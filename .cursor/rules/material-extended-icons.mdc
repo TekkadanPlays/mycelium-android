@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+When adding new icons to ribbit-android, ensure you are using R8/ProGuard to exlude irrelevant icons from the extended material icon pack. This will keep build times low.

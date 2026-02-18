@@ -1,0 +1,52 @@
+# Baseline profile rules for Ribbit
+# This profile optimizes critical user journeys for faster app startup and smoother interactions
+
+# MainActivity and app startup
+Lcom/example/views/MainActivity;
+HSPLcom/example/views/MainActivity;-><init>()V
+HSPLcom/example/views/MainActivity;->onCreate(Landroid/os/Bundle;)V
+
+# Theme and UI initialization
+Lcom/example/views/ui/theme/ThemeKt;
+HSPLcom/example/views/ui/theme/ThemeKt;->ViewsTheme(ZZLkotlin/jvm/functions/Function2;Landroidx/compose/runtime/Composer;II)V
+
+# Dashboard screen - critical user journey
+Lcom/example/views/ui/screens/DashboardScreenKt;
+HSPLcom/example/views/ui/screens/DashboardScreenKt;->DashboardScreen(ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;Landroidx/compose/foundation/lazy/LazyListState;Lcom/example/views/viewmodel/DashboardViewModel;Landroidx/compose/ui/Modifier;Landroidx/compose/runtime/Composer;II)V
+
+# ViewModel - state management
+Lcom/example/views/viewmodel/DashboardViewModel;
+HSPLcom/example/views/viewmodel/DashboardViewModel;-><init>()V
+HSPLcom/example/views/viewmodel/DashboardViewModel;->getUiState()Lkotlinx/coroutines/flow/StateFlow;
+HSPLcom/example/views/viewmodel/DashboardViewModel;->toggleLike(Ljava/lang/String;)V
+
+# Note cards - frequently rendered
+Lcom/example/views/ui/components/ModernNoteCardKt;
+HSPLcom/example/views/ui/components/ModernNoteCardKt;->ModernNoteCard(Lcom/example/views/data/Note;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Landroidx/compose/ui/Modifier;Landroidx/compose/runtime/Composer;III)V
+
+# Data models
+Lcom/example/views/data/Note;
+Lcom/example/views/data/Author;
+HSPLcom/example/views/data/Note;-><init>(Ljava/lang/String;Lcom/example/views/data/Author;Ljava/lang/String;JIIIZZLjava/util/List;Ljava/util/List;)V
+HSPLcom/example/views/data/Author;-><init>(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V
+
+# Navigation components
+Lcom/example/views/ui/components/AdaptiveHeaderKt;
+Lcom/example/views/ui/components/BottomNavigationKt;
+Lcom/example/views/ui/components/ModernSidebarKt;
+
+# Profile picture component
+Lcom/example/views/ui/components/SharedElementTransitionKt;
+HSPLcom/example/views/ui/components/SharedElementTransitionKt;->ProfilePicture(Lcom/example/views/data/Author;FLandroidx/compose/ui/Modifier;Lkotlin/jvm/functions/Function0;Landroidx/compose/runtime/Composer;II)V
+
+# Search functionality
+Lcom/example/views/ui/components/ModernSearchBarKt;
+
+# WebSocket client for real-time updates
+Lcom/example/views/network/WebSocketClient;
+HSPLcom/example/views/network/WebSocketClient;-><init>()V
+
+
+
+
+

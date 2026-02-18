@@ -1,0 +1,112 @@
+{
+  "id": "Mycelium",
+  "name": "Mycelium",
+  "summary": "A modern social networking platform built with Jetpack Compose",
+  "description": "Mycelium is a modern social networking platform where users can share thoughts, ideas, and connect with others in meaningful ways. Built with the latest Android technologies including Jetpack Compose and Material Design 3.",
+  "author": "Tekkadan",
+  "authorEmail": "npub12zqf55l7l9vsg5f6ssx5pq4f9dzu6hcmnepkm8ftj25fecy379jqkq99h8",
+  "authorWebsite": "https://njump.me/npub12zqf55l7l9vsg5f6ssx5pq4f9dzu6hcmnepkm8ftj25fecy379jqkq99h8",
+  "sourceCode": "https://github.com/TekkadanPlays/mycelium-android",
+  "license": "MIT",
+  "categories": ["Social"],
+  "tags": ["social", "compose", "material-design", "modern"],
+  "screenshots": [
+    "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/screenshots/screenshot1.png",
+    "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/screenshots/screenshot2.png",
+    "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/screenshots/screenshot3.png"
+  ],
+  "icon": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png",
+  "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
+  "releases": [
+    {
+      "version": "0.1.2",
+      "versionCode": 6,
+      "releaseDate": "2026-02-08",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.1.2/Mycelium-v0.1.2.apk",
+      "changelog": "Kind-1111 merge/UI fix, edge-to-edge embed and images in feed, conditional body highlight, View relays in kind-1111 replies, relay orbs on kind-11 root, OP styling (shortened chip, OP in feed), README Obtainium link.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Kind-1111 optimistic reply merge fix",
+        "Edge-to-edge link embed and images in feed",
+        "Body highlight only when note has text",
+        "View relays in topic reply dropdown",
+        "Relay orbs on kind-11 thread root",
+        "OP chip: name only in highlight, OP in feed"
+      ]
+    },
+    {
+      "version": "0.1.1",
+      "versionCode": 5,
+      "releaseDate": "2026-02-08",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.1.1/Mycelium-v0.1.1.apk",
+      "changelog": "Amber lifecycle fix, zap error feedback, relay picker, NIP-25 kind-1111, zap spacing, app ID Mycelium.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Amber signer persists after restart",
+        "Zap errors on home feed",
+        "Relay selection for kind-1",
+        "NIP-25 on kind-1111",
+        "Zap chip spacing",
+        "App ID Mycelium"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "versionCode": 4,
+      "releaseDate": "2026-02-08",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.1.0/Mycelium-v0.1.0.apk",
+      "changelog": "Thread UI polish (spacing, alignment). Notifications for topic replies (kind-1111) and thread replies (kind-1) with separate filters; open thread/topic with correct reply kind.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Thread polish - consistent spacing and line alignment",
+        "Topic and thread reply notifications (kind-1111 and kind-1)",
+        "Thread vs Topic reply filters in notifications",
+        "Open thread or topic from notification with correct reply chain"
+      ]
+    },
+    {
+      "version": "0.0.3",
+      "versionCode": 3,
+      "releaseDate": "2025-01-22",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.0.3/Mycelium-v0.0.3.apk",
+      "changelog": "Clean v0.0.3 release with Lightning Zaps and Wallet Connect functionality. Connect your Lightning wallet to send zaps to posts and comments.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "⚡ Lightning Zaps - Send Bitcoin tips to posts and comments",
+        "🔗 Wallet Connect - Connect Lightning wallets like Alby, Mutiny",
+        "💰 Account Preferences - Manage wallet connections",
+        "🎯 Zap Button Components - Full-featured zap buttons",
+        "💬 Zap Comments - Add messages with your zaps",
+        "📊 Smart Amount Formatting - Intelligent sat/bitcoin display",
+        "🔒 Secure URI Handling - Password-protected wallet connection",
+        "🎨 Material 3 Design - Modern UI with consistent design",
+        "📱 Responsive UI - Works on all screen sizes",
+        "🛡️ NIP Compliance - Full NIP-47 and NIP-57 support"
+      ]
+    }
+  ]
+}

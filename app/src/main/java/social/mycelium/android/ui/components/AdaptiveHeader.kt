@@ -36,7 +36,7 @@ import social.mycelium.android.viewmodel.TopicsSortOrder
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AdaptiveHeader(
-    title: String = "Mycelium",
+    title: String = "mycelium",
     isSearchMode: Boolean = false,
     showBackArrow: Boolean = false,
     searchQuery: TextFieldValue = TextFieldValue(""),
@@ -81,6 +81,8 @@ fun AdaptiveHeader(
     onNavigateToHome: (() -> Unit)? = null,
     /** Navigate to Live broadcast explorer. */
     onNavigateToLive: (() -> Unit)? = null,
+    /** True when a followed user is currently hosting a NIP-53 live event. Turns the Live icon red. */
+    hasFollowedLiveActivity: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -216,13 +218,14 @@ fun AdaptiveHeader(
                                     }
                                     // Live broadcast explorer
                                     if (onNavigateToLive != null) {
+                                        val liveTint = if (hasFollowedLiveActivity) Color.Red else LocalContentColor.current
                                         DropdownMenuItem(
-                                            text = { Text("Live") },
+                                            text = { Text("Live", color = if (hasFollowedLiveActivity) Color.Red else Color.Unspecified) },
                                             onClick = {
                                                 logoMenuExpanded = false
                                                 onNavigateToLive()
                                             },
-                                            leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null) }
+                                            leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null, tint = liveTint) }
                                         )
                                     }
                                     if (onNavigateToHome != null || onNavigateToLive != null) {
@@ -264,13 +267,14 @@ fun AdaptiveHeader(
                                     }
                                     // Live broadcast explorer
                                     if (onNavigateToLive != null) {
+                                        val liveTint = if (hasFollowedLiveActivity) Color.Red else LocalContentColor.current
                                         DropdownMenuItem(
-                                            text = { Text("Live") },
+                                            text = { Text("Live", color = if (hasFollowedLiveActivity) Color.Red else Color.Unspecified) },
                                             onClick = {
                                                 logoMenuExpanded = false
                                                 onNavigateToLive()
                                             },
-                                            leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null) }
+                                            leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null, tint = liveTint) }
                                         )
                                     }
                                     if (onNavigateToTopics != null || onNavigateToLive != null) {

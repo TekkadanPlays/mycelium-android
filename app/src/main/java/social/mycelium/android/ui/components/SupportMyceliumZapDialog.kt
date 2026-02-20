@@ -229,7 +229,7 @@ fun SupportMyceliumZapDialog(onDismiss: () -> Unit) {
                     value = comment,
                     onValueChange = { comment = it },
                     label = { Text("Message (optional)") },
-                    placeholder = { Text("Love Mycelium! \uD83D\uDC38") },
+                    placeholder = { Text("Love Mycelium! \uD83C\uDF44") },
                     modifier = Modifier.fillMaxWidth(),
                     maxLines = 2
                 )
@@ -288,7 +288,7 @@ fun SupportMyceliumZapDialog(onDismiss: () -> Unit) {
                                         val payResult = NwcPaymentManager.payInvoice(context, invoiceResult.bolt11)
                                         when (payResult) {
                                             is NwcPaymentResult.Success -> {
-                                                resultMessage = "⚡ Zap sent! Thank you for supporting Mycelium! \uD83D\uDC38"
+                                                resultMessage = "⚡ Zap sent! Thank you for supporting Mycelium! \uD83C\uDF44"
                                                 isSuccess = true
                                             }
                                             is NwcPaymentResult.Error -> {

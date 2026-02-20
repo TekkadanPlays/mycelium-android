@@ -150,15 +150,25 @@ fun LiveActivityChip(
 }
 
 /**
- * Full-width live activity card for vertical lists (e.g. TopicsScreen).
- * Matches the edge-to-edge style of HashtagCard.
+ * Full-width live activity card for vertical lists (e.g. LiveExplorerScreen).
+ * Shows host avatar, title, participant count, status, and — when friends are
+ * watching — a row of profile orbs for followed viewers below the main row.
+ *
+ * @param isFollowedHost  True when the host is someone we follow (green badge on avatar)
+ * @param followedViewerAvatars  Avatar URLs (or null) for followed friends who are
+ *                               participants/viewers of this broadcast (excluding the host).
+ *                               Drives the green person icon on the right and the orb row.
  */
 @Composable
 fun LiveActivityCard(
     activity: LiveActivity,
     onClick: () -> Unit,
+    isFollowedHost: Boolean = false,
+    followedViewerAvatars: List<Pair<String, String?>> = emptyList(),
     modifier: Modifier = Modifier
 ) {
+    val hasFriendViewers = followedViewerAvatars.isNotEmpty()
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -190,7 +200,17 @@ fun LiveActivityCard(
                     imageVector = Icons.Default.Person,
                     contentDescription = "Host",
                     modifier = Modifier.size(24.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = if (isFollowedHost) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Green person badge for followed hosts (shown even when avatar is present)
+            if (isFollowedHost && activity.hostAuthor?.avatarUrl != null) {
+                Icon(
+                    imageVector = Icons.Default.Person,
+                    contentDescription = "Followed host",
+                    modifier = Modifier.size(14.dp),
+                    tint = Color(0xFF4CAF50)
                 )
             }
 
@@ -207,7 +227,7 @@ fun LiveActivityCard(
                 modifier = Modifier.weight(1f, fill = false)
             )
 
-            // Participant count
+            // Participant count — person icon is green when friends are watching
             activity.currentParticipants?.let { count ->
                 if (count > 0) {
                     Spacer(Modifier.width(8.dp))
@@ -221,7 +241,7 @@ fun LiveActivityCard(
                         imageVector = Icons.Default.Person,
                         contentDescription = null,
                         modifier = Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (hasFriendViewers) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -243,6 +263,67 @@ fun LiveActivityCard(
                     LiveActivityStatus.ENDED -> MaterialTheme.colorScheme.outline
                 }
             )
+        }
+
+        // Followed viewer orbs — show profile pics of friends watching this broadcast
+        if (hasFriendViewers) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 36.dp, end = 12.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((-4).dp)
+            ) {
+                // Show up to 8 orbs, then "+N" overflow
+                val visible = followedViewerAvatars.take(8)
+                val overflow = followedViewerAvatars.size - visible.size
+
+                visible.forEach { (pubkey, avatarUrl) ->
+                    if (avatarUrl != null) {
+                        AsyncImage(
+                            model = avatarUrl,
+                            contentDescription = "Friend watching",
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clip(CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(20.dp)
+                                .background(Color(0xFF4CAF50).copy(alpha = 0.3f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Person,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                                tint = Color(0xFF4CAF50)
+                            )
+                        }
+                    }
+                }
+
+                if (overflow > 0) {
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "+$overflow",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF4CAF50),
+                        fontSize = 10.sp
+                    )
+                }
+
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = if (followedViewerAvatars.size == 1) "friend watching"
+                           else "${followedViewerAvatars.size} friends watching",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    fontSize = 10.sp
+                )
+            }
         }
 
         // Divider

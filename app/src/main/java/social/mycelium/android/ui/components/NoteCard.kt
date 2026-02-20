@@ -26,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import kotlin.math.abs
@@ -608,18 +609,15 @@ fun NoteCard(
                             // Tallest = smallest ratio (most portrait)
                             mutableStateOf(if (known.isNotEmpty()) known.min() else null)
                         }
-                        val containerModifier = if (containerRatio != null) {
-                            Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(containerRatio!!.coerceIn(0.3f, 3.0f))
-                                .animateContentSize()
-                        } else {
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 200.dp, max = 550.dp)
-                                .animateContentSize()
-                        }
-                        Box(modifier = containerModifier) {
+                        val containerModifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio((containerRatio ?: (16f / 9f)).coerceIn(0.3f, 3.0f))
+                            .clipToBounds()
+                            .background(androidx.compose.ui.graphics.Color.Black)
+                        Box(
+                            modifier = containerModifier,
+                            contentAlignment = Alignment.Center
+                        ) {
                             HorizontalPager(
                                 state = pagerState,
                                 modifier = Modifier.fillMaxSize(),
@@ -916,7 +914,7 @@ fun NoteCard(
                                                                 InlineVideoPlayer(
                                                                     url = url,
                                                                     modifier = Modifier.fillMaxWidth(),
-                                                                    isVisible = true,
+                                                                    isVisible = isVisible,
                                                                     onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) }
                                                                 )
                                                             }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -24,22 +25,29 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-// No pull-to-refresh: LiveActivityRepository auto-discovers streams
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.data.LiveActivityStatus
 import social.mycelium.android.repository.LiveActivityRepository
+import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.LiveActivityCard
 
 /**
  * Full-screen live broadcast explorer.
- * Shows all discovered NIP-53 live activities sorted by status (LIVE first, then PLANNED, then ENDED).
+ * Separates broadcasts into two sections:
+ * 1. "From People You Follow" — host is someone we follow (sorted by status then recency)
+ * 2. "Discover" — all other broadcasts
+ *
+ * Each card shows followed viewer orbs when friends are participants/viewers.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,18 +57,53 @@ fun LiveExplorerScreen(
     modifier: Modifier = Modifier
 ) {
     val repository = remember { LiveActivityRepository.getInstance() }
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
     val allActivities by repository.allActivities.collectAsState()
+    val followedSet by repository.followedPubkeysFlow.collectAsState()
 
-    val sortedActivities = remember(allActivities) {
-        allActivities.sortedWith(
-            compareBy<social.mycelium.android.data.LiveActivity> { activity ->
-                when (activity.status) {
-                    LiveActivityStatus.LIVE -> 0
-                    LiveActivityStatus.PLANNED -> 1
-                    LiveActivityStatus.ENDED -> 2
+    // Separate followed-host broadcasts from others
+    val (followedHostActivities, otherActivities) = remember(allActivities, followedSet) {
+        val statusOrder = { activity: LiveActivity ->
+            when (activity.status) {
+                LiveActivityStatus.LIVE -> 0
+                LiveActivityStatus.PLANNED -> 1
+                LiveActivityStatus.ENDED -> 2
+            }
+        }
+        val comparator = compareBy<LiveActivity> { statusOrder(it) }
+            .thenByDescending { it.createdAt }
+
+        val followed = mutableListOf<LiveActivity>()
+        val other = mutableListOf<LiveActivity>()
+
+        for (activity in allActivities) {
+            if (activity.hostPubkey.lowercase() in followedSet) {
+                followed.add(activity)
+            } else {
+                other.add(activity)
+            }
+        }
+
+        followed.sortedWith(comparator) to other.sortedWith(comparator)
+    }
+
+    // Pre-compute followed viewer avatars per activity (pubkey → avatarUrl?)
+    // Excludes the host — we only want non-host participants who are in our follow list
+    val followedViewersMap = remember(allActivities, followedSet) {
+        if (followedSet.isEmpty()) emptyMap()
+        else allActivities.associate { activity ->
+            val hostLower = activity.hostPubkey.lowercase()
+            val viewers = activity.participants
+                .filter { p ->
+                    val pk = p.pubkey.lowercase()
+                    pk != hostLower && pk in followedSet
                 }
-            }.thenByDescending { it.createdAt }
-        )
+                .map { p ->
+                    val author = profileCache.getAuthor(p.pubkey)
+                    p.pubkey to author?.avatarUrl
+                }
+            ("${activity.hostPubkey}:${activity.dTag}") to viewers
+        }
     }
 
     Scaffold(
@@ -94,7 +137,7 @@ fun LiveExplorerScreen(
         },
         modifier = modifier
     ) { padding ->
-        if (sortedActivities.isEmpty()) {
+        if (allActivities.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -129,19 +172,78 @@ fun LiveExplorerScreen(
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                items(
-                    items = sortedActivities,
-                    key = { "${it.hostPubkey}:${it.dTag}" }
-                ) { activity ->
-                    LiveActivityCard(
-                        activity = activity,
-                        onClick = {
-                            val addressableId = Uri.encode("${activity.hostPubkey}:${activity.dTag}")
-                            onActivityClick(addressableId)
-                        }
-                    )
+                // ── Section: From People You Follow ──
+                if (followedHostActivities.isNotEmpty()) {
+                    item(key = "header_followed") {
+                        LiveSectionHeader(
+                            title = "From People You Follow",
+                            count = followedHostActivities.size,
+                            color = Color(0xFF4CAF50)
+                        )
+                    }
+                    items(
+                        items = followedHostActivities,
+                        key = { "f:${it.hostPubkey}:${it.dTag}" }
+                    ) { activity ->
+                        val activityKey = "${activity.hostPubkey}:${activity.dTag}"
+                        val viewers = followedViewersMap[activityKey] ?: emptyList()
+                        LiveActivityCard(
+                            activity = activity,
+                            onClick = {
+                                val addressableId = Uri.encode(activityKey)
+                                onActivityClick(addressableId)
+                            },
+                            isFollowedHost = true,
+                            followedViewerAvatars = viewers
+                        )
+                    }
+                }
+
+                // ── Section: Discover ──
+                if (otherActivities.isNotEmpty()) {
+                    item(key = "header_discover") {
+                        LiveSectionHeader(
+                            title = if (followedHostActivities.isNotEmpty()) "Discover" else "Live Broadcasts",
+                            count = otherActivities.size,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    items(
+                        items = otherActivities,
+                        key = { "d:${it.hostPubkey}:${it.dTag}" }
+                    ) { activity ->
+                        val activityKey = "${activity.hostPubkey}:${activity.dTag}"
+                        val viewers = followedViewersMap[activityKey] ?: emptyList()
+                        LiveActivityCard(
+                            activity = activity,
+                            onClick = {
+                                val addressableId = Uri.encode(activityKey)
+                                onActivityClick(addressableId)
+                            },
+                            isFollowedHost = false,
+                            followedViewerAvatars = viewers
+                        )
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun LiveSectionHeader(
+    title: String,
+    count: Int,
+    color: Color
+) {
+    Text(
+        text = "$title ($count)",
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        color = color,
+        fontSize = 12.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    )
 }

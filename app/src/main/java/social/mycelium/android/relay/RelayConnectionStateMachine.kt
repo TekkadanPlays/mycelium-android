@@ -46,8 +46,18 @@ interface TemporarySubscriptionHandle {
     fun cancel()
 }
 
-private class CybinSubscriptionHandle(private val subscription: CybinSubscription) : TemporarySubscriptionHandle {
-    override fun cancel() = subscription.close()
+private class CybinSubscriptionHandle(
+    private val subscription: CybinSubscription,
+    private val pool: CybinRelayPool
+) : TemporarySubscriptionHandle {
+    override fun cancel() {
+        val relayUrls = subscription.relayFilters.keys.toSet()
+        subscription.close()
+        // Only disconnect relays that belonged to THIS subscription and are now idle.
+        // The pool-wide disconnectIdleRelays() would kill outbox relay connections
+        // that have their own active subscriptions.
+        pool.disconnectIdleRelays(relayUrls)
+    }
 }
 
 private object NoOpTemporaryHandle : TemporarySubscriptionHandle {
@@ -397,7 +407,12 @@ class RelayConnectionStateMachine {
                 mainFeedSubscription = null
                 val effectiveRelayUrls = RelayHealthTracker.filterBlocked(relayUrls)
                 if (effectiveRelayUrls.isEmpty()) { android.os.Trace.endSection(); return@launch }
-                _perRelayState.value = effectiveRelayUrls.associateWith { RelayEndpointStatus.Connecting }
+                // Preserve existing relay states (Connected/Failed); only set NEW relays to Connecting.
+                // This avoids flashing all orbs back to "connecting" when adding a single relay.
+                val existing = _perRelayState.value
+                _perRelayState.value = effectiveRelayUrls.associateWith { url ->
+                    existing[url] ?: RelayEndpointStatus.Connecting
+                }
                 if (customFilter != null && customOnEvent != null) {
                     val onEvent = customOnEvent
                     mainFeedSubscription = relayPool.subscribe(
@@ -422,9 +437,9 @@ class RelayConnectionStateMachine {
                     } else {
                         Filter(kinds = listOf(6), limit = GLOBAL_FEED_LIMIT, since = sevenDaysAgo)
                     }
-                    val filterKind11 = Filter(kinds = listOf(11), limit = 100, since = sevenDaysAgo)
-                    val filterKind1011 = Filter(kinds = listOf(1011), limit = 200, since = sevenDaysAgo)
-                    val filterKind30311 = Filter(kinds = listOf(30311), limit = 50)
+                    val filterKind11 = Filter(kinds = listOf(11), limit = 50, since = sevenDaysAgo)
+                    val filterKind1011 = Filter(kinds = listOf(1011), limit = 50, since = sevenDaysAgo)
+                    val filterKind30311 = Filter(kinds = listOf(30311), limit = 20)
                     val countsIds = countsNoteIds?.takeIf { it.isNotEmpty() } ?: emptySet()
                     val countsFilters = if (countsIds.isNotEmpty()) {
                         val noteIdList = countsIds.take(200).toList()
@@ -439,7 +454,12 @@ class RelayConnectionStateMachine {
                     val relayFilterMap = effectiveRelayUrls.associateWith { allFilters }
                     relayPool.openSubscription(subId, relayFilterMap) { event, relayUrl ->
                         markEventReceived()
-                        _perRelayState.value = _perRelayState.value + (relayUrl to RelayEndpointStatus.Connected)
+                        // Only update state when it actually changes (Connecting → Connected).
+                        // Avoids hundreds of redundant StateFlow emissions per second during event bursts.
+                        val current = _perRelayState.value[relayUrl]
+                        if (current != RelayEndpointStatus.Connected) {
+                            _perRelayState.value = _perRelayState.value + (relayUrl to RelayEndpointStatus.Connected)
+                        }
                         when (event.kind) {
                             1 -> {
                                 onKind1WithRelay?.invoke(event, relayUrl)
@@ -484,8 +504,8 @@ class RelayConnectionStateMachine {
     /** Timestamp of last event received from any relay. Used by keepalive to detect stale connections. */
     @Volatile private var lastEventReceivedAt: Long = System.currentTimeMillis()
     private var keepaliveJob: kotlinx.coroutines.Job? = null
-    private val KEEPALIVE_INTERVAL_MS = 90_000L  // Check every 90 seconds
-    private val STALE_THRESHOLD_MS = 180_000L    // Consider stale if no events in 3 minutes
+    private val KEEPALIVE_INTERVAL_MS = 120_000L  // Check every 2 minutes
+    private val STALE_THRESHOLD_MS = 300_000L     // Consider stale if no events in 5 minutes
 
     /** Call when any event is received to reset the keepalive timer. */
     fun markEventReceived() {
@@ -503,6 +523,8 @@ class RelayConnectionStateMachine {
                 val hasRelays = currentSubscriptionRelayUrls.isNotEmpty()
                 if (elapsed > STALE_THRESHOLD_MS && hasRelays && currentState is RelayState.Subscribed) {
                     Log.w(TAG, "Keepalive: no events in ${elapsed / 1000}s, forcing reconnect to ${currentSubscriptionRelayUrls.size} relays")
+                    // Reset timer so we don't keep firing every interval after reconnect
+                    lastEventReceivedAt = System.currentTimeMillis()
                     requestReconnectOnResume()
                 }
             }
@@ -697,7 +719,7 @@ class RelayConnectionStateMachine {
             onEvent = { event, _ -> onEvent(event) }
         )
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription)
+        return CybinSubscriptionHandle(subscription, relayPool)
     }
 
     /**
@@ -716,7 +738,7 @@ class RelayConnectionStateMachine {
             onEvent = { event, _ -> onEvent(event) }
         )
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription)
+        return CybinSubscriptionHandle(subscription, relayPool)
     }
 
     /**
@@ -735,7 +757,7 @@ class RelayConnectionStateMachine {
             onEvent = { event, relayUrl -> onEvent(event, relayUrl) }
         )
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription)
+        return CybinSubscriptionHandle(subscription, relayPool)
     }
 
     /**
@@ -754,7 +776,7 @@ class RelayConnectionStateMachine {
             onEvent = { event, _ -> onEvent(event) }
         )
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription)
+        return CybinSubscriptionHandle(subscription, relayPool)
     }
 
     companion object {

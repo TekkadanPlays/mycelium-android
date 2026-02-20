@@ -249,6 +249,10 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         }
         networkMonitor?.stop()
         RelayConnectionStateMachine.getInstance().stopKeepalive()
+        // Stop the foreground service — after process kill it has no relay state
+        // to work with and just leaves a useless notification. The feed will
+        // re-establish connections when the user reopens the app.
+        stopRelayForegroundService()
         super.onDestroy()
     }
 

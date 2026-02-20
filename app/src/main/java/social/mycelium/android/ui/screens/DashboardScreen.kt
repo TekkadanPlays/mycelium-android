@@ -8,6 +8,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -35,6 +36,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
@@ -66,6 +68,8 @@ import social.mycelium.android.repository.RelayRepository
 import social.mycelium.android.repository.RelayStorageManager
 import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
+import social.mycelium.android.repository.LiveActivityRepository
+import social.mycelium.android.repository.FeedSessionState
 import social.mycelium.android.ui.performance.animatedYOffset
 import java.text.SimpleDateFormat
 import java.util.*
@@ -123,6 +127,12 @@ fun DashboardScreen(
     val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // NIP-53: true when a followed user is currently hosting a live activity
+    val hasFollowedLive by LiveActivityRepository.getInstance().hasFollowedLiveActivity.collectAsState()
+
+    // Feed session lifecycle: Idle → Loading → Live (drives loading indicator)
+    val feedSession by viewModel.feedSessionState.collectAsState()
 
     // Real per-relay connection status from RelayConnectionStateMachine
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().perRelayState.collectAsState()
@@ -338,10 +348,12 @@ fun DashboardScreen(
     var showWalletConnectDialog by remember { mutableStateOf(false) }
     // Relay orb tap navigates to relay log page via onRelayClick callback
 
-    // Restore home feed scroll position when returning to dashboard (one-shot; do not re-run on notes.size)
+    // Restore home feed scroll position when returning to dashboard (one-shot; do not re-run on notes.size).
+    // Skip restoration when coming fresh from onboarding (hasLoadedRelays is false) to avoid
+    // landing in the middle of a stale cached feed.
     val scrollPos = homeFeedState.scrollPosition
     LaunchedEffect(isDashboardVisible, scrollPos.firstVisibleItem, scrollPos.scrollOffset) {
-        if (isDashboardVisible && scrollPos.firstVisibleItem > 0 && uiState.notes.isNotEmpty()) {
+        if (isDashboardVisible && hasLoadedRelays && scrollPos.firstVisibleItem > 0 && uiState.notes.isNotEmpty()) {
             listState.scrollToItem(
                 scrollPos.firstVisibleItem.coerceAtMost(uiState.notes.size - 1),
                 scrollPos.scrollOffset
@@ -349,6 +361,9 @@ fun DashboardScreen(
             feedStateViewModel.updateHomeFeedState { copy(scrollPosition = ScrollPosition(0, 0)) }
         }
     }
+
+    // Notes are always at index 0 in the LazyColumn (loading indicator is an overlay).
+    // No scroll-to-top hack needed — the list starts at the top naturally.
 
     // Close zap menus when feed scroll starts (not during scroll)
     var wasScrolling by remember { mutableStateOf(false) }
@@ -526,7 +541,7 @@ fun DashboardScreen(
                         modifier = Modifier.graphicsLayer { alpha = restoreAlpha }
                     ) {
                         Text(
-                            text = "\uD83D\uDC38",
+                            text = "\uD83C\uDF44",
                             style = MaterialTheme.typography.displayLarge
                         )
                         Spacer(modifier = Modifier.height(16.dp))
@@ -563,7 +578,7 @@ fun DashboardScreen(
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
                         Text(
-                            text = "\uD83D\uDC38",
+                            text = "\uD83C\uDF44",
                             style = MaterialTheme.typography.displayLarge
                         )
                         Text(
@@ -645,7 +660,7 @@ fun DashboardScreen(
                 } else {
                     // Normal mode - show scrollable header
                     AdaptiveHeader(
-                        title = "Mycelium",
+                        title = "mycelium",
                         isSearchMode = false,
                         searchQuery = androidx.compose.ui.text.input.TextFieldValue(""),
                         onSearchQueryChange = { },
@@ -701,7 +716,8 @@ fun DashboardScreen(
                         activeEngagementFilter = engagementFilter,
                         onEngagementFilterChange = { engagementFilter = it },
                         onNavigateToTopics = { onNavigateTo("topics") },
-                        onNavigateToLive = { onNavigateTo("live_explorer") }
+                        onNavigateToLive = { onNavigateTo("live_explorer") },
+                        hasFollowedLiveActivity = hasFollowedLive
                     )
                 }
             },
@@ -796,131 +812,8 @@ fun DashboardScreen(
                         }
                     }
 
-                    // Logged in but notes still loading (first load)
-                    if (sortedNotes.isEmpty()) {
-                        if ((feedTimedOut || (!hasOutboxRelays && !hasAnyConfiguredRelays)) && onboardingComplete) {
-                            // No relays configured — guide user to set up
-                            item(key = "onboarding_prompt") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillParentMaxHeight()
-                                        .fillMaxWidth(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        modifier = Modifier.padding(horizontal = 32.dp)
-                                    ) {
-                                        Icon(
-                                            Icons.Outlined.Explore,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(56.dp),
-                                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-                                        )
-                                        Spacer(Modifier.height(16.dp))
-                                        Text(
-                                            text = "Connect to Relays",
-                                            style = MaterialTheme.typography.headlineSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Spacer(Modifier.height(8.dp))
-                                        Text(
-                                            text = "Discover relays to start receiving notes from the Nostr network.",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                                        )
-                                        Spacer(Modifier.height(24.dp))
-                                        // Primary: Discover relays (encouraged)
-                                        Button(
-                                            onClick = { onNavigateTo("relay_discovery") },
-                                            modifier = Modifier.fillMaxWidth(0.7f)
-                                        ) {
-                                            Icon(Icons.Outlined.Explore, contentDescription = null, modifier = Modifier.size(18.dp))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("Discover Relays")
-                                        }
-                                        Spacer(Modifier.height(8.dp))
-                                        // Secondary: Manual relay manager
-                                        TextButton(
-                                            onClick = { onNavigateTo("settings/relay_health") }
-                                        ) {
-                                            Text(
-                                                "Set up manually",
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            // Loading — sleek relay connection status
-                            item(key = "notes_loading") {
-                                Box(
-                                    modifier = Modifier
-                                        .fillParentMaxHeight()
-                                        .fillMaxWidth(),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    var visible by remember { mutableStateOf(false) }
-                                    LaunchedEffect(Unit) { visible = true }
-                                    val alpha by animateFloatAsState(
-                                        targetValue = if (visible) 1f else 0f,
-                                        animationSpec = tween(350, easing = FastOutSlowInEasing),
-                                        label = "load_alpha"
-                                    )
-                                    val offsetY by animateFloatAsState(
-                                        targetValue = if (visible) 0f else 20f,
-                                        animationSpec = tween(350, easing = FastOutSlowInEasing),
-                                        label = "load_offset"
-                                    )
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        modifier = Modifier
-                                            .padding(horizontal = 48.dp)
-                                            .graphicsLayer {
-                                                this.alpha = alpha
-                                                translationY = offsetY
-                                            }
-                                    ) {
-                                        // Phase text: connecting → downloading
-                                        val allConnected = subscribedRelayCount > 0 && connectedRelayCount >= subscribedRelayCount
-                                        val statusText = when {
-                                            subscribedRelayCount == 0 -> "Connecting\u2026"
-                                            allConnected -> "Loading feed\u2026"
-                                            else -> "$connectedRelayCount of $subscribedRelayCount relays"
-                                        }
-                                        Text(
-                                            text = statusText,
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                            letterSpacing = androidx.compose.ui.unit.TextUnit(0.5f, androidx.compose.ui.unit.TextUnitType.Sp)
-                                        )
-                                        Spacer(modifier = Modifier.height(12.dp))
-                                        if (subscribedRelayCount > 0 && !allConnected) {
-                                            LinearProgressIndicator(
-                                                progress = { connectedRelayCount.toFloat() / subscribedRelayCount },
-                                                modifier = Modifier
-                                                    .fillMaxWidth(0.4f)
-                                                    .height(2.dp),
-                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                                                trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                                            )
-                                        } else {
-                                            LinearProgressIndicator(
-                                                modifier = Modifier
-                                                    .fillMaxWidth(0.4f)
-                                                    .height(2.dp),
-                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
-                                                trackColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    // Notes are always in the list — no conditional loading item.
+                    // The loading indicator is an overlay (below) so notes start at index 0.
                     // Stable keys (note.id) so LazyColumn recomposes only changed items when the feed list updates.
                     // contentType enables efficient item recycling across scroll.
                     items(
@@ -928,6 +821,8 @@ fun DashboardScreen(
                         key = { it.id },
                         contentType = { "note_card" }
                     ) { note ->
+                        // ✅ PERFORMANCE: Cache counts lookup once per item instead of 7 map lookups
+                        val counts = countsByNoteId[note.id]
                         NoteCard(
                             note = note,
                             onLike = { noteId -> viewModel.toggleLike(noteId) },
@@ -940,13 +835,13 @@ fun DashboardScreen(
                                 }
                             },
                             onProfileClick = onProfileClick,
-                            onNoteClick = { note -> onThreadClick(note, null) },
+                            onNoteClick = { n -> onThreadClick(n, null) },
                             onImageTap = onImageTap,
                             onOpenImageViewer = onOpenImageViewer,
                             onVideoClick = onVideoClick,
-                            onZap = { noteId, amount ->
-                                val n = sortedNotes.find { it.id == noteId } ?: return@NoteCard
-                                val err = accountStateViewModel.sendZap(n, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                            // ✅ PERFORMANCE: Use `note` already in scope instead of O(n) sortedNotes.find
+                            onZap = { _, amount ->
+                                val err = accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
                                 if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                             },
                             onCustomZapSend = { n, amount, zapType, msg ->
@@ -960,14 +855,14 @@ fun DashboardScreen(
                             isZapInProgress = note.id in zapInProgressNoteIds,
                             isZapped = note.id in zappedNoteIds,
                             myZappedAmount = zappedAmountByNoteId[note.id],
-                            overrideReplyCount = replyCountByNoteId[note.id] ?: countsByNoteId[note.id]?.replyCount,
-                            overrideZapCount = countsByNoteId[note.id]?.zapCount,
-                            overrideZapTotalSats = countsByNoteId[note.id]?.zapTotalSats,
-                            overrideReactions = countsByNoteId[note.id]?.reactions,
-                            overrideReactionAuthors = countsByNoteId[note.id]?.reactionAuthors,
-                            overrideZapAuthors = countsByNoteId[note.id]?.zapAuthors,
-                            overrideZapAmountByAuthor = countsByNoteId[note.id]?.zapAmountByAuthor,
-                            overrideCustomEmojiUrls = countsByNoteId[note.id]?.customEmojiUrls,
+                            overrideReplyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
+                            overrideZapCount = counts?.zapCount,
+                            overrideZapTotalSats = counts?.zapTotalSats,
+                            overrideReactions = counts?.reactions,
+                            overrideReactionAuthors = counts?.reactionAuthors,
+                            overrideZapAuthors = counts?.zapAuthors,
+                            overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
+                            overrideCustomEmojiUrls = counts?.customEmojiUrls,
                             countsByNoteId = countsByNoteId,
                             showHashtagsSection = false,
                             initialMediaPage = mediaPageForNote(note.id),
@@ -975,6 +870,272 @@ fun DashboardScreen(
                             isVisible = note.id in visibleKeys,
                             modifier = Modifier.fillMaxWidth()
                         )
+                    }
+                }
+
+                // ═══ OVERLAY: Loading indicator / Onboarding prompt ═══
+                // Rendered on top of the LazyColumn so notes are always at index 0.
+                // Fades out smoothly when notes arrive — no layout shift.
+                val showLoading = sortedNotes.isEmpty() && !((feedTimedOut || (!hasOutboxRelays && !hasAnyConfiguredRelays)) && onboardingComplete && feedSession != FeedSessionState.Loading)
+                val showOnboarding = sortedNotes.isEmpty() && (feedTimedOut || (!hasOutboxRelays && !hasAnyConfiguredRelays)) && onboardingComplete && feedSession != FeedSessionState.Loading
+
+                // Animated overlay alpha — fades out when notes arrive
+                val overlayAlpha by animateFloatAsState(
+                    targetValue = if (sortedNotes.isEmpty()) 1f else 0f,
+                    animationSpec = tween(350, easing = FastOutSlowInEasing),
+                    label = "overlay_alpha"
+                )
+
+                if (overlayAlpha > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = overlayAlpha }
+                            .background(MaterialTheme.colorScheme.background),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (showOnboarding) {
+                            // No relays configured — guide user to set up
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(horizontal = 32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Explore,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(56.dp),
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                )
+                                Spacer(Modifier.height(16.dp))
+                                Text(
+                                    text = "Connect to Relays",
+                                    style = MaterialTheme.typography.headlineSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = "Discover relays to start receiving notes from the Nostr network.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                Spacer(Modifier.height(24.dp))
+                                Button(
+                                    onClick = { onNavigateTo("relay_discovery") },
+                                    modifier = Modifier.fillMaxWidth(0.7f)
+                                ) {
+                                    Icon(Icons.Outlined.Explore, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Discover Relays")
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                TextButton(
+                                    onClick = { onNavigateTo("settings/relay_health") }
+                                ) {
+                                    Text(
+                                        "Set up manually",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        } else if (showLoading) {
+                            // Loading — modern feed session indicator
+                            val relayEntries = perRelayState.entries.toList()
+                            val connectedCount = relayEntries.count {
+                                it.value == social.mycelium.android.relay.RelayEndpointStatus.Connected
+                            }
+                            val connectingCount = relayEntries.count {
+                                it.value == social.mycelium.android.relay.RelayEndpointStatus.Connecting
+                            }
+                            val failedCount = relayEntries.count {
+                                it.value == social.mycelium.android.relay.RelayEndpointStatus.Failed
+                            }
+                            val totalCount = relayEntries.size
+
+                            val targetProgress = if (totalCount > 0) connectedCount.toFloat() / totalCount else 0f
+                            val animatedProgress by animateFloatAsState(
+                                targetValue = targetProgress,
+                                animationSpec = tween(600, easing = FastOutSlowInEasing),
+                                label = "ring_progress"
+                            )
+
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(horizontal = 48.dp)
+                            ) {
+                                // ── Central progress ring with count ──
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier.size(80.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        progress = { 1f },
+                                        modifier = Modifier.size(80.dp),
+                                        strokeWidth = 3.dp,
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                        trackColor = Color.Transparent
+                                    )
+                                    if (totalCount > 0 && animatedProgress > 0f) {
+                                        CircularProgressIndicator(
+                                            progress = { animatedProgress },
+                                            modifier = Modifier.size(80.dp),
+                                            strokeWidth = 3.dp,
+                                            color = Color(0xFF4CAF50).copy(alpha = 0.8f),
+                                            trackColor = Color.Transparent
+                                        )
+                                    }
+                                    if (connectingCount > 0 || totalCount == 0) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(80.dp),
+                                            strokeWidth = 1.5.dp,
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+                                        )
+                                    }
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        if (totalCount > 0) {
+                                            Text(
+                                                text = "$connectedCount",
+                                                style = MaterialTheme.typography.headlineSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (connectedCount > 0) Color(0xFF4CAF50)
+                                                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                            )
+                                            Text(
+                                                text = "of $totalCount",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(20.dp))
+
+                                // ── Relay orbs (tappable → relay connection status page) ──
+                                if (relayEntries.isNotEmpty()) {
+                                    val maxIndividualOrbs = 8
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+                                            .clickable { onNavigateTo("relay_connection_status") }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                                    ) {
+                                        if (totalCount <= maxIndividualOrbs) {
+                                            // Show individual orbs
+                                            for ((_, status) in relayEntries) {
+                                                val targetColor = when (status) {
+                                                    social.mycelium.android.relay.RelayEndpointStatus.Connected ->
+                                                        Color(0xFF4CAF50)
+                                                    social.mycelium.android.relay.RelayEndpointStatus.Connecting ->
+                                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                                                    social.mycelium.android.relay.RelayEndpointStatus.Failed ->
+                                                        MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+                                                }
+                                                val animColor by animateColorAsState(
+                                                    targetValue = targetColor,
+                                                    animationSpec = tween(400),
+                                                    label = "orb_color"
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(7.dp)
+                                                        .background(animColor, shape = androidx.compose.foundation.shape.CircleShape)
+                                                )
+                                            }
+                                        } else {
+                                            // Grouped: colored cluster dots + count labels
+                                            if (connectedCount > 0) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(7.dp)
+                                                        .background(Color(0xFF4CAF50), shape = androidx.compose.foundation.shape.CircleShape)
+                                                )
+                                                Spacer(Modifier.width(2.dp))
+                                                Text(
+                                                    "$connectedCount",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = Color(0xFF4CAF50).copy(alpha = 0.8f),
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                            if (connectingCount > 0) {
+                                                if (connectedCount > 0) Spacer(Modifier.width(6.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(6.dp)
+                                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), shape = androidx.compose.foundation.shape.CircleShape)
+                                                )
+                                                Spacer(Modifier.width(2.dp))
+                                                Text(
+                                                    "$connectingCount",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                            if (failedCount > 0) {
+                                                if (connectedCount > 0 || connectingCount > 0) Spacer(Modifier.width(6.dp))
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(6.dp)
+                                                        .background(MaterialTheme.colorScheme.error.copy(alpha = 0.4f), shape = androidx.compose.foundation.shape.CircleShape)
+                                                )
+                                                Spacer(Modifier.width(2.dp))
+                                                Text(
+                                                    "$failedCount",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.5f),
+                                                    fontSize = 10.sp
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // ── Status text ──
+                                val statusText = when (feedSession) {
+                                    FeedSessionState.Loading -> {
+                                        if (connectedCount > 0) "Receiving notes\u2026"
+                                        else if (totalCount > 0) "Connecting to relays\u2026"
+                                        else "Connecting\u2026"
+                                    }
+                                    FeedSessionState.Idle -> {
+                                        if (totalCount > 0 && connectedCount > 0) "Waiting for notes\u2026"
+                                        else "Connecting\u2026"
+                                    }
+                                    else -> "Loading\u2026"
+                                }
+                                Text(
+                                    text = statusText,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                    letterSpacing = 0.3.sp
+                                )
+
+                                // ── Connection detail ──
+                                if (totalCount > 0 && (failedCount > 0 || connectingCount > 0)) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    val detail = buildString {
+                                        if (connectingCount > 0) append("$connectingCount connecting")
+                                        if (failedCount > 0) {
+                                            if (isNotEmpty()) append(" \u00b7 ")
+                                            append("$failedCount failed")
+                                        }
+                                    }
+                                    Text(
+                                        text = detail,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (failedCount > 0) MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }

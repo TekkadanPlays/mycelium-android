@@ -38,6 +38,34 @@ class LiveActivityRepository {
     private val _allActivities = MutableStateFlow<List<LiveActivity>>(emptyList())
     val allActivities: StateFlow<List<LiveActivity>> = _allActivities.asStateFlow()
 
+    /** True when at least one LIVE activity is hosted by someone the user follows. Drives the red Live icon. */
+    private val _hasFollowedLiveActivity = MutableStateFlow(false)
+    val hasFollowedLiveActivity: StateFlow<Boolean> = _hasFollowedLiveActivity.asStateFlow()
+
+    /** Followed pubkeys (lowercase). Set by the ViewModel layer when follow list loads. */
+    private val _followedPubkeysFlow = MutableStateFlow<Set<String>>(emptySet())
+    /** Public read-only flow of followed pubkeys for UI (e.g. LiveExplorerScreen green icon). */
+    val followedPubkeysFlow: StateFlow<Set<String>> = _followedPubkeysFlow.asStateFlow()
+
+    /** Update the set of followed pubkeys so Live indicator can detect followed hosts. */
+    fun setFollowedPubkeys(pubkeys: Set<String>) {
+        _followedPubkeysFlow.value = pubkeys.map { it.lowercase() }.toSet()
+        updateFollowedLiveFlag()
+    }
+
+    private fun updateFollowedLiveFlag() {
+        val follows = _followedPubkeysFlow.value
+        if (follows.isEmpty()) {
+            _hasFollowedLiveActivity.value = false
+            return
+        }
+        val hasFollowed = _liveActivities.value.any { activity ->
+            activity.hostPubkey.lowercase() in follows ||
+                activity.participants.any { p -> p.pubkey.lowercase() in follows }
+        }
+        _hasFollowedLiveActivity.value = hasFollowed
+    }
+
     private var expiryJob: kotlinx.coroutines.Job? = null
 
     companion object {
@@ -196,6 +224,7 @@ class LiveActivityRepository {
                 compareByDescending<LiveActivity> { it.currentParticipants ?: 0 }
                     .thenByDescending { it.createdAt }
             )
+        updateFollowedLiveFlag()
     }
 
     /**

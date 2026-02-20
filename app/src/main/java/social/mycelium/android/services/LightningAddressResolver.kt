@@ -1,15 +1,17 @@
 package social.mycelium.android.services
 
 import android.util.Log
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.isSuccess
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.util.concurrent.TimeUnit
+import social.mycelium.android.network.MyceliumHttpClient
 
 /**
  * Response from the LNURLp endpoint (/.well-known/lnurlp/<user>).
@@ -33,11 +35,7 @@ data class LnUrlPayInfo(
 object LightningAddressResolver {
     private const val TAG = "LnAddressResolver"
     private val json = Json { ignoreUnknownKeys = true }
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private val httpClient = MyceliumHttpClient.instance
 
     /**
      * Resolve a lud16 address (user@domain) into the well-known LNURLp URL.
@@ -58,19 +56,15 @@ object LightningAddressResolver {
      */
     suspend fun fetchPayInfo(lnurlpUrl: String): LnUrlPayInfo? {
         return try {
-            val request = Request.Builder()
-                .url(lnurlpUrl)
-                .get()
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "LNURLp fetch failed: ${response.code}")
+            val response = httpClient.get(lnurlpUrl)
+            if (!response.status.isSuccess()) {
+                Log.w(TAG, "LNURLp fetch failed: ${response.status}")
                 return null
             }
 
-            val body = response.body?.string() ?: return null
-            val jsonObj = json.parseToJsonElement(body).jsonObject
+            val responseBody = response.bodyAsText()
+            if (responseBody.isBlank()) return null
+            val jsonObj = json.parseToJsonElement(responseBody).jsonObject
 
             LnUrlPayInfo(
                 callback = jsonObj["callback"]?.jsonPrimitive?.content ?: return null,
@@ -99,30 +93,25 @@ object LightningAddressResolver {
         zapRequestJson: String? = null
     ): String? {
         return try {
-            val urlBuilder = StringBuilder(callbackUrl)
-            urlBuilder.append(if ("?" in callbackUrl) "&" else "?")
-            urlBuilder.append("amount=$amountMillisats")
-
-            if (zapRequestJson != null) {
-                urlBuilder.append("&nostr=${java.net.URLEncoder.encode(zapRequestJson, "UTF-8")}")
+            val invoiceUrl = buildString {
+                append(callbackUrl)
+                append(if ("?" in callbackUrl) "&" else "?")
+                append("amount=$amountMillisats")
+                if (zapRequestJson != null) {
+                    append("&nostr=${java.net.URLEncoder.encode(zapRequestJson, "UTF-8")}")
+                }
             }
+            Log.d(TAG, "Fetching invoice from: $invoiceUrl")
 
-            val url = urlBuilder.toString()
-            Log.d(TAG, "Fetching invoice from: $url")
-
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "Invoice fetch failed: ${response.code}")
+            val response = httpClient.get(invoiceUrl)
+            if (!response.status.isSuccess()) {
+                Log.w(TAG, "Invoice fetch failed: ${response.status}")
                 return null
             }
 
-            val body = response.body?.string() ?: return null
-            val jsonObj = json.parseToJsonElement(body).jsonObject
+            val responseBody = response.bodyAsText()
+            if (responseBody.isBlank()) return null
+            val jsonObj = json.parseToJsonElement(responseBody).jsonObject
 
             // Check for errors
             val status = jsonObj["status"]?.jsonPrimitive?.content

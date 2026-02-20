@@ -18,15 +18,14 @@ import social.mycelium.android.data.UserRelay
 import social.mycelium.android.data.RelayInformation
 import social.mycelium.android.data.RelayConnectionStatus
 import social.mycelium.android.data.RelayHealth
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.http.isSuccess
 import social.mycelium.android.cache.Nip11CacheManager
+import social.mycelium.android.network.MyceliumHttpClient
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -41,11 +40,7 @@ class RelayRepository(private val context: Context) {
     }
 
     private val sharedPrefs: SharedPreferences = context.getSharedPreferences(RELAYS_PREFS, Context.MODE_PRIVATE)
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = MyceliumHttpClient.instance
     private val nip11Cache = Nip11CacheManager.getInstance(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
@@ -242,14 +237,11 @@ class RelayRepository(private val context: Context) {
             // Convert WebSocket URL to HTTP for NIP-11 check
             val httpUrl = url.replace("wss://", "https://").replace("ws://", "http://")
 
-            val request = Request.Builder()
-                .url(httpUrl)
-                .header("Accept", "application/nostr+json")
-                .build()
+            val response = httpClient.get(httpUrl) {
+                header("Accept", "application/nostr+json")
+            }
 
-            val response = httpClient.newCall(request).execute()
-
-            val isConnected = response.isSuccessful
+            val isConnected = response.status.isSuccess()
             updateConnectionStatus(url, if (isConnected) RelayConnectionStatus.CONNECTED else RelayConnectionStatus.ERROR)
 
             Log.d(TAG, "🔍 Tested relay connection: $url -> $isConnected")

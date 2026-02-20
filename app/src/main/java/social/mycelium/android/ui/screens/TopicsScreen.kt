@@ -62,6 +62,7 @@ import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.ui.components.LiveActivityCard
 import social.mycelium.android.ui.components.LiveActivityRow
 import social.mycelium.android.ui.components.LoadingAnimation
+import social.mycelium.android.repository.LiveActivityRepository
 import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.viewmodel.DashboardViewModel
 import social.mycelium.android.viewmodel.AuthViewModel
@@ -140,11 +141,11 @@ fun TopicsScreen(
 
     // NIP-53: Live activities for chips row
     val liveActivities by viewModel.liveActivities.collectAsState()
+    val hasFollowedLive by LiveActivityRepository.getInstance().hasFollowedLiveActivity.collectAsState()
 
     // Real per-relay connection counts from state machine for sidebar "Connected X/Y"
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().perRelayState.collectAsState()
-    val connectedRelayCount = perRelayState.values.count { it == social.mycelium.android.relay.RelayEndpointStatus.Connected }
-    val subscribedRelayCount = perRelayState.size
+    val relayStateMachineState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().state.collectAsState()
 
     // Relay management
     val storageManager = remember { RelayStorageManager(context) }
@@ -155,6 +156,35 @@ fun TopicsScreen(
         relayViewModel.uiState.collectAsState().value
     } else {
         social.mycelium.android.viewmodel.RelayManagementUiState()
+    }
+
+    // Sidebar relay counts: only count user-configured relays (not indexer/outbox temp connections)
+    val userRelayUrls = remember(currentAccount, relayUiState) {
+        val categoryUrls = relayUiState.relayCategories
+            .flatMap { it.relays }.map { it.url.trim().removeSuffix("/").lowercase() }
+        val outboxUrls = relayUiState.outboxRelays
+            .map { it.url.trim().removeSuffix("/").lowercase() }
+        val inboxUrls = relayUiState.inboxRelays
+            .map { it.url.trim().removeSuffix("/").lowercase() }
+        (categoryUrls + outboxUrls + inboxUrls).toSet()
+    }
+    val connectedRelayCount = remember(perRelayState, userRelayUrls) {
+        perRelayState.count { (url, status) ->
+            status == social.mycelium.android.relay.RelayEndpointStatus.Connected &&
+                url.trim().removeSuffix("/").lowercase() in userRelayUrls
+        }
+    }
+    val subscribedRelayCount = userRelayUrls.size
+
+    // Indexer relay counts
+    val indexerRelayUrls = remember(relayUiState) {
+        relayUiState.indexerRelays.map { it.url.trim().removeSuffix("/").lowercase() }.toSet()
+    }
+    val connectedIndexerCount = remember(perRelayState, indexerRelayUrls) {
+        perRelayState.count { (url, status) ->
+            status == social.mycelium.android.relay.RelayEndpointStatus.Connected &&
+                url.trim().removeSuffix("/").lowercase() in indexerRelayUrls
+        }
     }
 
     // Load user relays when account changes
@@ -330,8 +360,11 @@ fun TopicsScreen(
         inboxRelays = relayUiState.inboxRelays,
         feedState = topicsFeedState,
         selectedDisplayName = feedStateViewModel.getTopicsDisplayName(),
+        relayState = relayStateMachineState,
         connectedRelayCount = connectedRelayCount,
         subscribedRelayCount = subscribedRelayCount,
+        indexerRelayCount = relayUiState.indexerRelays.size,
+        connectedIndexerCount = connectedIndexerCount,
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
         onRelayHealthClick = onSidebarRelayHealthClick,
         onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,
@@ -484,7 +517,8 @@ fun TopicsScreen(
                             showFavoritesOnly = it
                         },
                         onNavigateToHome = { onNavigateTo("dashboard") },
-                        onNavigateToLive = { onNavigateTo("live_explorer") }
+                        onNavigateToLive = { onNavigateTo("live_explorer") },
+                        hasFollowedLiveActivity = hasFollowedLive
                     )
                 }
             },
@@ -524,8 +558,11 @@ fun TopicsScreen(
                     .padding(paddingValues)
             ) {
                 // Topics/Hashtag Discovery Grid
-                if (topicsUiState.connectedRelays.isEmpty()) {
-                    // No relays configured
+                // Show "No Relays" only when we truly have no relay config.
+                // If relayCategories exist but topics haven't loaded yet, show loading.
+                val hasRelayConfig = relayCategories.isNotEmpty()
+                if (topicsUiState.connectedRelays.isEmpty() && !hasRelayConfig && !topicsUiState.isLoading) {
+                    // No relays configured at all
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -569,6 +606,22 @@ fun TopicsScreen(
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text("Open Sidebar")
                             }
+                        }
+                    }
+                } else if (topicsUiState.connectedRelays.isEmpty() && hasRelayConfig) {
+                    // Relays configured but topics haven't loaded yet — show loading
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            LoadingAnimation(indicatorSize = 32.dp)
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "Loading topics\u2026",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 } else if (topicsUiState.isLoading && topicsUiState.hashtagStats.isEmpty()) {

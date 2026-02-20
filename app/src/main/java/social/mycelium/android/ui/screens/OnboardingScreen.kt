@@ -95,7 +95,11 @@ fun OnboardingScreen(
     }
 
     var phase by remember {
-        val initial = savedPhase?.let {
+        // Only restore phases that can be meaningfully resumed (user was interacting).
+        // Transient phases (LOADING, SEARCHING, SAVING, READY) restart from scratch
+        // to avoid visible phase jumping on re-entry.
+        val restorable = setOf("SELECT_INDEXERS", "REVIEW_RELAYS", "NIP65_NOT_FOUND")
+        val initial = savedPhase?.takeIf { it in restorable }?.let {
             try { OnboardingPhase.valueOf(it) } catch (_: Exception) { null }
         } ?: OnboardingPhase.LOADING_INDEXERS
         mutableStateOf(initial)
@@ -110,21 +114,15 @@ fun OnboardingScreen(
 
     // NIP-66 indexer discovery state — all Search-type relays sorted by RTT
     var allIndexers by remember { mutableStateOf<List<DiscoveredRelay>>(emptyList()) }
-    // Which indexer URLs the user has selected (pre-checked: top 5 by RTT)
-    var selectedIndexerUrls by remember { mutableStateOf(savedIndexers) }
-
-    // Sync returned indexer URLs from discovery selection screen (replace, not merge,
-    // so that deselections in discovery are respected)
-    LaunchedEffect(returnedIndexerUrls) {
-        if (returnedIndexerUrls.isNotEmpty()) {
-            selectedIndexerUrls = returnedIndexerUrls.toSet()
-            // Return to indexer selection so user sees updated list
-            if (phase != OnboardingPhase.SELECT_INDEXERS) {
-                phase = OnboardingPhase.SELECT_INDEXERS
-                statusText = "Choose which indexers to query for your relay list"
-            }
-        }
+    // Which indexer URLs the user has selected (pre-checked: top 5 by RTT).
+    // If returnedIndexerUrls is non-empty (user just returned from discovery selection),
+    // apply it immediately — no LaunchedEffect race.
+    var selectedIndexerUrls by remember {
+        val initial = if (returnedIndexerUrls.isNotEmpty()) returnedIndexerUrls.toSet() else savedIndexers
+        mutableStateOf(initial)
     }
+    // Track whether we consumed returned indexers (to skip overwrite in hexPubkey effect)
+    val hasReturnedIndexers = returnedIndexerUrls.isNotEmpty()
 
     // Persist phase changes to survive app interruption
     LaunchedEffect(phase) {
@@ -133,24 +131,21 @@ fun OnboardingScreen(
         }
     }
 
-    // Persist selected indexer URLs
+    // Persist selected indexer URLs (debounced to avoid I/O on every toggle)
     LaunchedEffect(selectedIndexerUrls) {
         if (hexPubkey.isNotBlank() && selectedIndexerUrls.isNotEmpty()) {
+            delay(500)
             storageManager.saveOnboardingSelectedIndexers(hexPubkey, selectedIndexerUrls)
         }
     }
 
-    // Multi-source NIP-65 results (streamed from repository)
-    val multiSourceResults by Nip65RelayListRepository.multiSourceResults.collectAsState()
-    val multiSourceStatuses by Nip65RelayListRepository.multiSourceStatuses.collectAsState()
-    val multiSourceDone by Nip65RelayListRepository.multiSourceDone.collectAsState()
-    val multiSourceTotal by Nip65RelayListRepository.multiSourceTotal.collectAsState()
+    // Multi-source NIP-65 results — collected lazily in the phases that need them
+    // (SEARCHING_NIP65, REVIEW_RELAYS). NOT collected at top level to avoid
+    // recomposing the entire screen during SELECT_INDEXERS when user toggles relays.
+    // LaunchedEffect(hexPubkey) reads .value directly and is unaffected.
 
     // The "best" result chosen for review (latest created_at)
     var chosenResult by remember { mutableStateOf<Nip65RelayListRepository.Nip65SourceResult?>(null) }
-
-    // NIP-66 metadata for discovered relays (for enriching the review UI)
-    val nip66Relays by Nip66RelayDiscoveryRepository.discoveredRelays.collectAsState()
 
     // Custom relay input
     var showCustomInput by remember { mutableStateOf(false) }
@@ -198,28 +193,31 @@ fun OnboardingScreen(
             return@LaunchedEffect
         }
 
-        // If returning from discovery selection (phase restored as SELECT_INDEXERS),
+        // If returning from discovery selection or resuming SELECT_INDEXERS,
         // just refresh the indexer list without overwriting user's selections.
-        // Also merge any new indexer relays added via the relay manager.
-        val isReturning = savedPhase == "SELECT_INDEXERS" && savedIndexers.isNotEmpty()
+        // hasReturnedIndexers means user just came back from discovery — selection
+        // was already applied in the remember{} initializer above.
+        val isReturning = hasReturnedIndexers ||
+            (savedPhase == "SELECT_INDEXERS" && savedIndexers.isNotEmpty())
         if (isReturning) {
-            Log.d("OnboardingScreen", "Returning to SELECT_INDEXERS, preserving selections (${selectedIndexerUrls.size})")
-            // Still need to populate allIndexers from NIP-66 cache
+            Log.d("OnboardingScreen", "Returning to SELECT_INDEXERS (fromDiscovery=$hasReturnedIndexers, selections=${selectedIndexerUrls.size})")
+            // Populate allIndexers from NIP-66 cache
             val allDiscovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
             val indexers = allDiscovered.values
-                .filter { relay ->
-                    65 in relay.supportedNips || RelayType.PUBLIC_OUTBOX in relay.types
-                }
+                .filter { relay -> relay.isSearch }
                 .sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
             allIndexers = indexers
-            // Merge any indexer relays added via the relay manager into the selection
-            val storedIndexerUrls = storageManager.loadIndexerRelays(hexPubkey)
-                .map { it.url.trim().removeSuffix("/") }.toSet()
-            if (storedIndexerUrls.isNotEmpty()) {
-                val merged = selectedIndexerUrls + storedIndexerUrls
-                if (merged.size > selectedIndexerUrls.size) {
-                    selectedIndexerUrls = merged
-                    Log.d("OnboardingScreen", "Merged ${merged.size - selectedIndexerUrls.size + storedIndexerUrls.size} indexer relays from relay manager")
+            // Only merge relay manager URLs when NOT returning from discovery
+            // (discovery returns a complete replacement set; merging would undo deselections)
+            if (!hasReturnedIndexers) {
+                val storedIndexerUrls = storageManager.loadIndexerRelays(hexPubkey)
+                    .map { it.url.trim().removeSuffix("/") }.toSet()
+                if (storedIndexerUrls.isNotEmpty()) {
+                    val merged = selectedIndexerUrls + storedIndexerUrls
+                    if (merged.size > selectedIndexerUrls.size) {
+                        selectedIndexerUrls = merged
+                        Log.d("OnboardingScreen", "Merged relay manager indexers into selection")
+                    }
                 }
             }
             phase = OnboardingPhase.SELECT_INDEXERS
@@ -260,9 +258,7 @@ fun OnboardingScreen(
             // Indexers need to support NIP-65 (kind 10002) for relay lists and kind 0 for profiles.
             // Look for relays with NIP-65 support or general PUBLIC_OUTBOX relays.
             val indexers = allDiscovered.values
-                .filter { relay ->
-                    65 in relay.supportedNips || RelayType.PUBLIC_OUTBOX in relay.types
-                }
+                .filter { relay -> relay.isSearch }
                 .sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
 
             allIndexers = indexers
@@ -384,46 +380,50 @@ fun OnboardingScreen(
         phase = OnboardingPhase.SAVING
         statusText = "Saving your relay configuration…"
 
-        // Disconnect all existing websocket connections so the feed will
-        // exclusively connect to the confirmed outbox relays on dashboard load.
-        social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().requestDisconnect()
+        searchScope.launch(Dispatchers.IO) {
+            // Disconnect all existing websocket connections so the feed will
+            // exclusively connect to the confirmed outbox relays on dashboard load.
+            social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().requestDisconnect()
 
-        // Apply to singleton state
-        Nip65RelayListRepository.applyMultiSourceResult(result)
+            // Apply to singleton state
+            Nip65RelayListRepository.applyMultiSourceResult(result)
 
-        // Save to storage
-        val outboxRelays = result.writeRelays.map { UserRelay(url = it, read = false, write = true) }
-        val inboxRelays = result.readRelays.map { UserRelay(url = it, read = true, write = false) }
-        storageManager.saveOutboxRelays(hexPubkey, outboxRelays)
-        storageManager.saveInboxRelays(hexPubkey, inboxRelays)
+            // Save to storage
+            val outboxRelays = result.writeRelays.map { UserRelay(url = it, read = false, write = true) }
+            val inboxRelays = result.readRelays.map { UserRelay(url = it, read = true, write = false) }
+            storageManager.saveOutboxRelays(hexPubkey, outboxRelays)
+            storageManager.saveInboxRelays(hexPubkey, inboxRelays)
 
-        // Populate Home relays category for feed subscription
-        val allNip65Urls = (result.writeRelays + result.readRelays).distinct()
-        val categoryRelays = allNip65Urls.map { UserRelay(url = it, read = true, write = true) }
-        val existingCategories = storageManager.loadCategories(hexPubkey)
-        val defaultCat = existingCategories.firstOrNull { it.id == "default_my_relays" }
-        val updatedCategories = if (defaultCat != null) {
-            val existingUrls = defaultCat.relays.map { it.url }.toSet()
-            val newRelays = categoryRelays.filter { it.url !in existingUrls }
-            existingCategories.map { cat ->
-                if (cat.id == "default_my_relays") cat.copy(relays = cat.relays + newRelays, isSubscribed = true)
-                else cat
+            // Populate Home relays category for feed subscription
+            val allNip65Urls = (result.writeRelays + result.readRelays).distinct()
+            val categoryRelays = allNip65Urls.map { UserRelay(url = it, read = true, write = true) }
+            val existingCategories = storageManager.loadCategories(hexPubkey)
+            val defaultCat = existingCategories.firstOrNull { it.id == "default_my_relays" }
+            val updatedCategories = if (defaultCat != null) {
+                val existingUrls = defaultCat.relays.map { it.url }.toSet()
+                val newRelays = categoryRelays.filter { it.url !in existingUrls }
+                existingCategories.map { cat ->
+                    if (cat.id == "default_my_relays") cat.copy(relays = cat.relays + newRelays, isSubscribed = true)
+                    else cat
+                }
+            } else {
+                val newCat = RelayCategory(
+                    id = "default_my_relays",
+                    name = "Home relays",
+                    relays = categoryRelays,
+                    isDefault = true,
+                    isSubscribed = true
+                )
+                existingCategories + newCat
             }
-        } else {
-            val newCat = RelayCategory(
-                id = "default_my_relays",
-                name = "Home relays",
-                relays = categoryRelays,
-                isDefault = true,
-                isSubscribed = true
-            )
-            existingCategories + newCat
-        }
-        storageManager.saveCategories(hexPubkey, updatedCategories)
-        Log.d("OnboardingScreen", "Saved ${categoryRelays.size} relays to Home category")
+            storageManager.saveCategories(hexPubkey, updatedCategories)
+            Log.d("OnboardingScreen", "Saved ${categoryRelays.size} relays to Home category")
 
-        phase = OnboardingPhase.READY
-        statusText = "You're all set"
+            withContext(Dispatchers.Main) {
+                phase = OnboardingPhase.READY
+                statusText = "You're all set"
+            }
+        }
     }
 
     // ── Navigate after READY ──
@@ -433,7 +433,7 @@ fun OnboardingScreen(
             if (hexPubkey.isNotBlank()) {
                 storageManager.clearOnboardingState(hexPubkey)
             }
-            delay(800)
+            delay(400)
             onComplete()
         }
     }
@@ -524,7 +524,7 @@ fun OnboardingScreen(
                 }
                 AnimatedContent(
                     targetState = title,
-                    transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(150)) },
+                    transitionSpec = { fadeIn(tween(250, delayMillis = 100)) togetherWith fadeOut(tween(200)) },
                     label = "title"
                 ) { t ->
                     Text(
@@ -539,7 +539,7 @@ fun OnboardingScreen(
                 Spacer(Modifier.height(4.dp))
                 AnimatedContent(
                     targetState = statusText,
-                    transitionSpec = { fadeIn(tween(300)) togetherWith fadeOut(tween(150)) },
+                    transitionSpec = { fadeIn(tween(250, delayMillis = 100)) togetherWith fadeOut(tween(200)) },
                     label = "status"
                 ) { s ->
                     Text(
@@ -557,8 +557,8 @@ fun OnboardingScreen(
                 AnimatedContent(
                     targetState = phase,
                     transitionSpec = {
-                        fadeIn(tween(350)) togetherWith fadeOut(tween(200)) using
-                                SizeTransform(clip = false)
+                        fadeIn(tween(300, delayMillis = 150)) togetherWith fadeOut(tween(250)) using
+                                SizeTransform(clip = true, sizeAnimationSpec = { _, _ -> tween(300) })
                     },
                     label = "phase_content"
                 ) { currentPhase ->
@@ -595,21 +595,20 @@ fun OnboardingScreen(
                             OnboardingPhase.SELECT_INDEXERS -> {
                                 IndexerSelectionCard(
                                     allIndexers = allIndexers,
-                                    selectedUrls = selectedIndexerUrls,
-                                    onToggle = { url ->
-                                        selectedIndexerUrls = if (url in selectedIndexerUrls)
-                                            selectedIndexerUrls - url else selectedIndexerUrls + url
-                                    },
-                                    onConfirm = { startNip65Search(selectedIndexerUrls.toList()) },
-                                    onChooseOwn = {
-                                        selectedIndexerUrls = emptySet()
-                                        onOpenRelayDiscoverySelection(emptyList())
-                                    },
-                                    onAddMore = { onOpenRelayDiscoverySelection(selectedIndexerUrls.toList()) }
+                                    initialSelectedUrls = selectedIndexerUrls,
+                                    onSelectionChanged = { selectedIndexerUrls = it },
+                                    onConfirm = { urls -> startNip65Search(urls.toList()) },
+                                    onChooseOwn = { urls -> onOpenRelayDiscoverySelection(urls.toList()) },
+                                    onAddMore = { urls -> onOpenRelayDiscoverySelection(urls.toList()) }
                                 )
                             }
 
                             OnboardingPhase.SEARCHING_NIP65 -> {
+                                // Collect flows only when this phase is active
+                                val multiSourceStatuses by Nip65RelayListRepository.multiSourceStatuses.collectAsState()
+                                val multiSourceResults by Nip65RelayListRepository.multiSourceResults.collectAsState()
+                                val multiSourceTotal by Nip65RelayListRepository.multiSourceTotal.collectAsState()
+                                val multiSourceDone by Nip65RelayListRepository.multiSourceDone.collectAsState()
                                 MultiSourceSearchCard(
                                     statuses = multiSourceStatuses,
                                     results = multiSourceResults,
@@ -625,6 +624,8 @@ fun OnboardingScreen(
                             }
 
                             OnboardingPhase.REVIEW_RELAYS -> {
+                                val multiSourceResults by Nip65RelayListRepository.multiSourceResults.collectAsState()
+                                val nip66Relays by Nip66RelayDiscoveryRepository.discoveredRelays.collectAsState()
                                 val result = chosenResult
                                 if (result != null) {
                                     RelayReviewCard(
@@ -717,12 +718,15 @@ fun OnboardingScreen(
 @Composable
 private fun IndexerSelectionCard(
     allIndexers: List<DiscoveredRelay>,
-    selectedUrls: Set<String>,
-    onToggle: (String) -> Unit,
-    onConfirm: () -> Unit,
-    onChooseOwn: () -> Unit,
-    onAddMore: () -> Unit
+    initialSelectedUrls: Set<String>,
+    onSelectionChanged: (Set<String>) -> Unit,
+    onConfirm: (Set<String>) -> Unit,
+    onChooseOwn: (Set<String>) -> Unit,
+    onAddMore: (Set<String>) -> Unit
 ) {
+    // Own selection state — isolated from parent to prevent AnimatedContent recomposition
+    var selectedUrls by remember(initialSelectedUrls) { mutableStateOf(initialSelectedUrls) }
+
     // Top 5 by RTT (always shown regardless of selection state)
     val rttGroup = remember(allIndexers) { allIndexers.take(5) }
     val rttUrls = remember(rttGroup) { rttGroup.map { it.url }.toSet() }
@@ -736,10 +740,13 @@ private fun IndexerSelectionCard(
         val indexerMap = allIndexers.associateBy { it.url }
         userPickUrls.map { url -> indexerMap[url] to url }
     }
-    // Fixed 2 visible user pick slots; scrollable if more
-    val userPickVisibleSlots = 2
-    val visibleUserPicks = userPickRelays.take(userPickVisibleSlots)
-    val overflowCount = (userPickRelays.size - userPickVisibleSlots).coerceAtLeast(0)
+
+    // Toggle helper
+    fun toggle(url: String) {
+        val updated = if (url in selectedUrls) selectedUrls - url else selectedUrls + url
+        selectedUrls = updated
+        onSelectionChanged(updated)
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Surface(
@@ -772,14 +779,16 @@ private fun IndexerSelectionCard(
                 Spacer(Modifier.height(4.dp))
 
                 rttGroup.forEach { relay ->
-                    IndexerRelayRow(
-                        relay = relay,
-                        isSelected = relay.url in selectedUrls,
-                        onClick = { onToggle(relay.url) }
-                    )
+                    key(relay.url) {
+                        IndexerRelayRow(
+                            relay = relay,
+                            isSelected = relay.url in selectedUrls,
+                            onClick = { toggle(relay.url) }
+                        )
+                    }
                 }
 
-                // ── Group 2: Your picks ──
+                // ── Group 2: Your picks (scrollable) ──
                 if (userPickRelays.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
@@ -791,40 +800,58 @@ private fun IndexerSelectionCard(
                         fontSize = 10.sp)
                     Spacer(Modifier.height(4.dp))
 
-                    visibleUserPicks.forEach { (relay, url) ->
-                        if (relay != null) {
-                            IndexerRelayRow(
-                                relay = relay,
-                                isSelected = true,
-                                onClick = { onToggle(url) }
-                            )
-                        } else {
-                            // URL not in NIP-66 data — show raw URL
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onToggle(url) }
-                                    .padding(vertical = 2.dp)
-                            ) {
-                                Checkbox(checked = true, onCheckedChange = null,
-                                    modifier = Modifier.size(32.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    text = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis
-                                )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 160.dp)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        userPickRelays.forEach { (relay, url) ->
+                            key(url) {
+                                if (relay != null) {
+                                    IndexerRelayRow(
+                                        relay = relay,
+                                        isSelected = true,
+                                        onClick = { toggle(url) }
+                                    )
+                                } else {
+                                    // URL not in NIP-66 data — show raw URL with lightweight indicator
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { toggle(url) }
+                                            .padding(vertical = 4.dp, horizontal = 2.dp)
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.size(20.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(18.dp)
+                                                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Filled.Check,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(12.dp),
+                                                    tint = MaterialTheme.colorScheme.onPrimary
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
                             }
                         }
-                    }
-
-                    if (overflowCount > 0) {
-                        Text("+$overflowCount more",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(start = 36.dp, top = 2.dp))
                     }
                 }
             }
@@ -834,7 +861,7 @@ private fun IndexerSelectionCard(
         Spacer(Modifier.height(20.dp))
 
         Button(
-            onClick = onConfirm,
+            onClick = { onConfirm(selectedUrls) },
             enabled = selectedUrls.isNotEmpty(),
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -846,7 +873,7 @@ private fun IndexerSelectionCard(
         Spacer(Modifier.height(8.dp))
 
         OutlinedButton(
-            onClick = onAddMore,
+            onClick = { onAddMore(selectedUrls) },
             modifier = Modifier.fillMaxWidth()
         ) {
             Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
@@ -857,7 +884,7 @@ private fun IndexerSelectionCard(
         Spacer(Modifier.height(4.dp))
 
         TextButton(
-            onClick = onChooseOwn,
+            onClick = { onChooseOwn(selectedUrls) },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("I'll choose my own indexers",
@@ -879,14 +906,40 @@ private fun IndexerRelayRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(vertical = 2.dp)
+            .padding(vertical = 4.dp, horizontal = 2.dp)
     ) {
-        Checkbox(
-            checked = isSelected,
-            onCheckedChange = null,
-            modifier = Modifier.size(32.dp)
-        )
-        Spacer(Modifier.width(4.dp))
+        // Lightweight check indicator — replaces Material3 Checkbox which is
+        // expensive (ripple, animation, accessibility) and causes scroll lag at 50+ rows
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.size(20.dp)
+        ) {
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .background(MaterialTheme.colorScheme.primary, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .background(
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                            CircleShape
+                        )
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
@@ -922,8 +975,9 @@ private fun IndexerRelayRow(
 }
 
 // ── Multi-source NIP-65 search progress card ──
-// Shows per-relay status (pending/success/no-data/failed/timeout),
-// relay count, and tap-to-view-logs for failed relays.
+// Scalable design: groups relays by status (success → pending → no-data → failed/timeout),
+// uses lazy scrolling inside a fixed-height container, supports re-ping per relay and batch retry.
+// Handles thousands of indexers without layout lag.
 
 @Composable
 private fun MultiSourceSearchCard(
@@ -943,10 +997,33 @@ private fun MultiSourceSearchCard(
     val noDataCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.NO_DATA }
     val pendingCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.PENDING }
     val hasResults = results.isNotEmpty()
+    val retryableCount = failCount + noDataCount
 
-    // Compute date diffs across successful results
+    // Group statuses by category for collapsible sections
+    val successList = remember(statuses) {
+        statuses.filter { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
+    }
+    val pendingList = remember(statuses) {
+        statuses.filter { it.status == Nip65RelayListRepository.IndexerQueryStatus.PENDING }
+    }
+    val noDataList = remember(statuses) {
+        statuses.filter { it.status == Nip65RelayListRepository.IndexerQueryStatus.NO_DATA }
+    }
+    val failedList = remember(statuses) {
+        statuses.filter {
+            it.status == Nip65RelayListRepository.IndexerQueryStatus.FAILED ||
+            it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT
+        }
+    }
+
+    // Collapsible section state — success expanded by default, others collapsed when >5
+    var successExpanded by remember { mutableStateOf(true) }
+    var pendingExpanded by remember { mutableStateOf(true) }
+    var noDataExpanded by remember { mutableStateOf(false) }
+    var failedExpanded by remember { mutableStateOf(false) }
+
+    // Date discrepancy
     val uniqueTimestamps = remember(results) { results.map { it.createdAt }.distinct().sorted() }
-    val dateFormat = remember { SimpleDateFormat("MMM d, yyyy h:mm a", Locale.getDefault()) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Surface(
@@ -962,11 +1039,11 @@ private fun MultiSourceSearchCard(
                         Spacer(Modifier.width(10.dp))
                     }
                     Text(
-                        text = if (!done) "Querying $total relays… ($pendingCount pending)"
+                        text = if (!done) "Querying $total relays\u2026 ($pendingCount pending)"
                                else buildString {
                                    append("$successCount of $total responded")
-                                   if (failCount > 0) append(" · $failCount failed")
-                                   if (noDataCount > 0) append(" · $noDataCount empty")
+                                   if (failCount > 0) append(" \u00b7 $failCount failed")
+                                   if (noDataCount > 0) append(" \u00b7 $noDataCount empty")
                                },
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface
@@ -989,93 +1066,94 @@ private fun MultiSourceSearchCard(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Spacer(Modifier.height(6.dp))
 
-                // Per-relay status rows
-                statuses.forEach { state ->
-                    val statusIcon: ImageVector
-                    val statusColor: Color
-                    val statusLabel: String
-                    val isClickable: Boolean
-
-                    when (state.status) {
-                        Nip65RelayListRepository.IndexerQueryStatus.PENDING -> {
-                            statusIcon = Icons.Outlined.HourglassEmpty
-                            statusColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                            statusLabel = "pending"
-                            isClickable = false
-                        }
-                        Nip65RelayListRepository.IndexerQueryStatus.SUCCESS -> {
-                            statusIcon = Icons.Filled.CheckCircle
-                            statusColor = Color(0xFF4CAF50)
-                            val r = state.result
-                            statusLabel = if (r != null) "${r.rTagCount} relays" else "ok"
-                            isClickable = true
-                        }
-                        Nip65RelayListRepository.IndexerQueryStatus.NO_DATA -> {
-                            statusIcon = Icons.Outlined.RemoveCircleOutline
-                            statusColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                            statusLabel = "no data"
-                            isClickable = true
-                        }
-                        Nip65RelayListRepository.IndexerQueryStatus.FAILED -> {
-                            statusIcon = Icons.Filled.Error
-                            statusColor = MaterialTheme.colorScheme.error
-                            statusLabel = "failed"
-                            isClickable = true
-                        }
-                        Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT -> {
-                            statusIcon = Icons.Outlined.TimerOff
-                            statusColor = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
-                            statusLabel = "timeout"
-                            isClickable = true
+                // ── Grouped relay status sections (scrollable) ──
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    // SUCCESS group
+                    if (successList.isNotEmpty()) {
+                        StatusGroupHeader(
+                            icon = Icons.Filled.CheckCircle,
+                            color = Color(0xFF4CAF50),
+                            label = "Responded",
+                            count = successCount,
+                            expanded = successExpanded,
+                            onToggle = { successExpanded = !successExpanded }
+                        )
+                        if (successExpanded) {
+                            successList.forEach { state ->
+                                IndexerStatusRow(
+                                    state = state,
+                                    onRelayLogClick = onRelayLogClick,
+                                    onRePing = null
+                                )
+                            }
                         }
                     }
 
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .then(
-                                if (isClickable) Modifier.clickable { onRelayLogClick(state.url) }
-                                else Modifier
-                            )
-                            .padding(vertical = 3.dp)
-                    ) {
-                        // Status icon (or spinner for pending)
-                        if (state.status == Nip65RelayListRepository.IndexerQueryStatus.PENDING) {
-                            CircularProgressIndicator(
-                                Modifier.size(12.dp),
-                                strokeWidth = 1.5.dp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                            )
-                        } else {
-                            Icon(statusIcon, null, Modifier.size(12.dp), tint = statusColor)
+                    // PENDING group
+                    if (pendingList.isNotEmpty()) {
+                        StatusGroupHeader(
+                            icon = Icons.Outlined.HourglassEmpty,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            label = "Pending",
+                            count = pendingCount,
+                            expanded = pendingExpanded,
+                            onToggle = { pendingExpanded = !pendingExpanded }
+                        )
+                        if (pendingExpanded) {
+                            pendingList.forEach { state ->
+                                IndexerStatusRow(
+                                    state = state,
+                                    onRelayLogClick = onRelayLogClick,
+                                    onRePing = null
+                                )
+                            }
                         }
-                        Spacer(Modifier.width(8.dp))
+                    }
 
-                        // Relay URL (no date — avoids layout shift during search)
-                        Text(
-                            text = state.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (state.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS)
-                                MaterialTheme.colorScheme.onSurface
-                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
-                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
+                    // NO DATA group
+                    if (noDataList.isNotEmpty()) {
+                        StatusGroupHeader(
+                            icon = Icons.Outlined.RemoveCircleOutline,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            label = "No Data",
+                            count = noDataCount,
+                            expanded = noDataExpanded,
+                            onToggle = { noDataExpanded = !noDataExpanded }
                         )
+                        if (noDataExpanded) {
+                            noDataList.forEach { state ->
+                                IndexerStatusRow(
+                                    state = state,
+                                    onRelayLogClick = onRelayLogClick,
+                                    onRePing = if (done) {{ Nip65RelayListRepository.rePingIndexer(state.url) }} else null
+                                )
+                            }
+                        }
+                    }
 
-                        Spacer(Modifier.width(6.dp))
-
-                        // Status label + tap hint for failed
-                        Text(
-                            text = statusLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = statusColor,
-                            fontSize = 10.sp
+                    // FAILED / TIMEOUT group
+                    if (failedList.isNotEmpty()) {
+                        StatusGroupHeader(
+                            icon = Icons.Filled.Error,
+                            color = MaterialTheme.colorScheme.error,
+                            label = "Failed",
+                            count = failCount,
+                            expanded = failedExpanded,
+                            onToggle = { failedExpanded = !failedExpanded }
                         )
-                        if (isClickable) {
-                            Spacer(Modifier.width(2.dp))
-                            Icon(Icons.Outlined.ChevronRight, null, Modifier.size(12.dp),
-                                tint = statusColor.copy(alpha = 0.5f))
+                        if (failedExpanded) {
+                            failedList.forEach { state ->
+                                IndexerStatusRow(
+                                    state = state,
+                                    onRelayLogClick = onRelayLogClick,
+                                    onRePing = if (done) {{ Nip65RelayListRepository.rePingIndexer(state.url) }} else null
+                                )
+                            }
                         }
                     }
                 }
@@ -1130,9 +1208,147 @@ private fun MultiSourceSearchCard(
                     Text("Configure Manually")
                 }
             }
+
+            // Retry all failed/no-data button
+            if (retryableCount > 0) {
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { Nip65RelayListRepository.rePingAllFailed() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Retry $retryableCount Failed")
+                }
+            }
         }
 
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+/** Collapsible group header for status sections. */
+@Composable
+private fun StatusGroupHeader(
+    icon: ImageVector,
+    color: Color,
+    label: String,
+    count: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 6.dp)
+    ) {
+        Icon(icon, null, Modifier.size(14.dp), tint = color)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = "$label ($count)",
+            style = MaterialTheme.typography.labelMedium,
+            color = color,
+            modifier = Modifier.weight(1f)
+        )
+        Icon(
+            if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+            contentDescription = if (expanded) "Collapse" else "Expand",
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        )
+    }
+}
+
+/** Single indexer status row with optional re-ping button. */
+@Composable
+private fun IndexerStatusRow(
+    state: Nip65RelayListRepository.IndexerQueryState,
+    onRelayLogClick: (String) -> Unit,
+    onRePing: (() -> Unit)?
+) {
+    val statusColor: Color
+    val statusLabel: String
+
+    when (state.status) {
+        Nip65RelayListRepository.IndexerQueryStatus.PENDING -> {
+            statusColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            statusLabel = "pending"
+        }
+        Nip65RelayListRepository.IndexerQueryStatus.SUCCESS -> {
+            statusColor = Color(0xFF4CAF50)
+            val r = state.result
+            statusLabel = if (r != null) "${r.rTagCount} relays" else "ok"
+        }
+        Nip65RelayListRepository.IndexerQueryStatus.NO_DATA -> {
+            statusColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            statusLabel = "no data"
+        }
+        Nip65RelayListRepository.IndexerQueryStatus.FAILED -> {
+            statusColor = MaterialTheme.colorScheme.error
+            statusLabel = "failed"
+        }
+        Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT -> {
+            statusColor = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+            statusLabel = "timeout"
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onRelayLogClick(state.url) }
+            .padding(vertical = 3.dp, horizontal = 4.dp)
+    ) {
+        if (state.status == Nip65RelayListRepository.IndexerQueryStatus.PENDING) {
+            CircularProgressIndicator(
+                Modifier.size(10.dp),
+                strokeWidth = 1.5.dp,
+                color = statusColor
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .background(statusColor, shape = CircleShape)
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+
+        Text(
+            text = state.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (state.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS)
+                MaterialTheme.colorScheme.onSurface
+            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+            fontSize = 11.sp
+        )
+
+        Spacer(Modifier.width(4.dp))
+
+        Text(
+            text = statusLabel,
+            style = MaterialTheme.typography.labelSmall,
+            color = statusColor,
+            fontSize = 9.sp
+        )
+
+        // Re-ping button for failed/no-data relays
+        if (onRePing != null) {
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                Icons.Outlined.Refresh,
+                contentDescription = "Retry",
+                modifier = Modifier
+                    .size(14.dp)
+                    .clickable(onClick = onRePing),
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+            )
+        }
     }
 }
 

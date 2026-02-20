@@ -12,6 +12,7 @@ import social.mycelium.android.repository.ContactListRepository
 import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.repository.LiveActivityRepository
 import social.mycelium.android.repository.NotesRepository
+import social.mycelium.android.repository.FeedSessionState
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.relay.RelayState
@@ -65,6 +66,9 @@ class DashboardViewModel : ViewModel() {
     /** NIP-53 live activities with status=LIVE for the chips row. */
     val liveActivities: StateFlow<List<LiveActivity>> = liveActivityRepository.liveActivities
 
+    /** Feed session lifecycle: Idle → Loading → Live. Drives the loading indicator in the UI. */
+    val feedSessionState: StateFlow<FeedSessionState> = notesRepository.feedSessionState
+
     companion object {
         private const val TAG = "DashboardViewModel"
     }
@@ -115,11 +119,31 @@ class DashboardViewModel : ViewModel() {
             val cached = ContactListRepository.getCachedFollowList(pubkey)
             if (cached != null && !forceRefresh) {
                 _uiState.update { it.copy(followList = cached) }
+                liveActivityRepository.setFollowedPubkeys(cached)
+                // Trigger outbox discovery with cached follow list
+                if (cached.isNotEmpty()) {
+                    startOutboxFeed(cached, cacheRelayUrls)
+                }
                 return@launch
             }
             val list = ContactListRepository.fetchFollowList(pubkey, cacheRelayUrls, forceRefresh)
             _uiState.update { it.copy(followList = list) }
+            liveActivityRepository.setFollowedPubkeys(list)
+            // Trigger outbox discovery after fresh fetch
+            if (list.isNotEmpty()) {
+                startOutboxFeed(list, cacheRelayUrls)
+            }
         }
+    }
+
+    /**
+     * Start outbox-aware feed: discover followed users' write relays via NIP-65
+     * and subscribe to them for kind-1 notes we'd otherwise miss.
+     * Called automatically after follow list loads. Can also be called manually
+     * with explicit indexer relay URLs.
+     */
+    fun startOutboxFeed(followedPubkeys: Set<String>, indexerRelayUrls: List<String>) {
+        notesRepository.startOutboxFeed(followedPubkeys, indexerRelayUrls)
     }
 
     /**
@@ -162,6 +186,8 @@ class DashboardViewModel : ViewModel() {
                         Log.e(TAG, "Notes collect failed: ${e.message}", e)
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
                 Log.e(TAG, "Notes flow failed: ${e.message}", e)
             }
@@ -192,6 +218,8 @@ class DashboardViewModel : ViewModel() {
                         }
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
                 Log.e(TAG, "Enrichment flow failed: ${e.message}", e)
             }
@@ -202,6 +230,8 @@ class DashboardViewModel : ViewModel() {
                 notesRepository.isLoading.collect { isLoading ->
                     _uiState.update { it.copy(isLoadingFromRelays = isLoading) }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
                 Log.e(TAG, "Loading flow failed: ${e.message}", e)
             }
@@ -214,6 +244,8 @@ class DashboardViewModel : ViewModel() {
                         _uiState.update { it.copy(error = error) }
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
                 Log.e(TAG, "Error flow failed: ${e.message}", e)
             }
@@ -226,6 +258,8 @@ class DashboardViewModel : ViewModel() {
                         it.copy(newNotesCountAll = counts.all, newNotesCountFollowing = counts.following)
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
                 Log.e(TAG, "NewNotesCounts flow failed: ${e.message}", e)
             }

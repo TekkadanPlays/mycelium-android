@@ -31,11 +31,13 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.content.TextContent
+import io.ktor.http.isSuccess
+import social.mycelium.android.network.MyceliumHttpClient
 
 /**
  * NIP-66 Relay Discovery and Liveness Monitoring.
@@ -63,14 +65,8 @@ object Nip66RelayDiscoveryRepository {
 
     /** rstate REST API base URL (proxied via Hono on mycelium.social). */
     private const val RSTATE_BASE_URL = "https://mycelium.social/relays"
-    private const val REST_TIMEOUT_SECONDS = 15L
-    private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(REST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .readTimeout(REST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .writeTimeout(REST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = MyceliumHttpClient.instance
 
     /** Well-known relays where NIP-66 monitors publish kind 30166 events. */
     val MONITOR_RELAYS = listOf(
@@ -165,22 +161,16 @@ object Nip66RelayDiscoveryRepository {
             val bodyJson = buildRestRequestBody(bodyMap)
             Log.d(TAG, "REST API request: POST $RSTATE_BASE_URL/search body=$bodyJson")
 
-            val requestBody = bodyJson.toRequestBody(JSON_MEDIA_TYPE)
-            val request = Request.Builder()
-                .url("$RSTATE_BASE_URL/search")
-                .post(requestBody)
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            if (!response.isSuccessful) {
-                Log.w(TAG, "REST API returned ${response.code}: ${response.message}")
-                response.close()
+            val response = httpClient.post("$RSTATE_BASE_URL/search") {
+                setBody(TextContent(bodyJson, ContentType.Application.Json))
+            }
+            if (!response.status.isSuccess()) {
+                Log.w(TAG, "REST API returned ${response.status}")
                 return@withContext false
             }
 
-            val responseBody = response.body?.string()
-            response.close()
-            if (responseBody.isNullOrBlank()) {
+            val responseBody = response.bodyAsText()
+            if (responseBody.isBlank()) {
                 Log.w(TAG, "REST API returned empty body")
                 return@withContext false
             }

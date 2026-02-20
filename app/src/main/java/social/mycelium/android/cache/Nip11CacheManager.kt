@@ -12,11 +12,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.isSuccess
 import social.mycelium.android.data.RelayInformation
+import social.mycelium.android.network.MyceliumHttpClient
 import social.mycelium.android.utils.MemoryUtils
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.util.concurrent.TimeUnit
 
 /**
  * Manages persistent caching of NIP-11 relay information with 24-hour expiration.
@@ -42,11 +44,7 @@ class Nip11CacheManager(private val context: Context) {
     }
 
     private val sharedPrefs: SharedPreferences = context.getSharedPreferences(CACHE_PREFS, Context.MODE_PRIVATE)
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = MyceliumHttpClient.instance
     
     // In-memory cache for fast access
     private val memoryCache = mutableMapOf<String, CachedRelayInfo>()
@@ -256,27 +254,24 @@ class Nip11CacheManager(private val context: Context) {
             // Convert WebSocket URL to HTTP for NIP-11
             val httpUrl = url.replace("wss://", "https://").replace("ws://", "http://")
             
-            val request = Request.Builder()
-                .url(httpUrl)
-                .header("Accept", "application/nostr+json")
-                .build()
+            val response = httpClient.get(httpUrl) {
+                header("Accept", "application/nostr+json")
+            }
             
-            val response = httpClient.newCall(request).execute()
-            
-            if (response.isSuccessful) {
-                val responseBody = response.body?.string() ?: ""
+            if (response.status.isSuccess()) {
+                val responseBody = response.bodyAsText()
                 if (responseBody.startsWith("{")) {
                     val relayInfo = JSON.decodeFromString<RelayInformation>(responseBody)
-                    Log.d(TAG, "✅ Fetched NIP-11 info for $url: ${relayInfo.name}")
+                    Log.d(TAG, "Fetched NIP-11 info for $url: ${relayInfo.name}")
                     return@withContext relayInfo
                 }
             }
             
-            Log.w(TAG, "⚠️ Invalid response for $url")
+            Log.w(TAG, "Invalid NIP-11 response for $url")
             null
             
         } catch (e: Exception) {
-            Log.w(TAG, "⚠️ Network error for $url: ${e.message}")
+            Log.w(TAG, "NIP-11 fetch error for $url: ${e.message}")
             null
         }
     }

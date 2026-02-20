@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -258,7 +259,7 @@ fun RelayLogScreen(
                     }
                 }
             } else {
-                items(filteredLogs, key = { "${it.timestamp}-${it.type}-${it.message.hashCode()}" }) { entry ->
+                itemsIndexed(filteredLogs, key = { index, it -> "$index-${it.timestamp}-${it.type}" }) { _, entry ->
                     LogEntryRow(entry)
                 }
             }

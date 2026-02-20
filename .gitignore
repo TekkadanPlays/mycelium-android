@@ -97,5 +97,8 @@ material-components-android/
 # Ktor (embedded repository)
 ktor/
 
+# BlazeCN (embedded repository)
+blazecn/
+
 # External submodules (removed)
 external/

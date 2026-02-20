@@ -125,9 +125,9 @@ fun AboutScreen(
         ) {
             Spacer(modifier = Modifier.height(48.dp))
 
-            // Frog emoji (our app icon theme)
+            // Mushroom emoji (our app icon theme)
             Text(
-                text = "\uD83D\uDC38",
+                text = "\uD83C\uDF44",
                 fontSize = 72.sp,
                 textAlign = TextAlign.Center
             )

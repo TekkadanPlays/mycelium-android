@@ -2,9 +2,9 @@ package social.mycelium.android.cache.nip11
 
 import android.util.Log
 import android.util.LruCache
+import io.ktor.client.HttpClient
 import social.mycelium.android.data.RelayInformation
-import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
+import social.mycelium.android.network.MyceliumHttpClient
 
 /**
  * Cached retriever for NIP-11 relay information with LruCache and state management.
@@ -17,11 +17,7 @@ import java.util.concurrent.TimeUnit
  * - Immediate empty state with fallback data (displayUrl + favicon)
  */
 class Nip11CachedRetriever(
-    private val okHttpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
+    private val httpClient: HttpClient = MyceliumHttpClient.instance
 ) {
     companion object {
         private const val TAG = "Nip11CachedRetriever"
@@ -35,7 +31,7 @@ class Nip11CachedRetriever(
     private val relayInformationDocumentCache = LruCache<String, RetrieveResult?>(CACHE_SIZE)
 
     // Network retriever
-    private val retriever = Nip11Retriever(okHttpClient)
+    private val retriever = Nip11Retriever(httpClient)
 
     /**
      * Get or create empty/default relay information for a URL.

@@ -144,29 +144,10 @@ private fun DrawerContent(
                 },
                 modifier = Modifier.size(40.dp)
             ) {
-                if (indexerRelayCount > 0) {
-                    BadgedBox(
-                        badge = {
-                            Badge(
-                                containerColor = if (connectedIndexerCount > 0)
-                                    MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.outlineVariant
-                            ) {
-                                Text("$indexerRelayCount")
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Outlined.ManageSearch,
-                            contentDescription = "Indexers"
-                        )
-                    }
-                } else {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Outlined.ManageSearch,
-                        contentDescription = "Indexers"
-                    )
-                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Outlined.ManageSearch,
+                    contentDescription = "Indexers"
+                )
             }
             IconButton(
                 onClick = {
@@ -225,7 +206,11 @@ private fun DrawerContent(
             }
             Text(
                 text = when {
-                    connectedRelayCount > 0 -> "Connected $connectedRelayCount/$subscribedRelayCount"
+                    connectedRelayCount > 0 -> {
+                        val base = "Connected $connectedRelayCount/$subscribedRelayCount"
+                        if (indexerRelayCount > 0) "$base  ·  Indexers $connectedIndexerCount/$indexerRelayCount"
+                        else base
+                    }
                     isConnecting -> "Connecting\u2026"
                     relayState is RelayState.ConnectFailed -> "Connection failed"
                     else -> "Disconnected"

@@ -1,6 +1,5 @@
 package social.mycelium.android.ui.components
 
-import android.view.MotionEvent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -102,6 +101,17 @@ private fun FeedVideoPlayer(
         }
     }
 
+    // Listener for reporting video dimensions — stored so we can remove on dispose
+    val sizeListener = remember(url) {
+        object : androidx.media3.common.Player.Listener {
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                if (videoSize.width > 0 && videoSize.height > 0) {
+                    social.mycelium.android.utils.MediaAspectRatioCache.add(url, videoSize.width, videoSize.height)
+                }
+            }
+        }
+    }
+
     // Acquire or re-acquire the pooled player
     LaunchedEffect(url) {
         if (player == null) {
@@ -114,13 +124,8 @@ private fun FeedVideoPlayer(
             p.volume = if (isMuted) 0f else 1f
             p.playWhenReady = prefAutoplay
             // Report video dimensions to aspect ratio cache once known
-            p.addListener(object : androidx.media3.common.Player.Listener {
-                override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                    if (videoSize.width > 0 && videoSize.height > 0) {
-                        social.mycelium.android.utils.MediaAspectRatioCache.add(url, videoSize.width, videoSize.height)
-                    }
-                }
-            })
+            p.removeListener(sizeListener) // prevent duplicates from pool re-use
+            p.addListener(sizeListener)
             player = p
         }
     }
@@ -139,6 +144,7 @@ private fun FeedVideoPlayer(
     DisposableEffect(url) {
         onDispose {
             player?.let {
+                it.removeListener(sizeListener)
                 VideoPositionCache.set(url, it.currentPosition)
                 VideoMuteCache.set(url, isMuted)
             }
@@ -161,14 +167,6 @@ private fun FeedVideoPlayer(
                         this.player = p
                         resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
                         setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                        setOnTouchListener { v, event ->
-                            when (event.action) {
-                                MotionEvent.ACTION_DOWN -> {
-                                    v.parent?.requestDisallowInterceptTouchEvent(false)
-                                }
-                            }
-                            false
-                        }
                     }
                 },
                 update = { view -> view.player = p }
@@ -276,6 +274,7 @@ private fun FullVideoPlayer(
                 VideoMuteCache.set(url, isMuted)
             }
             SharedPlayerPool.detach(url)
+            player = null
         }
     }
 
@@ -327,6 +326,7 @@ private fun FullVideoPlayer(
                         VideoPositionCache.set(url, p.currentPosition)
                         VideoMuteCache.set(url, isMuted)
                         SharedPlayerPool.detach(url)
+                        player = null
                         onExitFullscreen()
                     },
                     isFullscreen = true

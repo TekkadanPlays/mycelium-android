@@ -92,6 +92,7 @@ import social.mycelium.android.ui.screens.TopicThreadScreen
 import social.mycelium.android.ui.screens.ProfileScreen
 import social.mycelium.android.ui.screens.RelayLogScreen
 import social.mycelium.android.ui.screens.RelayDiscoveryScreen
+import social.mycelium.android.ui.screens.RelayConnectionStatusScreen
 import social.mycelium.android.ui.screens.RelayHealthScreen
 import social.mycelium.android.ui.screens.RelayManagementScreen
 import social.mycelium.android.ui.screens.SettingsScreen
@@ -463,12 +464,14 @@ fun MyceliumNavigation(
                     navController = navController,
                     startDestination = if (needsOnboarding) "onboarding" else "dashboard",
                     enterTransition = {
-                        // Use MaterialFadeThrough for main screen transitions only
                         when {
                             initialState.destination.route in mainScreenRoutes &&
                                     targetState.destination.route in mainScreenRoutes -> {
-                                // Fade through transition for navigation bar navigation
-                                fadeIn(animationSpec = tween(210, delayMillis = 90))
+                                // Slide transition for bottom-nav tab switches
+                                slideIntoContainer(
+                                    towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                                    animationSpec = tween(300)
+                                ) + fadeIn(animationSpec = tween(300))
                             }
                             else -> {
                                 // Default: slide + fade (overridden by per-route transitions)
@@ -487,12 +490,20 @@ fun MyceliumNavigation(
                         }
                     },
                     exitTransition = {
-                        // Use MaterialFadeThrough for main screen transitions only
+                        // Overlay routes (viewers): keep underlying screen in place
+                        val overlayTargets = setOf("image_viewer", "video_viewer")
                         when {
+                            targetState.destination.route in overlayTargets -> {
+                                // Dashboard stays in place — viewer fades in on top
+                                ExitTransition.None
+                            }
                             initialState.destination.route in mainScreenRoutes &&
                                     targetState.destination.route in mainScreenRoutes -> {
-                                // Fade through transition for navigation bar navigation
-                                fadeOut(animationSpec = tween(90))
+                                // Slide transition for bottom-nav tab switches
+                                slideOutOfContainer(
+                                    towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                                    animationSpec = tween(300)
+                                ) + fadeOut(animationSpec = tween(300))
                             }
                             else -> {
                                 // Default: slide + fade (overridden by per-route transitions)
@@ -519,7 +530,10 @@ fun MyceliumNavigation(
                             }
                             initialState.destination.route in mainScreenRoutes &&
                                     targetState.destination.route in mainScreenRoutes -> {
-                                fadeIn(animationSpec = tween(210, delayMillis = 90))
+                                slideIntoContainer(
+                                    towards = AnimatedContentTransitionScope.SlideDirection.End,
+                                    animationSpec = tween(300)
+                                ) + fadeIn(animationSpec = tween(300))
                             }
                             else -> {
                                 // Default: slide + fade (overridden by per-route transitions)
@@ -541,11 +555,14 @@ fun MyceliumNavigation(
                         val noAnimRoutes = setOf("image_viewer", "video_viewer", "reply_compose?rootId={rootId}&rootPubkey={rootPubkey}&parentId={parentId}&parentPubkey={parentPubkey}")
                         when {
                             initialState.destination.route in noAnimRoutes -> {
-                                ExitTransition.None
+                                fadeOut(animationSpec = tween(200))
                             }
                             initialState.destination.route in mainScreenRoutes &&
                                     targetState.destination.route in mainScreenRoutes -> {
-                                fadeOut(animationSpec = tween(90))
+                                slideOutOfContainer(
+                                    towards = AnimatedContentTransitionScope.SlideDirection.End,
+                                    animationSpec = tween(300)
+                                ) + fadeOut(animationSpec = tween(300))
                             }
                             else -> {
                                 // Default: slide + fade (overridden by per-route transitions)
@@ -600,7 +617,12 @@ fun MyceliumNavigation(
                         } ?: emptyList()
                     }
 
-                    Box(modifier = Modifier.fillMaxSize()) {
+                    // Gate: don't render feed while redirecting to onboarding (prevents flash)
+                    val hasAccount = currentAccount?.toHexKey()?.isNotBlank() == true
+                    if (hasAccount && !onboardingComplete) {
+                        // Blank — LaunchedEffect above will redirect to onboarding
+                        Box(Modifier.fillMaxSize())
+                    } else Box(modifier = Modifier.fillMaxSize()) {
                         DashboardScreen(
                             isSearchMode = appState.isSearchMode,
                             onSearchModeChange = { appViewModel.updateSearchMode(it) },
@@ -624,6 +646,9 @@ fun MyceliumNavigation(
                                         launchSingleTop = true
                                     }
                                     screen == "relay_discovery" -> navController.navigate("relay_discovery")
+                                    screen == "relay_connection_status" -> navController.navigate("relay_connection_status") {
+                                        launchSingleTop = true
+                                    }
                                     screen == "onboarding" -> navController.navigate("onboarding") {
                                         launchSingleTop = true
                                     }
@@ -826,14 +851,19 @@ fun MyceliumNavigation(
                     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
                     val hexPubkey = currentAccount?.toHexKey() ?: ""
 
-                    // Read returned indexer URLs from discovery selection screen
+                    // Consume-and-clear: read returned indexer URLs once, then remove
+                    // from savedStateHandle so they don't persist across recompositions.
+                    // This eliminates the race between getStateFlow default emission
+                    // and the actual value that caused selections to revert.
                     val savedStateHandle = navController.currentBackStackEntry?.savedStateHandle
-                    val returnedIndexers by savedStateHandle
-                        ?.getStateFlow<ArrayList<String>>("selected_indexers", arrayListOf())
-                        ?.collectAsState()
-                        ?: remember { mutableStateOf(arrayListOf()) }
-
-                    android.util.Log.d("OnboardingNav", "returnedIndexers=${returnedIndexers.size}: ${returnedIndexers.take(3)}")
+                    val returnedIndexers = remember {
+                        val urls = savedStateHandle?.get<ArrayList<String>>("selected_indexers")
+                        if (urls != null) {
+                            savedStateHandle.remove<ArrayList<String>>("selected_indexers")
+                            android.util.Log.d("OnboardingNav", "Consumed ${urls.size} returned indexers: ${urls.take(3)}")
+                        }
+                        mutableStateOf(urls?.toList() ?: emptyList())
+                    }
 
                     OnboardingScreen(
                         hexPubkey = hexPubkey,
@@ -856,7 +886,7 @@ fun MyceliumNavigation(
                             val encoded = android.net.Uri.encode(preSelectedUrls.joinToString(","))
                             navController.navigate("relay_discovery?selection=true&prefill=$encoded")
                         },
-                        returnedIndexerUrls = returnedIndexers.toList(),
+                        returnedIndexerUrls = returnedIndexers.value,
                         onRelayLogClick = { relayUrl ->
                             val encoded = android.net.Uri.encode(relayUrl)
                             navController.navigate("relay_log/$encoded")
@@ -1230,13 +1260,13 @@ fun MyceliumNavigation(
                     )
                 }
 
-                // Full-screen image viewer (Save, HD, back) — instant back, no slide
+                // Full-screen image viewer (Save, HD, back) — smooth fade back
                 composable(
                     "image_viewer",
                     enterTransition = { fadeIn(animationSpec = tween(150)) },
                     exitTransition = { ExitTransition.None },
                     popEnterTransition = { EnterTransition.None },
-                    popExitTransition = { ExitTransition.None }
+                    popExitTransition = { fadeOut(animationSpec = tween(200)) }
                 ) {
                     val appState by appViewModel.appState.collectAsState()
                     val urls = appState.imageViewerUrls
@@ -1258,13 +1288,13 @@ fun MyceliumNavigation(
                     }
                 }
 
-                // Full-screen video viewer — instant back, no slide
+                // Full-screen video viewer — smooth fade back
                 composable(
                     "video_viewer",
                     enterTransition = { fadeIn(animationSpec = tween(150)) },
                     exitTransition = { ExitTransition.None },
                     popEnterTransition = { EnterTransition.None },
-                    popExitTransition = { ExitTransition.None }
+                    popExitTransition = { fadeOut(animationSpec = tween(200)) }
                 ) {
                     // Kill PiP when any media goes fullscreen
                     LaunchedEffect(Unit) { PipStreamManager.kill() }
@@ -1336,6 +1366,12 @@ fun MyceliumNavigation(
                             animationSpec = tween(300)
                         )
                     },
+                    popEnterTransition = {
+                        slideIntoContainer(
+                            towards = AnimatedContentTransitionScope.SlideDirection.End,
+                            animationSpec = tween(300)
+                        )
+                    },
                     popExitTransition = {
                         slideOutOfContainer(
                             towards = AnimatedContentTransitionScope.SlideDirection.End,
@@ -1358,7 +1394,31 @@ fun MyceliumNavigation(
                 // Profile view - Can navigate to threads and other profiles
                 composable(
                         route = "profile/{authorId}",
-                        arguments = listOf(navArgument("authorId") { type = NavType.StringType })
+                        arguments = listOf(navArgument("authorId") { type = NavType.StringType }),
+                        enterTransition = {
+                            slideIntoContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
+                            )
+                        },
+                        exitTransition = {
+                            slideOutOfContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingStandardAccelerate)
+                            )
+                        },
+                        popEnterTransition = {
+                            slideIntoContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.End,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
+                            )
+                        },
+                        popExitTransition = {
+                            slideOutOfContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.End,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingStandardAccelerate)
+                            )
+                        }
                 ) { backStackEntry ->
                     val authorId =
                             backStackEntry.arguments?.getString("authorId") ?: return@composable
@@ -1390,10 +1450,14 @@ fun MyceliumNavigation(
                             .collect { profileCache.getAuthor(cacheKey)?.let { a -> author = a } }
                     }
 
-                    val authorNotes = dashboardState.notes.filter { it.author.id.lowercase() == author.id.lowercase() }
+                    val authorIdLower = remember(author.id) { author.id.lowercase() }
+                    val authorNotes = remember(dashboardState.notes, authorIdLower) {
+                        dashboardState.notes.filter { it.author.id.lowercase() == authorIdLower }
+                    }
                     val profileListState = rememberLazyListState()
                     val followList = dashboardState.followList
-                    val isFollowing = followList.isNotEmpty() && author.id.lowercase() in followList.map { it.lowercase() }.toSet()
+                    val followSetLower = remember(followList) { followList.map { it.lowercase() }.toSet() }
+                    val isFollowing = followSetLower.isNotEmpty() && authorIdLower in followSetLower
                     // Relay orb tap navigates to relay_log page via onRelayClick callback
                     val zapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
                     val zappedIds by accountStateViewModel.zappedNoteIds.collectAsState()
@@ -1636,7 +1700,19 @@ fun MyceliumNavigation(
                 composable("settings/about") {
                     AboutScreen(
                         onBackClick = { navController.popBackStack() },
-                        onProfileClick = { pubkey -> navController.navigate("profile/$pubkey") }
+                        onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) }
+                    )
+                }
+
+                composable("relay_connection_status") {
+                    RelayConnectionStatusScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onRelayClick = { relayUrl ->
+                            val encoded = android.net.Uri.encode(relayUrl)
+                            navController.navigate("relay_log/$encoded") {
+                                launchSingleTop = true
+                            }
+                        }
                     )
                 }
 
@@ -2269,7 +2345,10 @@ fun MyceliumNavigation(
 
 /** Navigation extension functions for type-safe navigation */
 private fun NavController.navigateToProfile(authorId: String) {
-    navigate("profile/$authorId")
+    navigate("profile/$authorId") {
+        launchSingleTop = true
+        restoreState = true
+    }
 }
 
 /**
@@ -2278,5 +2357,7 @@ private fun NavController.navigateToProfile(authorId: String) {
  */
 private fun NavController.navigateToThread(noteId: String, replyKind: Int = 1, highlightReplyId: String? = null) {
     val suffix = highlightReplyId?.let { "&highlightReplyId=${android.net.Uri.encode(it)}" } ?: ""
-    navigate("thread/$noteId?replyKind=$replyKind$suffix")
+    navigate("thread/$noteId?replyKind=$replyKind$suffix") {
+        launchSingleTop = true
+    }
 }

@@ -77,7 +77,6 @@ import social.mycelium.android.ui.components.RelayOrbs
 import social.mycelium.android.ui.components.ZapButtonWithMenu
 import social.mycelium.android.ui.components.ZapMenuRow
 import social.mycelium.android.ui.icons.ArrowDownward
-import social.mycelium.android.ui.theme.SageGreen80
 import social.mycelium.android.ui.icons.ArrowUpward
 import social.mycelium.android.ui.icons.Bolt
 import social.mycelium.android.ui.icons.Bookmark
@@ -95,8 +94,8 @@ private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault(
 private val standardAnimation = tween<IntSize>(durationMillis = 200, easing = FastOutSlowInEasing)
 private val fastAnimation = tween<IntSize>(durationMillis = 150, easing = FastOutSlowInEasing)
 
-/** Thread/topic reply separator line color (Mycelium sage theme). */
-private val ThreadLineColor = SageGreen80
+/** Thread/topic reply separator line color. */
+private val ThreadLineColor = Color(0xFF8888A0)
 
 /** Max indent depth; beyond this show "Read N more replies" and open sub-thread on tap. */
 private const val MAX_THREAD_DEPTH = 4

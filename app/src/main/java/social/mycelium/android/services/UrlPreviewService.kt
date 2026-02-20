@@ -1,29 +1,25 @@
 package social.mycelium.android.services
 
 import android.util.Log
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.contentType
+import io.ktor.http.isSuccess
 import social.mycelium.android.data.UrlPreviewInfo
 import social.mycelium.android.data.UrlPreviewState
+import social.mycelium.android.network.MyceliumHttpClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
 import java.io.IOException
 import java.net.URL
-import java.util.concurrent.TimeUnit
 
 /**
  * Service for fetching URL previews
  */
 class UrlPreviewService {
     
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .build()
-    
+    private val httpClient = MyceliumHttpClient.instance
     private val htmlParser = HtmlParser()
     
     /**
@@ -43,8 +39,7 @@ class UrlPreviewService {
             }
             
             // Fetch HTML content
-            val response = fetchHtml(validatedUrl)
-            val htmlContent = response.body?.string() ?: ""
+            val (htmlContent, contentType) = fetchHtml(validatedUrl)
             
             // Parse metadata
             val metadata = htmlParser.parseHtml(htmlContent, validatedUrl)
@@ -55,12 +50,14 @@ class UrlPreviewService {
                 description = metadata.description,
                 imageUrl = metadata.imageUrl,
                 siteName = metadata.siteName,
-                mimeType = response.header("Content-Type") ?: "text/html"
+                mimeType = contentType
             )
             
             Log.d("UrlPreviewService", "Successfully fetched preview: ${previewInfo.title}")
             UrlPreviewState.Loaded(previewInfo)
             
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // propagate cancellation, don't swallow
         } catch (e: Exception) {
             Log.e("UrlPreviewService", "Error fetching preview for $url", e)
             UrlPreviewState.Error(e.message ?: "Unknown error")
@@ -112,25 +109,22 @@ class UrlPreviewService {
         }
     }
     
-    private fun fetchHtml(url: String): Response {
-        val request = Request.Builder()
-            .url(url)
-            .addHeader("User-Agent", "Mycelium-Android/1.0")
-            .addHeader("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-            .build()
-        
-        val response = httpClient.newCall(request).execute()
-        
-        if (!response.isSuccessful) {
-            throw IOException("HTTP ${response.code}: ${response.message}")
+    private suspend fun fetchHtml(url: String): Pair<String, String> {
+        val response = httpClient.get(url) {
+            header("User-Agent", "Mycelium-Android/1.0")
+            header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         }
         
-        val contentType = response.header("Content-Type") ?: ""
+        if (!response.status.isSuccess()) {
+            throw IOException("HTTP ${response.status}")
+        }
+        
+        val contentType = response.contentType()?.toString() ?: ""
         if (!contentType.contains("text/html")) {
             throw IOException("Content is not HTML: $contentType")
         }
         
-        return response
+        return response.bodyAsText() to contentType
     }
     
     /**

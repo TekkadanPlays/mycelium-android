@@ -1,20 +1,22 @@
 package social.mycelium.android.cache.nip11
 
 import android.util.Log
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.isSuccess
 import social.mycelium.android.data.RelayInformation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.util.concurrent.TimeUnit
 
 /**
  * Network layer for fetching NIP-11 relay information documents.
  * Based on Amethyst's Nip11Retriever pattern.
  */
 class Nip11Retriever(
-    private val okHttpClient: OkHttpClient
+    private val httpClient: HttpClient
 ) {
     companion object {
         private const val TAG = "Nip11Retriever"
@@ -46,39 +48,33 @@ class Nip11Retriever(
         try {
             val httpUrl = convertToHttpUrl(relayUrl)
 
-            val request = Request.Builder()
-                .url(httpUrl)
-                .header("Accept", "application/nostr+json")
-                .build()
-
             withContext(Dispatchers.IO) {
                 try {
-                    val response = okHttpClient.newCall(request).execute()
+                    val response = httpClient.get(httpUrl) {
+                        header("Accept", "application/nostr+json")
+                    }
+                    val responseBody = response.bodyAsText()
 
-                    response.use { resp ->
-                        val body = resp.body?.string() ?: ""
-
-                        if (resp.isSuccessful) {
-                            if (body.startsWith("{")) {
-                                try {
-                                    val relayInfo = json.decodeFromString<RelayInformation>(body)
-                                    Log.d(TAG, "✅ Successfully fetched NIP-11 info for $relayUrl: ${relayInfo.name}")
-                                    onInfo(relayInfo)
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "❌ Failed to parse NIP-11 response for $relayUrl: $body", e)
-                                    onError(relayUrl, ErrorCode.FAIL_TO_PARSE_RESULT, e.message)
-                                }
-                            } else {
-                                Log.w(TAG, "⚠️ Invalid JSON response from $relayUrl: $body")
-                                onError(relayUrl, ErrorCode.FAIL_TO_PARSE_RESULT, "Response is not JSON")
+                    if (response.status.isSuccess()) {
+                        if (responseBody.startsWith("{")) {
+                            try {
+                                val relayInfo = json.decodeFromString<RelayInformation>(responseBody)
+                                Log.d(TAG, "Fetched NIP-11 info for $relayUrl: ${relayInfo.name}")
+                                onInfo(relayInfo)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Failed to parse NIP-11 for $relayUrl: $responseBody", e)
+                                onError(relayUrl, ErrorCode.FAIL_TO_PARSE_RESULT, e.message)
                             }
                         } else {
-                            Log.w(TAG, "⚠️ HTTP error ${resp.code} from $relayUrl")
-                            onError(relayUrl, ErrorCode.FAIL_WITH_HTTP_STATUS, "HTTP ${resp.code}")
+                            Log.w(TAG, "Invalid JSON response from $relayUrl")
+                            onError(relayUrl, ErrorCode.FAIL_TO_PARSE_RESULT, "Response is not JSON")
                         }
+                    } else {
+                        Log.w(TAG, "HTTP error ${response.status} from $relayUrl")
+                        onError(relayUrl, ErrorCode.FAIL_WITH_HTTP_STATUS, "HTTP ${response.status}")
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Network error fetching $relayUrl", e)
+                    Log.e(TAG, "Network error fetching $relayUrl", e)
                     onError(relayUrl, ErrorCode.FAIL_TO_REACH_SERVER, e.message)
                 }
             }

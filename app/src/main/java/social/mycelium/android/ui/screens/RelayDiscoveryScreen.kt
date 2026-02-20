@@ -25,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -68,7 +69,8 @@ fun RelayDiscoveryScreen(
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
     // ── Filter state ──
-    var selectedTypes by remember { mutableStateOf(emptySet<RelayType>()) }
+    // In selection mode (choosing indexers), auto-filter to Search/Indexer relays
+    var selectedTypes by remember { mutableStateOf(if (selectionMode) setOf(RelayType.SEARCH) else emptySet<RelayType>()) }
     var selectedSoftware by remember { mutableStateOf(emptySet<String>()) }
     var selectedCountries by remember { mutableStateOf(emptySet<String>()) }
     var selectedNips by remember { mutableStateOf(emptySet<Int>()) }
@@ -93,15 +95,12 @@ fun RelayDiscoveryScreen(
     var showAll by remember { mutableStateOf(false) }
 
     val allRelays = remember(discoveredRelays, sortMode) {
-        val sorted = when (sortMode) {
+        when (sortMode) {
             "rtt" -> discoveredRelays.values.sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
             "monitors" -> discoveredRelays.values.sortedByDescending { it.monitorCount }
-            "name" -> discoveredRelays.values.sortedBy {
-                (it.name ?: it.url).lowercase()
-            }
+            "name" -> discoveredRelays.values.sortedBy { (it.name ?: it.url).lowercase() }
             else -> discoveredRelays.values.toList()
         }
-        sorted
     }
 
     // ── Build dynamic filter options from actual data ──
@@ -144,8 +143,8 @@ fun RelayDiscoveryScreen(
         }
     }
 
-    // Cap display to 100 unless user requests all (perf: avoids composing 500+ rows)
-    val displayLimit = if (showAll) Int.MAX_VALUE else 100
+    // Cap display to 50 unless user requests all (perf: avoids composing 500+ rows)
+    val displayLimit = if (showAll) Int.MAX_VALUE else 50
     val filteredRelays = remember(allFilteredRelays, displayLimit) {
         allFilteredRelays.take(displayLimit)
     }
@@ -163,12 +162,31 @@ fun RelayDiscoveryScreen(
         counts
     }
 
+    // Pre-compute filter section counts as maps (avoids O(n) per chip)
+    val softwareCounts = remember(allFilteredRelays) {
+        val counts = mutableMapOf<String, Int>()
+        allFilteredRelays.forEach { relay -> relay.softwareShort?.let { counts[it] = (counts[it] ?: 0) + 1 } }
+        counts
+    }
+    val countryCounts = remember(allFilteredRelays) {
+        val counts = mutableMapOf<String, Int>()
+        allFilteredRelays.forEach { relay -> relay.countryCode?.let { counts[it] = (counts[it] ?: 0) + 1 } }
+        counts
+    }
+    val nipCounts = remember(allFilteredRelays) {
+        val counts = mutableMapOf<String, Int>()
+        allFilteredRelays.forEach { relay -> relay.supportedNips.forEach { nip -> val k = nip.toString(); counts[k] = (counts[k] ?: 0) + 1 } }
+        counts
+    }
+
     val activeFilterCount = remember(
         selectedTypes, selectedSoftware, selectedCountries, selectedNips,
-        filterPaymentRequired, filterAuthRequired, filterHasNip11
+        filterPaymentRequired, filterAuthRequired, filterHasNip11, selectionMode
     ) {
         var count = 0
-        if (selectedTypes.isNotEmpty()) count++
+        // In selection mode, SEARCH is the baseline — don't count it as a user filter
+        val baseTypes = if (selectionMode) setOf(RelayType.SEARCH) else emptySet<RelayType>()
+        if (selectedTypes.isNotEmpty() && selectedTypes != baseTypes) count++
         if (selectedSoftware.isNotEmpty()) count++
         if (selectedCountries.isNotEmpty()) count++
         if (selectedNips.isNotEmpty()) count++
@@ -214,7 +232,8 @@ fun RelayDiscoveryScreen(
                         if (activeFilterCount > 0) {
                             FilledTonalButton(
                                 onClick = {
-                                    selectedTypes = emptySet()
+                                    // In selection mode, preserve the SEARCH base filter
+                                    selectedTypes = if (selectionMode) setOf(RelayType.SEARCH) else emptySet()
                                     selectedSoftware = emptySet()
                                     selectedCountries = emptySet()
                                     selectedNips = emptySet()
@@ -289,13 +308,15 @@ fun RelayDiscoveryScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // "All" chip
-                    item {
-                        FilterChip(
-                            selected = selectedTypes.isEmpty(),
-                            onClick = { selectedTypes = emptySet() },
-                            label = { Text("All", style = MaterialTheme.typography.labelSmall) }
-                        )
+                    // "All" chip — hidden in selection mode (SEARCH is the locked baseline)
+                    if (!selectionMode) {
+                        item {
+                            FilterChip(
+                                selected = selectedTypes.isEmpty(),
+                                onClick = { selectedTypes = emptySet() },
+                                label = { Text("All", style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
                     }
                     items(typeOptions) { type ->
                         val count = typeCounts[type] ?: 0
@@ -303,6 +324,8 @@ fun RelayDiscoveryScreen(
                         FilterChip(
                             selected = type in selectedTypes,
                             onClick = {
+                                // In selection mode, don't allow deselecting SEARCH (it's the baseline)
+                                if (selectionMode && type == RelayType.SEARCH && type in selectedTypes) return@FilterChip
                                 selectedTypes = if (type in selectedTypes) selectedTypes - type
                                 else selectedTypes + type
                             },
@@ -410,7 +433,7 @@ fun RelayDiscoveryScreen(
                                     selectedSoftware = if (sw in selectedSoftware) selectedSoftware - sw
                                     else selectedSoftware + sw
                                 },
-                                countProvider = { sw -> allFilteredRelays.count { it.softwareShort == sw } }
+                                counts = softwareCounts
                             )
                         }
 
@@ -425,7 +448,7 @@ fun RelayDiscoveryScreen(
                                     selectedCountries = if (cc in selectedCountries) selectedCountries - cc
                                     else selectedCountries + cc
                                 },
-                                countProvider = { cc -> allFilteredRelays.count { it.countryCode == cc } },
+                                counts = countryCounts,
                                 formatLabel = { cc -> countryCodeToFlag(cc) + " " + countryName(cc) }
                             )
                         }
@@ -442,10 +465,7 @@ fun RelayDiscoveryScreen(
                                     selectedNips = if (nip in selectedNips) selectedNips - nip
                                     else selectedNips + nip
                                 },
-                                countProvider = { nipStr ->
-                                    val nip = nipStr.toIntOrNull() ?: 0
-                                    allFilteredRelays.count { nip in it.supportedNips }
-                                },
+                                counts = nipCounts,
                                 formatLabel = { "NIP-$it" }
                             )
                         }
@@ -629,7 +649,7 @@ private fun ExpandableFilterSection(
     options: List<String>,
     selectedOptions: Set<String>,
     onToggle: (String) -> Unit,
-    countProvider: (String) -> Int,
+    counts: Map<String, Int>,
     formatLabel: (String) -> String = { it },
     initiallyExpanded: Boolean = false
 ) {
@@ -700,7 +720,7 @@ private fun ExpandableFilterSection(
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 options.forEach { option ->
-                    val count = countProvider(option)
+                    val count = counts[option] ?: 0
                     val isSelected = option in selectedOptions
                     FilterChip(
                         selected = isSelected,
@@ -730,8 +750,9 @@ private fun DiscoveredRelayRow(
     onToggleSelection: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    val displayName = relay.name
+    val rawName = relay.name
         ?: relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+    val displayName = if (relay.paymentRequired) "$rawName  $" else rawName
     val iconUrl = relay.icon
 
     Surface(
@@ -816,11 +837,18 @@ private fun DiscoveredRelayRow(
 
                 Spacer(Modifier.height(3.dp))
 
-                // Metadata tags row
+                // Metadata tags row: [Flag] [Type tags] [Software] — single line, overflow clipped
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(20.dp)
+                        .clipToBounds()
                 ) {
+                    // Country flag (compact — just the flag emoji)
+                    relay.countryCode?.let { cc ->
+                        MetadataChip(countryCodeToFlag(cc), MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     // Type tags
                     relay.types.take(2).forEach { type ->
                         MetadataChip(type.displayName, MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
@@ -828,20 +856,13 @@ private fun DiscoveredRelayRow(
                     if (relay.types.size > 2) {
                         MetadataChip("+${relay.types.size - 2}", MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    // Software
-                    relay.softwareShort?.let { sw ->
-                        MetadataChip(sw, MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
-                    }
-                    // Country
-                    relay.countryCode?.let { cc ->
-                        MetadataChip(countryCodeToFlag(cc) + " " + countryName(cc), MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    // Payment/Auth badges
-                    if (relay.paymentRequired) {
-                        MetadataChip("Paid", MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
-                    }
+                    // Auth badge
                     if (relay.authRequired) {
                         MetadataChip("Auth", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
+                    }
+                    // Software (least important — last)
+                    relay.softwareShort?.let { sw ->
+                        MetadataChip(sw, MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
                     }
                 }
 

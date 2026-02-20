@@ -20,16 +20,16 @@ enum class ThemeMode(val label: String) {
 }
 
 /**
- * Accent color palette choices. Each maps to a set of pastel colors for dark and light themes.
+ * Accent color palette choices. Each maps to a blazecn-inspired semantic palette.
  */
 enum class AccentColor(val label: String, val emoji: String) {
-    GREEN("Frog Green", "\uD83D\uDC38"),
-    PURPLE("Nostr Purple", "\uD83D\uDD2E"),
-    ORANGE("Bitcoin Orange", "\uD83C\uDF4A"),
-    RED("Bear Market Red", "\uD83D\uDC3B");
+    VIOLET("Violet", "\uD83D\uDD2E"),
+    GREEN("Green", "\uD83C\uDF44"),
+    ORANGE("Orange", "\uD83C\uDF4A"),
+    RED("Red", "\uD83E\uDD40");
 
     companion object {
-        fun fromString(s: String): AccentColor = entries.firstOrNull { it.name == s } ?: GREEN
+        fun fromString(s: String): AccentColor = entries.firstOrNull { it.name == s } ?: VIOLET
     }
 }
 
@@ -44,17 +44,17 @@ object ThemePreferences {
 
     private lateinit var prefs: SharedPreferences
 
-    private val _themeMode = MutableStateFlow(ThemeMode.SYSTEM)
+    private val _themeMode = MutableStateFlow(ThemeMode.DARK)
     val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
 
-    private val _accentColor = MutableStateFlow(AccentColor.GREEN)
+    private val _accentColor = MutableStateFlow(AccentColor.VIOLET)
     val accentColor: StateFlow<AccentColor> = _accentColor.asStateFlow()
 
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        _themeMode.value = ThemeMode.fromString(prefs.getString(KEY_THEME_MODE, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name)
-        _accentColor.value = AccentColor.fromString(prefs.getString(KEY_ACCENT_COLOR, AccentColor.GREEN.name) ?: AccentColor.GREEN.name)
+        _themeMode.value = ThemeMode.fromString(prefs.getString(KEY_THEME_MODE, ThemeMode.DARK.name) ?: ThemeMode.DARK.name)
+        _accentColor.value = AccentColor.fromString(prefs.getString(KEY_ACCENT_COLOR, AccentColor.VIOLET.name) ?: AccentColor.VIOLET.name)
     }
 
     fun setThemeMode(mode: ThemeMode) {

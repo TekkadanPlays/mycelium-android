@@ -8,6 +8,9 @@ import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.extractPubkeysFromContent
 import com.example.cybin.core.Event
+import com.example.cybin.core.Filter
+import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.TemporarySubscriptionHandle
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,15 +20,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Job
 
@@ -59,12 +55,9 @@ class Kind1RepliesRepository {
     private val activeSubscriptions = mutableMapOf<String, kotlinx.coroutines.Job>()
     private val profileCache = ProfileMetadataCache.getInstance()
 
-    /** Direct OkHttp WebSocket connections for reply fetching (bypasses main relay pool). */
-    private val activeWebSockets = mutableListOf<WebSocket>()
-    private val wsClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+    /** Active CybinRelayPool subscription handle for reply fetching. Cancel before re-subscribing. */
+    @Volatile
+    private var replySubscriptionHandle: TemporarySubscriptionHandle? = null
 
     /** Parent ids we've requested (per thread root) to avoid duplicate fetches. */
     private val pendingParentFetches = mutableMapOf<String, MutableSet<String>>()
@@ -131,10 +124,8 @@ class Kind1RepliesRepository {
         batchStartMs = 0L
         activeSubscriptions.values.forEach { it.cancel() }
         activeSubscriptions.clear()
-        synchronized(activeWebSockets) {
-            activeWebSockets.forEach { it.close(1000, "cleanup") }
-            activeWebSockets.clear()
-        }
+        replySubscriptionHandle?.cancel()
+        replySubscriptionHandle = null
         connectedRelays = emptyList()
         deepFetchedIds.clear()
         _replies.value = emptyMap()
@@ -159,14 +150,12 @@ class Kind1RepliesRepository {
             return
         }
 
-        // Close previous WebSockets FIRST to stop stale events from arriving
+        // Cancel previous subscription FIRST to stop stale events from arriving
         flushJob?.cancel()
         pendingEvents.clear()
         batchStartMs = 0L
-        synchronized(activeWebSockets) {
-            activeWebSockets.forEach { it.close(1000, "new thread") }
-            activeWebSockets.clear()
-        }
+        replySubscriptionHandle?.cancel()
+        replySubscriptionHandle = null
 
         _isLoading.value = true
         _error.value = null
@@ -194,24 +183,43 @@ class Kind1RepliesRepository {
         }
 
         try {
-            Log.d(TAG, "Fetching Kind 1 replies for note ${noteId.take(8)}... from ${targetRelays.size} relays (direct WS)")
-
-            // Open direct WebSocket to each relay (skip blocked relays)
             // Enrich with author's outbox relays if available (NIP-65 kind-10002)
             val authorOutbox = authorPubkey?.let {
-                social.mycelium.android.repository.Nip65RelayListRepository.getCachedOutboxRelays(it)
+                Nip65RelayListRepository.getCachedOutboxRelays(it)
             }?.takeIf { it.isNotEmpty() } ?: emptyList()
             val allRelays = social.mycelium.android.relay.RelayHealthTracker.filterBlocked(
                 (targetRelays + authorOutbox).distinct()
             )
-            for (relayUrl in allRelays) {
-                openReplyWebSocket(relayUrl, noteId, limit)
-            }
+
+            Log.d(TAG, "Fetching Kind 1 replies for note ${noteId.take(8)}... from ${allRelays.size} relays (CybinRelayPool)")
+
+            // Subscribe for kind-1 replies + kind-7 reactions + kind-9735 zap receipts
+            val replyFilter = Filter(kinds = listOf(1), tags = mapOf("e" to listOf(noteId)), limit = limit)
+            val countsFilter = Filter(kinds = listOf(7, 9735), tags = mapOf("e" to listOf(noteId)), limit = 500)
+
+            val rsm = RelayConnectionStateMachine.getInstance()
+            replySubscriptionHandle = rsm.requestTemporarySubscriptionWithRelay(
+                relayUrls = allRelays,
+                filter = replyFilter,
+                onEvent = { event, relayUrl ->
+                    NoteCountsRepository.onLiveEvent(event)
+                    if (event.kind == 1) handleReplyEvent(noteId, event, relayUrl)
+                }
+            )
+            // Separate subscription for counts (kind-7 + kind-9735)
+            rsm.requestTemporarySubscription(
+                relayUrls = allRelays,
+                filters = listOf(countsFilter),
+                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) }
+            )
 
             // Clear loading after short window so UI shows live
             delay(INITIAL_LOAD_WINDOW_MS)
             _isLoading.value = false
             Log.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} so far)")
+
+            // Schedule deep-fetch rounds for replies-to-replies
+            scheduleDeepReplyFetch(allRelays, noteId, mutableSetOf(noteId), 0)
 
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching replies: ${e.message}", e)
@@ -221,96 +229,12 @@ class Kind1RepliesRepository {
     }
 
     /**
-     * Open a direct OkHttp WebSocket to a relay and send a REQ for kind-1 replies,
-     * kind-7 reactions, and kind-9735 zap receipts referencing noteId.
-     * After EOSE, automatically sends follow-up REQs for reply IDs to fetch deeper
-     * reply chains (replies-to-replies that only tag their direct parent, not the root).
-     * Bypasses the main relay pool which has event routing issues for temporary subscriptions.
-     */
-    private fun openReplyWebSocket(relayUrl: String, noteId: String, limit: Int) {
-        val subId = "replies_" + System.currentTimeMillis().toString(36)
-        val eTagArray = JSONArray().put(noteId)
-        // Filter 1: kind-1 replies
-        val filterReplies = JSONObject().apply {
-            put("kinds", JSONArray().put(1))
-            put("#e", eTagArray)
-            put("limit", limit)
-        }
-        // Filter 2: kind-7 reactions + kind-9735 zap receipts (for real-time counts)
-        val filterCounts = JSONObject().apply {
-            put("kinds", JSONArray().apply { put(7); put(9735) })
-            put("#e", eTagArray)
-            put("limit", 500)
-        }
-        val reqJson = JSONArray().apply {
-            put("REQ")
-            put(subId)
-            put(filterReplies)
-            put(filterCounts)
-        }.toString()
-
-        // Track which IDs we've queried on this WS for deep-fetch dedup
-        val queriedIds = mutableSetOf(noteId)
-        var deepFetchRound = 0
-
-        val request = Request.Builder().url(relayUrl).build()
-        val ws = wsClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WS open: $relayUrl — sending REQ ($subId) for replies to ${noteId.take(8)}")
-                social.mycelium.android.relay.RelayHealthTracker.recordConnectionSuccess(relayUrl)
-                webSocket.send(reqJson)
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val arr = JSONArray(text)
-                    when (arr.getString(0)) {
-                        "EVENT" -> {
-                            if (arr.length() >= 3) {
-                                val eventJson = arr.getJSONObject(2)
-                                val kind = eventJson.getInt("kind")
-                                val event = parseEventFromJson(eventJson)
-                                if (event != null) {
-                                    // Route ALL countable events to NoteCountsRepository for real-time counts
-                                    NoteCountsRepository.onLiveEvent(event)
-                                    if (kind == 1) handleReplyEvent(noteId, event, relayUrl)
-                                }
-                            }
-                        }
-                        "EOSE" -> {
-                            Log.d(TAG, "WS EOSE: $relayUrl ($subId) — ${getRepliesForNote(noteId).size} replies (round $deepFetchRound)")
-                            // Schedule deep-fetch for reply IDs we haven't queried yet
-                            scheduleDeepReplyFetch(webSocket, relayUrl, noteId, queriedIds, deepFetchRound)
-                            deepFetchRound++
-                        }
-                        "NOTICE" -> Log.w(TAG, "WS NOTICE from $relayUrl: ${arr.optString(1)}")
-                        else -> { }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "WS parse error from $relayUrl: ${e.message}")
-                }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "WS failure: $relayUrl — ${t.message}")
-                social.mycelium.android.relay.RelayHealthTracker.recordConnectionFailure(relayUrl, t.message)
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WS closed: $relayUrl ($code)")
-            }
-        })
-        synchronized(activeWebSockets) { activeWebSockets.add(ws) }
-    }
-
-    /**
-     * After EOSE, check if there are reply IDs we haven't queried for deeper replies.
-     * Sends a follow-up REQ on the same WebSocket for those IDs. This catches
+     * Iterative deep-fetch: after initial replies arrive, check for reply IDs we haven't
+     * queried yet and open a new temporary subscription for those IDs. This catches
      * replies-to-replies where the client only tagged the direct parent, not the root.
      */
     private fun scheduleDeepReplyFetch(
-        webSocket: WebSocket,
-        relayUrl: String,
+        relayUrls: List<String>,
         rootNoteId: String,
         queriedIds: MutableSet<String>,
         round: Int
@@ -318,61 +242,38 @@ class Kind1RepliesRepository {
         if (round >= MAX_DEEP_FETCH_ROUNDS) return
 
         scope.launch {
-            // Wait just long enough for the flush to complete
-            delay(FLUSH_DEBOUNCE_MS + 20)
+            // Wait for the flush to complete + some relay delivery time
+            delay(FLUSH_DEBOUNCE_MS + 500)
 
             val currentReplies = _replies.value[rootNoteId] ?: return@launch
             val replyIds = currentReplies.map { it.id }.toSet()
             val newIds = replyIds - queriedIds
             if (newIds.isEmpty()) return@launch
 
-            // Send follow-up REQ for deeper replies
             queriedIds.addAll(newIds)
-            val deepSubId = "deep_${round}_" + System.currentTimeMillis().toString(36)
-            val eTagArray = JSONArray().apply { newIds.forEach { put(it) } }
-            val filterDeep = JSONObject().apply {
-                put("kinds", JSONArray().put(1))
-                put("#e", eTagArray)
-                put("limit", 200)
-            }
-            val filterDeepCounts = JSONObject().apply {
-                put("kinds", JSONArray().apply { put(7); put(9735) })
-                put("#e", eTagArray)
-                put("limit", 500)
-            }
-            val reqJson = JSONArray().apply {
-                put("REQ")
-                put(deepSubId)
-                put(filterDeep)
-                put(filterDeepCounts)
-            }.toString()
+            val newIdList = newIds.toList()
+            Log.d(TAG, "Deep-fetch round $round: querying ${newIdList.size} reply IDs across ${relayUrls.size} relays")
 
-            try {
-                Log.d(TAG, "Deep-fetch round $round: $relayUrl — querying ${newIds.size} reply IDs ($deepSubId)")
-                webSocket.send(reqJson)
-            } catch (e: Exception) {
-                Log.w(TAG, "Deep-fetch send failed ($relayUrl): ${e.message}")
-            }
-        }
-    }
+            val deepReplyFilter = Filter(kinds = listOf(1), tags = mapOf("e" to newIdList), limit = 200)
+            val deepCountsFilter = Filter(kinds = listOf(7, 9735), tags = mapOf("e" to newIdList), limit = 500)
 
-    private fun parseEventFromJson(json: JSONObject): Event? {
-        return try {
-            val id = json.getString("id")
-            val pubkey = json.getString("pubkey")
-            val createdAt = json.getLong("created_at")
-            val kind = json.getInt("kind")
-            val content = json.optString("content", "")
-            val sig = json.optString("sig", "")
-            val tagsJson = json.getJSONArray("tags")
-            val tags = Array(tagsJson.length()) { i ->
-                val tagArr = tagsJson.getJSONArray(i)
-                Array(tagArr.length()) { j -> tagArr.getString(j) }
-            }
-            Event(id, pubkey, createdAt, kind, tags, content, sig)
-        } catch (e: Exception) {
-            Log.w(TAG, "Event parse failed: ${e.message}")
-            null
+            val rsm = RelayConnectionStateMachine.getInstance()
+            rsm.requestTemporarySubscriptionWithRelay(
+                relayUrls = relayUrls,
+                filter = deepReplyFilter,
+                onEvent = { event, relayUrl ->
+                    NoteCountsRepository.onLiveEvent(event)
+                    if (event.kind == 1) handleReplyEvent(rootNoteId, event, relayUrl)
+                }
+            )
+            rsm.requestTemporarySubscription(
+                relayUrls = relayUrls,
+                filters = listOf(deepCountsFilter),
+                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) }
+            )
+
+            // Schedule next round
+            scheduleDeepReplyFetch(relayUrls, rootNoteId, queriedIds, round + 1)
         }
     }
 
@@ -519,8 +420,9 @@ class Kind1RepliesRepository {
     }
 
     /**
-     * One-off fetch of an event by id using direct OkHttp WebSocket; add to this thread's
-     * replies if it belongs (same root). Connection is closed after first match or timeout.
+     * One-off fetch of an event by id using CybinRelayPool temporary subscription.
+     * Adds the event to this thread's replies if it belongs (same root).
+     * Subscription is cancelled after first match or timeout.
      */
     private suspend fun fetchMissingParent(parentId: String, rootNoteId: String) {
         val targetRelays = connectedRelays
@@ -529,82 +431,43 @@ class Kind1RepliesRepository {
             return
         }
         val handled = AtomicBoolean(false)
-        val sockets = java.util.Collections.synchronizedList(mutableListOf<WebSocket>())
 
-        val subId = "parent_" + System.currentTimeMillis().toString(36)
-        val filterObj = JSONObject().apply {
-            put("kinds", JSONArray().put(1))
-            put("ids", JSONArray().put(parentId))
-            put("limit", 1)
-        }
-        val reqJson = JSONArray().apply {
-            put("REQ")
-            put(subId)
-            put(filterObj)
-        }.toString()
-
-        val allRelays = targetRelays.distinct()
-
-        for (relayUrl in allRelays) {
-            val request = Request.Builder().url(relayUrl).build()
-            val ws = wsClient.newWebSocket(request, object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    webSocket.send(reqJson)
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    try {
-                        val arr = JSONArray(text)
-                        when (arr.getString(0)) {
-                            "EVENT" -> {
-                                if (arr.length() >= 3) {
-                                    val eventJson = arr.getJSONObject(2)
-                                    if (eventJson.getInt("kind") == 1 && eventJson.getString("id") == parentId) {
-                                        if (!handled.compareAndSet(false, true)) return
-                                        val event = parseEventFromJson(eventJson) ?: return
-                                        val note = convertEventToNote(event, relayUrl)
-                                        // Accept parent if its rootNoteId matches, OR if it references
-                                        // the thread root in any e-tag (covers parsing differences)
-                                        val referencesRoot = note.rootNoteId == rootNoteId ||
-                                            note.replyToId == rootNoteId ||
-                                            extractReferencedNoteIds(event).contains(rootNoteId)
-                                        if (!referencesRoot) {
-                                            pendingParentFetches[rootNoteId]?.remove(parentId)
-                                            Log.d(TAG, "Rejected parent ${parentId.take(8)} — doesn't reference thread ${rootNoteId.take(8)}")
-                                            return
-                                        }
-                                        val currentReplies = _replies.value[rootNoteId]?.toMutableList() ?: mutableListOf()
-                                        if (!currentReplies.any { it.id == note.id }) {
-                                            currentReplies.add(note)
-                                            val sorted = currentReplies.sortedBy { it.timestamp }
-                                            _replies.value = _replies.value + (rootNoteId to sorted)
-                                            updateThreadReplyCache(rootNoteId, sorted)
-                                            Log.d(TAG, "Fetched missing parent ${parentId.take(8)}... for thread ${rootNoteId.take(8)}...")
-                                            // Recursively resolve deeper missing parents
-                                            scheduleFetchMissingParents(rootNoteId)
-                                        }
-                                        pendingParentFetches[rootNoteId]?.remove(parentId)
-                                        // Close all sockets for this fetch
-                                        sockets.forEach { try { it.close(1000, "found") } catch (_: Exception) {} }
-                                    }
-                                }
-                            }
-                            "EOSE" -> webSocket.close(1000, "done")
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Parent fetch parse error ($relayUrl): ${e.message}")
+        val parentFilter = Filter(kinds = listOf(1), ids = listOf(parentId), limit = 1)
+        val rsm = RelayConnectionStateMachine.getInstance()
+        val handle = rsm.requestTemporarySubscriptionWithRelay(
+            relayUrls = targetRelays.distinct(),
+            filter = parentFilter,
+            onEvent = { event, relayUrl ->
+                if (event.kind == 1 && event.id == parentId) {
+                    if (!handled.compareAndSet(false, true)) return@requestTemporarySubscriptionWithRelay
+                    val note = convertEventToNote(event, relayUrl)
+                    // Accept parent if its rootNoteId matches, OR if it references
+                    // the thread root in any e-tag (covers parsing differences)
+                    val referencesRoot = note.rootNoteId == rootNoteId ||
+                        note.replyToId == rootNoteId ||
+                        extractReferencedNoteIds(event).contains(rootNoteId)
+                    if (!referencesRoot) {
+                        pendingParentFetches[rootNoteId]?.remove(parentId)
+                        Log.d(TAG, "Rejected parent ${parentId.take(8)} — doesn't reference thread ${rootNoteId.take(8)}")
+                        return@requestTemporarySubscriptionWithRelay
                     }
+                    val currentReplies = _replies.value[rootNoteId]?.toMutableList() ?: mutableListOf()
+                    if (!currentReplies.any { it.id == note.id }) {
+                        currentReplies.add(note)
+                        val sorted = currentReplies.sortedBy { it.timestamp }
+                        _replies.value = _replies.value + (rootNoteId to sorted)
+                        updateThreadReplyCache(rootNoteId, sorted)
+                        Log.d(TAG, "Fetched missing parent ${parentId.take(8)}... for thread ${rootNoteId.take(8)}...")
+                        // Recursively resolve deeper missing parents
+                        scheduleFetchMissingParents(rootNoteId)
+                    }
+                    pendingParentFetches[rootNoteId]?.remove(parentId)
                 }
+            }
+        )
 
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    Log.w(TAG, "Parent fetch WS fail ($relayUrl): ${t.message}")
-                }
-            })
-            sockets.add(ws)
-        }
-
-        kotlinx.coroutines.delay(PARENT_FETCH_TIMEOUT_MS)
-        sockets.forEach { try { it.close(1000, "timeout") } catch (_: Exception) {} }
+        delay(PARENT_FETCH_TIMEOUT_MS)
+        handle.cancel()
         if (!handled.get()) {
             pendingParentFetches[rootNoteId]?.remove(parentId)
             Log.d(TAG, "Timeout fetching parent ${parentId.take(8)}... for thread ${rootNoteId.take(8)}...")

@@ -2,6 +2,9 @@ package social.mycelium.android.repository
 
 import android.util.Log
 import com.example.cybin.core.Event
+import com.example.cybin.core.Filter
+import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.TemporarySubscriptionHandle
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,15 +15,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.TimeUnit
 
 /**
  * Aggregated counts per note: zap count and NIP-25 reactions (kind-7, kind-9735).
@@ -77,17 +73,9 @@ object NoteCountsRepository {
     @Volatile
     private var lastSubscribedNoteIds: Set<String> = emptySet()
 
-    /** Persistent WebSocket pool: relay URL → open WebSocket. */
-    private val wsPool = java.util.concurrent.ConcurrentHashMap<String, WebSocket>()
-    /** Track which pool connections are ready (onOpen received). */
-    private val wsReady = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    /** Current subscription ID per relay so we can CLOSE before sending a new REQ. */
-    private val wsCurrentSubId = java.util.concurrent.ConcurrentHashMap<String, String>()
-
-    private val okHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+    /** Active CybinRelayPool subscription handle for counts. Cancel before re-subscribing. */
+    @Volatile
+    private var countsSubscriptionHandle: TemporarySubscriptionHandle? = null
 
     /** Debounce job so rapid note-ID changes don't thrash subscriptions. */
     private var debounceJob: Job? = null
@@ -166,21 +154,19 @@ object NoteCountsRepository {
         scheduleSubscriptionUpdate()
     }
 
-    /**
-     * Update counts subscription using persistent WebSocket pool.
-     * Connections are reused — only new REQ messages are sent when note IDs change.
-     * Counts are preserved across updates (no reset).
-     */
     /** Minimum number of new (unseen) note IDs required to trigger a re-subscription. */
     private const val RESUB_THRESHOLD = 5
 
     /**
+     * Update counts subscription via CybinRelayPool (through RelayConnectionStateMachine).
+     * Cancels any previous subscription and creates a new one with per-relay filters.
+     *
      * @param phase 1 = kind-1 replies only, 2 = kind-7 reactions + kind-9735 zaps, 0 = all (legacy)
      */
     private fun updateCountsSubscription(phase: Int = 0, overrideMerged: Map<String, List<String>>? = null) {
         val merged = overrideMerged ?: (feedNoteRelays + topicNoteRelays + threadNoteRelays)
         if (merged.isEmpty()) {
-            closeAllWebSockets()
+            cancelCountsSubscription()
             lastSubscribedNoteIds = emptySet()
             return
         }
@@ -189,7 +175,7 @@ object NoteCountsRepository {
         if (phase != 2) {
             if (mergedIds == lastSubscribedNoteIds) return
             val newIds = mergedIds - lastSubscribedNoteIds
-            if (newIds.size < RESUB_THRESHOLD && lastSubscribedNoteIds.isNotEmpty() && wsPool.isNotEmpty()) return
+            if (newIds.size < RESUB_THRESHOLD && lastSubscribedNoteIds.isNotEmpty() && countsSubscriptionHandle != null) return
             lastSubscribedNoteIds = mergedIds
         }
 
@@ -210,189 +196,56 @@ object NoteCountsRepository {
             perRelayNoteIds.getOrPut(fallback) { mutableSetOf() }.addAll(allNoteIds)
         }
 
-        Log.d(TAG, "Updating counts sub: ${mergedIds.size} notes across ${perRelayNoteIds.size} relays")
+        Log.d(TAG, "Updating counts sub (phase=$phase): ${mergedIds.size} notes across ${perRelayNoteIds.size} relays")
 
+        // Build per-relay Cybin Filter maps
+        val relayFilters = mutableMapOf<String, List<Filter>>()
         for ((relayUrl, noteIds) in perRelayNoteIds) {
             val noteIdList = noteIds.take(200).toList()
             if (noteIdList.isEmpty()) continue
-            val phaseLabel = when (phase) { 1 -> "p1"; 2 -> "p2"; else -> "all" }
-            val subId = "counts_${phaseLabel}_" + System.currentTimeMillis().toString(36)
-            val reqJson = when (phase) {
-                1 -> buildPhase1ReqJson(subId, noteIdList)
-                2 -> buildPhase2ReqJson(subId, noteIdList)
-                else -> buildReqJson(subId, noteIdList)
-            }
-
-            val existingWs = wsPool[relayUrl]
-            if (existingWs != null && wsReady[relayUrl] == true) {
-                // Reuse: CLOSE previous sub, send new REQ
-                val prevSub = wsCurrentSubId[relayUrl]
-                if (prevSub != null) {
-                    try { existingWs.send(JSONArray().apply { put("CLOSE"); put(prevSub) }.toString()) } catch (_: Exception) {}
-                }
-                wsCurrentSubId[relayUrl] = subId
-                try {
-                    Log.d(TAG, "WS reuse: $relayUrl — sending REQ ($subId, ${noteIdList.size} notes)")
-                    existingWs.send(reqJson)
-                } catch (_: Exception) {
-                    // Connection died — remove and reopen
-                    wsPool.remove(relayUrl)
-                    wsReady.remove(relayUrl)
-                    wsCurrentSubId.remove(relayUrl)
-                    openPoolCountsWebSocket(relayUrl, subId, reqJson, noteIdList.size)
-                }
-            } else if (existingWs == null) {
-                openPoolCountsWebSocket(relayUrl, subId, reqJson, noteIdList.size)
+            relayFilters[relayUrl] = when (phase) {
+                1 -> buildPhase1Filters(noteIdList)
+                2 -> buildPhase2Filters(noteIdList)
+                else -> buildAllKindsFilters(noteIdList)
             }
         }
+
+        // Cancel previous subscription, then create a new one via CybinRelayPool
+        countsSubscriptionHandle?.cancel()
+        val rsm = RelayConnectionStateMachine.getInstance()
+        countsSubscriptionHandle = rsm.requestTemporarySubscriptionPerRelay(
+            relayFilters = relayFilters,
+            onEvent = { event -> onCountsEvent(event) }
+        )
     }
 
-    /**
-     * Open a new persistent WebSocket connection to a relay for counts.
-     * The connection stays open for reuse by subsequent subscription updates.
-     */
-    private fun openPoolCountsWebSocket(relayUrl: String, subId: String, reqJson: String, noteCount: Int) {
-        val request = Request.Builder().url(relayUrl).build()
-        val ws = okHttpClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                wsReady[relayUrl] = true
-                wsCurrentSubId[relayUrl] = subId
-                webSocket.send(reqJson)
-                Log.d(TAG, "WS open: $relayUrl — sending REQ ($subId, $noteCount notes)")
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val arr = JSONArray(text)
-                    val type = arr.getString(0)
-                    when (type) {
-                        "EVENT" -> {
-                            if (arr.length() >= 3) {
-                                val eventJson = arr.getJSONObject(2)
-                                val kind = eventJson.getInt("kind")
-                                if (kind == 1 || kind == 7 || kind == 9735) {
-                                    val event = parseEventFromJson(eventJson)
-                                    if (event != null) onCountsEvent(event)
-                                }
-                            }
-                        }
-                        "EOSE" -> Log.d(TAG, "WS EOSE: $relayUrl ($subId)")
-                        "NOTICE" -> Log.w(TAG, "WS NOTICE from $relayUrl: ${arr.optString(1)}")
-                        "CLOSED" -> Log.w(TAG, "WS CLOSED from $relayUrl: ${arr.optString(1)} ${arr.optString(2)}")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "WS parse error from $relayUrl: ${e.message}")
-                }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "WS failure: $relayUrl — ${t.message}")
-                wsPool.remove(relayUrl)
-                wsReady.remove(relayUrl)
-                wsCurrentSubId.remove(relayUrl)
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WS closed: $relayUrl ($code)")
-                wsPool.remove(relayUrl)
-                wsReady.remove(relayUrl)
-                wsCurrentSubId.remove(relayUrl)
-            }
-        })
-        wsPool[relayUrl] = ws
+    /** Phase 1 filters: kind-1 replies only (fast reply counts). */
+    private fun buildPhase1Filters(noteIds: List<String>): List<Filter> {
+        return listOf(
+            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500)
+        )
     }
 
-    /** Phase 1: kind-1 replies only (fast reply counts). */
-    private fun buildPhase1ReqJson(subId: String, noteIdList: List<String>): String {
-        val eTagArray = JSONArray().apply { noteIdList.forEach { put(it) } }
-        val filter1 = JSONObject().apply {
-            put("kinds", JSONArray().put(1))
-            put("#e", eTagArray)
-            put("limit", 2000)
-        }
-        return JSONArray().apply {
-            put("REQ")
-            put(subId)
-            put(filter1)
-        }.toString()
+    /** Phase 2 filters: kind-7 reactions + kind-9735 zaps (enrichment). */
+    private fun buildPhase2Filters(noteIds: List<String>): List<Filter> {
+        return listOf(
+            Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
+            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200)
+        )
     }
 
-    /** Phase 2: kind-7 reactions + kind-9735 zaps (enrichment). */
-    private fun buildPhase2ReqJson(subId: String, noteIdList: List<String>): String {
-        val eTagArray = JSONArray().apply { noteIdList.forEach { put(it) } }
-        val filter7 = JSONObject().apply {
-            put("kinds", JSONArray().put(7))
-            put("#e", eTagArray)
-            put("limit", 2000)
-        }
-        val filter9735 = JSONObject().apply {
-            put("kinds", JSONArray().put(9735))
-            put("#e", eTagArray)
-            put("limit", 200)
-        }
-        return JSONArray().apply {
-            put("REQ")
-            put(subId)
-            put(filter7)
-            put(filter9735)
-        }.toString()
+    /** All-kinds filters: kind-1 + kind-7 + kind-9735 in one subscription. */
+    private fun buildAllKindsFilters(noteIds: List<String>): List<Filter> {
+        return listOf(
+            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
+            Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
+            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200)
+        )
     }
 
-    /** Legacy: all kinds in one REQ (used by retrigger / thread). */
-    private fun buildReqJson(subId: String, noteIdList: List<String>): String {
-        val eTagArray = JSONArray().apply { noteIdList.forEach { put(it) } }
-        // Filter 1: kind-1 replies (to count replies per note)
-        val filter1 = JSONObject().apply {
-            put("kinds", JSONArray().put(1))
-            put("#e", eTagArray)
-            put("limit", 2000)
-        }
-        // Filter 2: kind-7 reactions
-        val filter7 = JSONObject().apply {
-            put("kinds", JSONArray().put(7))
-            put("#e", eTagArray)
-            put("limit", 2000)
-        }
-        // Filter 3: kind-9735 zap receipts
-        val filter9735 = JSONObject().apply {
-            put("kinds", JSONArray().put(9735))
-            put("#e", eTagArray)
-            put("limit", 200)
-        }
-        return JSONArray().apply {
-            put("REQ")
-            put(subId)
-            put(filter1)
-            put(filter7)
-            put(filter9735)
-        }.toString()
-    }
-
-    private fun parseEventFromJson(json: JSONObject): Event? {
-        return try {
-            val id = json.getString("id")
-            val pubkey = json.getString("pubkey")
-            val createdAt = json.getLong("created_at")
-            val kind = json.getInt("kind")
-            val content = json.optString("content", "")
-            val sig = json.optString("sig", "")
-            val tagsJson = json.getJSONArray("tags")
-            val tags = Array(tagsJson.length()) { i ->
-                val tagArr = tagsJson.getJSONArray(i)
-                Array(tagArr.length()) { j -> tagArr.getString(j) }
-            }
-            Event(id, pubkey, createdAt, kind, tags, content, sig)
-        } catch (e: Exception) {
-            Log.w(TAG, "Event parse failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun closeAllWebSockets() {
-        wsPool.values.forEach { try { it.close(1000, "subscription update") } catch (_: Exception) {} }
-        wsPool.clear()
-        wsReady.clear()
-        wsCurrentSubId.clear()
+    private fun cancelCountsSubscription() {
+        countsSubscriptionHandle?.cancel()
+        countsSubscriptionHandle = null
     }
 
     private val FALLBACK_RELAYS = emptyList<String>()
@@ -628,7 +481,7 @@ object NoteCountsRepository {
      * Clear all counts and cancel subscription (e.g. on logout).
      */
     fun clear() {
-        closeAllWebSockets()
+        cancelCountsSubscription()
         debounceJob?.cancel()
         countsFlushJob?.cancel()
         pendingCountEvents.clear()
@@ -646,7 +499,7 @@ object NoteCountsRepository {
      * Use when connections may have died silently.
      */
     fun reconnect() {
-        closeAllWebSockets()
+        cancelCountsSubscription()
         countsFlushJob?.cancel()
         pendingCountEvents.clear()
         firstPendingEventTs = 0L

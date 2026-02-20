@@ -92,6 +92,8 @@ class NotesRepository private constructor() {
     /** Debounce window for batching incoming kind-1 events before flushing to the notes list. */
     private val KIND1_BATCH_DEBOUNCE_MS = 120L
 
+    private val outboxFeedManager = OutboxFeedManager.getInstance()
+
     init {
         if (BuildConfig.DEBUG) {
             Log.i("MyceliumEvent", "Monitor enabled: kind-1 events will be logged here. Run: adb logcat -s MyceliumEvent")
@@ -107,7 +109,32 @@ class NotesRepository private constructor() {
                 processEventMutex.withLock { handleKind6Repost(event, relayUrl) }
             }
         }
+        // Wire outbox feed events into the same ingestion pipeline
+        outboxFeedManager.onNoteReceived = { event, relayUrl ->
+            pendingKind1Events.add(event to relayUrl)
+            scheduleKind1Flush()
+        }
         startProfileUpdateCoalescer()
+    }
+
+    /**
+     * Start outbox-aware feed: discover followed users' write relays via NIP-65
+     * and subscribe to them for kind-1 notes we'd otherwise miss.
+     * Call after the main feed subscription is active and follow list is loaded.
+     *
+     * @param followedPubkeys The user's follow list (hex pubkeys)
+     * @param indexerRelayUrls Indexer relay URLs for NIP-65 discovery
+     */
+    fun startOutboxFeed(followedPubkeys: Set<String>, indexerRelayUrls: List<String>) {
+        if (!followFilterEnabled || followedPubkeys.isEmpty()) {
+            Log.d(TAG, "Outbox feed skipped: followFilterEnabled=$followFilterEnabled, follows=${followedPubkeys.size}")
+            return
+        }
+        outboxFeedManager.start(
+            followedPubkeys = followedPubkeys,
+            indexerRelayUrls = indexerRelayUrls,
+            inboxRelayUrls = subscriptionRelays
+        )
     }
 
     /**
@@ -148,10 +175,23 @@ class NotesRepository private constructor() {
                 if (BuildConfig.DEBUG) logIncomingEventSummary(event, relayUrl)
                 val note = convertEventToNote(event, relayUrl)
 
-                // NOTE: No in-memory follow filter here. The relay subscription already
-                // uses an authors filter when Following is on, and updateDisplayedNotes()
-                // handles display-level filtering. Dropping events at ingestion permanently
-                // loses them, causing stale feeds when switching All/Following.
+                // Ingestion-level follow filter: when in Following mode, drop notes from
+                // non-followed authors immediately. Global notes are never cached — they are
+                // ephemeral and destroyed when leaving All/Global view. This saves memory,
+                // CPU, and prevents global noise from polluting the followed-only feed.
+                if (!isGlobalMode && followFilterEnabled) {
+                    val ff = followFilter
+                    if (ff != null && ff.isNotEmpty()) {
+                        val authorKey = normalizeAuthorIdForCache(note.author.id)
+                        val isOwnEvent = authorKey == currentUserPubkey
+                        if (!isOwnEvent && authorKey !in ff) continue
+                    } else {
+                        // Follow filter is enabled but list is null/empty (still loading).
+                        // Drop ALL notes to prevent global bleed into Following feed.
+                        // The follow list will load shortly and subscription will re-apply.
+                        continue
+                    }
+                }
 
                 // Track kind:1 notes with I tags as topic replies (NIP-22)
                 topicRepliesRepo.processKind1Note(note)
@@ -311,6 +351,13 @@ class NotesRepository private constructor() {
     @Volatile
     private var followFilterEnabled: Boolean = false
 
+    /** True when user is viewing All/Global feed. Global notes are ephemeral: never cached, destroyed on exit. */
+    @Volatile
+    private var isGlobalMode: Boolean = false
+
+    /** In-memory snapshot of following notes saved before entering Global mode; restored instantly on return. */
+    private var followingNotesSnapshot: List<Note> = emptyList()
+
     /** Last applied kind-1 filter (authors) when Following was active; used on resume when follow list is temporarily empty so All notes do not bleed into Following. */
     @Volatile
     private var lastAppliedKind1Filter: Filter? = null
@@ -391,6 +438,8 @@ class NotesRepository private constructor() {
             _notes.collect { list ->
                 delay(2000)
                 if (list.isEmpty()) return@collect
+                // Never persist global/All notes — they are ephemeral
+                if (isGlobalMode) return@collect
                 val isFollowing = followFilterEnabled && !followFilter.isNullOrEmpty()
                 saveFeedCacheToDisk(list.take(FEED_CACHE_MAX), isFollowing)
             }
@@ -476,8 +525,19 @@ class NotesRepository private constructor() {
     /** Push current subscription to state machine (global or following). Call after setFollowFilter or when (re)subscribing. */
     private fun applySubscriptionToStateMachine(relayUrls: List<String>) {
         val filter = buildKind1FilterForSubscription()
-        if (filter != null) lastAppliedKind1Filter = filter else lastAppliedKind1Filter = null
-        relayStateMachine.requestFeedChange(relayUrls, filter)
+        // Only update lastAppliedKind1Filter when we have a real filter or when explicitly
+        // switching to global (!followFilterEnabled). When followFilterEnabled=true but
+        // followFilter is null (follow list still loading), preserve the last known filter
+        // so resume/keepalive reconnect doesn't fall back to global.
+        if (filter != null) {
+            lastAppliedKind1Filter = filter
+        } else if (!followFilterEnabled) {
+            lastAppliedKind1Filter = null
+        }
+        // When Following is on but follow list is empty (loading), use lastAppliedKind1Filter
+        // to avoid sending a global subscription to relays.
+        val effectiveFilter = filter ?: if (followFilterEnabled) lastAppliedKind1Filter else null
+        relayStateMachine.requestFeedChange(relayUrls, effectiveFilter)
     }
 
     /** Schedule a single display update after the event burst settles (smooth UI under high throughput). */
@@ -499,7 +559,12 @@ class NotesRepository private constructor() {
         Log.d(TAG, "Subscription relays set: ${allUserRelayUrls.size} relays (stay connected to all)")
         subscriptionRelays = allUserRelayUrls
         relayStateMachine.resumeSubscriptionProvider = { getSubscriptionForResume() }
-        _feedSessionState.value = FeedSessionState.Idle
+        // Only reset to Idle when no notes exist (first load). When notes are already
+        // present (e.g. user added a relay), keep the current session state so the
+        // loading overlay doesn't flash over the existing feed.
+        if (_notes.value.isEmpty()) {
+            _feedSessionState.value = FeedSessionState.Idle
+        }
     }
 
     /**
@@ -518,16 +583,75 @@ class NotesRepository private constructor() {
      * Set follow filter: when enabled and followList is non-null, only notes from authors in followList are shown.
      * Pubkeys are normalized to lowercase so matching is case-insensitive (kind-3 vs event.pubKey can differ).
      * Re-subscribes with authors filter when Following is on so relays return follower notes directly (bandwidth savings).
-     * All events are stored in _notes regardless of follow mode; updateDisplayedNotes() handles display-level filtering.
-     * This means switching All/Following is instant — no re-fetch needed, just a display filter change.
+     *
+     * **Global mode**: When switching to All (enabled=false), marks global mode — notes are live-only and
+     * never cached. When switching back to Following (enabled=true), global notes are destroyed and the
+     * following feed is restored from disk cache.
+     *
      * getSubscriptionForResume uses lastAppliedKind1Filter when follow list is temporarily empty on resume.
      */
     fun setFollowFilter(followList: Set<String>?, enabled: Boolean) {
+        val wasGlobal = isGlobalMode
         // When Following is on but list is null or empty, treat as no filter (show all) so we never show zero notes
         val effective = followList?.map { it.lowercase() }?.toSet()?.takeIf { it.isNotEmpty() }
         followFilter = effective
         followFilterEnabled = enabled
         profileCache.setPinnedPubkeys(if (enabled && !followFilter.isNullOrEmpty()) followFilter else null)
+
+        val enteringGlobal = !enabled && !wasGlobal
+        val leavingGlobal = enabled && wasGlobal
+
+        if (enteringGlobal) {
+            // Snapshot following notes in memory before clearing so we can restore instantly
+            val currentNotes = _notes.value
+            if (currentNotes.isNotEmpty()) {
+                followingNotesSnapshot = currentNotes
+                Log.d(TAG, "Saved ${currentNotes.size} following notes to memory snapshot")
+            }
+            // Entering Global/All: clear feed, mark global, start fresh live subscription
+            isGlobalMode = true
+            kind1FlushJob?.cancel()
+            pendingKind1Events.clear()
+            _notes.value = emptyList()
+            _displayedNotes.value = emptyList()
+            synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
+            _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
+            initialLoadComplete = false
+            firstNoteDisplayedAtMs = 0L
+            feedCutoffTimestampMs = System.currentTimeMillis()
+            Log.d(TAG, "Entering Global mode — feed cleared, live-only")
+        } else if (leavingGlobal) {
+            // Leaving Global/All: destroy global notes, restore following feed from memory snapshot
+            isGlobalMode = false
+            kind1FlushJob?.cancel()
+            pendingKind1Events.clear()
+            synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
+            _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
+            firstNoteDisplayedAtMs = 0L
+            // Restore from memory snapshot (instant) or fall back to disk cache (async)
+            val snapshot = followingNotesSnapshot
+            if (snapshot.isNotEmpty()) {
+                _notes.value = snapshot
+                _displayedNotes.value = snapshot
+                initialLoadComplete = true
+                val now = System.currentTimeMillis()
+                firstNoteDisplayedAtMs = now - INITIAL_FEED_GRACE_MS - 1
+                feedCutoffTimestampMs = now
+                latestNoteTimestampAtOpen = snapshot.maxOfOrNull { it.timestamp } ?: now
+                _feedSessionState.value = FeedSessionState.Live
+                Log.d(TAG, "Leaving Global mode — restored ${snapshot.size} following notes from memory")
+            } else {
+                _notes.value = emptyList()
+                _displayedNotes.value = emptyList()
+                initialLoadComplete = false
+                feedCutoffTimestampMs = System.currentTimeMillis()
+                scope.launch { loadFeedCacheFromDisk() }
+                Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from disk cache")
+            }
+        } else {
+            isGlobalMode = !enabled
+        }
+
         updateDisplayedNotes()
         if (subscriptionRelays.isNotEmpty()) {
             applySubscriptionToStateMachine(subscriptionRelays)
@@ -549,8 +673,13 @@ class NotesRepository private constructor() {
             var filtered = if (connectedRelays.isEmpty()) _notes.value else _notes.value.filter(relayMatch)
             val currentFollowFilter = followFilter
             val followEnabled = followFilterEnabled
-            if (followEnabled && currentFollowFilter != null) {
-                filtered = filtered.filter { note -> normalizeAuthorIdForCache(note.author.id) in currentFollowFilter }
+            if (followEnabled) {
+                if (currentFollowFilter != null && currentFollowFilter.isNotEmpty()) {
+                    filtered = filtered.filter { note -> normalizeAuthorIdForCache(note.author.id) in currentFollowFilter }
+                } else {
+                    // Follow filter enabled but list not yet loaded — show nothing to prevent global bleed
+                    filtered = emptyList()
+                }
             }
             filtered = filtered.filter { note -> !note.isReply }
             _displayedNotes.value = filtered.toList()
@@ -619,6 +748,7 @@ class NotesRepository private constructor() {
      */
     fun disconnectAll() {
         Log.d(TAG, "Disconnecting from all relays")
+        outboxFeedManager.stop()
         kind1FlushJob?.cancel()
         pendingKind1Events.clear()
         relayStateMachine.resumeSubscriptionProvider = null
@@ -627,6 +757,8 @@ class NotesRepository private constructor() {
         subscriptionRelays = emptyList()
         followFilter = null
         followFilterEnabled = false
+        isGlobalMode = false
+        followingNotesSnapshot = emptyList()
         lastAppliedKind1Filter = null
         _feedSessionState.value = FeedSessionState.Idle
         _notes.value = emptyList()
@@ -654,6 +786,10 @@ class NotesRepository private constructor() {
             Log.d(TAG, "Restoring subscription for ${allUserRelayUrls.size} relays (keeping ${_notes.value.size} notes)")
             feedCutoffTimestampMs = System.currentTimeMillis()
             applySubscriptionToStateMachine(allUserRelayUrls)
+            // Mark feed as Live so UI scroll-to-top and other session-aware logic fires
+            if (_feedSessionState.value != FeedSessionState.Live) {
+                _feedSessionState.value = FeedSessionState.Live
+            }
             // Re-trigger counts now that the main feed subscription is active (counts may have
             // fired too early when notes were restored from cache before relay connected)
             NoteCountsRepository.retrigger()
@@ -693,17 +829,26 @@ class NotesRepository private constructor() {
         try {
             applySubscriptionToStateMachine(subscriptionRelays)
             // Wait for relays to deliver the initial burst of historical events.
-            // During this window, flushKind1Events batches events directly into the feed.
-            delay(500)
-            // Force-flush any remaining buffered events before marking initial load complete
-            kind1FlushJob?.cancel()
-            flushKind1Events()
+            // Poll every 100ms: transition to Live as soon as notes arrive, but wait
+            // up to 3s for slow relays. This keeps the loader visible until there's
+            // actually something to show, avoiding a flash of empty feed.
+            val maxWaitMs = 3000L
+            val pollIntervalMs = 100L
+            var waited = 0L
+            while (waited < maxWaitMs) {
+                delay(pollIntervalMs)
+                waited += pollIntervalMs
+                // Flush any buffered events so _notes reflects what we've received
+                kind1FlushJob?.cancel()
+                flushKind1Events()
+                if (_notes.value.isNotEmpty()) break
+            }
             latestNoteTimestampAtOpen = _notes.value.maxOfOrNull { it.timestamp } ?: feedCutoffTimestampMs
             initialLoadComplete = true
             _isLoading.value = false
             _feedSessionState.value = FeedSessionState.Live
             updateDisplayedNotes()
-            Log.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded (feed cutoff at $feedCutoffTimestampMs)")
+            Log.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded in ${waited}ms (feed cutoff at $feedCutoffTimestampMs)")
         } catch (e: Exception) {
             Log.e(TAG, "Error subscribing to notes: ${e.message}", e)
             _error.value = "Failed to load notes: ${e.message}"
@@ -860,7 +1005,7 @@ class NotesRepository private constructor() {
         try {
             val reposterPubkey = event.pubKey
             val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
-            val profileRelayUrls = (cacheRelayUrls + subscriptionRelays).distinct().filter { it.isNotBlank() }
+            val profileRelayUrls = getProfileRelayUrls()
             if (profileCache.getAuthor(reposterPubkey) == null && profileRelayUrls.isNotEmpty()) {
                 pendingProfilePubkeys.add(reposterPubkey.lowercase())
                 scheduleBatchProfileRequest(profileRelayUrls)
@@ -1092,7 +1237,7 @@ class NotesRepository private constructor() {
                         pendingProfilePubkeys.take(PROFILE_BATCH_SIZE).also { pendingProfilePubkeys.removeAll(it.toSet()) }
                     }
                     if (batch.isEmpty()) break
-                    val urls = (cacheRelayUrls + subscriptionRelays).distinct().filter { it.isNotBlank() }
+                    val urls = getProfileRelayUrls()
                     if (urls.isEmpty()) {
                         // Put them back — we'll try again when relays are available
                         pendingProfilePubkeys.addAll(batch)
@@ -1113,12 +1258,25 @@ class NotesRepository private constructor() {
         }
     }
 
+    /** Cached merged relay URLs for profile fetches; invalidated when cacheRelayUrls or subscriptionRelays change. */
+    @Volatile private var cachedProfileRelayUrls: List<String> = emptyList()
+    @Volatile private var cachedProfileRelayUrlsKey: Pair<List<String>, List<String>> = emptyList<String>() to emptyList()
+
+    private fun getProfileRelayUrls(): List<String> {
+        val key = cacheRelayUrls to subscriptionRelays
+        if (key != cachedProfileRelayUrlsKey) {
+            cachedProfileRelayUrls = (cacheRelayUrls + subscriptionRelays).distinct().filter { it.isNotBlank() }
+            cachedProfileRelayUrlsKey = key
+        }
+        return cachedProfileRelayUrls
+    }
+
     private fun convertEventToNote(event: Event, relayUrl: String): Note {
         android.os.Trace.beginSection("NotesRepo.convertEventToNote")
         val storedRelayUrl = relayUrl.ifEmpty { null }
         val pubkeyHex = event.pubKey
         val author = profileCache.resolveAuthor(pubkeyHex)
-        val profileRelayUrls = (cacheRelayUrls + subscriptionRelays).distinct().filter { it.isNotBlank() }
+        val profileRelayUrls = getProfileRelayUrls()
         if (profileCache.getAuthor(pubkeyHex) == null && profileRelayUrls.isNotEmpty()) {
             pendingProfilePubkeys.add(pubkeyHex.lowercase())
             scheduleBatchProfileRequest(profileRelayUrls)

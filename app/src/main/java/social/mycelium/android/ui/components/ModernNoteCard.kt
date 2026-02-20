@@ -526,7 +526,7 @@ private fun NoteCardContent(
                                                                         InlineVideoPlayer(
                                                                             url = url,
                                                                             modifier = Modifier.fillMaxWidth(),
-                                                                            isVisible = true,
+                                                                            isVisible = true, // Thread view: card always visible
                                                                             onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) }
                                                                         )
                                                                     }

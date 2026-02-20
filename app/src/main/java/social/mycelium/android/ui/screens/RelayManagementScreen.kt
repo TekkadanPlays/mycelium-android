@@ -875,10 +875,26 @@ fun RelayManagementScreen(
     // Create New Profile dialog — profile already created, user is on its tab
     if (showCreateProfileDialog && createProfileId != null) {
         val cancelCreate = {
-            createProfileId?.let { viewModel.deleteProfile(it) }
+            val idToDelete = createProfileId
+            val targetPage = createProfilePreviousPage.coerceIn(0, (totalPageCount - 2).coerceAtLeast(0))
             showCreateProfileDialog = false
             createProfileId = null
-            pagerScope.launch { pagerState.animateScrollToPage(createProfilePreviousPage) }
+            // Navigate away BEFORE deleting so pager doesn't land on a stale index
+            pagerScope.launch {
+                pagerState.animateScrollToPage(targetPage)
+                idToDelete?.let { viewModel.deleteProfile(it) }
+            }
+        }
+        val confirmCreate = {
+            if (createProfileName.isNotBlank()) {
+                createProfileId?.let { id ->
+                    relayProfiles.firstOrNull { p -> p.id == id }?.let { profile ->
+                        viewModel.updateProfile(id, profile.copy(name = createProfileName))
+                    }
+                }
+                showCreateProfileDialog = false
+                createProfileId = null
+            }
         }
         AlertDialog(
             onDismissRequest = { cancelCreate() },
@@ -894,23 +910,13 @@ fun RelayManagementScreen(
                     singleLine = true,
                     label = { Text("Profile name") },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = {
-                        if (createProfileName.isNotBlank()) {
-                            createProfileId?.let { viewModel.updateProfile(it, relayProfiles.first { p -> p.id == it }.copy(name = createProfileName)) }
-                            showCreateProfileDialog = false; createProfileId = null
-                        }
-                    }),
+                    keyboardActions = KeyboardActions(onDone = { confirmCreate() }),
                     modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
                 Button(
-                    onClick = {
-                        if (createProfileName.isNotBlank()) {
-                            createProfileId?.let { viewModel.updateProfile(it, relayProfiles.first { p -> p.id == it }.copy(name = createProfileName)) }
-                            showCreateProfileDialog = false; createProfileId = null
-                        }
-                    },
+                    onClick = { confirmCreate() },
                     enabled = createProfileName.isNotBlank()
                 ) { Text("Save") }
             },

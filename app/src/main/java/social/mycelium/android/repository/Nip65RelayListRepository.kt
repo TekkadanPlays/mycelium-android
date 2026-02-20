@@ -2,6 +2,7 @@ package social.mycelium.android.repository
 
 import android.util.Log
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -124,8 +125,12 @@ object Nip65RelayListRepository {
     fun getIndexerRelayUrls(limit: Int = 5): List<String> {
         val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
         if (discovered.isNotEmpty()) {
+            val flagged = RelayHealthTracker.flaggedRelays.value
+            val blocked = RelayHealthTracker.blockedRelays.value
             val indexers = discovered.values
                 .filter { social.mycelium.android.data.RelayType.SEARCH in it.types }
+                // Exclude flagged/blocked indexers so consistently failing ones are retired
+                .filter { it.url !in flagged && it.url !in blocked }
                 .sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
                 .take(limit)
                 .map { it.url }
@@ -240,18 +245,19 @@ object Nip65RelayListRepository {
      *
      * @param pubkeyHex  The user's hex pubkey
      * @param indexerUrls Indexer relay URLs to query (from NIP-66 discovery)
-     * @param timeoutMs  Per-indexer timeout (default 8s)
+     * @param timeoutMs  Per-indexer timeout (default 6s)
      */
     /**
-     * Max concurrent relay connections per batch. Keeps OkHttp's thread pool
-     * and the device's network stack from being overwhelmed.
+     * Max concurrent relay connections. Uses a semaphore so fast relays don't
+     * wait for slow ones — as soon as one finishes, the next starts immediately.
+     * 20 concurrent connections balances throughput vs network contention.
      */
-    private const val BATCH_SIZE = 20
+    private const val MAX_CONCURRENT = 20
 
     fun fetchRelayListMultiSource(
         pubkeyHex: String,
         indexerUrls: List<String>,
-        timeoutMs: Long = 8_000L
+        timeoutMs: Long = 10_000L
     ) {
         if (indexerUrls.isEmpty()) {
             Log.w(TAG, "No indexers for multi-source NIP-65 search")
@@ -272,7 +278,7 @@ object Nip65RelayListRepository {
             IndexerQueryState(url, IndexerQueryStatus.PENDING)
         }
 
-        Log.d(TAG, "Multi-source NIP-65 search for ${pubkeyHex.take(8)} across ${indexerUrls.size} indexers (batch=$BATCH_SIZE, timeout=${timeoutMs}ms)")
+        Log.d(TAG, "Multi-source NIP-65 search for ${pubkeyHex.take(8)} across ${indexerUrls.size} indexers (concurrency=$MAX_CONCURRENT, timeout=${timeoutMs}ms)")
 
         val filter = Filter(
             kinds = listOf(KIND_RELAY_LIST),
@@ -280,34 +286,27 @@ object Nip65RelayListRepository {
             limit = 1
         )
 
-        // Process relays in batches to avoid overwhelming the network stack.
-        // Each batch launches BATCH_SIZE concurrent coroutines, waits for all
-        // to complete (or timeout), then starts the next batch.
+        // Semaphore-based rolling concurrency: launch ALL relays immediately but
+        // only MAX_CONCURRENT run at a time. As soon as one relay finishes (success,
+        // no-data, fail, or timeout), the next one starts. No batch boundaries means
+        // fast relays never wait for slow ones in the same batch.
         scope.launch {
-            val batches = indexerUrls.chunked(BATCH_SIZE)
-            val globalCompleted = java.util.concurrent.atomic.AtomicInteger(0)
-
-            batches.forEachIndexed { batchIdx, batch ->
-                Log.d(TAG, "  Batch ${batchIdx + 1}/${batches.size}: ${batch.size} relays")
-
-                // Launch all relays in this batch concurrently
-                val batchJobs = batch.map { indexerUrl ->
-                    scope.launch {
+            val semaphore = kotlinx.coroutines.sync.Semaphore(MAX_CONCURRENT)
+            val jobs = indexerUrls.map { indexerUrl ->
+                scope.launch {
+                    semaphore.acquire()
+                    try {
                         queryOneIndexer(pubkeyHex, indexerUrl, filter, timeoutMs)
-                        globalCompleted.incrementAndGet()
+                    } finally {
+                        semaphore.release()
                     }
-                }
-
-                // Wait for entire batch to finish before starting next
-                batchJobs.forEach { it.join() }
-
-                // Brief stagger between batches to let WebSocket handshakes settle
-                if (batchIdx < batches.size - 1) {
-                    delay(300)
                 }
             }
 
-            // All batches done — mark any still-PENDING as TIMEOUT
+            // Wait for ALL relays to complete
+            jobs.forEach { it.join() }
+
+            // Mark any still-PENDING as TIMEOUT (shouldn't happen with proper timeouts, but safety net)
             synchronized(_multiSourceStatuses) {
                 _multiSourceStatuses.value = _multiSourceStatuses.value.map { state ->
                     if (state.status == IndexerQueryStatus.PENDING)
@@ -322,8 +321,8 @@ object Nip65RelayListRepository {
                 multiSourceHandles = emptyList()
             }
 
-            // CRITICAL: Disconnect ALL relay connections. Quartz's NostrClient
-            // keeps WebSocket connections alive in its pool even after subscriptions
+            // CRITICAL: Disconnect ALL relay connections. The relay pool
+            // keeps WebSocket connections alive even after subscriptions
             // are destroyed. Without this full disconnect, hundreds of indexer
             // connections persist and bleed into feed/notification subscriptions.
             // The feed will re-establish only the connections it actually needs.
@@ -350,6 +349,7 @@ object Nip65RelayListRepository {
             var bestEvent: Event? = null
             val gotEvent = kotlinx.coroutines.CompletableDeferred<Unit>()
             val startTime = System.currentTimeMillis()
+            RelayHealthTracker.recordConnectionAttempt(indexerUrl)
 
             val handle = RelayConnectionStateMachine.getInstance()
                 .requestTemporarySubscriptionWithRelay(listOf(indexerUrl), filter) { event, _ ->
@@ -381,6 +381,7 @@ object Nip65RelayListRepository {
 
             val event = bestEvent
             if (event != null) {
+                RelayHealthTracker.recordConnectionSuccess(indexerUrl)
                 val result = parseEventToSourceResult(event, indexerUrl)
                 synchronized(_multiSourceResults) {
                     _multiSourceResults.value = _multiSourceResults.value + result
@@ -388,12 +389,14 @@ object Nip65RelayListRepository {
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.SUCCESS, result = result)
                 Log.d(TAG, "  $indexerUrl: ${result.writeRelays.size}w/${result.readRelays.size}r, created=${result.createdAt} (${elapsed}ms)")
             } else {
+                RelayHealthTracker.recordConnectionFailure(indexerUrl, "No data returned")
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.NO_DATA)
                 Log.d(TAG, "  $indexerUrl: no data (${elapsed}ms)")
             }
         } catch (e: Exception) {
             val isCancellation = e is kotlinx.coroutines.CancellationException
             if (!isCancellation) {
+                RelayHealthTracker.recordConnectionFailure(indexerUrl, e.message)
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.FAILED, errorMessage = e.message)
                 Log.e(TAG, "  $indexerUrl: failed: ${e.message}")
             }
@@ -413,6 +416,38 @@ object Nip65RelayListRepository {
                 else state
             }
         }
+    }
+
+    /**
+     * Re-query a single indexer that previously returned no data, failed, or timed out.
+     * Updates the statuses and results flows in-place. Safe to call while a search is
+     * in progress or after it completes — does not interfere with the main search.
+     */
+    fun rePingIndexer(indexerUrl: String) {
+        val pubkey = multiSourcePubkey ?: return
+        updateIndexerStatus(indexerUrl, IndexerQueryStatus.PENDING)
+        val filter = Filter(
+            kinds = listOf(KIND_RELAY_LIST),
+            authors = listOf(pubkey),
+            limit = 1
+        )
+        scope.launch {
+            queryOneIndexer(pubkey, indexerUrl, filter, 6_000L)
+        }
+    }
+
+    /**
+     * Re-query all indexers that returned NO_DATA, FAILED, or TIMEOUT.
+     * Useful as a "retry all" action after the initial search completes.
+     */
+    fun rePingAllFailed() {
+        val statuses = _multiSourceStatuses.value
+        val retryable = statuses.filter {
+            it.status in setOf(IndexerQueryStatus.NO_DATA, IndexerQueryStatus.FAILED, IndexerQueryStatus.TIMEOUT)
+        }
+        if (retryable.isEmpty()) return
+        Log.d(TAG, "Re-pinging ${retryable.size} failed/no-data indexers")
+        retryable.forEach { rePingIndexer(it.url) }
     }
 
     /**

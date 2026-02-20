@@ -73,7 +73,10 @@ class RelayForegroundService : Service() {
             }
         }
 
-        return START_STICKY
+        // START_NOT_STICKY: don't restart after process kill. The singleton
+        // RelayConnectionStateMachine is recreated with empty state — the service
+        // can't reconnect to anything. The activity will restart it on next launch.
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
@@ -92,7 +95,7 @@ class RelayForegroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Mycelium is running")
             .setContentText(contentText)
-            .setSmallIcon(social.mycelium.android.R.drawable.ic_notification_frog)
+            .setSmallIcon(social.mycelium.android.R.drawable.ic_notification_network)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

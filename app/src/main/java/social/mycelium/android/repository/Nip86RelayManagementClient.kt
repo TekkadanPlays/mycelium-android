@@ -13,11 +13,13 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
+import io.ktor.client.request.header
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.content.TextContent
+import social.mycelium.android.network.MyceliumHttpClient
 
 /**
  * NIP-86 Relay Management API client.
@@ -43,7 +45,7 @@ class Nip86RelayManagementClient(private val relayWsUrl: String) {
 
     companion object {
         private const val TAG = "Nip86Client"
-        private val JSON_MEDIA_TYPE = "application/nostr+json+rpc".toMediaType()
+        private val NIP86_CONTENT_TYPE = ContentType.parse("application/nostr+json+rpc")
         private val JSON = Json { ignoreUnknownKeys = true }
     }
 
@@ -52,11 +54,7 @@ class Nip86RelayManagementClient(private val relayWsUrl: String) {
         .replace("ws://", "http://")
         .removeSuffix("/")
 
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
-        .build()
+    private val httpClient = MyceliumHttpClient.instance
 
     /**
      * Provider for NIP-98 authorization headers.
@@ -215,47 +213,46 @@ class Nip86RelayManagementClient(private val relayWsUrl: String) {
         params: List<JsonElement> = emptyList()
     ): Result<JsonElement?> = withContext(Dispatchers.IO) {
         try {
-            val requestBody = JsonObject(
+            val rpcPayload = JsonObject(
                 mapOf(
                     "method" to JsonPrimitive(method),
                     "params" to JsonArray(params)
                 )
             ).toString()
 
-            val requestBuilder = Request.Builder()
-                .url(httpUrl)
-                .post(requestBody.toRequestBody(JSON_MEDIA_TYPE))
-
-            // Add NIP-98 authorization if provider is set
+            // Build NIP-98 authorization header if provider is set
+            var nip98AuthHeader: String? = null
             val auth = authProvider
             if (auth != null) {
                 try {
-                    val payloadHash = sha256Hex(requestBody)
-                    val authHeader = auth(relayWsUrl, method, payloadHash)
-                    requestBuilder.addHeader("Authorization", "Nostr $authHeader")
+                    val payloadHash = sha256Hex(rpcPayload)
+                    nip98AuthHeader = "Nostr ${auth(relayWsUrl, method, payloadHash)}"
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to generate NIP-98 auth for $method: ${e.message}")
                 }
             }
 
-            val response = httpClient.newCall(requestBuilder.build()).execute()
+            val response = httpClient.post(httpUrl) {
+                setBody(TextContent(rpcPayload, NIP86_CONTENT_TYPE))
+                nip98AuthHeader?.let { header("Authorization", it) }
+            }
 
-            if (response.code == 401) {
+            if (response.status.value == 401) {
                 return@withContext Result.failure(Nip86AuthRequiredException("Authorization required for $method"))
             }
 
-            if (!response.isSuccessful) {
+            if (response.status.value !in 200..299) {
                 return@withContext Result.failure(
-                    Nip86ApiException("HTTP ${response.code} for $method: ${response.message}")
+                    Nip86ApiException("HTTP ${response.status} for $method")
                 )
             }
 
-            val body = response.body?.string()
-            if (body.isNullOrBlank()) {
+            val responseBody = response.bodyAsText()
+            if (responseBody.isBlank()) {
                 return@withContext Result.failure(Nip86ApiException("Empty response for $method"))
             }
 
-            val json = JSON.parseToJsonElement(body).jsonObject
+            val json = JSON.parseToJsonElement(responseBody).jsonObject
             val error = json["error"]?.jsonPrimitive?.content
             if (!error.isNullOrBlank()) {
                 return@withContext Result.failure(Nip86ApiException(error))

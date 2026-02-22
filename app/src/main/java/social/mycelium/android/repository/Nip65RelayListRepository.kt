@@ -1,6 +1,7 @@
 package social.mycelium.android.repository
 
 import android.util.Log
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.TemporarySubscriptionHandle
@@ -127,15 +128,20 @@ object Nip65RelayListRepository {
         if (discovered.isNotEmpty()) {
             val flagged = RelayHealthTracker.flaggedRelays.value
             val blocked = RelayHealthTracker.blockedRelays.value
-            val indexers = discovered.values
+            val allSearch = discovered.values
                 .filter { social.mycelium.android.data.RelayType.SEARCH in it.types }
-                // Exclude flagged/blocked indexers so consistently failing ones are retired
                 .filter { it.url !in flagged && it.url !in blocked }
-                .sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
+            val withRtt = allSearch.count { it.bestRtt != null }
+            val indexers = allSearch
+                .sortedBy { it.bestRtt ?: Int.MAX_VALUE }
                 .take(limit)
-                .map { it.url }
-            return indexers
+            Log.d("Nip65Repo", "getIndexerRelayUrls: ${allSearch.size} SEARCH relays, $withRtt with RTT data, returning ${indexers.size}:")
+            indexers.forEach { r ->
+                Log.d("Nip65Repo", "  → ${r.url} bestRtt=${r.bestRtt} (read=${r.avgRttRead} open=${r.avgRttOpen})")
+            }
+            return indexers.map { it.url }
         }
+        Log.d("Nip65Repo", "getIndexerRelayUrls: no discovered relays yet")
         return emptyList()
     }
 
@@ -189,11 +195,13 @@ object Nip65RelayListRepository {
 
                 var bestEvent: Event? = null
                 var bestEventSourceRelay: String? = null
+                val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
                 var eventCount = 0
                 val handle = RelayConnectionStateMachine.getInstance()
-                    .requestTemporarySubscriptionWithRelay(indexerRelayUrls, filter) { event, relayUrl ->
+                    .requestTemporarySubscriptionWithRelay(indexerRelayUrls, filter, priority = SubscriptionPriority.BACKGROUND) { event, relayUrl ->
                         if (event.kind == KIND_RELAY_LIST && event.pubKey == pubkeyHex) {
                             eventCount++
+                            lastEventAt.set(System.currentTimeMillis())
                             val current = bestEvent
                             if (current == null || event.createdAt > current.createdAt) {
                                 bestEvent = event
@@ -204,7 +212,16 @@ object Nip65RelayListRepository {
                     }
                 fetchHandle = handle
 
-                delay(FETCH_TIMEOUT_MS)
+                // Settle-based wait: break early when stream goes quiet (1s no new events)
+                val deadline = System.currentTimeMillis() + FETCH_TIMEOUT_MS
+                while (System.currentTimeMillis() < deadline) {
+                    delay(200)
+                    val lastAt = lastEventAt.get()
+                    if (lastAt > 0) {
+                        val quietMs = System.currentTimeMillis() - lastAt
+                        if (quietMs >= 1_000L) break
+                    }
+                }
                 handle.cancel()
                 fetchHandle = null
 
@@ -352,7 +369,7 @@ object Nip65RelayListRepository {
             RelayHealthTracker.recordConnectionAttempt(indexerUrl)
 
             val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscriptionWithRelay(listOf(indexerUrl), filter) { event, _ ->
+                .requestTemporarySubscriptionWithRelay(listOf(indexerUrl), filter, priority = SubscriptionPriority.NORMAL) { event, _ ->
                     if (event.kind == KIND_RELAY_LIST && event.pubKey == pubkeyHex) {
                         val current = bestEvent
                         if (current == null || event.createdAt > current.createdAt) {
@@ -603,15 +620,18 @@ object Nip65RelayListRepository {
 
     // --- Outbox relay lookup for other authors (quoted note preloading) ---
 
-    /** Cache of other authors' write (outbox) relays. LRU, max 100 entries. */
+    /** Cache of other authors' write (outbox) relays. LRU, max 500 entries. */
     private val authorOutboxCache = java.util.Collections.synchronizedMap(
-        object : LinkedHashMap<String, List<String>>(100, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>): Boolean = size > 100
+        object : LinkedHashMap<String, List<String>>(500, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>): Boolean = size > 500
         }
     )
 
-    /** In-flight fetches to avoid duplicate requests for the same pubkey. */
-    private val inFlightOutbox = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    /** Debounced batch state for individual outbox lookups. */
+    private val pendingOutboxPubkeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    @Volatile private var pendingOutboxRelays: List<String> = emptyList()
+    private var outboxBatchJob: kotlinx.coroutines.Job? = null
+    private val OUTBOX_BATCH_DEBOUNCE_MS = 300L
 
     /**
      * Get cached outbox (write) relays for an author, or null if not yet fetched.
@@ -619,68 +639,104 @@ object Nip65RelayListRepository {
     fun getCachedOutboxRelays(pubkeyHex: String): List<String>? = authorOutboxCache[pubkeyHex]
 
     /**
-     * Fetch another author's kind-10002 to get their write (outbox) relays.
-     * Results are cached. Returns the write relay URLs, or empty if not found.
-     * Uses cache/discovery relays to find the kind-10002 event.
+     * Queue an author's outbox relay lookup into a debounced batch.
+     * Instead of creating one subscription per author (which floods relays),
+     * pubkeys are accumulated and flushed as a single batched subscription
+     * after a short debounce window.
      */
     fun fetchOutboxRelaysForAuthor(pubkeyHex: String, discoveryRelays: List<String>) {
         if (pubkeyHex.isBlank() || discoveryRelays.isEmpty()) return
         if (authorOutboxCache.containsKey(pubkeyHex)) return
-        if (inFlightOutbox.putIfAbsent(pubkeyHex, true) != null) return
+        if (!pendingOutboxPubkeys.add(pubkeyHex)) return // already pending
 
-        scope.launch {
+        if (discoveryRelays.isNotEmpty()) pendingOutboxRelays = discoveryRelays
+        scheduleOutboxBatchFlush()
+    }
+
+    private fun scheduleOutboxBatchFlush() {
+        outboxBatchJob?.cancel()
+        outboxBatchJob = scope.launch {
+            delay(OUTBOX_BATCH_DEBOUNCE_MS)
+            flushOutboxBatch()
+        }
+    }
+
+    private suspend fun flushOutboxBatch() {
+        val pubkeys = pendingOutboxPubkeys.toList()
+        val relays = pendingOutboxRelays
+        pendingOutboxPubkeys.clear()
+        if (pubkeys.isEmpty() || relays.isEmpty()) return
+
+        // Filter out already-cached
+        val needed = pubkeys.filter { !authorOutboxCache.containsKey(it) }
+        if (needed.isEmpty()) return
+
+        Log.d(TAG, "Outbox batch flush: ${needed.size} pubkeys on ${relays.size} relays")
+
+        // Fetch in chunks of 50 to stay within relay filter size limits
+        needed.chunked(50).forEachIndexed { chunkIdx, chunk ->
             try {
                 val filter = Filter(
                     kinds = listOf(KIND_RELAY_LIST),
-                    authors = listOf(pubkeyHex),
-                    limit = 1
+                    authors = chunk,
+                    limit = chunk.size
                 )
-
-                var bestEvent: Event? = null
+                val collected = java.util.concurrent.ConcurrentHashMap<String, Event>()
+                val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
                 val handle = RelayConnectionStateMachine.getInstance()
-                    .requestTemporarySubscription(discoveryRelays, filter) { event ->
-                        if (event.kind == KIND_RELAY_LIST && event.pubKey == pubkeyHex) {
-                            val current = bestEvent
-                            if (current == null || event.createdAt > current.createdAt) {
-                                bestEvent = event
+                    .requestTemporarySubscription(relays, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
+                        if (event.kind == KIND_RELAY_LIST) {
+                            val existing = collected[event.pubKey]
+                            if (existing == null || event.createdAt > existing.createdAt) {
+                                collected[event.pubKey] = event
                             }
+                            lastEventAt.set(System.currentTimeMillis())
                         }
                     }
 
-                delay(4_000L) // shorter timeout for preloading
+                // Settle-based wait: break early when stream goes quiet
+                val deadline = System.currentTimeMillis() + BATCH_CHUNK_MAX_TIMEOUT_MS
+                while (System.currentTimeMillis() < deadline) {
+                    delay(200)
+                    val lastAt = lastEventAt.get()
+                    if (lastAt > 0) {
+                        val quietMs = System.currentTimeMillis() - lastAt
+                        if (quietMs >= BATCH_CHUNK_SETTLE_MS) break
+                    }
+                    if (collected.size >= chunk.size) break
+                }
                 handle.cancel()
 
-                val event = bestEvent
-                if (event != null) {
-                    val writeUrls = mutableListOf<String>()
-                    val readUrls = mutableListOf<String>()
-                    event.tags.forEach { tag ->
-                        if (tag.size >= 2 && tag[0] == "r" && tag[1].isNotBlank()) {
-                            val url = tag[1].trim()
-                            val marker = tag.getOrNull(2)?.lowercase()?.trim()
-                            when (marker) {
-                                "write" -> writeUrls.add(url)
-                                "read" -> readUrls.add(url)
-                                null, "" -> { writeUrls.add(url); readUrls.add(url) } // no marker = both
+                // Parse results
+                chunk.forEach { pk ->
+                    val event = collected[pk]
+                    if (event != null) {
+                        val writeUrls = mutableListOf<String>()
+                        val readUrls = mutableListOf<String>()
+                        event.tags.forEach { tag ->
+                            if (tag.size >= 2 && tag[0] == "r" && tag[1].isNotBlank()) {
+                                val url = tag[1].trim()
+                                val marker = tag.getOrNull(2)?.lowercase()?.trim()
+                                when (marker) {
+                                    "write" -> writeUrls.add(url)
+                                    "read" -> readUrls.add(url)
+                                    null, "" -> { writeUrls.add(url); readUrls.add(url) }
+                                }
                             }
                         }
+                        authorOutboxCache[pk] = writeUrls.distinct()
+                        authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct(), writeUrls.distinct())
+                        Log.d(TAG, "Relays for ${pk.take(8)}: ${writeUrls.size} write, ${readUrls.size} read")
+                    } else {
+                        authorOutboxCache[pk] = emptyList()
+                        authorRelayCache[pk] = AuthorRelayList(pk, emptyList(), emptyList())
+                        Log.d(TAG, "No kind-10002 for ${pk.take(8)}")
                     }
-                    authorOutboxCache[pubkeyHex] = writeUrls.distinct()
-                    // Also populate full relay cache
-                    authorRelayCache[pubkeyHex] = AuthorRelayList(pubkeyHex, readUrls.distinct(), writeUrls.distinct())
-                    emitAuthorRelaySnapshot()
-                    Log.d(TAG, "Relays for ${pubkeyHex.take(8)}: ${writeUrls.size} write, ${readUrls.size} read")
-                } else {
-                    authorOutboxCache[pubkeyHex] = emptyList()
-                    authorRelayCache[pubkeyHex] = AuthorRelayList(pubkeyHex, emptyList(), emptyList())
-                    emitAuthorRelaySnapshot()
-                    Log.d(TAG, "No kind-10002 for ${pubkeyHex.take(8)}")
                 }
+                emitAuthorRelaySnapshot()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch outbox for ${pubkeyHex.take(8)}: ${e.message}")
-                authorOutboxCache[pubkeyHex] = emptyList()
-            } finally {
-                inFlightOutbox.remove(pubkeyHex)
+                Log.e(TAG, "Outbox batch chunk $chunkIdx failed: ${e.message}")
+                chunk.forEach { pk -> authorOutboxCache.putIfAbsent(pk, emptyList()) }
             }
         }
     }
@@ -689,6 +745,11 @@ object Nip65RelayListRepository {
      * Batch-fetch kind-10002 for a list of pubkeys (e.g. the user's follow list).
      * Fetches in chunks to avoid overwhelming relays. Results populate authorRelayCache.
      */
+    /** Max time to wait per batch chunk for kind-10002 events. */
+    private const val BATCH_CHUNK_MAX_TIMEOUT_MS = 8_000L
+    /** After last event arrives, wait this long for more before declaring chunk done. */
+    private const val BATCH_CHUNK_SETTLE_MS = 800L
+
     fun batchFetchRelayLists(pubkeys: List<String>, discoveryRelays: List<String>) {
         if (pubkeys.isEmpty() || discoveryRelays.isEmpty()) return
         val uncached = pubkeys.filter { !authorRelayCache.containsKey(it) }
@@ -697,28 +758,43 @@ object Nip65RelayListRepository {
             return
         }
         Log.d(TAG, "Batch-fetching kind-10002 for ${uncached.size} pubkeys (${pubkeys.size - uncached.size} already cached)")
-        // Fetch in chunks of 50 to avoid huge filters
-        uncached.chunked(50).forEachIndexed { chunkIdx, chunk ->
-            scope.launch {
+        // Process chunks sequentially — each chunk settles before the next starts,
+        // so fast relays don't wait for slow ones across chunks.
+        scope.launch {
+            uncached.chunked(50).forEachIndexed { chunkIdx, chunk ->
                 try {
-                    if (chunkIdx > 0) delay(chunkIdx * 500L) // stagger chunks
                     val filter = Filter(
                         kinds = listOf(KIND_RELAY_LIST),
                         authors = chunk,
                         limit = chunk.size
                     )
                     val collected = java.util.concurrent.ConcurrentHashMap<String, Event>()
+                    val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
                     val handle = RelayConnectionStateMachine.getInstance()
-                        .requestTemporarySubscription(discoveryRelays, filter) { event ->
+                        .requestTemporarySubscription(discoveryRelays, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
                             if (event.kind == KIND_RELAY_LIST) {
                                 val existing = collected[event.pubKey]
                                 if (existing == null || event.createdAt > existing.createdAt) {
                                     collected[event.pubKey] = event
                                 }
+                                lastEventAt.set(System.currentTimeMillis())
                             }
                         }
-                    delay(5_000L)
+
+                    // Settle-based wait: break early when stream goes quiet
+                    val deadline = System.currentTimeMillis() + BATCH_CHUNK_MAX_TIMEOUT_MS
+                    while (System.currentTimeMillis() < deadline) {
+                        delay(200)
+                        val lastAt = lastEventAt.get()
+                        if (lastAt > 0) {
+                            val quietMs = System.currentTimeMillis() - lastAt
+                            if (quietMs >= BATCH_CHUNK_SETTLE_MS) break
+                        }
+                        // Early exit: all pubkeys in this chunk have been resolved
+                        if (collected.size >= chunk.size) break
+                    }
                     handle.cancel()
+
                     // Parse results
                     var found = 0
                     chunk.forEach { pk ->
@@ -745,7 +821,7 @@ object Nip65RelayListRepository {
                         }
                     }
                     emitAuthorRelaySnapshot()
-                    Log.d(TAG, "Batch chunk $chunkIdx: found kind-10002 for $found/${chunk.size} pubkeys")
+                    Log.d(TAG, "Batch chunk $chunkIdx: found kind-10002 for $found/${chunk.size} pubkeys (settled in ${System.currentTimeMillis() - (deadline - BATCH_CHUNK_MAX_TIMEOUT_MS)}ms)")
                 } catch (e: Exception) {
                     Log.e(TAG, "Batch fetch chunk $chunkIdx failed: ${e.message}")
                 }

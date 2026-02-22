@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 
@@ -256,7 +257,8 @@ class OutboxFeedManager private constructor() {
         }
 
         outboxHandle = relayStateMachine.requestTemporarySubscriptionPerRelay(
-            relayFilters = relayFilters.mapValues { it.value }
+            relayFilters = relayFilters.mapValues { it.value },
+            priority = SubscriptionPriority.LOW,
         ) { event ->
             if (event.kind == 1) {
                 _outboxNotesReceived.value = _outboxNotesReceived.value + 1
@@ -285,7 +287,7 @@ class OutboxFeedManager private constructor() {
         private const val TAG = "OutboxFeedManager"
 
         /** Max outbox relays to subscribe to. Prevents opening hundreds of WebSockets. */
-        private const val MAX_OUTBOX_RELAYS = 30
+        private const val MAX_OUTBOX_RELAYS = 12
 
         /** Per-relay note limit for outbox subscriptions. */
         private const val OUTBOX_PER_RELAY_LIMIT = 50

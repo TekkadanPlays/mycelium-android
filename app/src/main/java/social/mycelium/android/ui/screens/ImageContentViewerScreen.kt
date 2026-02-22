@@ -151,6 +151,9 @@ fun ImageContentViewerScreen(
                 AsyncImage(
                     model = ImageRequest.Builder(context)
                         .data(url)
+                        .crossfade(150)
+                        .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                        .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,

@@ -896,6 +896,43 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         return null
     }
 
+    /**
+     * Publish a Kind 1 reply with NIP-10 e-tags (root + reply markers).
+     * Used for replying in kind-1 threads from the thread view.
+     */
+    fun publishKind1Reply(
+        rootId: String,
+        rootPubkey: String,
+        parentId: String?,
+        parentPubkey: String?,
+        content: String
+    ): String? {
+        if (content.isBlank()) return "Reply is empty"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val relaySet = getOutboxRelayUrlSet()
+        if (relaySet.isEmpty()) return "No outbox relays configured"
+        viewModelScope.launch {
+            val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 1, content = content) {
+                // NIP-10 e-tags: root marker always points to the thread root
+                add(arrayOf("e", rootId, "", "root"))
+                // If replying to a specific reply (not the root), add reply marker
+                if (parentId != null && parentId != rootId) {
+                    add(arrayOf("e", parentId, "", "reply"))
+                }
+                // p-tags for the root author and (optionally) the parent reply author
+                add(arrayOf("p", rootPubkey))
+                if (parentPubkey != null && parentPubkey != rootPubkey) {
+                    add(arrayOf("p", parentPubkey))
+                }
+            }
+            when (result) {
+                is PublishResult.Success -> Log.d("AccountStateViewModel", "Kind-1 reply published: ${result.eventId.take(8)}")
+                is PublishResult.Error -> _toastMessage.value = "Reply failed: ${result.message}"
+            }
+        }
+        return null
+    }
+
     // ── NIP-22: Anchored Events ──────────────────────────────────────────
 
     /**

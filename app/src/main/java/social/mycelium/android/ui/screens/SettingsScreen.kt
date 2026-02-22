@@ -73,20 +73,30 @@ fun SettingsScreen(
                 .padding(paddingValues)
                 .verticalScroll(rememberScrollState())
         ) {
-            SettingsItem(icon = Icons.Outlined.Settings, title = "General", onClick = { onNavigateTo("general") })
-            SettingsItem(icon = Icons.Outlined.Edit, title = "Appearance", onClick = { onNavigateTo("appearance") })
-            SettingsItem(icon = Icons.Outlined.Notifications, title = "Notifications", onClick = { /* TODO */ })
+            // ── Your Experience ──
+            SettingsSectionHeader("Your Experience")
+            SettingsItem(icon = Icons.Outlined.Palette, title = "Appearance", onClick = { onNavigateTo("appearance") })
             SettingsItem(icon = Icons.Outlined.PlayCircleOutline, title = "Media", onClick = { onNavigateTo("media") })
+            SettingsItem(icon = Icons.Outlined.ElectricBolt, title = "Zaps", onClick = { onNavigateTo("zap_settings") })
+            SettingsItem(icon = Icons.Outlined.Notifications, title = "Notifications", onClick = { onNavigateTo("notifications") })
+
+            // ── Account ──
+            SettingsSectionHeader("Account")
             SettingsItem(icon = Icons.Outlined.Person, title = "Account Preferences", onClick = { onNavigateTo("account_preferences") })
-            SettingsItem(icon = Icons.Outlined.Lock, title = "Filters & Blocks", onClick = { /* TODO */ })
-            SettingsItem(icon = Icons.Outlined.Settings, title = "Data and Storage", onClick = { /* TODO */ })
             SettingsItem(icon = Icons.Outlined.Public, title = "Relays", onClick = { onNavigateTo("relay_health") })
+            SettingsItem(icon = Icons.Outlined.Lock, title = "Filters & Blocks", onClick = { onNavigateTo("filters_blocks") })
+
+            // ── App ──
+            SettingsSectionHeader("App")
+            SettingsItem(icon = Icons.Outlined.Settings, title = "General", onClick = { onNavigateTo("general") })
+            SettingsItem(icon = Icons.Outlined.Storage, title = "Data and Storage", onClick = { onNavigateTo("data_storage") })
 
             HorizontalDivider(
                 thickness = 1.dp,
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
             )
 
+            // ── Support ──
             SettingsItem(icon = Icons.Outlined.FavoriteBorder, title = "Support Mycelium", onClick = { showSupportZapDialog = true }, iconTint = Color(0xFFE57373))
             val context = LocalContext.current
             SettingsItem(
@@ -107,20 +117,6 @@ fun SettingsScreen(
 
             SettingsItem(icon = Icons.Outlined.BugReport, title = "Report a Bug", onClick = onBugReportClick)
             SettingsItem(icon = Icons.Outlined.Info, title = "About", onClick = { onNavigateTo("about") })
-
-            if (BuildConfig.DEBUG) {
-                HorizontalDivider(
-                    thickness = 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-                )
-                Text(
-                    text = "Debug",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(16.dp, 8.dp)
-                )
-                DebugEventStatsCard()
-            }
 
             Spacer(modifier = Modifier.height(16.dp))
         }
@@ -155,6 +151,17 @@ private fun DebugEventStatsCard() {
             )
         }
     }
+}
+
+@Composable
+private fun SettingsSectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
+    )
 }
 
 @Composable

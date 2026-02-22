@@ -35,6 +35,7 @@ import social.mycelium.android.data.toNote
 import social.mycelium.android.repository.TopicNote
 import social.mycelium.android.repository.TopicRepliesRepository
 import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.ActionRowSchema
 import social.mycelium.android.ui.components.ProfilePicture
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import social.mycelium.android.viewmodel.ThreadRepliesViewModel
@@ -143,92 +144,28 @@ fun TopicThreadScreen(
             }
         },
         floatingActionButton = {
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                // Mini FABs for reply options
-                AnimatedVisibility(
-                    visible = fabExpanded,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        // Kind:1 - Mesh network reply
-                        SmallFloatingActionButton(
-                            onClick = {
-                                fabExpanded = false
-                                onReplyKind1Click()
-                            },
-                            containerColor = MaterialTheme.colorScheme.tertiary,
-                            contentColor = MaterialTheme.colorScheme.onTertiary
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Public,
-                                    contentDescription = "Mesh network reply",
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = "Global",
-                                    style = MaterialTheme.typography.labelMedium
-                                )
-                            }
-                        }
-                        
-                        // Kind:1111 - Default topic reply
-                        SmallFloatingActionButton(
-                            onClick = {
-                                fabExpanded = false
-                                onReplyKind1111Click()
-                            },
-                            containerColor = MaterialTheme.colorScheme.secondary,
-                            contentColor = MaterialTheme.colorScheme.onSecondary
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Comment,
-                                    contentDescription = "Topic reply",
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Text(
-                                    text = "Topic",
-                                    style = MaterialTheme.typography.labelMedium
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                // Main FAB
-                val rotation by animateFloatAsState(
-                    targetValue = if (fabExpanded) 45f else 0f,
-                    label = "fab_rotation"
+            val replyItems = listOf(
+                social.mycelium.android.ui.components.FabMenuItem(
+                    label = "Topic",
+                    icon = Icons.Default.Comment,
+                    onClick = onReplyKind1111Click,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                ),
+                social.mycelium.android.ui.components.FabMenuItem(
+                    label = "Global",
+                    icon = Icons.Default.Public,
+                    onClick = onReplyKind1Click,
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer
                 )
-                
-                FloatingActionButton(
-                    onClick = { fabExpanded = !fabExpanded },
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary
-                ) {
-                    Icon(
-                        imageVector = if (fabExpanded) Icons.Default.Close else Icons.Default.Add,
-                        contentDescription = if (fabExpanded) "Close menu" else "Reply options",
-                        modifier = Modifier.rotate(rotation)
-                    )
-                }
-            }
+            )
+            social.mycelium.android.ui.components.ThreadFab(
+                listState = listState,
+                replyItems = replyItems,
+                firstReplyIndex = 2,
+                totalItems = 2 + allReplies.size
+            )
         }
     ) { paddingValues ->
         LazyColumn(
@@ -312,6 +249,7 @@ fun TopicThreadScreen(
                     overrideReplyCount = null,
                     overrideZapCount = null,
                     overrideReactions = null,
+                    actionRowSchema = ActionRowSchema.KIND1111_REPLY,
                     showHashtagsSection = true,
                     initialMediaPage = 0,
                     onMediaPageChanged = { },

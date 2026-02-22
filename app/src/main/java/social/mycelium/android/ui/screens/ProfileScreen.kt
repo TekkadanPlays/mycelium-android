@@ -1,6 +1,9 @@
 package social.mycelium.android.ui.screens
 
+import android.widget.Toast
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.cutoutPadding
@@ -8,17 +11,27 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
@@ -30,6 +43,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.cybin.nip19.toNpub
+import kotlinx.coroutines.launch
 import social.mycelium.android.R
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
@@ -38,11 +53,30 @@ import social.mycelium.android.ui.components.ModernSearchBar
 import social.mycelium.android.repository.ZapType
 import social.mycelium.android.ui.components.NoteCard
 
+// ─── Profile tab definitions ────────────────────────────────────────────────
+
+private data class ProfileTab(val label: String, val icon: @Composable () -> Unit)
+
+private val profileTabs = listOf(
+    ProfileTab("Notes") { Icon(Icons.AutoMirrored.Outlined.Article, null, modifier = Modifier.size(18.dp)) },
+    ProfileTab("Replies") { Icon(Icons.Outlined.Forum, null, modifier = Modifier.size(18.dp)) },
+    ProfileTab("Media") { Icon(Icons.Outlined.Image, null, modifier = Modifier.size(18.dp)) },
+)
+
+// ─── Main Screen ────────────────────────────────────────────────────────────
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
     author: Author,
     authorNotes: List<Note>,
+    isProfileLoading: Boolean = false,
+    isLoadingMore: Boolean = false,
+    hasMore: Boolean = true,
+    onLoadMore: () -> Unit = {},
+    followingCount: Int? = null,
+    followerCount: Int? = null,
+    isLoadingCounts: Boolean = false,
     onBackClick: () -> Unit,
     onNoteClick: (Note) -> Unit = {},
     onImageTap: (social.mycelium.android.data.Note, List<String>, Int) -> Unit = { _, _, _ -> },
@@ -53,20 +87,15 @@ fun ProfileScreen(
     onZap: (String, Long) -> Unit = { _, _ -> },
     isZapInProgress: (String) -> Boolean = { false },
     isZapped: (String) -> Boolean = { false },
-    /** Amount (sats) the current user zapped per note ID; (noteId) -> amount or null. */
     myZappedAmountForNote: (String) -> Long? = { null },
-    /** Override comment count per note ID (e.g. from ReplyCountCache); (noteId) -> count or null. */
     overrideReplyCountForNote: (String) -> Int? = { null },
-    /** Override zap count and reactions per note ID (e.g. from NoteCountsRepository); (noteId) -> NoteCounts or null. */
     countsForNote: (String) -> social.mycelium.android.repository.NoteCounts? = { null },
     onLike: (String) -> Unit = {},
     onShare: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onProfileClick: (String) -> Unit = {},
     onNavigateTo: (String) -> Unit = {},
-    /** Called when user taps a relay orb to show relay info. When non-null, RelayInfoDialog is shown by the host. */
     onRelayClick: (relayUrl: String) -> Unit = {},
-    /** Whether the current user follows this profile author (from kind-3 contact list). */
     isFollowing: Boolean = false,
     onFollowClick: () -> Unit = {},
     onMessageClick: () -> Unit = {},
@@ -74,14 +103,31 @@ fun ProfileScreen(
     listState: LazyListState = rememberLazyListState(),
     topAppBarState: TopAppBarState = rememberTopAppBarState(),
     onLoginClick: (() -> Unit)? = null,
+    onSeeAllReactions: (Note) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    // Use predictive back for smooth gesture navigation
-    androidx.activity.compose.BackHandler {
-        onBackClick()
-    }
+    androidx.activity.compose.BackHandler { onBackClick() }
 
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
+    val coroutineScope = rememberCoroutineScope()
+
+    // Tab state
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val pagerState = rememberPagerState(initialPage = 0) { profileTabs.size }
+    LaunchedEffect(selectedTab) {
+        if (pagerState.currentPage != selectedTab) pagerState.animateScrollToPage(selectedTab)
+    }
+    LaunchedEffect(pagerState.currentPage) {
+        if (pagerState.currentPage != selectedTab) selectedTab = pagerState.currentPage
+    }
+
+    // Per-tab filtered notes
+    val notesOnly = remember(authorNotes) { authorNotes.filter { !it.isReply } }
+    val repliesOnly = remember(authorNotes) { authorNotes.filter { it.isReply } }
+    val mediaOnly = remember(authorNotes) { authorNotes.filter { it.mediaUrls.isNotEmpty() } }
+
+    // Bio expanded state
+    var bioExpanded by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = Modifier
@@ -92,40 +138,21 @@ fun ProfileScreen(
                 TopAppBar(
                     title = {
                         Text(
-                            text = "profile",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            text = author.displayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     navigationIcon = {
                         IconButton(onClick = onBackClick) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                     },
                     actions = {
-                        // Search button for searching notes on user's profile
-                        IconButton(onClick = { /* TODO: Search profile notes */ }) {
-                            Icon(
-                                imageVector = Icons.Default.Search,
-                                contentDescription = "Search profile",
-                                tint = Color.White
-                            )
-                        }
-
-                        // Profile/Login button
-                        if (onLoginClick != null) {
-                            IconButton(onClick = onLoginClick) {
-                                Icon(
-                                    imageVector = Icons.Default.Person,
-                                    contentDescription = "Profile",
-                                    tint = Color.White
-                                )
-                            }
+                        IconButton(onClick = { /* TODO: more options */ }) {
+                            Icon(Icons.Outlined.MoreVert, contentDescription = "More")
                         }
                     },
                     scrollBehavior = scrollBehavior,
@@ -145,24 +172,117 @@ fun ProfileScreen(
                 .padding(paddingValues),
             contentPadding = PaddingValues(bottom = 80.dp)
         ) {
-            // Profile Header
-            item {
-                ProfileHeader(
+            // ═══ Banner + Avatar ═══
+            item(key = "profile_banner") {
+                ProfileBanner(
                     author = author,
-                    notesCount = authorNotes.size,
-                    isFollowing = isFollowing,
-                    onFollowClick = onFollowClick,
-                    onMessageClick = onMessageClick,
-                    modifier = Modifier.fillMaxWidth()
+                    onBannerClick = { url ->
+                        if (url != null) onOpenImageViewer(listOf(url), 0)
+                    },
+                    onAvatarClick = { url ->
+                        if (url != null) onOpenImageViewer(listOf(url), 0)
+                    }
                 )
             }
 
-            item {
-                Spacer(modifier = Modifier.height(24.dp))
+            // ═══ Identity + Actions ═══
+            item(key = "profile_identity") {
+                ProfileIdentity(
+                    author = author,
+                    notesCount = authorNotes.size,
+                    followingCount = followingCount,
+                    followerCount = followerCount,
+                    isLoadingCounts = isLoadingCounts,
+                    isFollowing = isFollowing,
+                    onFollowClick = onFollowClick,
+                    onMessageClick = onMessageClick,
+                    bioExpanded = bioExpanded,
+                    onBioToggle = { bioExpanded = !bioExpanded }
+                )
             }
 
-            // Notes List (stable keys for recomposition and scroll performance)
-            items(authorNotes, key = { it.id }) { note ->
+            // ═══ Tab bar (sticky) ═══
+            stickyHeader(key = "profile_tabs") {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    TabRow(
+                        selectedTabIndex = selectedTab,
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        divider = {
+                            HorizontalDivider(
+                                thickness = 0.5.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                            )
+                        }
+                    ) {
+                        profileTabs.forEachIndexed { index, tab ->
+                            val count = when (index) {
+                                0 -> notesOnly.size
+                                1 -> repliesOnly.size
+                                2 -> mediaOnly.size
+                                else -> 0
+                            }
+                            Tab(
+                                selected = selectedTab == index,
+                                onClick = { coroutineScope.launch { pagerState.animateScrollToPage(index) } },
+                                text = {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        tab.icon()
+                                        Text("${tab.label} ($count)", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ═══ Tab content (notes for selected tab) ═══
+            val tabNotes = when (selectedTab) {
+                0 -> notesOnly
+                1 -> repliesOnly
+                2 -> mediaOnly
+                else -> notesOnly
+            }
+
+            if (tabNotes.isEmpty()) {
+                item(key = "empty_tab") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(
+                                when (selectedTab) {
+                                    1 -> Icons.Outlined.Forum
+                                    2 -> Icons.Outlined.Image
+                                    else -> Icons.AutoMirrored.Outlined.Article
+                                },
+                                contentDescription = null,
+                                modifier = Modifier.size(40.dp),
+                                tint = MaterialTheme.colorScheme.outline
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "No ${profileTabs[selectedTab].label.lowercase()} yet",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            items(tabNotes, key = { "tab${selectedTab}_${it.id}" }) { note ->
+                val counts = countsForNote(note.id)
                 NoteCard(
                     note = note,
                     onLike = onLike,
@@ -180,281 +300,424 @@ fun ProfileScreen(
                     isZapped = isZapped(note.id),
                     myZappedAmount = myZappedAmountForNote(note.id),
                     overrideReplyCount = overrideReplyCountForNote(note.id),
-                    overrideZapCount = countsForNote(note.id)?.zapCount,
-                    overrideZapTotalSats = countsForNote(note.id)?.zapTotalSats,
-                    overrideReactions = countsForNote(note.id)?.reactions,
-                    overrideReactionAuthors = countsForNote(note.id)?.reactionAuthors,
-                    overrideZapAuthors = countsForNote(note.id)?.zapAuthors,
-                    overrideZapAmountByAuthor = countsForNote(note.id)?.zapAmountByAuthor,
-                    overrideCustomEmojiUrls = countsForNote(note.id)?.customEmojiUrls,
+                    overrideZapCount = counts?.zapCount,
+                    overrideZapTotalSats = counts?.zapTotalSats,
+                    overrideReactions = counts?.reactions,
+                    overrideReactionAuthors = counts?.reactionAuthors,
+                    overrideZapAuthors = counts?.zapAuthors,
+                    overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
+                    overrideCustomEmojiUrls = counts?.customEmojiUrls,
                     onRelayClick = onRelayClick,
                     accountNpub = accountNpub,
+                    onSeeAllReactions = { onSeeAllReactions(note) },
                     modifier = Modifier.fillMaxWidth()
                 )
+            }
+
+            // Load more trigger: fires when the last note becomes visible
+            if (tabNotes.isNotEmpty() && hasMore && !isLoadingMore) {
+                item(key = "load_more_trigger") {
+                    LaunchedEffect(Unit) { onLoadMore() }
+                }
+            }
+
+            // Loading indicator at the bottom
+            if (isProfileLoading || isLoadingMore) {
+                item(key = "loading_indicator") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(24.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                        )
+                    }
+                }
+            }
+
+            // End of feed indicator
+            if (!hasMore && tabNotes.isNotEmpty()) {
+                item(key = "end_of_feed") {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "End of feed",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        )
+                    }
+                }
             }
         }
     }
 }
 
-@Composable
-private fun ProfileHeader(
-    author: Author,
-    notesCount: Int = 0,
-    isFollowing: Boolean = false,
-    onFollowClick: () -> Unit = {},
-    onMessageClick: () -> Unit = {},
-    modifier: Modifier = Modifier
-) {
-    val uriHandler = LocalUriHandler.current
+// ─── Banner + Avatar ────────────────────────────────────────────────────────
 
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp
+@Composable
+private fun ProfileBanner(
+    author: Author,
+    onBannerClick: (String?) -> Unit,
+    onAvatarClick: (String?) -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(180.dp)
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
-            // Banner image (kind-0)
+        // Banner
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(140.dp)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .clickable { onBannerClick(author.banner) }
+        ) {
+            author.banner?.takeIf { it.isNotBlank() }?.let { bannerUrl ->
+                AsyncImage(
+                    model = bannerUrl,
+                    contentDescription = "Profile banner",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            // Gradient scrim at bottom for avatar readability
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(140.dp)
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                author.banner?.takeIf { it.isNotBlank() }?.let { bannerUrl ->
-                    AsyncImage(
-                        model = bannerUrl,
-                        contentDescription = "Profile banner",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
+                    .height(48.dp)
+                    .align(Alignment.BottomCenter)
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.3f))
+                        )
+                    )
+            )
+        }
+
+        // Avatar — left-aligned, overlapping banner bottom
+        Box(
+            modifier = Modifier
+                .padding(start = 16.dp)
+                .align(Alignment.BottomStart)
+                .size(80.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surface)
+                .border(3.dp, MaterialTheme.colorScheme.surface, CircleShape)
+                .clickable { onAvatarClick(author.avatarUrl) }
+        ) {
+            if (author.avatarUrl != null) {
+                AsyncImage(
+                    model = author.avatarUrl,
+                    contentDescription = "Profile picture",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = author.displayName.take(1).uppercase(),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
             }
+        }
+    }
+}
 
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                // Avatar overlapping the banner
-                Box(
-                    modifier = Modifier
-                        .offset(y = (-40).dp)
-                        .size(96.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.surface)
-                        .padding(3.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (author.avatarUrl != null) {
-                        AsyncImage(
-                            model = author.avatarUrl,
-                            contentDescription = "Profile picture",
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(CircleShape),
-                            contentScale = ContentScale.Crop
+// ─── Identity + Actions ─────────────────────────────────────────────────────
+
+@Composable
+private fun ProfileIdentity(
+    author: Author,
+    notesCount: Int,
+    followingCount: Int? = null,
+    followerCount: Int? = null,
+    isLoadingCounts: Boolean = false,
+    isFollowing: Boolean,
+    onFollowClick: () -> Unit,
+    onMessageClick: () -> Unit,
+    bioExpanded: Boolean,
+    onBioToggle: () -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .padding(top = 8.dp)
+    ) {
+        // ── Row: Name + Actions ──
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Name column
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = author.displayName,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (author.isVerified) {
+                        Spacer(Modifier.width(4.dp))
+                        Icon(
+                            Icons.Default.Verified,
+                            contentDescription = "Verified",
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.primary
                         )
-                    } else {
+                    }
+                    author.pronouns?.takeIf { it.isNotBlank() }?.let { p ->
+                        Spacer(Modifier.width(6.dp))
                         Text(
-                            text = author.displayName.take(1).uppercase(),
-                            style = MaterialTheme.typography.displaySmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
+                            "($p)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
+                // NIP-05 or @username
+                val subtitle = author.nip05?.takeIf { it.isNotBlank() } ?: "@${author.username}"
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (author.nip05 != null) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
 
-                // Pull content up to compensate for avatar offset
-                Column(
-                    modifier = Modifier.offset(y = (-24).dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    // Name, pronouns, and verification
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = author.displayName,
-                            style = MaterialTheme.typography.headlineSmall.copy(
-                                fontWeight = FontWeight.Bold
-                            ),
-                            textAlign = TextAlign.Center
-                        )
-                        author.pronouns?.takeIf { it.isNotBlank() }?.let { pronouns ->
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "($pronouns)",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (author.isVerified) {
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Icon(
-                                imageVector = Icons.Default.Star,
-                                contentDescription = "Verified",
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                        }
+            // Action buttons
+            Spacer(Modifier.width(8.dp))
+            // Copy npub
+            IconButton(
+                onClick = {
+                    try {
+                        val npub = author.id.toNpub()
+                        clipboardManager.setText(AnnotatedString(npub))
+                        Toast.makeText(context, "npub copied", Toast.LENGTH_SHORT).show()
+                    } catch (_: Throwable) {
+                        clipboardManager.setText(AnnotatedString(author.id))
+                        Toast.makeText(context, "Pubkey copied", Toast.LENGTH_SHORT).show()
                     }
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(Icons.Outlined.ContentCopy, contentDescription = "Copy npub", modifier = Modifier.size(18.dp))
+            }
+        }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+        Spacer(Modifier.height(12.dp))
 
-                    // Username
-                    Text(
-                        text = "@${author.username}",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center
+        // ── Action row: Follow / Zap / Message ──
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (isFollowing) {
+                OutlinedButton(
+                    onClick = onFollowClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Following", style = MaterialTheme.typography.labelMedium)
+                }
+            } else {
+                Button(
+                    onClick = onFollowClick,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Follow", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            // Zap button
+            if (author.lud16?.isNotBlank() == true) {
+                OutlinedButton(
+                    onClick = { /* TODO: zap profile */ },
+                    shape = RoundedCornerShape(20.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Icon(
+                        Icons.Default.ElectricBolt,
+                        null,
+                        modifier = Modifier.size(16.dp),
+                        tint = Color(0xFFFFB74D)
                     )
+                    Spacer(Modifier.width(4.dp))
+                    Text("Zap", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            OutlinedButton(
+                onClick = onMessageClick,
+                shape = RoundedCornerShape(20.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Icon(Icons.Outlined.Mail, null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("DM", style = MaterialTheme.typography.labelMedium)
+            }
+        }
 
-                    // NIP-05 identifier
-                    author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
-                        Spacer(modifier = Modifier.height(2.dp))
+        // ── Bio ──
+        author.about?.takeIf { it.isNotBlank() }?.let { about ->
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = about,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = if (bioExpanded) Int.MAX_VALUE else 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onBioToggle() }
+            )
+            if (!bioExpanded && about.length > 150) {
+                Text(
+                    "Show more",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { onBioToggle() }
+                )
+            }
+        }
+
+        // ── Links row ──
+        val hasWebsite = author.website?.isNotBlank() == true
+        val hasLn = author.lud16?.isNotBlank() == true
+        if (hasWebsite || hasLn) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                author.website?.takeIf { it.isNotBlank() }?.let { url ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable {
+                            uriHandler.openUri(if (url.startsWith("http")) url else "https://$url")
+                        }
+                    ) {
+                        Icon(Icons.Default.Link, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.width(3.dp))
                         Text(
-                            text = nip05,
+                            url.removePrefix("https://").removePrefix("http://").removeSuffix("/"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
-                            textAlign = TextAlign.Center,
+                            textDecoration = TextDecoration.Underline,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-
-                    // About / bio
-                    author.about?.takeIf { it.isNotBlank() }?.let { about ->
-                        Spacer(modifier = Modifier.height(12.dp))
+                }
+                author.lud16?.takeIf { it.isNotBlank() }?.let { ln ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.ElectricBolt, null, Modifier.size(14.dp), tint = Color(0xFFFFB74D))
+                        Spacer(Modifier.width(3.dp))
                         Text(
-                            text = about,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Center,
-                            maxLines = 6,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.fillMaxWidth()
+                            ln,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-
-                    // Website link
-                    author.website?.takeIf { it.isNotBlank() }?.let { url ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable {
-                                uriHandler.openUri(if (url.startsWith("http")) url else "https://$url")
-                            }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Link,
-                                contentDescription = "Website",
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = url.removePrefix("https://").removePrefix("http://"),
-                                style = MaterialTheme.typography.bodyMedium.copy(
-                                    color = MaterialTheme.colorScheme.primary,
-                                    textDecoration = TextDecoration.Underline
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
-                    // Lightning address (LUD-16)
-                    author.lud16?.takeIf { it.isNotBlank() }?.let { lnAddress ->
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.clickable { /* TODO: open zap dialog */ }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ElectricBolt,
-                                contentDescription = "Lightning address",
-                                modifier = Modifier.size(16.dp),
-                                tint = Color(0xFFFFB74D) // Bitcoin orange
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = lnAddress,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(20.dp))
-
-                    // Stats Row
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly
-                    ) {
-                        StatItem(label = "Notes", value = notesCount.toString(), onClick = {})
-                        StatItem(label = "Followers", value = "\u2013", onClick = {})
-                        StatItem(label = "Following", value = "\u2013", onClick = {})
-                    }
-
-                    Spacer(modifier = Modifier.height(20.dp))
-
-                    // Action Buttons
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        if (isFollowing) {
-                            OutlinedButton(
-                                onClick = onFollowClick,
-                                modifier = Modifier.weight(1f)
-                            ) { Text("Following") }
-                        } else {
-                            Button(
-                                onClick = onFollowClick,
-                                modifier = Modifier.weight(1f)
-                            ) { Text("Follow") }
-                        }
-                        OutlinedButton(
-                            onClick = onMessageClick,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Message") }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
                 }
             }
         }
+
+        // ── Stats row ──
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            StatItem(value = notesCount.toString(), label = "Notes")
+            StatItem(
+                value = when {
+                    followingCount != null -> formatCount(followingCount)
+                    isLoadingCounts -> "\u2026"
+                    else -> "\u2013"
+                },
+                label = "Following"
+            )
+            StatItem(
+                value = when {
+                    followerCount != null -> formatCount(followerCount)
+                    isLoadingCounts -> "\u2026"
+                    else -> "\u2013"
+                },
+                label = "Followers"
+            )
+        }
+        Spacer(Modifier.height(8.dp))
     }
 }
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Format a count for display: 1234 → "1.2k", 12345 → "12.3k", 1234567 → "1.2M" */
+private fun formatCount(count: Int): String = when {
+    count >= 1_000_000 -> String.format("%.1fM", count / 1_000_000.0)
+    count >= 10_000 -> String.format("%.1fk", count / 1_000.0)
+    count >= 1_000 -> String.format("%.1fk", count / 1_000.0)
+    else -> count.toString()
+}
+
+// ─── Stat chip ──────────────────────────────────────────────────────────────
+
 @Composable
 private fun StatItem(
-    label: String,
     value: String,
-    onClick: () -> Unit,
+    label: String,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier.clickable { onClick() },
-        horizontalAlignment = Alignment.CenterHorizontally
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Text(
             text = value,
-            style = MaterialTheme.typography.titleLarge.copy(
-                fontWeight = FontWeight.Bold
-            )
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold
         )
         Text(
             text = label,
-            style = MaterialTheme.typography.bodySmall.copy(
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
 }

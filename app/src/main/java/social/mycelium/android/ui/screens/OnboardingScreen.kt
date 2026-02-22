@@ -121,6 +121,9 @@ fun OnboardingScreen(
         val initial = if (returnedIndexerUrls.isNotEmpty()) returnedIndexerUrls.toSet() else savedIndexers
         mutableStateOf(initial)
     }
+    // Ref for debounced persistence — updated on every toggle WITHOUT triggering
+    // recomposition of the parent (which would cascade through AnimatedContent).
+    val latestSelectionRef = remember { androidx.compose.runtime.mutableStateOf(selectedIndexerUrls) }
     // Track whether we consumed returned indexers (to skip overwrite in hexPubkey effect)
     val hasReturnedIndexers = returnedIndexerUrls.isNotEmpty()
 
@@ -131,12 +134,15 @@ fun OnboardingScreen(
         }
     }
 
-    // Persist selected indexer URLs (debounced to avoid I/O on every toggle)
-    LaunchedEffect(selectedIndexerUrls) {
-        if (hexPubkey.isNotBlank() && selectedIndexerUrls.isNotEmpty()) {
-            delay(500)
-            storageManager.saveOnboardingSelectedIndexers(hexPubkey, selectedIndexerUrls)
-        }
+    // Persist selected indexer URLs via ref (debounced, no recomposition)
+    LaunchedEffect(Unit) {
+        snapshotFlow { latestSelectionRef.value }
+            .collect { urls ->
+                if (hexPubkey.isNotBlank() && urls.isNotEmpty()) {
+                    delay(500)
+                    storageManager.saveOnboardingSelectedIndexers(hexPubkey, urls)
+                }
+            }
     }
 
     // Multi-source NIP-65 results — collected lazily in the phases that need them
@@ -205,7 +211,7 @@ fun OnboardingScreen(
             val allDiscovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
             val indexers = allDiscovered.values
                 .filter { relay -> relay.isSearch }
-                .sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
+                .sortedBy { it.bestRtt ?: Int.MAX_VALUE }
             allIndexers = indexers
             // Only merge relay manager URLs when NOT returning from discovery
             // (discovery returns a complete replacement set; merging would undo deselections)
@@ -259,7 +265,7 @@ fun OnboardingScreen(
             // Look for relays with NIP-65 support or general PUBLIC_OUTBOX relays.
             val indexers = allDiscovered.values
                 .filter { relay -> relay.isSearch }
-                .sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
+                .sortedBy { it.bestRtt ?: Int.MAX_VALUE }
 
             allIndexers = indexers
             // Restore saved indexer selections, or pre-select top 5 by RTT
@@ -596,10 +602,19 @@ fun OnboardingScreen(
                                 IndexerSelectionCard(
                                     allIndexers = allIndexers,
                                     initialSelectedUrls = selectedIndexerUrls,
-                                    onSelectionChanged = { selectedIndexerUrls = it },
-                                    onConfirm = { urls -> startNip65Search(urls.toList()) },
-                                    onChooseOwn = { urls -> onOpenRelayDiscoverySelection(urls.toList()) },
-                                    onAddMore = { urls -> onOpenRelayDiscoverySelection(urls.toList()) }
+                                    onSelectionChanged = { latestSelectionRef.value = it },
+                                    onConfirm = { urls ->
+                                        selectedIndexerUrls = urls
+                                        startNip65Search(urls.toList())
+                                    },
+                                    onChooseOwn = { urls ->
+                                        selectedIndexerUrls = urls
+                                        onOpenRelayDiscoverySelection(urls.toList())
+                                    },
+                                    onAddMore = { urls ->
+                                        selectedIndexerUrls = urls
+                                        onOpenRelayDiscoverySelection(urls.toList())
+                                    }
                                 )
                             }
 

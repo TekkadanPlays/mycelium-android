@@ -12,6 +12,7 @@ import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.extractPubkeysFromContent
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.BuildConfig
 import com.example.cybin.core.Event
 import com.example.cybin.relay.RelayUrlNormalizer
@@ -165,6 +166,7 @@ class NotesRepository private constructor() {
         try {
             // Convert all events to Notes (no lock needed — convertEventToNote is stateless except profile cache)
             val newNotes = mutableListOf<Note>()
+            val newNoteIds = HashSet<String>() // O(1) dedup within batch
             val relayUpdates = mutableMapOf<String, List<String>>() // noteId -> merged relayUrls
             val currentNotes = _notes.value
             val currentIds = currentNotes.associateBy { it.id }
@@ -217,8 +219,8 @@ class NotesRepository private constructor() {
                     continue
                 }
                 if (pendingIds.contains(note.id)) continue
-                // Dedup within this batch
-                if (newNotes.any { it.id == note.id }) continue
+                // Dedup within this batch (O(1) via HashSet)
+                if (!newNoteIds.add(note.id)) continue
 
                 newNotes.add(note)
             }
@@ -278,6 +280,12 @@ class NotesRepository private constructor() {
             // Always debounce the display update
             scheduleDisplayUpdate()
 
+            // Schedule ONE profile batch fetch for all pubkeys accumulated during this flush
+            val profileRelayUrls = getProfileRelayUrls()
+            if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {
+                scheduleBatchProfileRequest(profileRelayUrls)
+            }
+
             if (BuildConfig.DEBUG && batch.size > 5) {
                 Log.d(TAG, "Flushed ${batch.size} events: ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges")
             }
@@ -335,6 +343,11 @@ class NotesRepository private constructor() {
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
+    private val _isLoadingOlder = MutableStateFlow(false)
+    val isLoadingOlder: StateFlow<Boolean> = _isLoadingOlder.asStateFlow()
+    /** Handle for the active "load older" subscription; cancelled when a new one starts or feed resets. */
+    @Volatile private var olderNotesHandle: social.mycelium.android.relay.TemporarySubscriptionHandle? = null
+
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
@@ -368,16 +381,34 @@ class NotesRepository private constructor() {
     /** Debounced display update: one run after event burst settles so UI stays smooth under high throughput. */
     private var displayUpdateJob: Job? = null
     private var countsSubscriptionJob: Job? = null
+    /** Background job for initial note polling after subscription starts (non-blocking). */
+    private var initialLoadJob: Job? = null
 
     /** Batched kind-0 profile requests: uncached authors are added here and fetched in batches to avoid flooding relays and speed up feed resolution. */
-    private val pendingProfilePubkeys = Collections.synchronizedSet(HashSet<String>())
+    private val pendingProfilePubkeys = Collections.synchronizedSet(LinkedHashSet<String>())
     /** Track in-flight tag-only repost fetches to avoid duplicate requests for the same repost event. */
     private val pendingRepostFetches = Collections.synchronizedSet(HashSet<String>())
+
+    /** Metadata for a pending repost fetch (batched instead of one-sub-per-repost). */
+    private data class PendingRepost(
+        val originalNoteId: String,
+        val compositeId: String,
+        val reposterAuthor: Author,
+        val repostTimestampMs: Long,
+        val relayUrl: String,
+        val fetchRelays: List<String>,
+    )
+    /** Buffer of pending repost fetches waiting to be flushed as a single batched subscription. */
+    private val pendingRepostBuffer = java.util.concurrent.ConcurrentHashMap<String, PendingRepost>()
+    /** Debounce job for batched repost flush. */
+    private var repostBatchJob: Job? = null
+    private val REPOST_BATCH_DELAY_MS = 500L
+
     /** Job that schedules the next batch (debounce timer). Cancelled and re-set on each new pubkey. */
     private var profileBatchScheduleJob: Job? = null
     /** Job that is actively fetching profiles from relays. Never cancelled by new pubkeys. */
     private var profileBatchFetchJob: Job? = null
-    private val PROFILE_BATCH_DELAY_MS = 500L
+    private val PROFILE_BATCH_DELAY_MS = 200L
     private val PROFILE_BATCH_SIZE = 80
     /** Debounce window for coalescing profileUpdated before applying to notes list (one list update per batch). */
     private val PROFILE_UPDATE_DEBOUNCE_MS = 80L
@@ -417,6 +448,10 @@ class NotesRepository private constructor() {
         private const val FEED_CACHE_FOLLOWING_KEY = "feed_notes_following"
         private const val FEED_LAST_MODE_KEY = "feed_last_mode"
         private const val FEED_CACHE_MAX = 200
+        /** Max time to wait for older notes before declaring done. */
+        private const val OLDER_NOTES_TIMEOUT_MS = 8_000L
+        /** After last event arrives, wait this long for more before declaring done. */
+        private const val OLDER_NOTES_SETTLE_MS = 1_200L
 
         @Volatile
         private var instance: NotesRepository? = null
@@ -594,6 +629,9 @@ class NotesRepository private constructor() {
         val wasGlobal = isGlobalMode
         // When Following is on but list is null or empty, treat as no filter (show all) so we never show zero notes
         val effective = followList?.map { it.lowercase() }?.toSet()?.takeIf { it.isNotEmpty() }
+        // Idempotency: skip if nothing actually changed (prevents re-subscription loop
+        // when DashboardScreen's LaunchedEffect re-fires with identical follow list content)
+        if (enabled == followFilterEnabled && effective == followFilter) return
         followFilter = effective
         followFilterEnabled = enabled
         profileCache.setPinnedPubkeys(if (enabled && !followFilter.isNullOrEmpty()) followFilter else null)
@@ -663,12 +701,16 @@ class NotesRepository private constructor() {
     private fun updateDisplayedNotes() {
         android.os.Trace.beginSection("NotesRepo.updateDisplayedNotes")
         try {
-            val connectedSet = connectedRelays.toSet()
+            // Pre-build a combined set of raw + normalized URLs for O(1) lookup (avoids per-note normalization)
+            val connectedSet = buildSet {
+                connectedRelays.forEach { url ->
+                    add(url)
+                    RelayUrlNormalizer.normalizeOrNull(url)?.url?.let { add(it) }
+                }
+            }
             val relayMatch: (Note) -> Boolean = { note ->
                 val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                urls.isEmpty() || urls.any { url ->
-                    url in connectedSet || RelayUrlNormalizer.normalizeOrNull(url)?.url in connectedSet
-                }
+                urls.isEmpty() || urls.any { it in connectedSet }
             }
             var filtered = if (connectedRelays.isEmpty()) _notes.value else _notes.value.filter(relayMatch)
             val currentFollowFilter = followFilter
@@ -715,8 +757,13 @@ class NotesRepository private constructor() {
     /** Pending new notes counts for All and Following (by current relay set); separate so both filters show correct counts. */
     private fun updateDisplayedNewNotesCount() {
         try {
-            val connectedSet = connectedRelays.toSet()
-            val hasRelayFilter = connectedSet.isNotEmpty()
+            val hasRelayFilter = connectedRelays.isNotEmpty()
+            val connectedSet = if (hasRelayFilter) buildSet {
+                connectedRelays.forEach { url ->
+                    add(url)
+                    RelayUrlNormalizer.normalizeOrNull(url)?.url?.let { add(it) }
+                }
+            } else emptySet()
             val filter = followFilter
             var countAll = 0
             var countFollowing = 0
@@ -725,7 +772,7 @@ class NotesRepository private constructor() {
                 if (!hasRelayFilter) true
                 else {
                     val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                    urls.isEmpty() || urls.any { url -> url in connectedSet || RelayUrlNormalizer.normalizeOrNull(url)?.url in connectedSet }
+                    urls.isEmpty() || urls.any { it in connectedSet }
                 }
             }
             for (note in pendingSnapshot) {
@@ -775,11 +822,28 @@ class NotesRepository private constructor() {
      * Ensure subscription to kind-1 notes for ALL user relays. Pass allUserRelayUrls (not sidebar selection).
      * Display filter is set separately via connectToRelays(displayFilterUrls).
      */
+    /** Relay set from the last successful ensureSubscriptionToNotes call (idempotency guard). */
+    @Volatile private var lastEnsuredRelaySet: Set<String> = emptySet()
+
+    /** Invalidate the idempotency guard so the next ensureSubscriptionToNotes re-applies.
+     *  Call when relay config changes externally (e.g. relay manager add/remove). */
+    fun invalidateSubscriptionGuard() {
+        lastEnsuredRelaySet = emptySet()
+    }
+
     suspend fun ensureSubscriptionToNotes(allUserRelayUrls: List<String>, limit: Int = 100) {
         if (allUserRelayUrls.isEmpty()) {
             Log.w(TAG, "No relays configured")
             return
         }
+        // Idempotency guard: skip only if we're already subscribed to the same relay set,
+        // notes are loaded, AND the feed is Live (not still Loading from a previous call).
+        val relaySet = allUserRelayUrls.toSet()
+        if (relaySet == lastEnsuredRelaySet && _notes.value.isNotEmpty() && _feedSessionState.value == FeedSessionState.Live) {
+            Log.d(TAG, "ensureSubscriptionToNotes: already active for ${relaySet.size} relays, skipping")
+            return
+        }
+        lastEnsuredRelaySet = relaySet
         setSubscriptionRelays(allUserRelayUrls)
         if (_notes.value.isNotEmpty()) {
             // Resume: keep existing feed; set new cutoff so notes arriving after resume go to pending (not into feed) until user refreshes.
@@ -828,27 +892,30 @@ class NotesRepository private constructor() {
 
         try {
             applySubscriptionToStateMachine(subscriptionRelays)
-            // Wait for relays to deliver the initial burst of historical events.
-            // Poll every 100ms: transition to Live as soon as notes arrive, but wait
-            // up to 3s for slow relays. This keeps the loader visible until there's
-            // actually something to show, avoiding a flash of empty feed.
-            val maxWaitMs = 3000L
-            val pollIntervalMs = 100L
-            var waited = 0L
-            while (waited < maxWaitMs) {
-                delay(pollIntervalMs)
-                waited += pollIntervalMs
-                // Flush any buffered events so _notes reflects what we've received
-                kind1FlushJob?.cancel()
-                flushKind1Events()
-                if (_notes.value.isNotEmpty()) break
+            // Non-blocking: launch a background job that polls for initial notes.
+            // The caller (loadNotesFromFavoriteCategory) returns immediately so the
+            // viewModelScope coroutine is not blocked. This prevents the feed hang
+            // that occurred when a racing second subscription killed the first one's
+            // events mid-delivery, leaving the polling loop stuck for 3 seconds.
+            initialLoadJob?.cancel()
+            initialLoadJob = scope.launch {
+                val maxWaitMs = 3000L
+                val pollIntervalMs = 100L
+                var waited = 0L
+                while (waited < maxWaitMs) {
+                    delay(pollIntervalMs)
+                    waited += pollIntervalMs
+                    kind1FlushJob?.cancel()
+                    flushKind1Events()
+                    if (_notes.value.isNotEmpty()) break
+                }
+                latestNoteTimestampAtOpen = _notes.value.maxOfOrNull { it.timestamp } ?: feedCutoffTimestampMs
+                initialLoadComplete = true
+                _isLoading.value = false
+                _feedSessionState.value = FeedSessionState.Live
+                updateDisplayedNotes()
+                Log.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded in ${waited}ms (feed cutoff at $feedCutoffTimestampMs)")
             }
-            latestNoteTimestampAtOpen = _notes.value.maxOfOrNull { it.timestamp } ?: feedCutoffTimestampMs
-            initialLoadComplete = true
-            _isLoading.value = false
-            _feedSessionState.value = FeedSessionState.Live
-            updateDisplayedNotes()
-            Log.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded in ${waited}ms (feed cutoff at $feedCutoffTimestampMs)")
         } catch (e: Exception) {
             Log.e(TAG, "Error subscribing to notes: ${e.message}", e)
             _error.value = "Failed to load notes: ${e.message}"
@@ -856,6 +923,68 @@ class NotesRepository private constructor() {
             initialLoadComplete = true
             _feedSessionState.value = FeedSessionState.Live
             updateDisplayedNotes()
+        }
+    }
+
+    /**
+     * Load older notes beyond the current feed. Creates a temporary subscription with
+     * `until` = oldest note timestamp (relay-side cursor pagination).
+     * No `since` parameter — let the relay return whatever it has up to `limit`.
+     * Called when user scrolls to the bottom of the feed.
+     */
+    fun loadOlderNotes() {
+        if (_isLoadingOlder.value) return
+        val currentNotes = _notes.value
+        if (currentNotes.isEmpty()) return
+
+        val oldestTimestampMs = currentNotes.minOf { it.repostTimestamp ?: it.timestamp }
+        val untilSec = oldestTimestampMs / 1000
+
+        val authors = if (followFilterEnabled) followFilter?.toList() else null
+        if (followFilterEnabled && authors.isNullOrEmpty()) return
+
+        val relays = subscriptionRelays.ifEmpty { return }
+
+        _isLoadingOlder.value = true
+        olderNotesHandle?.cancel()
+        val beforeCount = currentNotes.size
+        Log.d(TAG, "Loading older notes: until=${java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.US).format(oldestTimestampMs)} from ${relays.size} relays")
+
+        val filter = if (authors != null) {
+            Filter(kinds = listOf(1), authors = authors, limit = 200, until = untilSec)
+        } else {
+            Filter(kinds = listOf(1), limit = 200, until = untilSec)
+        }
+
+        val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
+        olderNotesHandle = relayStateMachine.requestTemporarySubscription(
+            relayUrls = relays,
+            filters = listOf(filter),
+            priority = SubscriptionPriority.NORMAL,
+        ) { event ->
+            if (event.kind == 1) {
+                lastEventAt.set(System.currentTimeMillis())
+                pendingKind1Events.add(event to "")
+                scheduleKind1Flush()
+            }
+        }
+
+        // Settle-based wait: break early when stream goes quiet
+        scope.launch {
+            val deadline = System.currentTimeMillis() + OLDER_NOTES_TIMEOUT_MS
+            while (System.currentTimeMillis() < deadline) {
+                delay(300)
+                val lastAt = lastEventAt.get()
+                if (lastAt > 0) {
+                    val quietMs = System.currentTimeMillis() - lastAt
+                    if (quietMs >= OLDER_NOTES_SETTLE_MS) break
+                }
+            }
+            olderNotesHandle?.cancel()
+            olderNotesHandle = null
+            _isLoadingOlder.value = false
+            val newSize = _notes.value.size
+            Log.d(TAG, "Older notes loaded: feed now has $newSize notes (was $beforeCount, +${newSize - beforeCount})")
         }
     }
 
@@ -1008,7 +1137,6 @@ class NotesRepository private constructor() {
             val profileRelayUrls = getProfileRelayUrls()
             if (profileCache.getAuthor(reposterPubkey) == null && profileRelayUrls.isNotEmpty()) {
                 pendingProfilePubkeys.add(reposterPubkey.lowercase())
-                scheduleBatchProfileRequest(profileRelayUrls)
             }
 
             val repostTimestampMs = event.createdAt * 1000L
@@ -1035,7 +1163,6 @@ class NotesRepository private constructor() {
                 val noteAuthor = profileCache.resolveAuthor(notePubkey)
                 if (profileCache.getAuthor(notePubkey) == null && profileRelayUrls.isNotEmpty()) {
                     pendingProfilePubkeys.add(notePubkey.lowercase())
-                    scheduleBatchProfileRequest(profileRelayUrls)
                 }
 
                 val hashtags = (jsonObj["tags"] as? kotlinx.serialization.json.JsonArray)
@@ -1065,6 +1192,10 @@ class NotesRepository private constructor() {
                     repostTimestamp = repostTimestampMs
                 )
                 insertRepostNote(note, repostTimestampMs)
+                // Schedule profile fetch for accumulated repost pubkeys
+                if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {
+                    scheduleBatchProfileRequest(profileRelayUrls)
+                }
             } else {
                 // Tag-only repost: content is blank, original note ID is in the e-tag.
                 // Extract the event ID and optional relay hint from tags.
@@ -1089,59 +1220,16 @@ class NotesRepository private constructor() {
                 // Track pending fetch to avoid duplicate requests
                 if (!pendingRepostFetches.add(compositeId)) return
 
-                val filter = Filter(ids = listOf(originalNoteId), kinds = listOf(1), limit = 1)
-                val handle = relayStateMachine.requestTemporarySubscription(fetchRelays, filter) { originalEvent ->
-                    scope.launch {
-                        try {
-                            processEventMutex.withLock {
-                                val notePubkey = originalEvent.pubKey
-                                val followSet = followFilter
-                                if (followFilterEnabled && followSet != null && notePubkey.lowercase() !in followSet) return@launch
-
-                                val noteAuthor = profileCache.resolveAuthor(notePubkey)
-                                if (profileCache.getAuthor(notePubkey) == null && profileRelayUrls.isNotEmpty()) {
-                                    pendingProfilePubkeys.add(notePubkey.lowercase())
-                                    scheduleBatchProfileRequest(profileRelayUrls)
-                                }
-
-                                val noteContent = originalEvent.content
-                                val hashtags = originalEvent.tags
-                                    .filter { it.size >= 2 && it[0] == "t" }
-                                    .map { it[1] }
-                                val mediaUrls = UrlDetector.findUrls(noteContent).filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
-                                val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(noteContent)
-                                val originalTimestampMs = originalEvent.createdAt * 1000L
-
-                                val note = Note(
-                                    id = compositeId,
-                                    author = noteAuthor,
-                                    content = noteContent,
-                                    timestamp = originalTimestampMs,
-                                    likes = 0, shares = 0, comments = 0, isLiked = false,
-                                    hashtags = hashtags, mediaUrls = mediaUrls, quotedEventIds = quotedEventIds,
-                                    relayUrl = relayUrl.ifEmpty { null },
-                                    relayUrls = if (relayUrl.isNotEmpty()) listOf(relayUrl) else emptyList(),
-                                    isReply = false,
-                                    originalNoteId = originalNoteId,
-                                    repostedByAuthors = listOf(reposterAuthor),
-                                    repostTimestamp = repostTimestampMs
-                                )
-                                insertRepostNote(note, repostTimestampMs)
-                            }
-                        } catch (e: Throwable) {
-                            Log.e(TAG, "Error processing fetched repost note: ${e.message}", e)
-                        } finally {
-                            pendingRepostFetches.remove(compositeId)
-                        }
-                    }
-                }
-
-                // Auto-cancel the fetch after a timeout to avoid leaking subscriptions
-                scope.launch {
-                    delay(10_000L)
-                    handle.cancel()
-                    pendingRepostFetches.remove(compositeId)
-                }
+                // Buffer the repost for batched fetch (one subscription for all pending reposts)
+                pendingRepostBuffer[originalNoteId] = PendingRepost(
+                    originalNoteId = originalNoteId,
+                    compositeId = compositeId,
+                    reposterAuthor = reposterAuthor,
+                    repostTimestampMs = repostTimestampMs,
+                    relayUrl = relayUrl,
+                    fetchRelays = fetchRelays,
+                )
+                scheduleRepostBatchFlush()
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Error handling kind-6 repost: ${e.message}", e)
@@ -1218,6 +1306,86 @@ class NotesRepository private constructor() {
         }
     }
 
+    /** Schedule a debounced flush of the repost buffer. Resets on each new repost so we batch them. */
+    private fun scheduleRepostBatchFlush() {
+        repostBatchJob?.cancel()
+        repostBatchJob = scope.launch {
+            delay(REPOST_BATCH_DELAY_MS)
+            flushRepostBatch()
+        }
+    }
+
+    /** Flush all pending repost fetches as ONE batched subscription. */
+    private fun flushRepostBatch() {
+        if (pendingRepostBuffer.isEmpty()) return
+        // Drain the buffer
+        val batch = pendingRepostBuffer.toMap()
+        pendingRepostBuffer.clear()
+
+        // Collect all note IDs and union of all relay URLs
+        val allNoteIds = batch.keys.toList()
+        val allRelayUrls = batch.values.flatMap { it.fetchRelays }.distinct().take(8)
+        if (allNoteIds.isEmpty() || allRelayUrls.isEmpty()) return
+
+        Log.d(TAG, "Flushing repost batch: ${allNoteIds.size} notes across ${allRelayUrls.size} relays (was ${allNoteIds.size} individual subs)")
+
+        val filter = Filter(ids = allNoteIds, kinds = listOf(1), limit = allNoteIds.size)
+        val handle = relayStateMachine.requestTemporarySubscription(allRelayUrls, filter, priority = SubscriptionPriority.LOW) { originalEvent ->
+            val pending = batch[originalEvent.id] ?: return@requestTemporarySubscription
+            scope.launch {
+                try {
+                    processEventMutex.withLock {
+                        val notePubkey = originalEvent.pubKey
+                        val followSet = followFilter
+                        if (followFilterEnabled && followSet != null && notePubkey.lowercase() !in followSet) return@launch
+
+                        val noteAuthor = profileCache.resolveAuthor(notePubkey)
+                        val profRelays = getProfileRelayUrls()
+                        if (profileCache.getAuthor(notePubkey) == null && profRelays.isNotEmpty()) {
+                            pendingProfilePubkeys.add(notePubkey.lowercase())
+                        }
+
+                        val noteContent = originalEvent.content
+                        val hashtags = originalEvent.tags
+                            .filter { it.size >= 2 && it[0] == "t" }
+                            .map { it[1] }
+                        val mediaUrls = UrlDetector.findUrls(noteContent).filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
+                        val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(noteContent)
+                        val originalTimestampMs = originalEvent.createdAt * 1000L
+
+                        val note = Note(
+                            id = pending.compositeId,
+                            author = noteAuthor,
+                            content = noteContent,
+                            timestamp = originalTimestampMs,
+                            likes = 0, shares = 0, comments = 0, isLiked = false,
+                            hashtags = hashtags, mediaUrls = mediaUrls, quotedEventIds = quotedEventIds,
+                            relayUrl = pending.relayUrl.ifEmpty { null },
+                            relayUrls = if (pending.relayUrl.isNotEmpty()) listOf(pending.relayUrl) else emptyList(),
+                            isReply = false,
+                            originalNoteId = pending.originalNoteId,
+                            repostedByAuthors = listOf(pending.reposterAuthor),
+                            repostTimestamp = pending.repostTimestampMs
+                        )
+                        insertRepostNote(note, pending.repostTimestampMs)
+                    }
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Error processing batched repost note: ${e.message}", e)
+                } finally {
+                    pendingRepostFetches.remove(pending.compositeId)
+                }
+            }
+        }
+
+        // Auto-cancel after timeout to avoid leaking subscriptions
+        scope.launch {
+            delay(15_000L)
+            handle.cancel()
+            // Clean up any pending that didn't get fetched
+            batch.values.forEach { pendingRepostFetches.remove(it.compositeId) }
+        }
+    }
+
     /**
      * Schedule a batched kind-0 fetch. The debounce timer resets on each new pubkey so we accumulate
      * a full batch before firing. In-flight fetches are never cancelled — only the schedule timer is.
@@ -1279,7 +1447,6 @@ class NotesRepository private constructor() {
         val profileRelayUrls = getProfileRelayUrls()
         if (profileCache.getAuthor(pubkeyHex) == null && profileRelayUrls.isNotEmpty()) {
             pendingProfilePubkeys.add(pubkeyHex.lowercase())
-            scheduleBatchProfileRequest(profileRelayUrls)
         }
         // Request kind-0 for pubkeys mentioned in content (npub + hex) so @mentions resolve to display names
         extractPubkeysFromContent(event.content).forEach { hex ->
@@ -1287,7 +1454,6 @@ class NotesRepository private constructor() {
                 pendingProfilePubkeys.add(hex.lowercase())
             }
         }
-        if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) scheduleBatchProfileRequest(profileRelayUrls)
         val hashtags = event.tags.toList()
             .filter { tag -> tag.size >= 2 && tag[0] == "t" }
             .mapNotNull { tag -> tag.getOrNull(1) }
@@ -1411,12 +1577,12 @@ class NotesRepository private constructor() {
      */
     suspend fun fetchNoteById(noteId: String, relayUrls: List<String>): Note? {
         if (relayUrls.isEmpty()) return null
-        val filter = Filter(kinds = listOf(1, 11), ids = listOf(noteId), limit = 1)
+        val filter = Filter(kinds = listOf(1, 11, 1111), ids = listOf(noteId), limit = 1)
         var fetched: Note? = null
         val relayUrl = relayUrls.firstOrNull() ?: ""
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        val handle = stateMachine.requestTemporarySubscription(relayUrls, filter) { ev ->
-            if (ev.kind == 1 || ev.kind == 11) fetched = convertEventToNote(ev, relayUrl)
+        val handle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.HIGH) { ev ->
+            if (ev.kind == 1 || ev.kind == 11 || ev.kind == 1111) fetched = convertEventToNote(ev, relayUrl)
         }
         delay(3000)
         handle.cancel()
@@ -1455,16 +1621,17 @@ class NotesRepository private constructor() {
                         if (result !== note) updatedCount++
                         return result
                     }
-                    _notes.value = _notes.value.map { updateNote(it) }
+                    val newNotes = _notes.value.map { updateNote(it) }
                     synchronized(pendingNotesLock) {
                         val updated = _pendingNewNotes.map { updateNote(it) }
                         _pendingNewNotes.clear()
                         _pendingNewNotes.addAll(updated)
                     }
                     if (updatedCount > 0) {
+                        _notes.value = newNotes
                         Log.d(TAG, "Profile batch: updated $updatedCount notes from ${authorMap.size} profiles")
+                        scheduleDisplayUpdate()
                     }
-                    updateDisplayedNotes()
                 } catch (e: Throwable) {
                     Log.e(TAG, "updateAuthorsInNotesBatch failed: ${e.message}", e)
                 }
@@ -1511,7 +1678,7 @@ class NotesRepository private constructor() {
                         _pendingNewNotes.clear()
                         _pendingNewNotes.addAll(updated)
                     }
-                    updateDisplayedNotes()
+                    scheduleDisplayUpdate()
                     Log.d(TAG, "refreshAuthorsFromCache: updated feed with ${authorMap.size} profiles")
                 } catch (e: Throwable) {
                     Log.e(TAG, "refreshAuthorsFromCache failed: ${e.message}", e)

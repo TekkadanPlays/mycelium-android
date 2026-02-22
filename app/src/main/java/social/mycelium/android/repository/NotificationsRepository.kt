@@ -12,6 +12,7 @@ import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +69,19 @@ object NotificationsRepository {
     private var myPubkeyHex: String? = null
 
     private var prefs: SharedPreferences? = null
+
+    // ── Batched target note fetch ──────────────────────────────────────────────
+    /** Pending target note fetch entry. */
+    private data class PendingTargetFetch(
+        val noteId: String,
+        val notificationId: String,
+        val update: (NotificationData) -> (Note?) -> NotificationData,
+    )
+    /** Buffer of pending target note fetches waiting to be flushed as one subscription. */
+    private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, PendingTargetFetch>()
+    /** Debounce job for batched target note flush. */
+    private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
+    private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
 
     /** Call once from Application or Activity to enable persistent seen IDs. */
     fun init(context: Context) {
@@ -158,7 +172,7 @@ object NotificationsRepository {
             limit = 500
         )
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filter) { event -> handleEvent(event) }
+        notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.NORMAL) { event -> handleEvent(event) }
         Log.d(TAG, "Notifications subscription started for ${pubkey.take(8)}... on ${relayUrls.size} relays")
 
         // Second subscription: fetch user's kind-11 topic IDs, then subscribe for kind-1111 replies
@@ -173,7 +187,7 @@ object NotificationsRepository {
                     since = since,
                     limit = 200
                 )
-                threadRepliesHandle = stateMachine.requestTemporarySubscription(relayUrls, threadFilter) { event ->
+                threadRepliesHandle = stateMachine.requestTemporarySubscription(relayUrls, threadFilter, priority = SubscriptionPriority.NORMAL) { event ->
                     handleEvent(event)
                 }
             } else {
@@ -283,7 +297,11 @@ object NotificationsRepository {
         notificationsById[event.id] = data
         emitSorted()
         if (rootId != null) {
-            scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
+            // Fetch the direct parent (reply-to) as the target preview so the notification
+            // shows what was actually replied to, not the distant thread root.
+            // Fall back to rootId for direct replies (where parent == root).
+            val parentId = getReplyToNoteId(event) ?: rootId
+            scope.launch { fetchAndSetTargetNote(parentId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         }
     }
 
@@ -335,6 +353,20 @@ object NotificationsRepository {
         }
         if (rootTag != null) return rootTag.getOrNull(1)
         return eTags.firstOrNull()?.getOrNull(1)
+    }
+
+    /** NIP-10: direct parent (reply-to) note id from "e" tag with "reply" marker, or last "e" tag. */
+    private fun getReplyToNoteId(event: Event): String? {
+        val eTags = event.tags.filter { it.size >= 2 && it[0] == "e" }
+        if (eTags.isEmpty()) return null
+        val replyTag = eTags.firstOrNull { tag ->
+            val m3 = tag.getOrNull(3)
+            val m4 = tag.getOrNull(4)
+            m3 == "reply" || m4 == "reply"
+        }
+        if (replyTag != null) return replyTag.getOrNull(1)
+        // Positional fallback: last e-tag is the reply-to (NIP-10)
+        return if (eTags.size > 1) eTags.last().getOrNull(1) else eTags.first().getOrNull(1)
     }
 
     private val repostByTargetId = ConcurrentHashMap<String, MutableList<Pair<String, Long>>>()
@@ -512,7 +544,7 @@ object NotificationsRepository {
             since = since,
             limit = 100
         )
-        val handle = stateMachine.requestTemporarySubscription(relayUrls, filter) { ev ->
+        val handle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.BACKGROUND) { ev ->
             if (ev.kind == 11) {
                 synchronized(topicIds) { topicIds.add(ev.id) }
             }
@@ -542,51 +574,64 @@ object NotificationsRepository {
             .toList()
     }
 
-    private suspend fun fetchAndSetTargetNote(noteId: String, notificationId: String, update: (NotificationData) -> (Note?) -> NotificationData) {
+    private fun fetchAndSetTargetNote(noteId: String, notificationId: String, update: (NotificationData) -> (Note?) -> NotificationData) {
         if (subscriptionRelayUrls.isEmpty()) return
-        val filter = Filter(kinds = listOf(1, 11), ids = listOf(noteId), limit = 1)
-        var fetched: Note? = null
-        val stateMachine = RelayConnectionStateMachine.getInstance()
-        val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter) { ev ->
-            if (ev.kind == 1 || ev.kind == 11) fetched = eventToNote(ev)
+        // Buffer for batched fetch instead of creating individual subscriptions
+        pendingTargetFetches[noteId] = PendingTargetFetch(noteId, notificationId, update)
+        scheduleTargetFetchFlush()
+    }
+
+    /** Schedule a debounced flush of the target note fetch buffer. */
+    private fun scheduleTargetFetchFlush() {
+        targetFetchBatchJob?.cancel()
+        targetFetchBatchJob = scope.launch {
+            delay(TARGET_FETCH_BATCH_DELAY_MS)
+            flushTargetFetchBatch()
         }
-        delay(3000)
+    }
+
+    /** Flush all pending target note fetches as ONE batched subscription. */
+    private suspend fun flushTargetFetchBatch() {
+        if (pendingTargetFetches.isEmpty() || subscriptionRelayUrls.isEmpty()) return
+        val batch = pendingTargetFetches.toMap()
+        pendingTargetFetches.clear()
+
+        val allNoteIds = batch.keys.toList()
+        Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (was ${allNoteIds.size} individual subs)")
+
+        val filter = Filter(kinds = listOf(1, 11, 1111), ids = allNoteIds, limit = allNoteIds.size)
+        val fetched = java.util.concurrent.ConcurrentHashMap<String, Note>()
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.LOW) { ev ->
+            if (ev.kind == 1 || ev.kind == 11 || ev.kind == 1111) {
+                fetched[ev.id] = eventToNote(ev)
+            }
+        }
+        delay(5000)
         handle.cancel()
-        val note = fetched
-        if (note != null) {
-            val current = notificationsById[notificationId] ?: return
+
+        // Apply fetched notes to their notifications
+        for ((noteId, pending) in batch) {
+            val note = fetched[noteId] ?: continue
+            val current = notificationsById[pending.notificationId] ?: continue
             // Kind-7 (like): only show if target note author is the current user
             if (current.type == NotificationType.LIKE && myPubkeyHex != null) {
                 val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
                 if (targetAuthorHex != myPubkeyHex) {
-                    notificationsById.remove(notificationId)
-                    emitSorted()
-                    return
+                    notificationsById.remove(pending.notificationId)
+                    continue
                 }
             }
-            // Kind-1 (reply): only show if the note being replied to (root) was authored by the current user.
-            // This check applies only to kind-1 replies; kind-1111 topic replies are handled by the
-            // reclassification logic below (Threads vs Comments).
-            if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && myPubkeyHex != null) {
-                val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
-                if (rootAuthorHex != myPubkeyHex) {
-                    notificationsById.remove(notificationId)
-                    emitSorted()
-                    return
-                }
-            }
-            // Reclassify kind-1111 replies: if root is a kind-11 topic authored by the current user,
-            // set replyKind=11 so it routes to the "Threads" tab; otherwise keep 1111 for "Comments".
-            var updated = update(current)(note)
+            var updated = pending.update(current)(note)
             if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {
                 val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
                 if (rootAuthorHex == myPubkeyHex) {
                     updated = updated.copy(replyKind = 11, text = "${current.author?.displayName ?: "Someone"} replied to your thread")
                 }
             }
-            notificationsById[notificationId] = updated
-            emitSorted()
+            notificationsById[pending.notificationId] = updated
         }
+        emitSorted()
     }
 
     private fun eventToNote(event: Event): Note {

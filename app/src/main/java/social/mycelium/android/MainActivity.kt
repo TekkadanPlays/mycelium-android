@@ -115,7 +115,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                         add(GifDecoder.Factory())
                     }
                 }
-                .crossfade(200)
+                .crossfade(100)
                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                 .memoryCache {
@@ -183,6 +183,8 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     social.mycelium.android.repository.Nip66RelayDiscoveryRepository.refreshIfStale()
                 }
                 Lifecycle.Event.ON_STOP -> {
+                    // Pause all inline video players when app goes to background
+                    social.mycelium.android.ui.components.SharedPlayerPool.pauseAll()
                     if (!social.mycelium.android.ui.components.PipStreamManager.continueInBackground.value) {
                         social.mycelium.android.ui.components.PipStreamManager.pauseIfActive()
                     }

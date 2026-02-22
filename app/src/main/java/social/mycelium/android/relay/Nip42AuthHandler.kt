@@ -94,24 +94,32 @@ class Nip42AuthHandler(
         }
     }
 
+    /** Rate-limit "no signer" warnings: last log time per relay URL. */
+    private val lastNoSignerLogMs = mutableMapOf<String, Long>()
+    private val NO_SIGNER_LOG_INTERVAL_MS = 30_000L
+
     private fun handleAuthChallenge(url: String, challenge: String) {
+        // Dedup FIRST — prevents processing the same challenge regardless of signer state
+        val key = ChallengeKey(url, challenge)
+        if (key in respondedChallenges) return
+        respondedChallenges.add(key)
+
         val currentSigner = signer
 
-        Log.d(TAG, "AUTH challenge from $url: ${challenge.take(16)}…")
-        updateStatus(url, AuthStatus.CHALLENGED)
-
         if (currentSigner == null) {
-            Log.w(TAG, "No signer available — cannot respond to AUTH from $url")
+            // Rate-limit log spam from relays that send AUTH repeatedly
+            val now = System.currentTimeMillis()
+            val lastLog = lastNoSignerLogMs[url] ?: 0L
+            if (now - lastLog > NO_SIGNER_LOG_INTERVAL_MS) {
+                Log.w(TAG, "No signer available — cannot respond to AUTH from $url")
+                lastNoSignerLogMs[url] = now
+            }
             updateStatus(url, AuthStatus.FAILED)
             return
         }
 
-        val key = ChallengeKey(url, challenge)
-        if (key in respondedChallenges) {
-            Log.d(TAG, "Already responded to this challenge from $url, skipping")
-            return
-        }
-        respondedChallenges.add(key)
+        Log.d(TAG, "AUTH challenge from $url: ${challenge.take(16)}…")
+        updateStatus(url, AuthStatus.CHALLENGED)
 
         updateStatus(url, AuthStatus.AUTHENTICATING)
 

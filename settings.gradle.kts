@@ -22,7 +22,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Mycelium"
 include(":app")
-includeBuild("../cybin") {
+includeBuild("cybin") {
     dependencySubstitution {
         substitute(module("com.github.TekkadanPlays:cybin")).using(project(":cybin"))
     }

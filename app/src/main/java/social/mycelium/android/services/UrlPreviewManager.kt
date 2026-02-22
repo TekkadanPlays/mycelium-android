@@ -18,7 +18,8 @@ class UrlPreviewManager(
 ) {
     
     /**
-     * Process a note and add URL previews if URLs are detected
+     * Process a note and add URL previews if URLs are detected.
+     * Each fetched preview is stored to cache immediately so cancelled runs don't lose work.
      */
     suspend fun processNoteForUrlPreviews(note: Note): Note = withContext(Dispatchers.IO) {
         val urls = UrlDetector.findUrls(note.content)
@@ -39,6 +40,7 @@ class UrlPreviewManager(
                 } else {
                     val result = urlPreviewService.fetchPreview(url)
                     if (result is social.mycelium.android.data.UrlPreviewState.Loaded) {
+                        urlPreviewCache.put(url, result.previewInfo)
                         urlPreviews.add(result.previewInfo)
                     }
                 }
@@ -57,6 +59,44 @@ class UrlPreviewManager(
         notes.map { note ->
             processNoteForUrlPreviews(note)
         }
+    }
+
+    /**
+     * Enrich the top N notes with URL previews. Returns a map of noteId → previews.
+     * Uses cache for already-fetched URLs so re-runs after cancellation are fast.
+     * Only processes notes that have non-media URLs and don't already have previews.
+     */
+    suspend fun enrichTopNotes(notes: List<Note>, limit: Int = 20): Map<String, List<UrlPreviewInfo>> = withContext(Dispatchers.IO) {
+        val result = mutableMapOf<String, List<UrlPreviewInfo>>()
+        var processed = 0
+        for (note in notes) {
+            if (processed >= limit) break
+            val urls = UrlDetector.findUrls(note.content)
+            val embeddedMedia = note.mediaUrls.toSet()
+            val linkUrls = urls.filter { it !in embeddedMedia && !UrlDetector.isImageUrl(it) && !UrlDetector.isVideoUrl(it) }.take(2)
+            if (linkUrls.isEmpty()) continue
+
+            processed++
+            val previews = mutableListOf<UrlPreviewInfo>()
+            for (url in linkUrls) {
+                try {
+                    val cached = urlPreviewCache.get(url)
+                    if (cached != null) {
+                        previews.add(cached)
+                    } else {
+                        val state = urlPreviewService.fetchPreview(url)
+                        if (state is social.mycelium.android.data.UrlPreviewState.Loaded) {
+                            urlPreviewCache.put(url, state.previewInfo)
+                            previews.add(state.previewInfo)
+                        }
+                    }
+                } catch (_: Exception) { }
+            }
+            if (previews.isNotEmpty()) {
+                result[note.id] = previews
+            }
+        }
+        result
     }
     
     /**

@@ -150,6 +150,13 @@ class FeedStateViewModel : ViewModel() {
     /**
      * Get display name for current relay selection only (Global vs category vs relay). Following filter is separate.
      */
+    /**
+     * Set engagement filter for home feed (null = all, "replies" / "likes" / "zaps").
+     */
+    fun setHomeEngagementFilter(filter: String?) {
+        _homeFeedState.update { it.copy(engagementFilter = filter) }
+    }
+
     fun getHomeDisplayName(): String {
         val state = _homeFeedState.value
         return when {
@@ -215,6 +222,9 @@ data class FeedState(
 
     // Sidebar drawer state
     val isSidebarOpen: Boolean = false,
+
+    // Engagement filter: null = all, "replies" / "likes" / "zaps" (persists across navigations)
+    val engagementFilter: String? = null,
 
     // Topics: selected hashtag and whether viewing that hashtag's feed (persists across tab switch)
     val selectedHashtag: String? = null,

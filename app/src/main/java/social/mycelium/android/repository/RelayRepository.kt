@@ -26,6 +26,7 @@ import social.mycelium.android.network.MyceliumHttpClient
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -371,15 +372,26 @@ class RelayRepository(private val context: Context) {
                 limit = 1
             )
             val latestEventRef = AtomicReference<Event?>(null)
+            val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
             val stateMachine = RelayConnectionStateMachine.getInstance()
-            val handle = stateMachine.requestTemporarySubscription(cacheUrls, filter) { event ->
+            val handle = stateMachine.requestTemporarySubscription(cacheUrls, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
                 if (event.kind == 10002) {
                     latestEventRef.getAndUpdate { current ->
                         if (current == null || event.createdAt > current.createdAt) event else current
                     }
+                    lastEventAt.set(System.currentTimeMillis())
                 }
             }
-            delay(5000L)
+            // Settle-based wait: break early when stream goes quiet (1s no new events)
+            val deadline = System.currentTimeMillis() + 5_000L
+            while (System.currentTimeMillis() < deadline) {
+                delay(200)
+                val lastAt = lastEventAt.get()
+                if (lastAt > 0) {
+                    val quietMs = System.currentTimeMillis() - lastAt
+                    if (quietMs >= 1_000L) break
+                }
+            }
             handle.cancel()
             val event = latestEventRef.get()
             if (event == null) {

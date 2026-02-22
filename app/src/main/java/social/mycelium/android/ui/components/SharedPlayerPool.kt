@@ -112,4 +112,28 @@ object SharedPlayerPool {
      * Get the player for [url] without changing ownership. Returns null if not pooled.
      */
     fun peek(url: String): ExoPlayer? = pool[url]?.player
+
+    /**
+     * Pause ALL pooled players (e.g. when app goes to background).
+     * Saves current positions so they can resume cleanly.
+     */
+    fun pauseAll() {
+        for ((url, entry) in pool) {
+            if (entry.player.isPlaying) {
+                VideoPositionCache.set(url, entry.player.currentPosition)
+                entry.player.pause()
+            }
+        }
+    }
+
+    /**
+     * Release ALL pooled players (e.g. on app destruction).
+     */
+    fun releaseAll() {
+        for ((url, entry) in pool) {
+            VideoPositionCache.set(url, entry.player.currentPosition)
+            entry.player.release()
+        }
+        pool.clear()
+    }
 }

@@ -115,12 +115,14 @@ data class DiscoveredRelay(
     val isPrivateInbox: Boolean get() = RelayType.PRIVATE_INBOX in types
     val isDirectory: Boolean get() = RelayType.DIRECTORY in types
 
-    /** Readable software name (strip git URLs, lowercase, cap length, filter spam) */
-    val softwareShort: String? get() = software?.let { sw ->
+    /** Best available RTT value: prefers rttRead, falls back to rttOpen, then rttWrite. */
+    val bestRtt: Int? get() = avgRttRead ?: avgRttOpen ?: avgRttWrite
+
+    /** Readable software name (strip git URLs, lowercase, cap length, filter spam). Computed once at construction. */
+    val softwareShort: String? = software?.let { sw ->
         val cleaned = sw.removePrefix("git+").removePrefix("https://github.com/")
             .removePrefix("http://").removeSuffix(".git")
             .substringAfterLast("/").lowercase().trim()
-        // Filter out spam: if cleaned name is still absurdly long, discard it
         if (cleaned.isBlank() || cleaned.length > 40) null
         else cleaned.take(30)
     }

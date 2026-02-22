@@ -373,6 +373,9 @@ private fun NoteCardContent(
                             is NoteContentBlock.QuotedNote -> {
                                 // Inline quoted notes handled by standalone section below
                             }
+                            is NoteContentBlock.LiveEventReference -> {
+                                // Live event references handled like quoted notes
+                            }
                         }
                     }
                     if (note.quotedEventIds.isNotEmpty()) {
@@ -414,9 +417,17 @@ private fun NoteCardContent(
                                         )
                                     }
 
+                                    // Outer wrapper: matches body text background
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                        shape = androidx.compose.ui.graphics.RectangleShape
+                                    ) {
+                                    // Inner quote surface
                                     Surface(
                                         modifier = Modifier
                                             .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 4.dp)
                                             .clickable {
                                                 val quotedNote = Note(
                                                     id = meta.eventId,
@@ -431,9 +442,10 @@ private fun NoteCardContent(
                                                 )
                                                 onNoteClick(quotedNote)
                                             },
-                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        border = BorderStroke(0.dp, Color.Transparent),
-                                        shape = androidx.compose.ui.graphics.RectangleShape
+                                        color = MaterialTheme.colorScheme.surface,
+                                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                                        shape = MaterialTheme.shapes.small,
+                                        shadowElevation = 0.dp
                                     ) {
                                         Row(modifier = Modifier.fillMaxWidth()) {
                                             // Left accent bar
@@ -441,7 +453,7 @@ private fun NoteCardContent(
                                                 modifier = Modifier
                                                     .width(3.dp)
                                                     .fillMaxHeight()
-                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
+                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
                                             )
                                         Column(modifier = Modifier.padding(10.dp).weight(1f)) {
                                             // ── Header: author (left) ──
@@ -561,6 +573,14 @@ private fun NoteCardContent(
                                                             modifier = Modifier.padding(vertical = 2.dp)
                                                         )
                                                     }
+                                                    is NoteContentBlock.LiveEventReference -> {
+                                                        Text(
+                                                            text = "Live event: ${qBlock.eventId.take(8)}…",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.primary,
+                                                            modifier = Modifier.padding(vertical = 2.dp)
+                                                        )
+                                                    }
                                                 }
                                             }
 
@@ -579,6 +599,7 @@ private fun NoteCardContent(
                                             }
                                         }
                                         }
+                                    }
                                     }
                                 }
                             }
@@ -607,10 +628,8 @@ private fun NoteCardContent(
                 }
                 val mediaContainerModifier = if (mediaContainerRatio != null) {
                     Modifier.fillMaxWidth().aspectRatio(mediaContainerRatio!!.coerceIn(0.3f, 3.0f))
-                        .animateContentSize()
                 } else {
                     Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 480.dp)
-                        .animateContentSize()
                 }
                 Box(modifier = mediaContainerModifier) {
                     HorizontalPager(
@@ -661,22 +680,6 @@ private fun NoteCardContent(
                                         }
                                     }
                                 )
-                                IconButton(
-                                    onClick = { onOpenImageViewer(mediaList, page) },
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(8.dp)
-                                        .size(36.dp),
-                                    colors = IconButtonDefaults.iconButtonColors(
-                                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                                        contentColor = MaterialTheme.colorScheme.onSurface
-                                    )
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Outlined.Search,
-                                        contentDescription = "Open in viewer"
-                                    )
-                                }
                             }
                         }
                     }
@@ -845,7 +848,8 @@ private fun NoteCardContent(
                     onSendZap = { amount, zapType, message ->
                         showCustomZapDialog = false
                         onCustomZapSend?.invoke(note, amount, zapType, message)
-                    }
+                    },
+                    onZapSettings = onZapSettings
                 )
             }
         }

@@ -8,6 +8,7 @@ import social.mycelium.android.repository.NwcConfig
 import social.mycelium.android.repository.NwcConfigRepository
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import com.example.cybin.core.hexToByteArray
 import com.example.cybin.core.nowUnixSeconds
 import com.example.cybin.crypto.KeyPair
@@ -110,6 +111,7 @@ object NwcPaymentManager {
             subscriptionHandle = rsm.requestTemporarySubscription(
                 relayUrls = listOf(config.relay),
                 filter = filter,
+                priority = SubscriptionPriority.HIGH,
                 onEvent = { event: Event ->
                     if (event.kind == LnZapPaymentResponseEvent.KIND) {
                         handleResponseEvent(event, nwcSigner, paymentRequest.id, responseDeferred)

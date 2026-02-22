@@ -273,6 +273,8 @@ sealed class NoteContentBlock {
     data class MediaGroup(val urls: List<String>) : NoteContentBlock()
     /** An inline quoted note reference (nostr:nevent1.../nostr:note1...) at its position in the text flow. */
     data class QuotedNote(val eventId: String) : NoteContentBlock()
+    /** An inline NIP-53 live event reference (nevent1 with kind=30311). */
+    data class LiveEventReference(val eventId: String, val author: String?, val relays: List<String>) : NoteContentBlock()
 }
 
 /**
@@ -295,7 +297,7 @@ fun buildNoteContentWithInlinePreviews(
     val previewByUrl = urlPreviews.associateBy { it.url }
 
     // Build an ordered list of "markers" – each is either a media URL or a link-preview URL at a position
-    data class Marker(val start: Int, val end: Int, val url: String, val isMedia: Boolean, val preview: UrlPreviewInfo?, val quotedEventId: String? = null)
+    data class Marker(val start: Int, val end: Int, val url: String, val isMedia: Boolean, val preview: UrlPreviewInfo?, val quotedEventId: String? = null, val liveEventAuthor: String? = null, val liveEventRelays: List<String>? = null)
     // consumedUrls are hidden from text (like media) but not rendered as media groups
     val allHiddenUrls = mediaUrls + consumedUrls
 
@@ -305,12 +307,22 @@ fun buildNoteContentWithInlinePreviews(
         val fullUri = if (match.value.startsWith("nostr:", ignoreCase = true)) match.value else "nostr:${match.value}"
         try {
             val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute(fullUri) ?: return@mapNotNull null
-            val hex = when (val entity = parsed.entity) {
-                is com.example.cybin.nip19.NEvent -> entity.hex
-                is com.example.cybin.nip19.NNote -> entity.hex
+            when (val entity = parsed.entity) {
+                is com.example.cybin.nip19.NEvent -> {
+                    val hex = entity.hex
+                    if (hex.length != 64) return@mapNotNull null
+                    if (entity.kind == 30311) {
+                        Marker(match.range.first, match.range.last + 1, match.value, false, null, hex, entity.author, entity.relays)
+                    } else {
+                        Marker(match.range.first, match.range.last + 1, match.value, false, null, hex)
+                    }
+                }
+                is com.example.cybin.nip19.NNote -> {
+                    val hex = entity.hex
+                    if (hex.length == 64) Marker(match.range.first, match.range.last + 1, match.value, false, null, hex) else null
+                }
                 else -> null
             }
-            if (hex != null && hex.length == 64) Marker(match.range.first, match.range.last + 1, match.value, false, null, hex) else null
         } catch (_: Exception) { null }
     }.toList()
 
@@ -351,9 +363,13 @@ fun buildNoteContentWithInlinePreviews(
     while (i < markers.size) {
         val m = markers[i]
         if (m.quotedEventId != null) {
-            // Inline quoted note – emit text before it, then the quote block
+            // Inline quoted note or live event reference – emit text before it, then the block
             emitTextBlock(cursor, m.start)
-            blocks.add(NoteContentBlock.QuotedNote(m.quotedEventId))
+            if (m.liveEventRelays != null) {
+                blocks.add(NoteContentBlock.LiveEventReference(m.quotedEventId, m.liveEventAuthor, m.liveEventRelays))
+            } else {
+                blocks.add(NoteContentBlock.QuotedNote(m.quotedEventId))
+            }
             cursor = m.end
             i++
         } else if (m.isMedia) {

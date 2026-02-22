@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -70,9 +72,14 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.outlined.ExpandLess
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -195,6 +202,26 @@ fun LiveStreamScreen(
             }
             prepare()
             playWhenReady = true
+        }
+    }
+
+    // Pause player when app goes to background (unless handed off to PiP)
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    if (player != null && !handedOffToPip) {
+        DisposableEffect(lifecycleOwner, player) {
+            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                when (event) {
+                    androidx.lifecycle.Lifecycle.Event.ON_STOP -> {
+                        if (!handedOffToPip && player.isPlaying) player.pause()
+                    }
+                    androidx.lifecycle.Lifecycle.Event.ON_START -> {
+                        if (!handedOffToPip) player.play()
+                    }
+                    else -> {}
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
     }
 
@@ -332,6 +359,7 @@ fun LiveStreamScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .imePadding()
         ) {
             // ── Top section: video + stream info (not scrollable, fixed) ──
             LiveStreamPlayerView(
@@ -412,16 +440,63 @@ fun LiveStreamScreen(
                 }
             }
 
-            // Summary / description (if provided)
+            // Summary / bio dropdown
             if (!activity.summary.isNullOrBlank()) {
-                Text(
-                    text = activity.summary,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
-                )
+                var bioExpanded by remember { mutableStateOf(false) }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { bioExpanded = !bioExpanded }
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Outlined.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = if (bioExpanded) "Hide details" else "Show details",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Icon(
+                        if (bioExpanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+                androidx.compose.animation.AnimatedVisibility(visible = bioExpanded) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 4.dp)) {
+                        Text(
+                            text = activity.summary,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        // Hashtags
+                        if (activity.hashtags.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = activity.hashtags.joinToString(" ") { "#$it" },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                            )
+                        }
+                        // Participants
+                        if (activity.participants.size > 1) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = "${activity.participants.size} participants",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             }
 
             HorizontalDivider(modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
@@ -529,25 +604,7 @@ private fun LiveStreamPlayerView(
                 }
             )
 
-            // PiP button overlay
-            IconButton(
-                onClick = onPipClick,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .size(36.dp)
-                    .background(
-                        Color.Black.copy(alpha = 0.5f),
-                        RoundedCornerShape(8.dp)
-                    )
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.OpenInNew,
-                    contentDescription = "Picture in Picture",
-                    tint = Color.White,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+            // PiP auto-activates on back gesture; no manual PiP button needed
         }
     } else if (showUnavailable) {
         Box(
@@ -859,7 +916,8 @@ private fun LiveChatInput(
 
             DropdownMenu(
                 expanded = showRelayMenu,
-                onDismissRequest = { showRelayMenu = false }
+                onDismissRequest = { showRelayMenu = false },
+                modifier = Modifier.heightIn(max = 300.dp)
             ) {
                 relayUrls.forEach { url ->
                     val isEnabled = relayEnabled[url] ?: true
@@ -872,8 +930,10 @@ private fun LiveChatInput(
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Checkbox(
                                     checked = isEnabled,
-                                    onCheckedChange = { onRelayToggle(url) }
+                                    onCheckedChange = { onRelayToggle(url) },
+                                    modifier = Modifier.size(24.dp)
                                 )
+                                Spacer(Modifier.width(4.dp))
                                 Text(
                                     text = displayName,
                                     style = MaterialTheme.typography.bodySmall,

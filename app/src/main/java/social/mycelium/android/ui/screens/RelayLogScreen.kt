@@ -63,7 +63,9 @@ private val RELEVANT_LOG_TYPES = setOf(
 @Composable
 fun RelayLogScreen(
     relayUrl: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    /** Called when user wants to add this relay to a relay profile. Passes (relayUrl, profileType). */
+    onAddToRelayProfile: ((relayUrl: String, profileType: String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
@@ -116,8 +118,36 @@ fun RelayLogScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = { RelayLogBuffer.clearLogsForRelay(relayUrl) }) {
-                            Icon(Icons.Outlined.Delete, contentDescription = "Clear logs")
+                        var showAddMenu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { showAddMenu = true }) {
+                                Icon(Icons.Outlined.Add, contentDescription = "Add to my relays")
+                            }
+                            DropdownMenu(
+                                expanded = showAddMenu,
+                                onDismissRequest = { showAddMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Add to Outbox Relays") },
+                                    leadingIcon = { Icon(Icons.Outlined.Upload, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                    onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "outbox") }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add to Inbox Relays") },
+                                    leadingIcon = { Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                    onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "inbox") }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add to Indexer Relays") },
+                                    leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                    onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "indexer") }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add to Feed Relays") },
+                                    leadingIcon = { Icon(Icons.Outlined.RssFeed, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                    onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "feed") }
+                                )
+                            }
                         }
                     },
                     windowInsets = WindowInsets(0),

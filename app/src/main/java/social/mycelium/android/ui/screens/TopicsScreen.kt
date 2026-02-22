@@ -59,6 +59,7 @@ import social.mycelium.android.ui.components.BottomNavDestinations
 import social.mycelium.android.ui.components.ModernSearchBar
 import social.mycelium.android.ui.components.GlobalSidebar
 import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.ActionRowSchema
 import social.mycelium.android.ui.components.LiveActivityCard
 import social.mycelium.android.ui.components.LiveActivityRow
 import social.mycelium.android.ui.components.LoadingAnimation
@@ -119,6 +120,8 @@ fun TopicsScreen(
     onSidebarRelayDiscoveryClick: () -> Unit = {},
     onNavigateToCreateTopic: (String?) -> Unit = {},
     onRelayClick: (String) -> Unit = {},
+    /** Navigate to the full-page zap settings screen. */
+    onNavigateToZapSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -198,46 +201,47 @@ fun TopicsScreen(
     val activeProfile = relayUiState.relayProfiles.firstOrNull { it.isActive }
     val relayCategories = activeProfile?.categories ?: emptyList()
 
+    // Synchronous relay URLs from local storage — available instantly before async ViewModel loads.
+    // Prevents "No Relays" / loading spinner flash while ViewModel is still loading.
+    val savedRelayUrls = remember(currentAccount) {
+        currentAccount?.toHexKey()?.let { pubkey ->
+            val categories = storageManager.loadCategories(pubkey)
+            val subscribed = categories.filter { it.isSubscribed }
+                .flatMap { it.relays }.map { it.url }.distinct()
+            subscribed.ifEmpty {
+                categories.flatMap { it.relays }.map { it.url }.distinct()
+            }
+        } ?: emptyList()
+    }
+    val hasSavedRelayConfig = savedRelayUrls.isNotEmpty()
+
     // Track if we've already loaded relays on this mount — reset on account change
     var hasLoadedRelays by remember { mutableStateOf(false) }
     LaunchedEffect(currentAccount) { hasLoadedRelays = false }
 
-    // Auto-load topics: subscription = all relays, display = sidebar selection
-    LaunchedEffect(relayCategories, currentAccount, topicsFeedState.isGlobal, topicsFeedState.selectedCategoryId, topicsFeedState.selectedRelayUrl, onboardingComplete) {
+    // Auto-load topics: use ViewModel relay categories when available, fall back to sync storage URLs.
+    // This ensures topics load immediately even before the async ViewModel finishes.
+    LaunchedEffect(relayCategories, savedRelayUrls, currentAccount, topicsFeedState.isGlobal, topicsFeedState.selectedCategoryId, topicsFeedState.selectedRelayUrl, onboardingComplete) {
         if (!onboardingComplete) return@LaunchedEffect
-        if (relayCategories.isNotEmpty() && !hasLoadedRelays) {
-            val allUserRelayUrls = relayCategories.flatMap { it.relays }.map { it.url }.distinct()
-            val displayUrls = when {
-                topicsFeedState.isGlobal -> allUserRelayUrls
-                topicsFeedState.selectedCategoryId != null -> relayCategories
-                    .firstOrNull { it.id == topicsFeedState.selectedCategoryId }?.relays?.map { it.url } ?: emptyList()
-                topicsFeedState.selectedRelayUrl != null -> listOf(topicsFeedState.selectedRelayUrl!!)
-                else -> allUserRelayUrls
-            }
-            if (allUserRelayUrls.isNotEmpty()) {
-                topicsViewModel.loadTopicsFromRelays(allUserRelayUrls, displayUrls)
-                hasLoadedRelays = true
-            }
-        }
-    }
+        if (hasLoadedRelays) return@LaunchedEffect
 
-    // Ensure relays are recalled when navigating back to topics feed
-    LaunchedEffect(Unit, relayCategories, topicsFeedState.isGlobal, topicsFeedState.selectedCategoryId, topicsFeedState.selectedRelayUrl, onboardingComplete) {
-        if (!onboardingComplete) return@LaunchedEffect
-        if (!hasLoadedRelays && relayCategories.isNotEmpty() && topicsUiState.hashtagStats.isEmpty() && !topicsUiState.isLoading) {
-            val allUserRelayUrls = relayCategories.flatMap { it.relays }.map { it.url }.distinct()
-            val displayUrls = when {
-                topicsFeedState.isGlobal -> allUserRelayUrls
-                topicsFeedState.selectedCategoryId != null -> relayCategories
-                    .firstOrNull { it.id == topicsFeedState.selectedCategoryId }?.relays?.map { it.url } ?: emptyList()
-                topicsFeedState.selectedRelayUrl != null -> listOf(topicsFeedState.selectedRelayUrl!!)
-                else -> allUserRelayUrls
-            }
-            if (allUserRelayUrls.isNotEmpty()) {
-                topicsViewModel.loadTopicsFromRelays(allUserRelayUrls, displayUrls)
-                hasLoadedRelays = true
-            }
+        // Prefer ViewModel categories (has sidebar selection info), fall back to sync storage
+        val allUserRelayUrls = if (relayCategories.isNotEmpty()) {
+            relayCategories.flatMap { it.relays }.map { it.url }.distinct()
+        } else {
+            savedRelayUrls
         }
+        if (allUserRelayUrls.isEmpty()) return@LaunchedEffect
+
+        val displayUrls = when {
+            topicsFeedState.isGlobal -> allUserRelayUrls
+            topicsFeedState.selectedCategoryId != null && relayCategories.isNotEmpty() -> relayCategories
+                .firstOrNull { it.id == topicsFeedState.selectedCategoryId }?.relays?.map { it.url } ?: allUserRelayUrls
+            topicsFeedState.selectedRelayUrl != null -> listOf(topicsFeedState.selectedRelayUrl!!)
+            else -> allUserRelayUrls
+        }
+        topicsViewModel.loadTopicsFromRelays(allUserRelayUrls, displayUrls)
+        hasLoadedRelays = true
     }
 
     // Fetch user's NIP-65 relay list when account changes
@@ -301,8 +305,6 @@ fun TopicsScreen(
     // Zap menu state - shared across all note cards
     var shouldCloseZapMenus by remember { mutableStateOf(false) }
 
-    // Zap configuration dialog state
-    var showZapConfigDialog by remember { mutableStateOf(false) }
     var showWalletConnectDialog by remember { mutableStateOf(false) }
 
     // Relay orb tap navigates to relay log page via onRelayClick callback
@@ -558,11 +560,14 @@ fun TopicsScreen(
                     .padding(paddingValues)
             ) {
                 // Topics/Hashtag Discovery Grid
-                // Show "No Relays" only when we truly have no relay config.
-                // If relayCategories exist but topics haven't loaded yet, show loading.
-                val hasRelayConfig = relayCategories.isNotEmpty()
-                if (topicsUiState.connectedRelays.isEmpty() && !hasRelayConfig && !topicsUiState.isLoading) {
-                    // No relays configured at all
+                // Priority: show cached data first, only fall back to empty/loading states when no data exists.
+                val hasRelayConfig = relayCategories.isNotEmpty() || hasSavedRelayConfig
+                val hasTopicData = topicsUiState.hashtagStats.isNotEmpty()
+                val isStillLoading = topicsUiState.isLoading || topicsUiState.isReceivingEvents ||
+                    (topicsUiState.connectedRelays.isEmpty() && hasRelayConfig)
+
+                if (!hasRelayConfig && !hasTopicData) {
+                    // No relays configured at all and no cached data
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -608,56 +613,20 @@ fun TopicsScreen(
                             }
                         }
                     }
-                } else if (topicsUiState.connectedRelays.isEmpty() && hasRelayConfig) {
-                    // Relays configured but topics haven't loaded yet — show loading
+                } else if (!hasTopicData && isStillLoading) {
+                    // No data yet but loading — simple Material3 spinner
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            LoadingAnimation(indicatorSize = 32.dp)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Loading topics\u2026",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(32.dp),
+                            strokeWidth = 2.5.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
-                } else if (topicsUiState.isLoading && topicsUiState.hashtagStats.isEmpty()) {
-                    // Loading state - connecting to relays
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            LoadingAnimation(indicatorSize = 32.dp)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Connecting to relays...",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                } else if (topicsUiState.isReceivingEvents && topicsUiState.hashtagStats.isEmpty()) {
-                    // Receiving events but haven't gotten any topics yet
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            LoadingAnimation(indicatorSize = 32.dp)
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "Retrieving topics from ${topicsUiState.connectedRelays.size} relay${if (topicsUiState.connectedRelays.size > 1) "s" else ""}...",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                } else if (topicsUiState.hashtagStats.isEmpty()) {
-                    // Empty state
+                } else if (!hasTopicData) {
+                    // Finished loading but truly no topics found
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -680,7 +649,7 @@ fun TopicsScreen(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "No topics found from the selected relay${if (topicsUiState.connectedRelays.size > 1) "s" else ""}. Try selecting different relays or check back later.",
+                                text = "No topics found from the selected relays. Try selecting different relays or check back later.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
@@ -689,8 +658,22 @@ fun TopicsScreen(
                     }
                 } else {
                     // Main content area
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        if (!isViewingHashtagFeed) {
+                    AnimatedContent(
+                        targetState = isViewingHashtagFeed,
+                        transitionSpec = {
+                            if (targetState) {
+                                // Entering feed: slide in from right + fade
+                                (slideInHorizontally { it } + fadeIn()) togetherWith
+                                    (slideOutHorizontally { -it / 3 } + fadeOut())
+                            } else {
+                                // Returning to list: slide in from left + fade
+                                (slideInHorizontally { -it } + fadeIn()) togetherWith
+                                    (slideOutHorizontally { it / 3 } + fadeOut())
+                            }
+                        },
+                        label = "topics_content"
+                    ) { viewingFeed ->
+                        if (!viewingFeed) {
                             // Hashtag list - new topics counter, then full width cards
                             LazyColumn(
                                 state = listState,
@@ -862,10 +845,11 @@ fun TopicsScreen(
                                                 accountStateViewModel.sendZap(n, amount, zapType, msg)
                                             },
                                             shouldCloseZapMenus = shouldCloseZapMenus,
-                                            onZapSettings = { showZapConfigDialog = true },
+                                            onZapSettings = { onNavigateToZapSettings() },
                                             onRelayClick = onRelayClick,
                                             accountNpub = currentAccount?.npub,
                                             extraMoreMenuItems = moderationMenuItems,
+                                            actionRowSchema = ActionRowSchema.KIND11_FEED,
                                             showHashtagsSection = false,
                                             modifier = Modifier.fillMaxWidth()
                                         )
@@ -892,16 +876,7 @@ fun TopicsScreen(
         )
     }
 
-    // Zap configuration dialog
-    if (showZapConfigDialog) {
-        social.mycelium.android.ui.components.ZapConfigurationDialog(
-            onDismiss = { showZapConfigDialog = false },
-            onOpenWalletSettings = {
-                showZapConfigDialog = false
-                showWalletConnectDialog = true
-            }
-        )
-    }
+    // Zap configuration: now navigates to zap_settings page via onNavigateToZapSettings
 
     // Wallet Connect dialog
     if (showWalletConnectDialog) {

@@ -73,6 +73,17 @@ class DashboardViewModel : ViewModel() {
         private const val TAG = "DashboardViewModel"
     }
 
+    /** Debounced enrichment job: only one runs at a time, after list stabilizes, so UI stays fast. */
+    private var enrichmentJob: Job? = null
+    /** Note IDs already enriched (or attempted) — avoids redundant HTTP fetches on re-scroll. */
+    private val enrichedNoteIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** How many notes ahead of the last visible item to prefetch URL previews for. */
+    private val PREFETCH_AHEAD = 15
+    /** Minimum interval between prefetch runs (ms) to avoid thrashing during fast scroll. */
+    private val PREFETCH_DEBOUNCE_MS = 400L
+    /** Current visible range reported by the UI. */
+    private val _visibleRange = MutableStateFlow(0 to 0)
+
     init {
         loadInitialData()
         // Defer WebSocket: feed is relay-driven; connect only when a real backend exists (reduces startup/no-op connection)
@@ -162,12 +173,18 @@ class DashboardViewModel : ViewModel() {
         }
     }
 
-    /** Debounced enrichment job: only one runs at a time, after list stabilizes, so UI stays fast. */
-    private var enrichmentJob: Job? = null
+    /**
+     * Called by the UI (DashboardScreen) when the visible item range changes.
+     * Drives the viewport-aware URL preview prefetch.
+     */
+    fun updateVisibleRange(firstVisible: Int, lastVisible: Int) {
+        _visibleRange.value = firstVisible to lastVisible
+    }
 
     /**
-     * Observe notes from the NotesRepository; emit immediately for fast render; enrich with URL previews after list stabilizes.
-     * Enrichment is triggered from displayedNotes (debounced at 150ms) so profile batch updates don't cancel it.
+     * Observe notes from the NotesRepository; emit immediately for fast render; enrich with URL previews ahead of scroll.
+     * Enrichment is viewport-aware: prefetches URL previews for notes below the current viewport so they're
+     * ready by the time the user scrolls to them.
      */
     private fun observeNotesFromRepository() {
         // Fast path: push notes to UI immediately
@@ -193,28 +210,43 @@ class DashboardViewModel : ViewModel() {
             }
         }
 
-        // Enrichment: triggered from displayedNotes which is already debounced (150ms).
-        // This prevents profile batch updates from cancelling enrichment repeatedly.
+        // Viewport-aware URL preview prefetch: enriches notes from firstVisible through
+        // lastVisible + PREFETCH_AHEAD. Debounced to avoid thrashing during fast scroll.
+        // Already-enriched note IDs are skipped. Results cached per-URL in UrlPreviewCache.
         viewModelScope.launch {
             try {
-                notesRepository.displayedNotes.collect { displayed ->
-                    if (displayed.isEmpty()) return@collect
+                _visibleRange.collect { (firstVisible, lastVisible) ->
                     enrichmentJob?.cancel()
                     enrichmentJob = viewModelScope.launch {
                         try {
-                            delay(800)
-                            val snapshot = displayed.map { it.id }
-                            val enriched = withContext(Dispatchers.IO) {
-                                urlPreviewManager.processNotesForUrlPreviews(displayed)
+                            delay(PREFETCH_DEBOUNCE_MS)
+                            val displayed = notesRepository.displayedNotes.value
+                            if (displayed.isEmpty()) return@launch
+
+                            // Prefetch window: from firstVisible to lastVisible + PREFETCH_AHEAD
+                            val prefetchEnd = (lastVisible + PREFETCH_AHEAD).coerceAtMost(displayed.size)
+                            val prefetchStart = firstVisible.coerceAtLeast(0)
+                            if (prefetchStart >= prefetchEnd) return@launch
+
+                            val windowNotes = displayed.subList(prefetchStart, prefetchEnd)
+                                .filter { it.id !in enrichedNoteIds }
+                            if (windowNotes.isEmpty()) return@launch
+
+                            // Mark as attempted before fetching to avoid duplicate runs
+                            windowNotes.forEach { enrichedNoteIds.add(it.id) }
+
+                            val previews = withContext(Dispatchers.IO) {
+                                urlPreviewManager.enrichTopNotes(windowNotes, limit = windowNotes.size)
                             }
-                            if (_uiState.value.notes.map { it.id }.take(snapshot.size) == snapshot) {
-                                val previewsByNoteId = enriched.associate { it.id to it.urlPreviews }
-                                _uiState.update { it.copy(urlPreviewsByNoteId = previewsByNoteId) }
+                            if (previews.isNotEmpty()) {
+                                _uiState.update { state ->
+                                    state.copy(urlPreviewsByNoteId = state.urlPreviewsByNoteId + previews)
+                                }
                             }
                         } catch (e: kotlinx.coroutines.CancellationException) {
-                            // Normal: enrichment cancelled by newer emission — not an error
+                            // Normal: enrichment cancelled by newer scroll position
                         } catch (e: Throwable) {
-                            Log.e(TAG, "Enrichment failed: ${e.message}", e)
+                            Log.e(TAG, "Prefetch enrichment failed: ${e.message}", e)
                         }
                     }
                 }
@@ -223,6 +255,19 @@ class DashboardViewModel : ViewModel() {
             } catch (e: Throwable) {
                 Log.e(TAG, "Enrichment flow failed: ${e.message}", e)
             }
+        }
+
+        // Initial enrichment: when feed first loads, prefetch the first batch of notes
+        // before any scroll events arrive.
+        viewModelScope.launch {
+            try {
+                notesRepository.displayedNotes.collect { displayed ->
+                    if (displayed.isNotEmpty() && enrichedNoteIds.isEmpty()) {
+                        delay(800)
+                        updateVisibleRange(0, 0)
+                    }
+                }
+            } catch (_: kotlinx.coroutines.CancellationException) { }
         }
 
         viewModelScope.launch {

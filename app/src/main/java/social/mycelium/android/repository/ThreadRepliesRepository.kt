@@ -3,6 +3,7 @@ package social.mycelium.android.repository
 import android.util.Log
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.ThreadReply
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import social.mycelium.android.repository.ProfileMetadataCache
@@ -94,10 +95,14 @@ class ThreadRepliesRepository {
      * @param relayUrls Optional list of relays to query (uses connected relays if not provided)
      * @param limit Maximum number of replies to fetch
      */
+    /** Tracks which root notes are kind-11 topics (for accepting kind-1 replies alongside kind-1111). */
+    private val topicRootIds = mutableSetOf<String>()
+
     suspend fun fetchRepliesForNote(
         noteId: String,
         relayUrls: List<String>? = null,
-        limit: Int = 100
+        limit: Int = 100,
+        rootKind: Int = 1111
     ) {
         val targetRelays = relayUrls ?: connectedRelays
         if (targetRelays.isEmpty()) {
@@ -123,18 +128,22 @@ class ThreadRepliesRepository {
             _replies.value = _replies.value + (noteId to emptyList())
         }
 
+        // Track kind-11 roots so handleReplyEvent knows to accept kind-1 replies too
+        if (rootKind == 11) topicRootIds.add(noteId) else topicRootIds.remove(noteId)
+
         try {
+            // For kind-11 topics, also fetch kind-1 replies alongside kind-1111
+            val replyKinds = if (rootKind == 11) listOf(1, 1111) else listOf(1111)
+            Log.d(TAG, "Fetching kind $replyKinds replies for note ${noteId.take(8)}... from ${targetRelays.size} relays (shared client)")
 
-            Log.d(TAG, "Fetching kind 1111 replies for note ${noteId.take(8)}... from ${targetRelays.size} relays (shared client)")
-
-            // Create filters for kind 1111 replies (NIP-22 root can be "e" or "E")
+            // Create filters for replies (NIP-22 root can be "e" or "E")
             val lowerFilter = Filter(
-                kinds = listOf(1111),
+                kinds = replyKinds,
                 tags = mapOf("e" to listOf(noteId)),
                 limit = limit
             )
             val upperFilter = Filter(
-                kinds = listOf(1111),
+                kinds = replyKinds,
                 tags = mapOf("E" to listOf(noteId)),
                 limit = limit
             )
@@ -142,12 +151,14 @@ class ThreadRepliesRepository {
             val lowerHandle = relayStateMachine.requestTemporarySubscriptionWithRelay(
                 relayUrls = targetRelays,
                 filter = lowerFilter,
-                onEvent = { event, relayUrl -> handleReplyEvent(noteId, event, relayUrl) }
+                onEvent = { event, relayUrl -> handleReplyEvent(noteId, event, relayUrl) },
+                priority = SubscriptionPriority.CRITICAL,
             )
             val upperHandle = relayStateMachine.requestTemporarySubscriptionWithRelay(
                 relayUrls = targetRelays,
                 filter = upperFilter,
-                onEvent = { event, relayUrl -> handleReplyEvent(noteId, event, relayUrl) }
+                onEvent = { event, relayUrl -> handleReplyEvent(noteId, event, relayUrl) },
+                priority = SubscriptionPriority.CRITICAL,
             )
             activeSubscriptions[noteId] = lowerHandle
             activeSubscriptions["$noteId:root"] = upperHandle
@@ -169,7 +180,8 @@ class ThreadRepliesRepository {
      */
     private fun handleReplyEvent(noteId: String, event: Event, relayUrl: String = "") {
         try {
-            if (event.kind == 1111) {
+            // Accept kind-1111 always; accept kind-1 only when root is a kind-11 topic
+            if (event.kind == 1111 || (event.kind == 1 && noteId in topicRootIds)) {
                 val reply = convertEventToThreadReply(event, relayUrl).let { r ->
                     if (r.rootNoteId == null) r.copy(rootNoteId = noteId) else r
                 }

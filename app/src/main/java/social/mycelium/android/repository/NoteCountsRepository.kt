@@ -3,6 +3,7 @@ package social.mycelium.android.repository
 import android.util.Log
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -132,6 +133,11 @@ object NoteCountsRepository {
             phase2Job?.cancel()
             // Snapshot the merged note relay map for both phases
             val snapshot = feedNoteRelays + topicNoteRelays + threadNoteRelays
+            if (snapshot.isEmpty()) {
+                cancelCountsSubscription()
+                lastSubscribedNoteIds = emptySet()
+                return@launch
+            }
             updateCountsSubscription(phase = 1, overrideMerged = snapshot)
             // Phase 2: reactions + zaps after replies have had time to arrive
             phase2Job = launch {
@@ -157,6 +163,9 @@ object NoteCountsRepository {
     /** Minimum number of new (unseen) note IDs required to trigger a re-subscription. */
     private const val RESUB_THRESHOLD = 5
 
+    /** Pre-compiled regex for validating 64-char hex Nostr event IDs. */
+    private val HEX_ID_REGEX = Regex("^[0-9a-f]{64}$")
+
     /**
      * Update counts subscription via CybinRelayPool (through RelayConnectionStateMachine).
      * Cancels any previous subscription and creates a new one with per-relay filters.
@@ -180,8 +189,7 @@ object NoteCountsRepository {
         }
 
         // Validate note IDs: must be exactly 64 hex chars (Nostr event ID)
-        val hexRegex = Regex("^[0-9a-f]{64}$")
-        val validMerged = merged.filterKeys { hexRegex.matches(it) }
+        val validMerged = merged.filterKeys { HEX_ID_REGEX.matches(it) }
         if (validMerged.isEmpty()) return
 
         // Build per-relay note ID groups
@@ -196,11 +204,19 @@ object NoteCountsRepository {
             perRelayNoteIds.getOrPut(fallback) { mutableSetOf() }.addAll(allNoteIds)
         }
 
-        Log.d(TAG, "Updating counts sub (phase=$phase): ${mergedIds.size} notes across ${perRelayNoteIds.size} relays")
+        // Cap relay fan-out to avoid subscription pressure on too many relays
+        val cappedPerRelay = if (perRelayNoteIds.size > MAX_COUNTS_RELAYS) {
+            perRelayNoteIds.entries
+                .sortedByDescending { it.value.size }
+                .take(MAX_COUNTS_RELAYS)
+                .associate { it.key to it.value }
+        } else perRelayNoteIds
+
+        Log.d(TAG, "Updating counts sub (phase=$phase): ${mergedIds.size} notes across ${cappedPerRelay.size} relays (${perRelayNoteIds.size} total)")
 
         // Build per-relay Cybin Filter maps
         val relayFilters = mutableMapOf<String, List<Filter>>()
-        for ((relayUrl, noteIds) in perRelayNoteIds) {
+        for ((relayUrl, noteIds) in cappedPerRelay) {
             val noteIdList = noteIds.take(200).toList()
             if (noteIdList.isEmpty()) continue
             relayFilters[relayUrl] = when (phase) {
@@ -215,7 +231,8 @@ object NoteCountsRepository {
         val rsm = RelayConnectionStateMachine.getInstance()
         countsSubscriptionHandle = rsm.requestTemporarySubscriptionPerRelay(
             relayFilters = relayFilters,
-            onEvent = { event -> onCountsEvent(event) }
+            onEvent = { event -> onCountsEvent(event) },
+            priority = SubscriptionPriority.NORMAL,
         )
     }
 
@@ -249,6 +266,9 @@ object NoteCountsRepository {
     }
 
     private val FALLBACK_RELAYS = emptyList<String>()
+
+    /** Max relays to fan out counts subscriptions to. Prevents subscription flood. */
+    private const val MAX_COUNTS_RELAYS = 10
 
     /**
      * Called when a kind-1, kind-7, or kind-9735 event is received from ANY source:

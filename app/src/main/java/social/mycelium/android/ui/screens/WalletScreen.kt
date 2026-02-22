@@ -31,6 +31,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import social.mycelium.android.repository.CoinosRepository
 import social.mycelium.android.repository.CoinosTransaction
 import com.example.cybin.signer.NostrSigner
@@ -103,107 +104,23 @@ private fun NostrLoginScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        // Bitcoin icon
-        Surface(
-            shape = CircleShape,
-            color = BitcoinOrange.copy(alpha = 0.15f),
-            modifier = Modifier.size(80.dp)
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Icon(
-                    Icons.Filled.Bolt,
-                    contentDescription = null,
-                    modifier = Modifier.size(40.dp),
-                    tint = BitcoinOrange
-                )
-            }
-        }
-
-        Spacer(Modifier.height(24.dp))
-
-        Text(
-            text = "Bitcoin Wallet",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold
+        Icon(
+            painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_coinos_lightning),
+            contentDescription = "Lightning",
+            modifier = Modifier.size(120.dp),
+            tint = Color.White
         )
-
-        Spacer(Modifier.height(8.dp))
-
-        Text(
-            text = "Powered by coinos.io",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        Spacer(Modifier.height(12.dp))
-
-        Text(
-            text = "Sign in with your Nostr identity.\nNo password or captcha needed.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-
-        if (error != null) {
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = error,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
 
         Spacer(Modifier.height(32.dp))
 
-        if (signer != null && pubkey != null) {
-            Button(
-                onClick = { CoinosRepository.loginWithNostr(signer, pubkey) },
-                enabled = !isLoading,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(54.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = BitcoinOrange)
-            ) {
-                if (isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = Color.White
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    Text("Connecting...", fontWeight = FontWeight.SemiBold)
-                } else {
-                    Icon(Icons.Filled.Bolt, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Connect with Nostr", fontWeight = FontWeight.SemiBold)
-                }
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            Text(
-                text = pubkey.take(8) + "..." + pubkey.takeLast(8),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        } else {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = "Sign in to Mycelium with Amber or nsec to connect your wallet.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(16.dp)
-                )
-            }
-        }
+        Text(
+            text = "Coming soon..",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Light,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            letterSpacing = 1.5.sp
+        )
     }
 }
 

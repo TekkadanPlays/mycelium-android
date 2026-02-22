@@ -4,6 +4,7 @@ import android.util.Log
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import com.example.cybin.core.nowUnixSeconds
 import com.example.cybin.core.eventTemplate
 import com.example.cybin.signer.NostrSigner
@@ -97,7 +98,7 @@ object ContactListRepository {
             val collected = CopyOnWriteArrayList<Event>()
             val firstEventAt = java.util.concurrent.atomic.AtomicLong(0)
             val stateMachine = RelayConnectionStateMachine.getInstance()
-            val handle = stateMachine.requestTemporarySubscription(distinctUrls, filter) { event ->
+            val handle = stateMachine.requestTemporarySubscription(distinctUrls, filter, priority = SubscriptionPriority.HIGH) { event ->
                 if (event.kind == 3) {
                     collected.add(event)
                     firstEventAt.compareAndSet(0, System.currentTimeMillis())

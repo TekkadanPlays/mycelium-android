@@ -8,6 +8,7 @@ import com.example.cybin.core.CybinUtils
 import com.example.cybin.relay.CybinRelayPool
 import com.example.cybin.relay.CybinSubscription
 import com.example.cybin.relay.RelayConnectionListener
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.network.MyceliumHttpClient
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -165,6 +166,7 @@ class RelayConnectionStateMachine {
             }
 
             override fun onDisconnected(url: String) {
+                Log.d(TAG, "[$url] Disconnected — pool will auto-reconnect if subs active")
                 val current = _perRelayState.value
                 if (url in current) {
                     _perRelayState.value = current + (url to RelayEndpointStatus.Connecting)
@@ -313,7 +315,10 @@ class RelayConnectionStateMachine {
                         retryAttempt = 0
                     }
                     is RelaySideEffect.ScheduleRetry -> {
-                        _perRelayState.value = _perRelayState.value.mapValues { RelayEndpointStatus.Failed }
+                        // Only mark non-Connected relays as Failed; preserve relays that are already working
+                        _perRelayState.value = _perRelayState.value.mapValues { (_, status) ->
+                            if (status == RelayEndpointStatus.Connected) status else RelayEndpointStatus.Failed
+                        }
                         executeScheduleRetry()
                     }
                     is RelaySideEffect.UpdateSubscription -> {
@@ -486,9 +491,19 @@ class RelayConnectionStateMachine {
                 relayPool.connect()
             } catch (e: Exception) {
                 Log.e(TAG, "Update subscription failed: ${e.message}", e)
-                _connectionError.value = ConnectionError(e.message, false)
-                _perRelayState.value = _perRelayState.value.mapValues { RelayEndpointStatus.Failed }
-                stateMachine.transition(RelayEvent.ConnectFailed(e.message))
+                // Only mark non-Connected relays as Failed; preserve relays that are already working
+                _perRelayState.value = _perRelayState.value.mapValues { (_, status) ->
+                    if (status == RelayEndpointStatus.Connected) status else RelayEndpointStatus.Failed
+                }
+                val anyConnected = _perRelayState.value.values.any { it == RelayEndpointStatus.Connected }
+                if (anyConnected) {
+                    // Some relays are working — don't kill the whole subscription
+                    Log.d(TAG, "Subscription error but ${_perRelayState.value.values.count { it == RelayEndpointStatus.Connected }} relays still connected; staying Subscribed")
+                    _connectionError.value = null
+                } else {
+                    _connectionError.value = ConnectionError(e.message, false)
+                    stateMachine.transition(RelayEvent.ConnectFailed(e.message))
+                }
             } finally {
                 android.os.Trace.endSection()
             }
@@ -710,14 +725,15 @@ class RelayConnectionStateMachine {
     fun requestTemporarySubscription(
         relayUrls: List<String>,
         filter: Filter,
-        onEvent: (Event) -> Unit
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty()) return NoOpTemporaryHandle
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = listOf(filter),
-            onEvent = { event, _ -> onEvent(event) }
-        )
+            priority = priority,
+        ) { event, _ -> onEvent(event) }
         relayPool.connect()
         return CybinSubscriptionHandle(subscription, relayPool)
     }
@@ -729,14 +745,15 @@ class RelayConnectionStateMachine {
     fun requestTemporarySubscription(
         relayUrls: List<String>,
         filters: List<Filter>,
-        onEvent: (Event) -> Unit
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = filters,
-            onEvent = { event, _ -> onEvent(event) }
-        )
+            priority = priority,
+        ) { event, _ -> onEvent(event) }
         relayPool.connect()
         return CybinSubscriptionHandle(subscription, relayPool)
     }
@@ -748,14 +765,15 @@ class RelayConnectionStateMachine {
     fun requestTemporarySubscriptionWithRelay(
         relayUrls: List<String>,
         filter: Filter,
-        onEvent: (Event, String) -> Unit
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event, String) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty()) return NoOpTemporaryHandle
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = listOf(filter),
-            onEvent = { event, relayUrl -> onEvent(event, relayUrl) }
-        )
+            priority = priority,
+        ) { event, relayUrl -> onEvent(event, relayUrl) }
         relayPool.connect()
         return CybinSubscriptionHandle(subscription, relayPool)
     }
@@ -768,13 +786,14 @@ class RelayConnectionStateMachine {
      */
     fun requestTemporarySubscriptionPerRelay(
         relayFilters: Map<String, List<Filter>>,
-        onEvent: (Event) -> Unit
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayFilters.isEmpty()) return NoOpTemporaryHandle
         val subscription = relayPool.subscribe(
             relayFilters = relayFilters,
-            onEvent = { event, _ -> onEvent(event) }
-        )
+            priority = priority,
+        ) { event, _ -> onEvent(event) }
         relayPool.connect()
         return CybinSubscriptionHandle(subscription, relayPool)
     }

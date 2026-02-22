@@ -9,6 +9,7 @@ import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.extractPubkeysFromContent
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -61,6 +62,11 @@ class Kind1RepliesRepository {
 
     /** Parent ids we've requested (per thread root) to avoid duplicate fetches. */
     private val pendingParentFetches = mutableMapOf<String, MutableSet<String>>()
+    /** Batched parent IDs waiting to be flushed as ONE subscription. */
+    private val pendingParentBatch = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+    /** Debounce job for batched parent fetch. */
+    private var parentBatchJob: Job? = null
+    private val PARENT_BATCH_DELAY_MS = 300L
 
     /** Per-thread cache: rootNoteId -> (replyId -> Note) for fast lookup and tree building. */
     private val threadReplyCache = mutableMapOf<String, MutableMap<String, Note>>()
@@ -204,13 +210,15 @@ class Kind1RepliesRepository {
                 onEvent = { event, relayUrl ->
                     NoteCountsRepository.onLiveEvent(event)
                     if (event.kind == 1) handleReplyEvent(noteId, event, relayUrl)
-                }
+                },
+                priority = SubscriptionPriority.CRITICAL,
             )
             // Separate subscription for counts (kind-7 + kind-9735)
             rsm.requestTemporarySubscription(
                 relayUrls = allRelays,
                 filters = listOf(countsFilter),
-                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) }
+                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) },
+                priority = SubscriptionPriority.HIGH,
             )
 
             // Clear loading after short window so UI shows live
@@ -264,12 +272,14 @@ class Kind1RepliesRepository {
                 onEvent = { event, relayUrl ->
                     NoteCountsRepository.onLiveEvent(event)
                     if (event.kind == 1) handleReplyEvent(rootNoteId, event, relayUrl)
-                }
+                },
+                priority = SubscriptionPriority.HIGH,
             )
             rsm.requestTemporarySubscription(
                 relayUrls = relayUrls,
                 filters = listOf(deepCountsFilter),
-                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) }
+                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) },
+                priority = SubscriptionPriority.NORMAL,
             )
 
             // Schedule next round
@@ -404,7 +414,7 @@ class Kind1RepliesRepository {
     }
 
     /**
-     * Find replyToIds that are not in the current list (and not the thread root) and fetch those events
+     * Find replyToIds that are not in the current list (and not the thread root) and batch-fetch those events
      * so the thread tree can attach children to parents (Amethyst-style: resolve missing parents).
      */
     private fun scheduleFetchMissingParents(rootNoteId: String) {
@@ -412,43 +422,56 @@ class Kind1RepliesRepository {
         val existingIds = currentReplies.map { it.id }.toSet() + rootNoteId
         val missingParentIds = currentReplies.mapNotNull { it.replyToId }.filter { it !in existingIds }.toSet()
         val pending = pendingParentFetches.getOrPut(rootNoteId) { mutableSetOf() }
+        val batch = pendingParentBatch.getOrPut(rootNoteId) { java.util.Collections.synchronizedSet(mutableSetOf()) }
+        var added = false
         missingParentIds.forEach { parentId ->
             if (parentId in pending) return@forEach
             pending.add(parentId)
-            scope.launch { fetchMissingParent(parentId, rootNoteId) }
+            batch.add(parentId)
+            added = true
+        }
+        if (added) scheduleParentBatchFlush(rootNoteId)
+    }
+
+    /** Schedule a debounced flush of the batched parent fetch buffer. */
+    private fun scheduleParentBatchFlush(rootNoteId: String) {
+        parentBatchJob?.cancel()
+        parentBatchJob = scope.launch {
+            delay(PARENT_BATCH_DELAY_MS)
+            flushParentBatch(rootNoteId)
         }
     }
 
     /**
-     * One-off fetch of an event by id using CybinRelayPool temporary subscription.
-     * Adds the event to this thread's replies if it belongs (same root).
-     * Subscription is cancelled after first match or timeout.
+     * Flush all pending parent IDs as ONE batched subscription instead of one-per-parent.
+     * Adds fetched events to this thread's replies if they belong (same root).
      */
-    private suspend fun fetchMissingParent(parentId: String, rootNoteId: String) {
+    private suspend fun flushParentBatch(rootNoteId: String) {
+        val batch = pendingParentBatch.remove(rootNoteId) ?: return
+        val parentIds = batch.toList()
+        if (parentIds.isEmpty()) return
+
         val targetRelays = connectedRelays
         if (targetRelays.isEmpty()) {
-            pendingParentFetches[rootNoteId]?.remove(parentId)
+            parentIds.forEach { pendingParentFetches[rootNoteId]?.remove(it) }
             return
         }
-        val handled = AtomicBoolean(false)
 
-        val parentFilter = Filter(kinds = listOf(1), ids = listOf(parentId), limit = 1)
+        Log.d(TAG, "Flushing parent batch: ${parentIds.size} parents for thread ${rootNoteId.take(8)} (was ${parentIds.size} individual subs)")
+
+        val parentFilter = Filter(kinds = listOf(1), ids = parentIds, limit = parentIds.size)
         val rsm = RelayConnectionStateMachine.getInstance()
         val handle = rsm.requestTemporarySubscriptionWithRelay(
             relayUrls = targetRelays.distinct(),
             filter = parentFilter,
             onEvent = { event, relayUrl ->
-                if (event.kind == 1 && event.id == parentId) {
-                    if (!handled.compareAndSet(false, true)) return@requestTemporarySubscriptionWithRelay
+                if (event.kind == 1 && event.id in parentIds) {
                     val note = convertEventToNote(event, relayUrl)
-                    // Accept parent if its rootNoteId matches, OR if it references
-                    // the thread root in any e-tag (covers parsing differences)
                     val referencesRoot = note.rootNoteId == rootNoteId ||
                         note.replyToId == rootNoteId ||
                         extractReferencedNoteIds(event).contains(rootNoteId)
                     if (!referencesRoot) {
-                        pendingParentFetches[rootNoteId]?.remove(parentId)
-                        Log.d(TAG, "Rejected parent ${parentId.take(8)} — doesn't reference thread ${rootNoteId.take(8)}")
+                        pendingParentFetches[rootNoteId]?.remove(event.id)
                         return@requestTemporarySubscriptionWithRelay
                     }
                     val currentReplies = _replies.value[rootNoteId]?.toMutableList() ?: mutableListOf()
@@ -457,21 +480,23 @@ class Kind1RepliesRepository {
                         val sorted = currentReplies.sortedBy { it.timestamp }
                         _replies.value = _replies.value + (rootNoteId to sorted)
                         updateThreadReplyCache(rootNoteId, sorted)
-                        Log.d(TAG, "Fetched missing parent ${parentId.take(8)}... for thread ${rootNoteId.take(8)}...")
-                        // Recursively resolve deeper missing parents
-                        scheduleFetchMissingParents(rootNoteId)
+                        Log.d(TAG, "Fetched missing parent ${event.id.take(8)}... for thread ${rootNoteId.take(8)}...")
                     }
-                    pendingParentFetches[rootNoteId]?.remove(parentId)
+                    pendingParentFetches[rootNoteId]?.remove(event.id)
                 }
             }
         )
 
         delay(PARENT_FETCH_TIMEOUT_MS)
         handle.cancel()
-        if (!handled.get()) {
-            pendingParentFetches[rootNoteId]?.remove(parentId)
-            Log.d(TAG, "Timeout fetching parent ${parentId.take(8)}... for thread ${rootNoteId.take(8)}...")
+        // Clean up unfetched parents
+        val stillPending = parentIds.filter { pendingParentFetches[rootNoteId]?.contains(it) == true }
+        if (stillPending.isNotEmpty()) {
+            Log.d(TAG, "Timeout: ${stillPending.size}/${parentIds.size} parents not found for thread ${rootNoteId.take(8)}")
+            stillPending.forEach { pendingParentFetches[rootNoteId]?.remove(it) }
         }
+        // Recursively resolve any newly-discovered missing parents
+        scheduleFetchMissingParents(rootNoteId)
     }
 
     /**

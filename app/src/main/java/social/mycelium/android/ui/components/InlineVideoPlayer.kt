@@ -40,6 +40,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.ui.settings.MediaPreferences
 import kotlinx.coroutines.delay
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
 
 /**
  * Inline video player for feed content.
@@ -122,6 +133,7 @@ private fun FeedVideoPlayer(
                 p.seekTo(cached)
             }
             p.volume = if (isMuted) 0f else 1f
+            p.repeatMode = ExoPlayer.REPEAT_MODE_ALL
             p.playWhenReady = prefAutoplay
             // Report video dimensions to aspect ratio cache once known
             p.removeListener(sizeListener) // prevent duplicates from pool re-use
@@ -157,21 +169,47 @@ private fun FeedVideoPlayer(
         }
     }
 
-    Box(modifier = modifier) {
-        player?.let { p ->
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        this.player = p
-                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    }
-                },
-                update = { view -> view.player = p }
-            )
+    // Stable PlayerView that survives recomposition — prevents surface buffer detach spam
+    val stablePlayerView = remember(url) { mutableStateOf<PlayerView?>(null) }
 
+    // Attach/detach player from the stable view
+    LaunchedEffect(player) {
+        val view = stablePlayerView.value
+        if (view != null && player != null) {
+            view.player = player
+        } else if (view != null && player == null) {
+            view.player = null
+        }
+    }
+
+    DisposableEffect(url) {
+        onDispose {
+            // Clear player from view before surface is destroyed
+            stablePlayerView.value?.player = null
+        }
+    }
+
+    Box(modifier = modifier) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = false
+                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                    stablePlayerView.value = this
+                    // Attach current player if already acquired
+                    player?.let { this.player = it }
+                }
+            },
+            update = { view ->
+                if (stablePlayerView.value !== view) stablePlayerView.value = view
+                val p = player
+                if (view.player !== p) view.player = p
+            }
+        )
+
+        player?.let { p ->
             // Tap to show/hide controls
             Box(
                 modifier = Modifier
@@ -233,6 +271,25 @@ private fun FullVideoPlayer(
     var isMuted by remember(url) { mutableStateOf(VideoMuteCache.get(url) ?: false) }
     var isActuallyPlaying by remember(url) { mutableStateOf(true) }
     var showControls by remember { mutableStateOf(true) }
+    var playbackProgress by remember(url) { mutableFloatStateOf(0f) }
+    var playbackDuration by remember(url) { mutableLongStateOf(0L) }
+    var playbackPosition by remember(url) { mutableLongStateOf(0L) }
+    var isSeeking by remember(url) { mutableStateOf(false) }
+
+    // Poll playback position for seekbar
+    LaunchedEffect(player, isActuallyPlaying) {
+        val p = player ?: return@LaunchedEffect
+        while (isActuallyPlaying) {
+            if (!isSeeking) {
+                val dur = p.duration.coerceAtLeast(1L)
+                val pos = p.currentPosition
+                playbackDuration = dur
+                playbackPosition = pos
+                playbackProgress = (pos.toFloat() / dur).coerceIn(0f, 1f)
+            }
+            delay(250)
+        }
+    }
 
     // Acquire pooled player — inherit mute state, resume seamlessly
     LaunchedEffect(url) {
@@ -243,6 +300,7 @@ private fun FullVideoPlayer(
             p.seekTo(cached)
         }
         p.volume = if (isMuted) 0f else 1f
+        p.repeatMode = ExoPlayer.REPEAT_MODE_ALL
         p.playWhenReady = true
         p.play()
         player = p
@@ -278,21 +336,42 @@ private fun FullVideoPlayer(
         }
     }
 
-    Box(modifier = modifier) {
-        player?.let { p ->
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    PlayerView(ctx).apply {
-                        useController = false
-                        this.player = p
-                        resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-                        setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
-                    }
-                },
-                update = { view -> view.player = p }
-            )
+    // Stable PlayerView that survives recomposition
+    val stablePlayerView = remember(url) { mutableStateOf<PlayerView?>(null) }
 
+    LaunchedEffect(player) {
+        val view = stablePlayerView.value
+        if (view != null && player != null) {
+            view.player = player
+        } else if (view != null && player == null) {
+            view.player = null
+        }
+    }
+
+    DisposableEffect(url) {
+        onDispose { stablePlayerView.value?.player = null }
+    }
+
+    Box(modifier = modifier) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                PlayerView(ctx).apply {
+                    useController = false
+                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
+                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                    stablePlayerView.value = this
+                    player?.let { this.player = it }
+                }
+            },
+            update = { view ->
+                if (stablePlayerView.value !== view) stablePlayerView.value = view
+                val p = player
+                if (view.player !== p) view.player = p
+            }
+        )
+
+        player?.let { p ->
             // Tap to show/hide controls
             Box(
                 modifier = Modifier
@@ -329,7 +408,17 @@ private fun FullVideoPlayer(
                         player = null
                         onExitFullscreen()
                     },
-                    isFullscreen = true
+                    isFullscreen = true,
+                    progress = playbackProgress,
+                    duration = playbackDuration,
+                    position = playbackPosition,
+                    onSeekStart = { isSeeking = true },
+                    onSeek = { frac -> playbackProgress = frac; playbackPosition = (frac * playbackDuration).toLong() },
+                    onSeekEnd = { frac ->
+                        val seekMs = (frac * p.duration).toLong()
+                        p.seekTo(seekMs)
+                        isSeeking = false
+                    }
                 )
             }
         }
@@ -346,42 +435,90 @@ private fun VideoControlsPill(
     onMuteToggle: () -> Unit,
     onPlayPauseToggle: () -> Unit,
     onScreenToggle: () -> Unit,
-    isFullscreen: Boolean
+    isFullscreen: Boolean,
+    progress: Float = 0f,
+    duration: Long = 0L,
+    position: Long = 0L,
+    onSeekStart: () -> Unit = {},
+    onSeek: (Float) -> Unit = {},
+    onSeekEnd: (Float) -> Unit = {}
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .padding(8.dp)
-            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(24.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(2.dp)
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
-        // Play/Pause
-        IconButton(onClick = onPlayPauseToggle, modifier = Modifier.size(40.dp)) {
-            Icon(
-                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play",
-                tint = Color.White,
-                modifier = Modifier.size(24.dp)
-            )
+        // Seekbar (only in fullscreen or when duration is known)
+        if (isFullscreen && duration > 0) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = formatDuration(position),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Slider(
+                    value = progress,
+                    onValueChange = { onSeekStart(); onSeek(it) },
+                    onValueChangeFinished = { onSeekEnd(progress) },
+                    modifier = Modifier.weight(1f).height(24.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = Color.White,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                    )
+                )
+                Text(
+                    text = formatDuration(duration),
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
         }
-        // Mute toggle
-        IconButton(onClick = onMuteToggle, modifier = Modifier.size(40.dp)) {
-            Icon(
-                imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                contentDescription = if (isMuted) "Unmute" else "Mute",
-                tint = Color.White,
-                modifier = Modifier.size(24.dp)
-            )
-        }
-        // Fullscreen / Exit fullscreen
-        IconButton(onClick = onScreenToggle, modifier = Modifier.size(40.dp)) {
-            Icon(
-                imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-                tint = Color.White,
-                modifier = Modifier.size(24.dp)
-            )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            // Play/Pause
+            IconButton(onClick = onPlayPauseToggle, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            // Mute toggle
+            IconButton(onClick = onMuteToggle, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                    contentDescription = if (isMuted) "Unmute" else "Mute",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            // Fullscreen / Exit fullscreen
+            IconButton(onClick = onScreenToggle, modifier = Modifier.size(40.dp)) {
+                Icon(
+                    imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                    contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
+                    tint = Color.White,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
         }
     }
+}
+
+private fun formatDuration(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
 }

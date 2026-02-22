@@ -6,6 +6,7 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -58,6 +59,7 @@ class LiveChatRepository private constructor() {
         subscriptionHandle = relayStateMachine.requestTemporarySubscription(
             relayUrls = relayUrls,
             filter = filter,
+            priority = SubscriptionPriority.HIGH,
             onEvent = { event -> handleChatEvent(event) }
         )
 

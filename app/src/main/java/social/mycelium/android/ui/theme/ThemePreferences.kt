@@ -24,9 +24,13 @@ enum class ThemeMode(val label: String) {
  */
 enum class AccentColor(val label: String, val emoji: String) {
     VIOLET("Violet", "\uD83D\uDD2E"),
-    GREEN("Green", "\uD83C\uDF44"),
+    BLUE("Blue", "\uD83C\uDF0A"),
+    TEAL("Teal", "\uD83E\uDEB4"),
+    GREEN("Emerald", "\uD83C\uDF3F"),
+    GOLD("Gold", "\u2B50"),
     ORANGE("Orange", "\uD83C\uDF4A"),
-    RED("Red", "\uD83E\uDD40");
+    RED("Rose", "\uD83C\uDF39"),
+    PINK("Pink", "\uD83C\uDF38");
 
     companion object {
         fun fromString(s: String): AccentColor = entries.firstOrNull { it.name == s } ?: VIOLET

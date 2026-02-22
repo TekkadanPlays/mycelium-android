@@ -126,11 +126,12 @@ class ThreadRepliesViewModel : ViewModel() {
                 // Connect to relays if not already connected
                 repository.connectToRelays(relayUrls)
 
-                // Fetch replies for this note
+                // Fetch replies for this note; pass rootKind so kind-11 topics also get kind-1 replies
                 repository.fetchRepliesForNote(
                     noteId = note.id,
                     relayUrls = relayUrls,
-                    limit = 200
+                    limit = 200,
+                    rootKind = note.kind
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading replies: ${e.message}", e)

@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshotFlow
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -88,15 +89,23 @@ private fun timeGroupFor(timestampMs: Long): TimeGroup {
 
 // ─── Live timestamp formatting ───────────────────────────────────────────────
 
+/**
+ * Shared screen-level time tick. Call once per screen, pass the value to items.
+ * Avoids N LaunchedEffect coroutines for N visible notification items.
+ */
 @Composable
-private fun liveTimeAgo(timestampMs: Long): String {
+private fun rememberTimeTick(): Long {
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(30_000L) // refresh every 30s
+            delay(30_000L)
             now = System.currentTimeMillis()
         }
     }
+    return now
+}
+
+private fun formatTimeAgo(timestampMs: Long, now: Long): String {
     val diff = now - timestampMs
     return when {
         diff < 60_000 -> "just now"
@@ -137,12 +146,9 @@ fun NotificationsScreen(
     val tabListStates = remember { List(8) { LazyListState() } }
     val currentListState = tabListStates.getOrElse(selectedTabIndex) { tabListStates[0] }
     val coroutineScope = rememberCoroutineScope()
-    // Scroll to top when switching tabs
-    LaunchedEffect(selectedTabIndex) {
-        currentListState.scrollToItem(0)
-    }
     val allNotifications by NotificationsRepository.notifications.collectAsState()
     val seenIds by NotificationsRepository.seenIds.collectAsState()
+    val timeTick = rememberTimeTick()
 
     // Batch-request profiles for all notification and note authors
     val profileCache = ProfileMetadataCache.getInstance()
@@ -159,7 +165,7 @@ fun NotificationsScreen(
         if (authorIds.isNotEmpty()) profileCache.requestProfiles(authorIds, cacheRelayUrls)
     }
 
-    // Tab definitions (All, Threads, Comments, Likes, Zaps, Reposts, Mentions)
+    // Tab definitions (All, Replies, Threads, Comments, Likes, Zaps, Reposts, Mentions)
     val tabs = remember {
         listOf(
             NotifTab("All", { Icon(Icons.Default.Notifications, null, modifier = Modifier.size(18.dp)) }) { true },
@@ -179,6 +185,15 @@ fun NotificationsScreen(
         )
     }
 
+    // Pre-compute unseen counts per tab once per data change (not per frame).
+    // Previously each tab row recomputed O(notifications) per tab per recomposition.
+    val tabUnseenCounts = remember(allNotifications, seenIds) {
+        IntArray(tabs.size) { tabIdx ->
+            val f = tabs[tabIdx].filter
+            allNotifications.count { f(it) && it.id !in seenIds }
+        }
+    }
+
     // Pager state synced with external selectedTabIndex
     val pagerState = rememberPagerState(initialPage = selectedTabIndex) { tabs.size }
     // Sync: external tab selection -> pager
@@ -189,7 +204,16 @@ fun NotificationsScreen(
     LaunchedEffect(pagerState.currentPage) {
         if (pagerState.currentPage != selectedTabIndex) onTabSelected(pagerState.currentPage)
     }
-
+    // Scroll to top when pager settles on a new page (after animation completes)
+    LaunchedEffect(pagerState) {
+        var previousPage = pagerState.settledPage
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            if (page != previousPage) {
+                tabListStates.getOrElse(page) { tabListStates[0] }.scrollToItem(0)
+                previousPage = page
+            }
+        }
+    }
 
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
@@ -213,7 +237,7 @@ fun NotificationsScreen(
                         }
                     },
                     actions = {
-                        val unseenInTab = allNotifications.count { tabs[selectedTabIndex].filter(it) && it.id !in seenIds }
+                        val unseenInTab = tabUnseenCounts.getOrElse(selectedTabIndex) { 0 }
                         if (unseenInTab > 0) {
                             IconButton(onClick = {
                                 if (selectedTabIndex == 0) {
@@ -255,7 +279,7 @@ fun NotificationsScreen(
                     }
                 ) {
                     tabs.forEachIndexed { index, tab ->
-                        val unseenForTab = allNotifications.count { tab.filter(it) && it.id !in seenIds }
+                        val unseenForTab = tabUnseenCounts.getOrElse(index) { 0 }
                         Tab(
                             selected = selectedTabIndex == index,
                             onClick = { coroutineScope.launch { pagerState.animateScrollToPage(index) } },
@@ -366,6 +390,7 @@ fun NotificationsScreen(
                             CompactNotificationRow(
                                 notification = notification,
                                 isSeen = isSeen,
+                                timeTick = timeTick,
                                 onProfileClick = onProfileClick,
                                 onClick = {
                                     NotificationsRepository.markAsSeen(notification.id)
@@ -379,6 +404,7 @@ fun NotificationsScreen(
                             FullNotificationCard(
                                 notification = notification,
                                 isSeen = isSeen,
+                                timeTick = timeTick,
                                 onProfileClick = onProfileClick,
                                 onClick = {
                                     NotificationsRepository.markAsSeen(notification.id)
@@ -414,19 +440,21 @@ private val placeholderAuthor = Author(
 private fun CompactNotificationRow(
     notification: NotificationData,
     isSeen: Boolean,
+    timeTick: Long,
     onProfileClick: (String) -> Unit,
     onClick: () -> Unit
 ) {
     val profileCache = ProfileMetadataCache.getInstance()
-    val timeAgo = liveTimeAgo(notification.sortTimestamp)
+    val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)
 
-    // Live profile resolution: re-compose when any actor profile updates
+    // Live profile resolution: re-compose when a relevant actor profile updates
     var profileRevision by remember { mutableIntStateOf(0) }
     val actorPubkeys = notification.actorPubkeys
-    LaunchedEffect(actorPubkeys) {
-        profileCache.profileUpdated.collect { pk ->
-            if (pk in actorPubkeys.map { normalizeAuthorIdForCache(it) }) profileRevision++
-        }
+    val actorPubkeySet = remember(actorPubkeys) { actorPubkeys.map { normalizeAuthorIdForCache(it) }.toSet() }
+    LaunchedEffect(actorPubkeySet) {
+        profileCache.profileUpdated
+            .filter { it in actorPubkeySet }
+            .collect { profileRevision++ }
     }
     @Suppress("UNUSED_EXPRESSION") profileRevision
 
@@ -624,6 +652,7 @@ private fun CompactNotificationRow(
 private fun FullNotificationCard(
     notification: NotificationData,
     isSeen: Boolean,
+    timeTick: Long,
     onProfileClick: (String) -> Unit,
     onClick: () -> Unit
 ) {
@@ -633,24 +662,30 @@ private fun FullNotificationCard(
     var displayAuthor by remember(authorId) {
         mutableStateOf(profileCache.getAuthor(cacheKey) ?: notification.author ?: placeholderAuthor)
     }
-    LaunchedEffect(Unit) {
-        profileCache.getAuthor(cacheKey)?.let { displayAuthor = it }
-    }
-    LaunchedEffect(cacheKey) {
-        if (cacheKey.isBlank()) return@LaunchedEffect
-        profileCache.profileUpdated
-            .filter { it == cacheKey }
-            .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+
+    // Build the set of all relevant pubkeys for this card (author + target note author)
+    val relevantPubkeys = remember(cacheKey, notification.targetNote?.author?.id, notification.note?.author?.id) {
+        buildSet {
+            if (cacheKey.isNotBlank()) add(cacheKey)
+            notification.targetNote?.author?.id?.let { add(normalizeAuthorIdForCache(it)) }
+            notification.note?.author?.id?.let { add(normalizeAuthorIdForCache(it)) }
+        }
     }
 
-    // Live profile resolution for target note authors
+    // Single collector for all relevant profiles instead of two separate collectors
     var profileRevision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        profileCache.profileUpdated.collect { profileRevision++ }
+    LaunchedEffect(relevantPubkeys) {
+        if (relevantPubkeys.isEmpty()) return@LaunchedEffect
+        profileCache.profileUpdated
+            .filter { it in relevantPubkeys }
+            .collect {
+                if (it == cacheKey) displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor
+                profileRevision++
+            }
     }
     @Suppress("UNUSED_EXPRESSION") profileRevision
 
-    val timeAgo = liveTimeAgo(notification.sortTimestamp)
+    val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)
     val typeColor = when (notification.type) {
         NotificationType.REPLY -> MaterialTheme.colorScheme.secondary
         NotificationType.MENTION -> MaterialTheme.colorScheme.tertiary
@@ -712,9 +747,21 @@ private fun FullNotificationCard(
                 )
             }
 
+            // Original content first — gives context before showing the reply
+            notification.targetNote?.let { target ->
+                Spacer(Modifier.height(6.dp))
+                NotificationTargetPreview(
+                    target = target,
+                    profileCache = profileCache,
+                    profileRevision = profileRevision,
+                    linkStyle = linkStyle,
+                    onProfileClick = onProfileClick,
+                )
+            }
+
             Spacer(Modifier.height(8.dp))
 
-            // Author row
+            // Replier: author row + their reply content
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ProfilePicture(
                     author = displayAuthor,
@@ -742,186 +789,13 @@ private fun FullNotificationCard(
             }
 
             // Inline reply content
-            val uriHandler = LocalUriHandler.current
             notification.note?.let { replyNote ->
-                if (replyNote.content.isNotBlank() || replyNote.mediaUrls.isNotEmpty()) {
-                    val imageUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
-                    val videoUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
-                    // Build NIP-19 annotated string for proper rendering of nostr:nevent, nostr:npub, etc.
-                    val mediaUrlSet = remember(replyNote.mediaUrls) { replyNote.mediaUrls.toSet() }
-                    val linkColor = MaterialTheme.colorScheme.primary
-                    val linkStyle = remember(linkColor) { SpanStyle(color = linkColor) }
-                    val annotatedContent = remember(replyNote.content, mediaUrlSet, linkStyle) {
-                        buildNoteContentAnnotatedString(
-                            content = replyNote.content,
-                            mediaUrls = mediaUrlSet,
-                            linkStyle = linkStyle,
-                            profileCache = profileCache
-                        )
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Column {
-                            if (annotatedContent.text.isNotBlank()) {
-                                social.mycelium.android.ui.components.ClickableNoteContent(
-                                    text = annotatedContent,
-                                    style = MaterialTheme.typography.bodySmall.copy(
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                        lineHeight = 18.sp
-                                    ),
-                                    maxLines = 4,
-                                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp),
-                                    onClick = { offset ->
-                                        val profile = annotatedContent.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                        val url = annotatedContent.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                        when {
-                                            profile != null -> onProfileClick(profile.item)
-                                            url != null -> uriHandler.openUri(url.item)
-                                            else -> onClick()
-                                        }
-                                    }
-                                )
-                            }
-                            // Embedded media — sits inside the Surface so background extends behind it
-                            if (imageUrls.size == 1 && videoUrls.isEmpty()) {
-                                // Single image — full-width, flush with Surface edges
-                                if (annotatedContent.text.isNotBlank()) Spacer(Modifier.height(6.dp))
-                                AsyncImage(
-                                    model = imageUrls[0],
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(max = 160.dp)
-                                )
-                            } else if (imageUrls.isNotEmpty() || videoUrls.isNotEmpty()) {
-                                // Multiple media — thumbnail row
-                                if (annotatedContent.text.isNotBlank()) Spacer(Modifier.height(6.dp))
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    modifier = Modifier.padding(horizontal = 10.dp)
-                                ) {
-                                    imageUrls.take(3).forEach { url ->
-                                        AsyncImage(
-                                            model = url,
-                                            contentDescription = null,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .size(56.dp)
-                                                .clip(RoundedCornerShape(6.dp))
-                                        )
-                                    }
-                                    videoUrls.take(2).forEach { _ ->
-                                        Box(
-                                            modifier = Modifier
-                                                .size(56.dp)
-                                                .clip(RoundedCornerShape(6.dp))
-                                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Default.PlayArrow,
-                                                contentDescription = "Video",
-                                                modifier = Modifier.size(24.dp),
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                            // Hashtags
-                            if (replyNote.hashtags.isNotEmpty()) {
-                                Text(
-                                    text = replyNote.hashtags.joinToString(" ") { "#$it" },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFF8FBC8F),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 4.dp)
-                                )
-                            }
-                            // Bottom padding for the Surface
-                            Spacer(Modifier.height(10.dp))
-                        }
-                    }
-                }
-            }
-
-            // Target note preview (what was replied to) with author context
-            notification.targetNote?.let { target ->
-                Spacer(Modifier.height(6.dp))
-                Row(
-                    verticalAlignment = Alignment.Top,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .width(2.dp)
-                            .height(36.dp)
-                            .background(
-                                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                                RoundedCornerShape(1.dp)
-                            )
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        // Target note author for context
-                        val targetAuthorId = remember(target.author.id) { normalizeAuthorIdForCache(target.author.id) }
-                        val targetAuthor = remember(targetAuthorId, profileRevision) {
-                            profileCache.getAuthor(targetAuthorId) ?: target.author
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            ProfilePicture(
-                                author = targetAuthor,
-                                size = 16.dp,
-                                onClick = { onProfileClick(target.author.id) }
-                            )
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                text = targetAuthor.displayName.ifBlank { targetAuthor.id.take(8) + "…" },
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        // Target note content with NIP-19 rendering
-                        val targetMediaSet = remember(target.mediaUrls) { target.mediaUrls.toSet() }
-                        val targetAnnotated = remember(target.content, targetMediaSet, linkStyle) {
-                            buildNoteContentAnnotatedString(
-                                content = target.content,
-                                mediaUrls = targetMediaSet,
-                                linkStyle = linkStyle,
-                                profileCache = profileCache
-                            )
-                        }
-                        if (targetAnnotated.text.isNotBlank()) {
-                            Text(
-                                text = targetAnnotated,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                lineHeight = 16.sp
-                            )
-                        }
-                    }
-                    // Small media indicator for target note
-                    if (target.mediaUrls.isNotEmpty()) {
-                        Spacer(Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Outlined.Image,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                        )
-                    }
-                }
+                NotificationReplyContent(
+                    replyNote = replyNote,
+                    profileCache = profileCache,
+                    onProfileClick = onProfileClick,
+                    onClick = onClick,
+                )
             }
         }
     }
@@ -930,6 +804,201 @@ private fun FullNotificationCard(
         thickness = 0.5.dp,
         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
     )
+}
+
+/**
+ * Extracted inline reply content: annotated text + embedded media + hashtags.
+ * Splits ~100 lines from FullNotificationCard to reduce 6.5MB JIT.
+ */
+@Composable
+private fun NotificationReplyContent(
+    replyNote: Note,
+    profileCache: ProfileMetadataCache,
+    onProfileClick: (String) -> Unit,
+    onClick: () -> Unit,
+) {
+    if (replyNote.content.isBlank() && replyNote.mediaUrls.isEmpty()) return
+
+    val uriHandler = LocalUriHandler.current
+    val imageUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
+    val videoUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+    val mediaUrlSet = remember(replyNote.mediaUrls) { replyNote.mediaUrls.toSet() }
+    val linkColor = MaterialTheme.colorScheme.primary
+    val linkStyle = remember(linkColor) { SpanStyle(color = linkColor) }
+    val annotatedContent = remember(replyNote.content, mediaUrlSet, linkStyle) {
+        buildNoteContentAnnotatedString(
+            content = replyNote.content,
+            mediaUrls = mediaUrlSet,
+            linkStyle = linkStyle,
+            profileCache = profileCache
+        )
+    }
+    Spacer(Modifier.height(8.dp))
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column {
+            if (annotatedContent.text.isNotBlank()) {
+                social.mycelium.android.ui.components.ClickableNoteContent(
+                    text = annotatedContent,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 18.sp
+                    ),
+                    maxLines = 4,
+                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp),
+                    onClick = { offset ->
+                        val profile = annotatedContent.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                        val url = annotatedContent.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                        when {
+                            profile != null -> onProfileClick(profile.item)
+                            url != null -> uriHandler.openUri(url.item)
+                            else -> onClick()
+                        }
+                    }
+                )
+            }
+            // Embedded media
+            if (imageUrls.size == 1 && videoUrls.isEmpty()) {
+                if (annotatedContent.text.isNotBlank()) Spacer(Modifier.height(6.dp))
+                AsyncImage(
+                    model = imageUrls[0],
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 160.dp)
+                )
+            } else if (imageUrls.isNotEmpty() || videoUrls.isNotEmpty()) {
+                if (annotatedContent.text.isNotBlank()) Spacer(Modifier.height(6.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.padding(horizontal = 10.dp)
+                ) {
+                    imageUrls.take(3).forEach { url ->
+                        AsyncImage(
+                            model = url,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                        )
+                    }
+                    videoUrls.take(2).forEach { _ ->
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Video",
+                                modifier = Modifier.size(24.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+            // Hashtags
+            if (replyNote.hashtags.isNotEmpty()) {
+                Text(
+                    text = replyNote.hashtags.joinToString(" ") { "#$it" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF8FBC8F),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 4.dp)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+    }
+}
+
+/**
+ * Extracted target note preview: shows what was replied to with author context.
+ * Splits ~70 lines from FullNotificationCard to reduce 6.5MB JIT.
+ */
+@Composable
+private fun NotificationTargetPreview(
+    target: Note,
+    profileCache: ProfileMetadataCache,
+    profileRevision: Int,
+    linkStyle: SpanStyle,
+    onProfileClick: (String) -> Unit,
+) {
+    Spacer(Modifier.height(6.dp))
+    Row(
+        verticalAlignment = Alignment.Top,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Box(
+            modifier = Modifier
+                .width(2.dp)
+                .height(36.dp)
+                .background(
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    RoundedCornerShape(1.dp)
+                )
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            val targetAuthorId = remember(target.author.id) { normalizeAuthorIdForCache(target.author.id) }
+            val targetAuthor = remember(targetAuthorId, profileRevision) {
+                profileCache.getAuthor(targetAuthorId) ?: target.author
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ProfilePicture(
+                    author = targetAuthor,
+                    size = 16.dp,
+                    onClick = { onProfileClick(target.author.id) }
+                )
+                Spacer(Modifier.width(4.dp))
+                Text(
+                    text = targetAuthor.displayName.ifBlank { targetAuthor.id.take(8) + "…" },
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            val targetMediaSet = remember(target.mediaUrls) { target.mediaUrls.toSet() }
+            val targetAnnotated = remember(target.content, targetMediaSet, linkStyle) {
+                buildNoteContentAnnotatedString(
+                    content = target.content,
+                    mediaUrls = targetMediaSet,
+                    linkStyle = linkStyle,
+                    profileCache = profileCache
+                )
+            }
+            if (targetAnnotated.text.isNotBlank()) {
+                Text(
+                    text = targetAnnotated,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+        if (target.mediaUrls.isNotEmpty()) {
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.Outlined.Image,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+            )
+        }
+    }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

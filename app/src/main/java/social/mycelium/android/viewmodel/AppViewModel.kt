@@ -12,6 +12,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/** Holds reaction/zap/boost data for the dedicated ReactionsScreen. */
+data class ReactionsData(
+    val noteId: String,
+    val reactions: List<String> = emptyList(),
+    val reactionAuthors: Map<String, List<String>> = emptyMap(),
+    val customEmojiUrls: Map<String, String> = emptyMap(),
+    val zapAuthors: List<String> = emptyList(),
+    val zapAmountByAuthor: Map<String, Long> = emptyMap(),
+    val zapTotalSats: Long = 0L,
+    val boostAuthors: List<Author> = emptyList(),
+)
+
 data class AppState(
     val currentScreen: String = "dashboard",
     val isSearchMode: Boolean = false,
@@ -145,6 +157,41 @@ class AppViewModel : ViewModel() {
 
     fun updateExitWindowActive(isActive: Boolean) {
         _appState.update { it.copy(isExitWindowActive = isActive) }
+    }
+
+    // ── Viewed thread tracking for "Clear Read" ──
+
+    /** Note IDs the user has opened in thread view this session. */
+    private val viewedThreadIds = mutableSetOf<String>()
+
+    /** Note IDs hidden from the feed via "Clear Read". */
+    private val _hiddenNoteIds = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenNoteIds: StateFlow<Set<String>> = _hiddenNoteIds.asStateFlow()
+
+    /** Mark a note as viewed (called when opening a thread). */
+    fun markThreadViewed(noteId: String) {
+        viewedThreadIds.add(noteId)
+    }
+
+    /** Whether there are viewed notes that can be cleared. */
+    fun hasViewedNotes(): Boolean = viewedThreadIds.isNotEmpty() && viewedThreadIds.any { it !in _hiddenNoteIds.value }
+
+    /** Move all viewed thread IDs into the hidden set. */
+    fun clearReadNotes() {
+        if (viewedThreadIds.isEmpty()) return
+        _hiddenNoteIds.value = _hiddenNoteIds.value + viewedThreadIds
+    }
+
+    /** Pending reaction data for the ReactionsScreen route. */
+    private val _pendingReactionsData = MutableStateFlow<ReactionsData?>(null)
+    val pendingReactionsData: StateFlow<ReactionsData?> = _pendingReactionsData.asStateFlow()
+
+    fun storeReactionsData(data: ReactionsData) {
+        _pendingReactionsData.value = data
+    }
+
+    fun clearReactionsData() {
+        _pendingReactionsData.value = null
     }
 
     fun resetToDashboard() {

@@ -20,6 +20,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
@@ -49,6 +50,8 @@ fun ProfilePicture(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null
 ) {
+    val density = LocalDensity.current
+    val sizePx = remember(size) { with(density) { size.roundToPx() } }
     Box(
         modifier = modifier
             .size(size)
@@ -65,10 +68,11 @@ fun ProfilePicture(
     ) {
         if (author.avatarUrl != null) {
             val context = LocalContext.current
-            val imageRequest = remember(author.avatarUrl) {
+            val imageRequest = remember(author.avatarUrl, sizePx) {
                 ImageRequest.Builder(context)
                     .data(author.avatarUrl)
-                    .crossfade(200)
+                    .crossfade(true)
+                    .size(sizePx)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
                     .placeholderMemoryCacheKey(author.avatarUrl)

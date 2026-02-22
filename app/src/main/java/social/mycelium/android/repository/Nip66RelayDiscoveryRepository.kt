@@ -11,6 +11,7 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -196,7 +197,14 @@ object Nip66RelayDiscoveryRepository {
                 _discoveredRelays.value = merged
                 saveToDisk(merged)
                 val searchCount = merged.values.count { RelayType.SEARCH in it.types }
-                Log.d(TAG, "REST API: merged ${relays.size} relays (total now ${merged.size}, SEARCH: $searchCount)")
+                val searchRelays = merged.values.filter { RelayType.SEARCH in it.types }
+                val withRtt = searchRelays.count { it.bestRtt != null }
+                Log.d(TAG, "REST API: merged ${relays.size} relays (total now ${merged.size}, SEARCH: $searchCount, withRTT: $withRtt/${searchRelays.size})")
+                if (searchRelays.isNotEmpty()) {
+                    searchRelays.sortedBy { it.bestRtt ?: Int.MAX_VALUE }.take(5).forEach { r ->
+                        Log.d(TAG, "  SEARCH relay: ${r.url} bestRtt=${r.bestRtt} (read=${r.avgRttRead} open=${r.avgRttOpen})")
+                    }
+                }
             }
 
             _hasFetched.value = true
@@ -243,11 +251,24 @@ object Nip66RelayDiscoveryRepository {
         val software = softwareObj?.get("family")?.jsonObject?.get("value")?.jsonPrimitive?.content
         val version = softwareObj?.get("version")?.jsonObject?.get("value")?.jsonPrimitive?.content
 
-        // RTT
+        // RTT — rstate API nests as rtt.open.value, rtt.read.value, rtt.write.value
+        // but some responses use flat integers: rtt.open = 123 (not rtt.open.value = 123)
         val rttObj = obj["rtt"]?.jsonObject
-        val rttOpen = rttObj?.get("open")?.jsonObject?.get("value")?.jsonPrimitive?.int
-        val rttRead = rttObj?.get("read")?.jsonObject?.get("value")?.jsonPrimitive?.int
-        val rttWrite = rttObj?.get("write")?.jsonObject?.get("value")?.jsonPrimitive?.int
+        val rttOpen = rttObj?.get("open")?.let { el ->
+            (el as? JsonObject)?.get("value")?.jsonPrimitive?.int
+                ?: (el as? JsonPrimitive)?.content?.toIntOrNull()
+        }
+        val rttRead = rttObj?.get("read")?.let { el ->
+            (el as? JsonObject)?.get("value")?.jsonPrimitive?.int
+                ?: (el as? JsonPrimitive)?.content?.toIntOrNull()
+        }
+        val rttWrite = rttObj?.get("write")?.let { el ->
+            (el as? JsonObject)?.get("value")?.jsonPrimitive?.int
+                ?: (el as? JsonPrimitive)?.content?.toIntOrNull()
+        }
+        if (rttObj != null && rttRead == null) {
+            Log.w(TAG, "RTT parse miss for $relayUrl: rtt=$rttObj")
+        }
 
         // NIPs
         val nipsObj = obj["nips"]?.jsonObject
@@ -391,7 +412,7 @@ object Nip66RelayDiscoveryRepository {
             }
 
             val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(allRelays, filter) { event ->
+                .requestTemporarySubscription(allRelays, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
                     if (event.kind == KIND_RELAY_DISCOVERY) {
                         synchronized(rawEvents) { rawEvents.add(event) }
                     }
@@ -439,15 +460,26 @@ object Nip66RelayDiscoveryRepository {
                     limit = 50
                 )
 
+                val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
                 val handle = RelayConnectionStateMachine.getInstance()
-                    .requestTemporarySubscription(discoveryRelays, filter) { event ->
+                    .requestTemporarySubscription(discoveryRelays, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
                         if (event.kind == KIND_MONITOR_ANNOUNCEMENT) {
                             synchronized(rawEvents) { rawEvents.add(event) }
+                            lastEventAt.set(System.currentTimeMillis())
                         }
                     }
                 monitorFetchHandle = handle
 
-                delay(8_000L)
+                // Settle-based wait: break early when stream goes quiet (1.5s no new events)
+                val deadline = System.currentTimeMillis() + 8_000L
+                while (System.currentTimeMillis() < deadline) {
+                    delay(200)
+                    val lastAt = lastEventAt.get()
+                    if (lastAt > 0) {
+                        val quietMs = System.currentTimeMillis() - lastAt
+                        if (quietMs >= 1_500L) break
+                    }
+                }
                 handle.cancel()
                 monitorFetchHandle = null
 

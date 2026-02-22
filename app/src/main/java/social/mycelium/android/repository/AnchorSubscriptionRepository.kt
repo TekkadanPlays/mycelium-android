@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 
 /**
  * Repository for managing anchor subscriptions (kind:30073)
@@ -132,6 +133,7 @@ class AnchorSubscriptionRepository private constructor() {
         val handle = RelayConnectionStateMachine.getInstance().requestTemporarySubscription(
             relayUrls = relays.toList(),
             filter = filter,
+            priority = SubscriptionPriority.BACKGROUND,
             onEvent = { event -> handleSubscriptionEvent(event) }
         )
         // Auto-cancel after 10 seconds (one-shot fetch)

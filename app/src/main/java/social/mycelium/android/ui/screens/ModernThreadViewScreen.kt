@@ -11,6 +11,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -232,12 +233,22 @@ fun ModernThreadViewScreen(
     /** Store the media album page when user swipes (to AppViewModel). */
     onMediaPageChanged: (String, Int) -> Unit = { _, _ -> },
     onRelayNavigate: (String) -> Unit = {},
+    /** When set, tapping relay orbs navigates to a dedicated relay list screen instead of opening a popup. */
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
+    /** Called when user taps "See all" in the reaction details panel. */
+    onSeeAllReactions: (String) -> Unit = {},
+    /** Navigate to the full-page zap settings screen. */
+    onNavigateToZapSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isRefreshing by remember { mutableStateOf(false) }
     /** Stack of reply ids for sub-thread drill-down; back gesture pops one. Empty = full thread. */
     var rootReplyIdStack by remember { mutableStateOf<List<String>>(emptyList()) }
     val currentRootReplyId = rootReplyIdStack.lastOrNull()
+    /** Saved scroll positions per stack depth — restored when popping back from sub-thread. */
+    val savedScrollByDepth = remember { mutableMapOf<Int, Pair<Int, Int>>() }
+    /** Root-only mode: when true, only show level-0 replies with descendant count badges. */
+    var showRootOnly by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -374,8 +385,6 @@ fun ModernThreadViewScreen(
     var shouldCloseZapMenus by remember { mutableStateOf(false) }
     var expandedZapMenuCommentId by remember { mutableStateOf<String?>(null) }
 
-    // ✅ ZAP CONFIGURATION: Dialog state for editing zap amounts
-    var showZapConfigDialog by remember { mutableStateOf(false) }
     var showWalletConnectDialog by remember { mutableStateOf(false) }
     var showCopyTextDialog by remember { mutableStateOf(false) }
     var copyTextContent by remember { mutableStateOf("") }
@@ -434,7 +443,13 @@ fun ModernThreadViewScreen(
 
     // Predictive back: from sub-thread pop one level; from full thread exit screen
     BackHandler(enabled = rootReplyIdStack.isNotEmpty()) {
+        val depth = rootReplyIdStack.size
         rootReplyIdStack = rootReplyIdStack.dropLast(1)
+        // Restore scroll position from before the drill-down
+        val saved = savedScrollByDepth.remove(depth - 1)
+        if (saved != null) {
+            scope.launch { listState.scrollToItem(saved.first, saved.second) }
+        }
     }
     BackHandler(enabled = rootReplyIdStack.isEmpty()) {
         onBackClick()
@@ -501,21 +516,34 @@ fun ModernThreadViewScreen(
             )
         },
         floatingActionButton = {
-            if (onOpenReplyCompose != null || onPublishThreadReply != null) {
-                FloatingActionButton(
-                    onClick = {
-                        if (onOpenReplyCompose != null) {
-                            onOpenReplyCompose(note.id, note.author.id, null, null, null)
-                        } else {
-                            parentReplyId = null
-                            showReplyDialog = true
+            val replyItems = buildList {
+                if (onOpenReplyCompose != null || onPublishThreadReply != null) {
+                    add(social.mycelium.android.ui.components.FabMenuItem(
+                        label = "Reply",
+                        icon = Icons.Outlined.Reply,
+                        onClick = {
+                            if (onOpenReplyCompose != null) {
+                                onOpenReplyCompose(note.id, note.author.id, null, null, null)
+                            } else {
+                                parentReplyId = null
+                                showReplyDialog = true
+                            }
                         }
-                    },
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                ) {
-                    Icon(Icons.Outlined.Reply, contentDescription = "Reply to thread")
+                    ))
                 }
+            }
+            // Show ThreadFab when there are reply actions OR when there are replies to navigate
+            if (replyItems.isNotEmpty() || repliesState.totalReplyCount > 0) {
+                val hasNestedReplies = repliesState.threadedReplies.any { it.children.isNotEmpty() }
+                social.mycelium.android.ui.components.ThreadFab(
+                    listState = listState,
+                    replyItems = replyItems,
+                    firstReplyIndex = 2,
+                    totalItems = 2 + repliesState.totalReplyCount,
+                    showRootOnly = showRootOnly,
+                    onToggleRootOnly = { showRootOnly = !showRootOnly },
+                    rootOnlyAvailable = hasNestedReplies && currentRootReplyId == null
+                )
             }
         }
     ) { paddingValues ->
@@ -557,12 +585,16 @@ fun ModernThreadViewScreen(
                         overrideZapAmountByAuthor = noteCountsByNoteId[note.id]?.zapAmountByAuthor,
                         overrideCustomEmojiUrls = noteCountsByNoteId[note.id]?.customEmojiUrls,
                         onRelayClick = onRelayNavigate,
+                        onNavigateToRelayList = onNavigateToRelayList,
                         shouldCloseZapMenus = shouldCloseZapMenus,
                         accountNpub = accountNpub,
                         expandLinkPreviewInThread = true,
                         showHashtagsSection = false,
                         initialMediaPage = mediaPageForNote(note.id),
                         onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
+                        actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.ActionRowSchema.KIND1_FEED
+                            else social.mycelium.android.ui.components.ActionRowSchema.KIND11_FEED,
+                        onSeeAllReactions = { onSeeAllReactions(note.id) },
                         extraMoreMenuItems = listOf(
                             Pair("Copy text") {
                                 copyTextContent = note.content
@@ -633,6 +665,7 @@ fun ModernThreadViewScreen(
                                                 if (replyKind == 1) kind1RepliesViewModel.setSortOrder(Kind1ReplySortOrder.CHRONOLOGICAL)
                                                 else threadRepliesViewModel.setSortOrder(ReplySortOrder.CHRONOLOGICAL)
                                                 showSortMenu = false
+                                                scope.launch { listState.animateScrollToItem(1) }
                                             }
                                         )
                                         DropdownMenuItem(
@@ -641,6 +674,7 @@ fun ModernThreadViewScreen(
                                                 if (replyKind == 1) kind1RepliesViewModel.setSortOrder(Kind1ReplySortOrder.REVERSE_CHRONOLOGICAL)
                                                 else threadRepliesViewModel.setSortOrder(ReplySortOrder.REVERSE_CHRONOLOGICAL)
                                                 showSortMenu = false
+                                                scope.launch { listState.animateScrollToItem(1) }
                                             }
                                         )
                                         DropdownMenuItem(
@@ -649,6 +683,7 @@ fun ModernThreadViewScreen(
                                                 if (replyKind == 1) kind1RepliesViewModel.setSortOrder(Kind1ReplySortOrder.MOST_LIKED)
                                                 else threadRepliesViewModel.setSortOrder(ReplySortOrder.MOST_LIKED)
                                                 showSortMenu = false
+                                                scope.launch { listState.animateScrollToItem(1) }
                                             }
                                         )
                                     }
@@ -684,8 +719,17 @@ fun ModernThreadViewScreen(
                 } else {
                     repliesState.replies.map { ThreadedReply(reply = it, children = emptyList(), level = 0) }
                 }
+                // Compute descendant counts per root reply for root-only badges
+                fun countDescendants(replies: List<ThreadedReply>): Int =
+                    replies.sumOf { 1 + countDescendants(it.children) }
+                val descendantCountByReplyId: Map<String, Int> =
+                    if (showRootOnly) {
+                        displayThreaded.filter { it.level == 0 && it.children.isNotEmpty() }
+                            .associate { it.reply.id to countDescendants(it.children) }
+                    } else emptyMap()
                 val displayList = when {
                     currentRootReplyId != null -> subtreeWithStructure(displayThreaded, currentRootReplyId!!) ?: displayThreaded
+                    showRootOnly -> displayThreaded.filter { it.level == 0 }
                     else -> displayThreaded
                 }
                 if (currentRootReplyId != null) {
@@ -751,6 +795,7 @@ fun ModernThreadViewScreen(
                             threadedReply = threadedReply,
                             isLastRootReply = index == displayList.size - 1,
                             rootAuthorId = note.author.id,
+                            replyKind = replyKind,
                             commentStates = commentStates,
                             noteCountsByNoteId = noteCountsByNoteId,
                             onLike = { replyId ->
@@ -760,20 +805,30 @@ fun ModernThreadViewScreen(
                             onReply = effectiveOnCommentReply,
                             onProfileClick = onProfileClick,
                             onRelayClick = onRelayNavigate,
+                            onNavigateToRelayList = onNavigateToRelayList,
                             shouldCloseZapMenus = shouldCloseZapMenus,
                             expandedZapMenuReplyId = expandedZapMenuCommentId,
                             onExpandZapMenu = { replyId ->
                                 expandedZapMenuCommentId = if (expandedZapMenuCommentId == replyId) null else replyId
                             },
                             onZap = effectiveOnZap,
-                            onZapSettings = { showZapConfigDialog = true },
+                            onZapSettings = { onNavigateToZapSettings() },
                             expandedControlsReplyId = expandedControlsReplyId,
                             onExpandedControlsReplyChange = onExpandedControlsReplyChange,
-                            onReadMoreReplies = { replyId -> rootReplyIdStack = rootReplyIdStack + replyId },
+                            onReadMoreReplies = { replyId ->
+                                // Save current scroll position before drilling down
+                                savedScrollByDepth[rootReplyIdStack.size] = Pair(
+                                    listState.firstVisibleItemIndex,
+                                    listState.firstVisibleItemScrollOffset
+                                )
+                                rootReplyIdStack = rootReplyIdStack + replyId
+                                scope.launch { listState.scrollToItem(0) }
+                            },
                             onNoteClick = { clickedNote -> if (clickedNote.id != note.id) onNoteClick(clickedNote) },
                             onReact = onReact,
                             onImageTap = { urls, idx -> onImageTap(note, urls, idx) },
                             onVideoClick = onVideoClick,
+                            collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
                             modifier = Modifier.fillMaxWidth()
                         )
                         if (index < displayList.size - 1) {
@@ -785,16 +840,7 @@ fun ModernThreadViewScreen(
         }
     }
 
-    // ✅ ZAP CONFIGURATION: Dialogs for editing zap amounts
-    if (showZapConfigDialog) {
-        social.mycelium.android.ui.components.ZapConfigurationDialog(
-            onDismiss = { showZapConfigDialog = false },
-            onOpenWalletSettings = {
-                showZapConfigDialog = false
-                showWalletConnectDialog = true
-            }
-        )
-    }
+    // Zap configuration: now navigates to zap_settings page via onNavigateToZapSettings
 
     if (showWalletConnectDialog) {
         social.mycelium.android.ui.components.WalletConnectDialog(
@@ -1473,6 +1519,828 @@ private fun formatReplyTimestamp(timestamp: Long): String {
 }
 
 /**
+ * Extracted reply header: profile picture, OP badge, display name, reaction/zap counts,
+ * timestamp, 3-dot menu, relay orbs.
+ * Splits ~130 lines from ThreadedReplyCard to reduce 9MB inner lambda JIT.
+ */
+@Composable
+private fun ReplyHeader(
+    reply: ThreadReply,
+    displayAuthor: Author,
+    rootAuthorId: String?,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    onProfileClick: (String) -> Unit,
+    onRelayClick: (String) -> Unit,
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        ProfilePicture(
+            author = displayAuthor,
+            size = 28.dp,
+            onClick = { onProfileClick(reply.author.id) }
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
+                    val isOp = rootAuthorId != null && social.mycelium.android.utils.normalizeAuthorIdForCache(reply.author.id) == social.mycelium.android.utils.normalizeAuthorIdForCache(rootAuthorId)
+                    if (isOp) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                color = Color(0xFF8E30EB),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = displayAuthor.displayName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "OP",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = displayAuthor.displayName,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(6.dp))
+                val headerCounts = noteCountsByNoteId[reply.id]
+                val hcReactions = headerCounts?.reactions ?: emptyList()
+                val hcZapSats = headerCounts?.zapTotalSats ?: 0L
+                val hcEmojiUrls = headerCounts?.customEmojiUrls ?: emptyMap()
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (hcReactions.isNotEmpty()) {
+                        val uniqueEmojis = hcReactions.distinct().take(3)
+                        uniqueEmojis.forEach { emoji ->
+                            social.mycelium.android.ui.components.ReactionEmoji(
+                                emoji = emoji,
+                                customEmojiUrls = hcEmojiUrls,
+                                fontSize = 12.sp,
+                                imageSize = 14.dp
+                            )
+                        }
+                        if (hcReactions.size > 1) {
+                            Text(
+                                text = "${hcReactions.size}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFE57373)
+                            )
+                        }
+                    }
+                    if (hcZapSats > 0) {
+                        Text(
+                            text = "⚡${social.mycelium.android.utils.ZapUtils.formatZapAmount(hcZapSats)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFFD700)
+                        )
+                    }
+                    // Relay orbs — left of timestamp
+                    val replyRelayUrls = reply.relayUrls.distinct().take(6)
+                    if (replyRelayUrls.isNotEmpty()) {
+                        RelayOrbs(relayUrls = replyRelayUrls, onRelayClick = onRelayClick, onNavigateToRelayList = onNavigateToRelayList)
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = formatReplyTimestamp(reply.timestamp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
+                    // 3-dot menu in header
+                    var showMore by remember { mutableStateOf(false) }
+                    Box {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "More",
+                            modifier = Modifier
+                                .size(18.dp)
+                                .clickable(
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                    indication = null
+                                ) { showMore = true },
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        DropdownMenu(
+                            expanded = showMore,
+                            onDismissRequest = { showMore = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Share") },
+                                onClick = { showMore = false },
+                                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Report") },
+                                onClick = { showMore = false },
+                                leadingIcon = { Icon(Icons.Default.Report, contentDescription = null) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Extracted reply content body: rich text blocks, inline media, URL previews, quoted notes.
+ * Splits ~200 lines from ThreadedReplyCard to reduce 18MB inner lambda JIT.
+ */
+@Composable
+private fun ReplyContentBody(
+    reply: ThreadReply,
+    onProfileClick: (String) -> Unit,
+    onNoteClick: (Note) -> Unit,
+    onImageTap: (List<String>, Int) -> Unit,
+    onVideoClick: (List<String>, Int) -> Unit,
+    onToggleControls: () -> Unit,
+) {
+    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+    val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+    val linkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary)
+    val replyMediaUrls = remember(reply.content) {
+        social.mycelium.android.utils.UrlDetector.findUrls(reply.content)
+            .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+            .toSet()
+    }
+    val replyIsMarkdown = remember(reply.content) { social.mycelium.android.ui.components.isMarkdown(reply.content) }
+    val replyContentBlocks = remember(reply.content, replyMediaUrls) {
+        social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
+            reply.content,
+            replyMediaUrls,
+            emptyList(),
+            linkStyle,
+            profileCache
+        )
+    }
+
+    replyContentBlocks.forEach { block ->
+        when (block) {
+            is social.mycelium.android.utils.NoteContentBlock.Content -> {
+                val annotated = block.annotated
+                if (annotated.isNotEmpty()) {
+                    if (replyIsMarkdown) {
+                        social.mycelium.android.ui.components.MarkdownNoteContent(
+                            content = annotated.text,
+                            style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                            onProfileClick = onProfileClick,
+                            onNoteClick = { },
+                            onUrlClick = { url -> uriHandler.openUri(url) }
+                        )
+                    } else {
+                        social.mycelium.android.ui.components.ClickableNoteContent(
+                            text = annotated,
+                            style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                            onClick = { offset ->
+                                val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                                val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                when {
+                                    profile != null -> onProfileClick(profile.item)
+                                    url != null -> uriHandler.openUri(url.item)
+                                    else -> onToggleControls()
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+            is social.mycelium.android.utils.NoteContentBlock.MediaGroup -> {
+                val mediaList = block.urls.take(4)
+                if (mediaList.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    val imgUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
+                    val vidUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+                    if (imgUrls.size == 1 && vidUrls.isEmpty()) {
+                        val imgUrl = imgUrls[0]
+                        val cachedRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
+                        val imgModifier = if (cachedRatio != null) {
+                            Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(cachedRatio.coerceIn(0.5f, 3.0f))
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onImageTap(mediaList, 0) }
+                        } else {
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 240.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onImageTap(mediaList, 0) }
+                        }
+                        AsyncImage(
+                            model = imgUrl,
+                            contentDescription = null,
+                            contentScale = ContentScale.FillWidth,
+                            modifier = imgModifier,
+                            onSuccess = { state ->
+                                val drawable = state.result.drawable
+                                social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                            }
+                        )
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            imgUrls.take(3).forEachIndexed { idx, url ->
+                                AsyncImage(
+                                    model = url,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { onImageTap(mediaList, idx) }
+                                )
+                            }
+                            vidUrls.take(2).forEachIndexed { idx, _ ->
+                                Box(
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                                        .clickable { onVideoClick(mediaList, imgUrls.size + idx) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "Video",
+                                        modifier = Modifier.size(24.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            is social.mycelium.android.utils.NoteContentBlock.Preview -> {
+                social.mycelium.android.ui.components.UrlPreviewCard(
+                    previewInfo = block.previewInfo,
+                    onUrlClick = { url -> uriHandler.openUri(url) },
+                    onUrlLongClick = { }
+                )
+            }
+            is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
+                // Live event references in thread replies - show simple label
+                Text(
+                    text = "Live event: ${block.eventId.take(8)}\u2026",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 2.dp)
+                )
+            }
+            is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
+                val qProfileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                var qMeta by remember(block.eventId) { mutableStateOf(social.mycelium.android.repository.QuotedNoteCache.getCached(block.eventId)) }
+                LaunchedEffect(block.eventId) {
+                    if (qMeta == null) {
+                        qMeta = social.mycelium.android.repository.QuotedNoteCache.get(block.eventId)
+                    }
+                }
+                val meta = qMeta
+                if (meta != null) {
+                    val qAuthor = remember(meta.authorId) { qProfileCache.resolveAuthor(meta.authorId) }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .clickable {
+                                onNoteClick(Note(
+                                    id = meta.eventId,
+                                    author = qAuthor,
+                                    content = meta.fullContent,
+                                    timestamp = meta.createdAt,
+                                    likes = 0, shares = 0, comments = 0,
+                                    isLiked = false, hashtags = emptyList(),
+                                    mediaUrls = emptyList(), isReply = false,
+                                    relayUrl = meta.relayUrl,
+                                    relayUrls = listOfNotNull(meta.relayUrl)
+                                ))
+                            },
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                        shape = MaterialTheme.shapes.small,
+                        shadowElevation = 0.dp
+                    ) {
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            Box(
+                                modifier = Modifier
+                                    .width(3.dp)
+                                    .fillMaxHeight()
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                            )
+                            Column(modifier = Modifier.padding(10.dp).weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    ProfilePicture(author = qAuthor, size = 18.dp, onClick = { onProfileClick(meta.authorId) })
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = qAuthor.displayName,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = meta.contentSnippet,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                } else {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                            Text("Loading quoted note\u2026", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Extracted reply controls: action buttons (upvote, downvote, react, zap, reply, details)
+ * + expandable reaction/zap detail panel + zap amount chips.
+ * Splits ~400 lines from ThreadedReplyCard to reduce 19MB JIT.
+ */
+@Composable
+private fun ReplyControlsPanel(
+    reply: ThreadReply,
+    /** 1 = kind-1 replies (no voting), 1111 = kind-1111 replies (with voting). */
+    replyKind: Int = 1111,
+    isControlsExpanded: Boolean,
+    isZapMenuExpanded: Boolean,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    onReply: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
+    onExpandZapMenu: (String) -> Unit,
+    onZap: (String, Long) -> Unit,
+    onZapSettings: () -> Unit,
+    onReact: (Note, String) -> Unit,
+) {
+    var isDetailsExpanded by remember { mutableStateOf(false) }
+
+    AnimatedVisibility(
+        visible = isControlsExpanded,
+        enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+        exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
+    ) {
+        Column {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Row(
+                    modifier = Modifier
+                        .background(
+                            MaterialTheme.colorScheme.surfaceContainerHighest,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                        )
+                        .padding(vertical = 2.dp, horizontal = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Upvote / Downvote — kind-1111 replies only (not kind-1)
+                    if (replyKind != 1) {
+                        CompactModernButton(
+                            icon = Icons.Outlined.ArrowUpward,
+                            contentDescription = "Upvote",
+                            isActive = false,
+                            onClick = { /* placeholder for future voting */ }
+                        )
+                        CompactModernButton(
+                            icon = Icons.Outlined.ArrowDownward,
+                            contentDescription = "Downvote",
+                            isActive = false,
+                            onClick = { /* placeholder for future voting */ }
+                        )
+                    }
+                    // Lightning (Zap)
+                    CompactModernButton(
+                        icon = Icons.Filled.Bolt,
+                        contentDescription = "Zap",
+                        isActive = false,
+                        onClick = { onExpandZapMenu(reply.id) }
+                    )
+                    // Likes / React button — heart icon, tap opens emoji picker
+                    Box {
+                        var showReactionMenu by remember { mutableStateOf(false) }
+                        CompactModernButton(
+                            icon = if (reply.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                            contentDescription = "React",
+                            isActive = reply.isLiked,
+                            onClick = { showReactionMenu = true },
+                            tint = if (reply.isLiked) Color.Red else null
+                        )
+                        DropdownMenu(
+                            expanded = showReactionMenu,
+                            onDismissRequest = { showReactionMenu = false }
+                        ) {
+                            val reactionEmojis = listOf("🤙", "❤️", "🔥", "😂", "😢", "🫡", "👀", "🚀", "🤔", "💯")
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                reactionEmojis.forEach { emoji ->
+                                    Text(
+                                        text = emoji,
+                                        fontSize = 22.sp,
+                                        modifier = Modifier
+                                            .clickable {
+                                                showReactionMenu = false
+                                                onReact(reply.toNote(), emoji)
+                                            }
+                                            .padding(4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    // Reply
+                    CompactModernButton(
+                        icon = Icons.Outlined.Reply,
+                        contentDescription = "Reply",
+                        isActive = false,
+                        onClick = { onReply(reply.id) }
+                    )
+                    // Reactions caret — expand/collapse reaction & zap breakdown
+                    CompactModernButton(
+                        icon = if (isDetailsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = "Details",
+                        isActive = isDetailsExpanded,
+                        onClick = { isDetailsExpanded = !isDetailsExpanded }
+                    )
+                }
+            }
+
+            // ── Expandable details panel: replies, reactions, zaps ──
+            ReplyDetailsPanel(
+                replyId = reply.id,
+                isDetailsExpanded = isDetailsExpanded,
+                noteCountsByNoteId = noteCountsByNoteId,
+                onProfileClick = onProfileClick,
+            )
+        }
+    }
+
+    // Zap amount chips
+    if (isControlsExpanded) {
+        AnimatedVisibility(
+            visible = isZapMenuExpanded,
+            enter = expandVertically() + fadeIn(),
+            exit = shrinkVertically() + fadeOut()
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 6.dp, horizontal = 12.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val context = LocalContext.current
+                    LaunchedEffect(Unit) {
+                        social.mycelium.android.utils.ZapAmountManager.initialize(context)
+                    }
+                    val zapAmounts by social.mycelium.android.utils.ZapAmountManager.zapAmounts.collectAsState()
+                    zapAmounts.sortedDescending().forEach { amount ->
+                        FilterChip(
+                            selected = amount == 1L,
+                            onClick = {
+                                onExpandZapMenu(reply.id)
+                                onZap(reply.id, amount)
+                            },
+                            label = {
+                                Text(
+                                    text = social.mycelium.android.utils.ZapUtils.formatZapAmount(amount),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Filled.Bolt,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = Color(0xFFFFA500),
+                                selectedLabelColor = Color.White,
+                                selectedLeadingIconColor = Color.White,
+                                containerColor = Color(0xFFFFA500),
+                                labelColor = Color.White,
+                                iconColor = Color.White
+                            ),
+                            border = BorderStroke(1.dp, Color(0xFFFFA500))
+                        )
+                    }
+                    FilterChip(
+                        selected = false,
+                        onClick = {
+                            onExpandZapMenu(reply.id)
+                            onZapSettings()
+                        },
+                        label = { Text("Edit") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Edit,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                            labelColor = MaterialTheme.colorScheme.onSurface
+                        )
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Extracted reaction/zap detail panel for a reply.
+ * Shows per-author reaction lines and zap amounts when expanded.
+ */
+@Composable
+private fun ReplyDetailsPanel(
+    replyId: String,
+    isDetailsExpanded: Boolean,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    onProfileClick: (String) -> Unit,
+) {
+    val detailCounts = noteCountsByNoteId[replyId]
+    val detailReactions = detailCounts?.reactions ?: emptyList()
+    val detailReactionAuthors = detailCounts?.reactionAuthors ?: emptyMap()
+    val detailZapCount = detailCounts?.zapCount ?: 0
+    val detailZapTotalSats = detailCounts?.zapTotalSats ?: 0L
+    val detailZapAuthors = detailCounts?.zapAuthors ?: emptyList()
+    val detailZapAmountByAuthor = detailCounts?.zapAmountByAuthor ?: emptyMap()
+    val detailEmojiUrls = detailCounts?.customEmojiUrls ?: emptyMap()
+    val hasReactions = detailReactions.isNotEmpty()
+    val hasZaps = detailZapCount > 0
+
+    AnimatedVisibility(
+        visible = isDetailsExpanded && (hasReactions || hasZaps),
+        enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+        exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
+    ) {
+        val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+            shape = RectangleShape
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Reactions section
+                if (hasReactions) {
+                    var reactionsExpanded by remember { mutableStateOf(false) }
+                    val grouped = remember(detailReactions, detailReactionAuthors) {
+                        detailReactions.map { emoji ->
+                            emoji to (detailReactionAuthors[emoji]?.size ?: 1)
+                        }.sortedByDescending { it.second }
+                    }
+                    val totalReactionCount = if (detailReactionAuthors.isNotEmpty()) {
+                        detailReactionAuthors.values.sumOf { it.size }
+                    } else detailReactions.size
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { reactionsExpanded = !reactionsExpanded }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Default.Favorite, null, Modifier.size(14.dp), tint = Color(0xFFE91E63))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Reactions",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        grouped.take(5).forEach { (emoji, count) ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    social.mycelium.android.ui.components.ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 13.sp, imageSize = 14.dp)
+                                    if (count > 1) {
+                                        Spacer(Modifier.width(2.dp))
+                                        Text("$count", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        if (totalReactionCount > 0) {
+                            Text("$totalReactionCount", style = MaterialTheme.typography.bodySmall, color = Color(0xFFE57373))
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        Icon(
+                            if (reactionsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            null, Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                    // Expanded: per-author reaction lines with profile pictures
+                    AnimatedVisibility(visible = reactionsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                        var profileRevision by remember { mutableIntStateOf(0) }
+                        val allPubkeys = remember(detailReactionAuthors) { detailReactionAuthors.values.flatten().toSet() }
+                        LaunchedEffect(allPubkeys) {
+                            val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
+                            if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+                        }
+                        LaunchedEffect(allPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
+                        @Suppress("UNUSED_EXPRESSION") profileRevision
+                        Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            grouped.forEach { (emoji, _) ->
+                                val authors = detailReactionAuthors[emoji]
+                                if (!authors.isNullOrEmpty()) {
+                                    authors.take(10).forEach { pubkey ->
+                                        val author = profileCache.resolveAuthor(pubkey)
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { onProfileClick(author.id) }
+                                                .padding(vertical = 2.dp)
+                                        ) {
+                                            social.mycelium.android.ui.components.ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
+                                            Spacer(Modifier.width(6.dp))
+                                            social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = author.displayName.ifBlank { author.id.take(8) + "..." },
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(" reacted", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                    if (authors.size > 10) {
+                                        Text("  +${authors.size - 10} more", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                } else {
+                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 1.dp)) {
+                                        Text(text = emoji, fontSize = 16.sp)
+                                        Spacer(Modifier.width(8.dp))
+                                        val c = detailReactionAuthors[emoji]?.size ?: 1
+                                        Text(
+                                            text = "$c reaction${if (c != 1) "s" else ""}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Zaps section
+                if (hasZaps) {
+                    var zapsExpanded by remember { mutableStateOf(false) }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { zapsExpanded = !zapsExpanded }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Icon(Icons.Default.Bolt, null, Modifier.size(14.dp), tint = Color(0xFFF59E0B))
+                        Spacer(Modifier.width(8.dp))
+                        if (detailZapTotalSats > 0) {
+                            Text(
+                                "${social.mycelium.android.utils.ZapUtils.formatZapAmount(detailZapTotalSats)} sats",
+                                style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B)
+                            )
+                            Text(
+                                " ($detailZapCount zap${if (detailZapCount != 1) "s" else ""})",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                        } else {
+                            Text(
+                                "$detailZapCount zap${if (detailZapCount != 1) "s" else ""}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        Icon(
+                            if (zapsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            null, Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                    // Expanded: per-author zap lines with profile pictures
+                    AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                        var zapProfileRevision by remember { mutableIntStateOf(0) }
+                        val allZapPubkeys = remember(detailZapAuthors) { detailZapAuthors.toSet() }
+                        LaunchedEffect(allZapPubkeys) {
+                            val uncached = allZapPubkeys.filter { profileCache.getAuthor(it) == null }
+                            if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+                        }
+                        LaunchedEffect(allZapPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
+                        @Suppress("UNUSED_EXPRESSION") zapProfileRevision
+                        Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            val sortedZapAuthors = remember(detailZapAuthors, detailZapAmountByAuthor) {
+                                detailZapAuthors.sortedByDescending { detailZapAmountByAuthor[it] ?: 0L }
+                            }
+                            sortedZapAuthors.take(10).forEach { pubkey ->
+                                val author = profileCache.resolveAuthor(pubkey)
+                                val zapSats = detailZapAmountByAuthor[pubkey] ?: 0L
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onProfileClick(author.id) }
+                                        .padding(vertical = 2.dp)
+                                ) {
+                                    social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = author.displayName.ifBlank { author.id.take(8) + "..." },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (zapSats > 0) {
+                                        Text(
+                                            " ⚡ ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapSats)} sats",
+                                            style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B)
+                                        )
+                                    } else {
+                                        Text(" zapped", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                            if (detailZapAuthors.size > 10) {
+                                Text("+${detailZapAuthors.size - 10} more", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
  * Threaded reply card: thin line along the left edge of the card, stacking horizontally per level
  * for coherent conversation view. Condensed layout.
  */
@@ -1482,6 +2350,8 @@ private fun ThreadedReplyCard(
     isLastRootReply: Boolean = true,
     /** Root note author id; when reply.author matches, show OP highlight and "OP" label. */
     rootAuthorId: String? = null,
+    /** 1 = kind-1 thread (no voting on replies), 1111 = kind-1111 thread (voting on replies). */
+    replyKind: Int = 1111,
     commentStates: MutableMap<String, CommentState>,
     /** Counts (reactions, zaps, replies) per note ID from NoteCountsRepository. */
     noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
@@ -1489,6 +2359,7 @@ private fun ThreadedReplyCard(
     onReply: (String) -> Unit,
     onProfileClick: (String) -> Unit,
     onRelayClick: (String) -> Unit = {},
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
     shouldCloseZapMenus: Boolean = false,
     expandedZapMenuReplyId: String? = null,
     onExpandZapMenu: (String) -> Unit = {},
@@ -1505,6 +2376,8 @@ private fun ThreadedReplyCard(
     onReact: (Note, String) -> Unit = { _, _ -> },
     onImageTap: (List<String>, Int) -> Unit = { _, _ -> },
     onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
+    /** When non-null and > 0, shows "N replies in thread" badge (root-only mode). */
+    collapsedChildCount: Int? = null,
     modifier: Modifier = Modifier
 ) {
     val reply = threadedReply.reply
@@ -1517,7 +2390,6 @@ private fun ThreadedReplyCard(
     val threadLineWidth = 2.dp
     val indentPerLevel = 1.dp
     val isZapMenuExpanded = expandedZapMenuReplyId == reply.id
-    var isDetailsExpanded by remember { mutableStateOf(false) }
 
     // Resolve author from profile cache so display name/avatar update when profiles load
     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
@@ -1630,739 +2502,76 @@ private fun ThreadedReplyCard(
                             .weight(1f)
                             .padding(horizontal = 12.dp, vertical = 8.dp)
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            ProfilePicture(
-                                author = displayAuthor,
-                                size = 28.dp,
-                                onClick = { onProfileClick(reply.author.id) }
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
-                                        val isOp = rootAuthorId != null && social.mycelium.android.utils.normalizeAuthorIdForCache(reply.author.id) == social.mycelium.android.utils.normalizeAuthorIdForCache(rootAuthorId)
-                                        if (isOp) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                Surface(
-                                                    color = Color(0xFF8E30EB),
-                                                    shape = RoundedCornerShape(4.dp)
-                                                ) {
-                                                    Text(
-                                                        text = displayAuthor.displayName,
-                                                        style = MaterialTheme.typography.bodyMedium,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = Color.White,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                                    )
-                                                }
-                                                Spacer(modifier = Modifier.width(4.dp))
-                                                Text(
-                                                    text = "OP",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        } else {
-                                            Text(
-                                                text = displayAuthor.displayName,
-                                                style = MaterialTheme.typography.bodyMedium,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                        }
-                                    }
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    val headerCounts = noteCountsByNoteId[reply.id]
-                                    val hcReactions = headerCounts?.reactions ?: emptyList()
-                                    val hcZapSats = headerCounts?.zapTotalSats ?: 0L
-                                    val hcEmojiUrls = headerCounts?.customEmojiUrls ?: emptyMap()
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        if (hcReactions.isNotEmpty()) {
-                                            val uniqueEmojis = hcReactions.distinct().take(3)
-                                            uniqueEmojis.forEach { emoji ->
-                                                social.mycelium.android.ui.components.ReactionEmoji(
-                                                    emoji = emoji,
-                                                    customEmojiUrls = hcEmojiUrls,
-                                                    fontSize = 12.sp,
-                                                    imageSize = 14.dp
-                                                )
-                                            }
-                                            if (hcReactions.size > 1) {
-                                                Text(
-                                                    text = "${hcReactions.size}",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = Color(0xFFE57373)
-                                                )
-                                            }
-                                        }
-                                        if (hcZapSats > 0) {
-                                            Text(
-                                                text = "⚡${social.mycelium.android.utils.ZapUtils.formatZapAmount(hcZapSats)}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = Color(0xFFFFD700)
-                                            )
-                                        }
-                                        Text(
-                                            text = formatReplyTimestamp(reply.timestamp),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1
-                                        )
-                                        // 3-dot menu in header
-                                        var showMore by remember { mutableStateOf(false) }
-                                        Box {
-                                            Icon(
-                                                imageVector = Icons.Default.MoreVert,
-                                                contentDescription = "More",
-                                                modifier = Modifier
-                                                    .size(18.dp)
-                                                    .clickable(
-                                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                                                        indication = null
-                                                    ) { showMore = true },
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            DropdownMenu(
-                                                expanded = showMore,
-                                                onDismissRequest = { showMore = false }
-                                            ) {
-                                                DropdownMenuItem(
-                                                    text = { Text("Share") },
-                                                    onClick = { showMore = false },
-                                                    leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) }
-                                                )
-                                                DropdownMenuItem(
-                                                    text = { Text("Report") },
-                                                    onClick = { showMore = false },
-                                                    leadingIcon = { Icon(Icons.Default.Report, contentDescription = null) }
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            val replyRelayUrls = reply.relayUrls.distinct().take(6)
-                            if (replyRelayUrls.isNotEmpty()) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                RelayOrbs(relayUrls = replyRelayUrls, onRelayClick = onRelayClick)
-                            }
-                        }
+                        // ── Header — extracted into ReplyHeader ──
+                        ReplyHeader(
+                            reply = reply,
+                            displayAuthor = displayAuthor,
+                            rootAuthorId = rootAuthorId,
+                            noteCountsByNoteId = noteCountsByNoteId,
+                            onProfileClick = onProfileClick,
+                            onRelayClick = onRelayClick,
+                            onNavigateToRelayList = onNavigateToRelayList,
+                        )
 
                         Spacer(modifier = Modifier.height(4.dp))
 
-                        // ── Rich content: NIP-19 quoted notes, markdown, @tags, links, media ──
-                        val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
-                        val linkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary)
-                        val replyMediaUrls = remember(reply.content) {
-                            social.mycelium.android.utils.UrlDetector.findUrls(reply.content)
-                                .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
-                                .toSet()
-                        }
-                        val replyIsMarkdown = remember(reply.content) { social.mycelium.android.ui.components.isMarkdown(reply.content) }
-                        val replyContentBlocks = remember(reply.content, replyMediaUrls) {
-                            social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
-                                reply.content,
-                                replyMediaUrls,
-                                emptyList(),
-                                linkStyle,
-                                profileCache
-                            )
-                        }
+                        // ── Rich content — extracted into ReplyContentBody ──
+                        ReplyContentBody(
+                            reply = reply,
+                            onProfileClick = onProfileClick,
+                            onNoteClick = onNoteClick,
+                            onImageTap = onImageTap,
+                            onVideoClick = onVideoClick,
+                            onToggleControls = onToggleControls,
+                        )
 
-                        replyContentBlocks.forEach { block ->
-                            when (block) {
-                                is social.mycelium.android.utils.NoteContentBlock.Content -> {
-                                    val annotated = block.annotated
-                                    if (annotated.isNotEmpty()) {
-                                        if (replyIsMarkdown) {
-                                            social.mycelium.android.ui.components.MarkdownNoteContent(
-                                                content = annotated.text,
-                                                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                                                onProfileClick = onProfileClick,
-                                                onNoteClick = { },
-                                                onUrlClick = { url -> uriHandler.openUri(url) }
-                                            )
-                                        } else {
-                                            social.mycelium.android.ui.components.ClickableNoteContent(
-                                                text = annotated,
-                                                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                                                onClick = { offset ->
-                                                    val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                                    val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                                    when {
-                                                        profile != null -> onProfileClick(profile.item)
-                                                        url != null -> uriHandler.openUri(url.item)
-                                                        else -> onToggleControls()
-                                                    }
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                                is social.mycelium.android.utils.NoteContentBlock.MediaGroup -> {
-                                    val mediaList = block.urls.take(4)
-                                    if (mediaList.isNotEmpty()) {
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        val imgUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
-                                        val vidUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
-                                        if (imgUrls.size == 1 && vidUrls.isEmpty()) {
-                                            val imgUrl = imgUrls[0]
-                                            val cachedRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
-                                            val imgModifier = if (cachedRatio != null) {
-                                                Modifier
-                                                    .fillMaxWidth()
-                                                    .aspectRatio(cachedRatio.coerceIn(0.5f, 3.0f))
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable { onImageTap(mediaList, 0) }
-                                            } else {
-                                                Modifier
-                                                    .fillMaxWidth()
-                                                    .heightIn(max = 240.dp)
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .clickable { onImageTap(mediaList, 0) }
-                                            }
-                                            AsyncImage(
-                                                model = imgUrl,
-                                                contentDescription = null,
-                                                contentScale = ContentScale.FillWidth,
-                                                modifier = imgModifier,
-                                                onSuccess = { state ->
-                                                    val drawable = state.result.drawable
-                                                    social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, drawable.intrinsicWidth, drawable.intrinsicHeight)
-                                                }
-                                            )
-                                        } else {
-                                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                                imgUrls.take(3).forEachIndexed { idx, url ->
-                                                    AsyncImage(
-                                                        model = url,
-                                                        contentDescription = null,
-                                                        contentScale = ContentScale.Crop,
-                                                        modifier = Modifier
-                                                            .size(56.dp)
-                                                            .clip(RoundedCornerShape(6.dp))
-                                                            .clickable { onImageTap(mediaList, idx) }
-                                                    )
-                                                }
-                                                vidUrls.take(2).forEachIndexed { idx, _ ->
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .size(56.dp)
-                                                            .clip(RoundedCornerShape(6.dp))
-                                                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                                                            .clickable { onVideoClick(mediaList, imgUrls.size + idx) },
-                                                        contentAlignment = Alignment.Center
-                                                    ) {
-                                                        Icon(
-                                                            imageVector = Icons.Default.PlayArrow,
-                                                            contentDescription = "Video",
-                                                            modifier = Modifier.size(24.dp),
-                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                is social.mycelium.android.utils.NoteContentBlock.Preview -> {
-                                    social.mycelium.android.ui.components.UrlPreviewCard(
-                                        previewInfo = block.previewInfo,
-                                        onUrlClick = { url -> uriHandler.openUri(url) },
-                                        onUrlLongClick = { }
-                                    )
-                                }
-                                is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
-                                    // ── Inline quoted note (NIP-19 nostr:nevent1...) ──
-                                    val qProfileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
-                                    var qMeta by remember(block.eventId) { mutableStateOf(social.mycelium.android.repository.QuotedNoteCache.getCached(block.eventId)) }
-                                    LaunchedEffect(block.eventId) {
-                                        if (qMeta == null) {
-                                            qMeta = social.mycelium.android.repository.QuotedNoteCache.get(block.eventId)
-                                        }
-                                    }
-                                    val meta = qMeta
-                                    if (meta != null) {
-                                        val qAuthor = remember(meta.authorId) { qProfileCache.resolveAuthor(meta.authorId) }
-                                        Spacer(modifier = Modifier.height(6.dp))
-                                        Surface(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable {
-                                                    onNoteClick(Note(
-                                                        id = meta.eventId,
-                                                        author = qAuthor,
-                                                        content = meta.fullContent,
-                                                        timestamp = meta.createdAt,
-                                                        likes = 0, shares = 0, comments = 0,
-                                                        isLiked = false, hashtags = emptyList(),
-                                                        mediaUrls = emptyList(), isReply = false,
-                                                        relayUrl = meta.relayUrl,
-                                                        relayUrls = listOfNotNull(meta.relayUrl)
-                                                    ))
-                                                },
-                                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                                            shape = RectangleShape,
-                                            border = BorderStroke(0.dp, Color.Transparent)
-                                        ) {
-                                            Row(modifier = Modifier.fillMaxWidth()) {
-                                                // Left accent bar
-                                                Box(
-                                                    modifier = Modifier
-                                                        .width(3.dp)
-                                                        .fillMaxHeight()
-                                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
-                                                )
-                                                Column(modifier = Modifier.padding(10.dp).weight(1f)) {
-                                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                                        ProfilePicture(author = qAuthor, size = 18.dp, onClick = { onProfileClick(meta.authorId) })
-                                                        Spacer(modifier = Modifier.width(6.dp))
-                                                        Text(
-                                                            text = qAuthor.displayName,
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            fontWeight = FontWeight.Bold,
-                                                            maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                                            color = MaterialTheme.colorScheme.onSurface
-                                                        )
-                                                    }
-                                                    Spacer(modifier = Modifier.height(4.dp))
-                                                    Text(
-                                                        text = meta.contentSnippet,
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                        maxLines = 3,
-                                                        overflow = TextOverflow.Ellipsis
-                                                    )
-                                                }
-                                            }
-                                        }
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                    } else {
-                                        // Loading / not found placeholder
-                                        Text(
-                                            text = "Loading quoted note…",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                            modifier = Modifier.padding(vertical = 2.dp)
-                                        )
-                                    }
-                                }
-                            }
-                        }
+                        // Reactions and zaps — extracted into ReplyControlsPanel
+                        ReplyControlsPanel(
+                            reply = reply,
+                            replyKind = replyKind,
+                            isControlsExpanded = isControlsExpanded,
+                            isZapMenuExpanded = isZapMenuExpanded,
+                            noteCountsByNoteId = noteCountsByNoteId,
+                            onReply = onReply,
+                            onProfileClick = onProfileClick,
+                            onExpandZapMenu = onExpandZapMenu,
+                            onZap = onZap,
+                            onZapSettings = onZapSettings,
+                            onReact = onReact,
+                        )
+                    }  // Column (weight 1f, padding)
 
-                        // Reactions and zaps — smooth expand/collapse
-
-                        AnimatedVisibility(
-                            visible = isControlsExpanded,
-                            enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-                            exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
-                        ) {
-                        Column {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.End
-                        ) {
-                            Row(
-                                modifier = Modifier
-                                    .background(
-                                        MaterialTheme.colorScheme.surfaceContainerHighest,
-                                        shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
-                                    )
-                                    .padding(vertical = 2.dp, horizontal = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                CompactModernButton(
-                                    icon = Icons.Outlined.ArrowUpward,
-                                    contentDescription = "Upvote",
-                                    isActive = false,
-                                    onClick = { /* placeholder for future voting */ }
-                                )
-                                CompactModernButton(
-                                    icon = Icons.Outlined.ArrowDownward,
-                                    contentDescription = "Downvote",
-                                    isActive = false,
-                                    onClick = { /* placeholder for future voting */ }
-                                )
-                                // React button — heart icon, tap opens emoji picker (same as root note)
-                                Box {
-                                    var showReactionMenu by remember { mutableStateOf(false) }
-                                    CompactModernButton(
-                                        icon = if (reply.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                                        contentDescription = "React",
-                                        isActive = reply.isLiked,
-                                        onClick = { showReactionMenu = true },
-                                        tint = if (reply.isLiked) Color.Red else null
-                                    )
-                                    DropdownMenu(
-                                        expanded = showReactionMenu,
-                                        onDismissRequest = { showReactionMenu = false }
-                                    ) {
-                                        val reactionEmojis = listOf("🤙", "❤️", "🔥", "😂", "😢", "🫡", "👀", "🚀", "🤔", "💯")
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(2.dp)
-                                        ) {
-                                            reactionEmojis.forEach { emoji ->
-                                                Text(
-                                                    text = emoji,
-                                                    fontSize = 22.sp,
-                                                    modifier = Modifier
-                                                        .clickable {
-                                                            showReactionMenu = false
-                                                            onReact(reply.toNote(), emoji)
-                                                        }
-                                                        .padding(4.dp)
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                                CompactModernButton(
-                                    icon = Icons.Filled.Bolt,
-                                    contentDescription = "Zap",
-                                    isActive = false,
-                                    onClick = { onExpandZapMenu(reply.id) }
-                                )
-                                CompactModernButton(
-                                    icon = Icons.Outlined.Reply,
-                                    contentDescription = "Reply",
-                                    isActive = false,
-                                    onClick = { onReply(reply.id) }
-                                )
-                                // Details caret — expand/collapse reaction & zap breakdown
-                                CompactModernButton(
-                                    icon = if (isDetailsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                    contentDescription = "Details",
-                                    isActive = isDetailsExpanded,
-                                    onClick = { isDetailsExpanded = !isDetailsExpanded }
-                                )
-                            }
-                        }
-
-                        // ── Expandable details panel: replies, reactions, zaps (mirrors NoteCard) ──
-                        val detailCounts = noteCountsByNoteId[reply.id]
-                        val detailReactions = detailCounts?.reactions ?: emptyList()
-                        val detailReactionAuthors = detailCounts?.reactionAuthors ?: emptyMap()
-                        val detailZapCount = detailCounts?.zapCount ?: 0
-                        val detailZapTotalSats = detailCounts?.zapTotalSats ?: 0L
-                        val detailZapAuthors = detailCounts?.zapAuthors ?: emptyList()
-                        val detailZapAmountByAuthor = detailCounts?.zapAmountByAuthor ?: emptyMap()
-                        val detailEmojiUrls = detailCounts?.customEmojiUrls ?: emptyMap()
-                        val hasReactions = detailReactions.isNotEmpty()
-                        val hasZaps = detailZapCount > 0
-
-                        AnimatedVisibility(
-                            visible = isDetailsExpanded && (hasReactions || hasZaps),
-                            enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-                            exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
-                        ) {
-                            val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                                shape = RectangleShape
-                            ) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    // Reactions section
-                                    if (hasReactions) {
-                                        var reactionsExpanded by remember { mutableStateOf(false) }
-                                        val grouped = remember(detailReactions, detailReactionAuthors) {
-                                            detailReactions.map { emoji ->
-                                                emoji to (detailReactionAuthors[emoji]?.size ?: 1)
-                                            }.sortedByDescending { it.second }
-                                        }
-                                        val totalReactionCount = if (detailReactionAuthors.isNotEmpty()) {
-                                            detailReactionAuthors.values.sumOf { it.size }
-                                        } else detailReactions.size
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { reactionsExpanded = !reactionsExpanded }
-                                                .padding(vertical = 2.dp)
-                                        ) {
-                                            Icon(Icons.Default.Favorite, null, Modifier.size(14.dp), tint = Color(0xFFE91E63))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text(
-                                                text = "Reactions",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                            Spacer(Modifier.width(8.dp))
-                                            grouped.take(5).forEach { (emoji, count) ->
-                                                Surface(
-                                                    shape = RoundedCornerShape(12.dp),
-                                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                                    modifier = Modifier.padding(end = 4.dp)
-                                                ) {
-                                                    Row(
-                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                        verticalAlignment = Alignment.CenterVertically
-                                                    ) {
-                                                        social.mycelium.android.ui.components.ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 13.sp, imageSize = 14.dp)
-                                                        if (count > 1) {
-                                                            Spacer(Modifier.width(2.dp))
-                                                            Text("$count", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Spacer(Modifier.weight(1f))
-                                            if (totalReactionCount > 0) {
-                                                Text("$totalReactionCount", style = MaterialTheme.typography.bodySmall, color = Color(0xFFE57373))
-                                                Spacer(Modifier.width(4.dp))
-                                            }
-                                            Icon(
-                                                if (reactionsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                                null, Modifier.size(16.dp),
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                            )
-                                        }
-                                        // Expanded: per-author reaction lines with profile pictures
-                                        AnimatedVisibility(visible = reactionsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                                            var profileRevision by remember { mutableIntStateOf(0) }
-                                            val allPubkeys = remember(detailReactionAuthors) { detailReactionAuthors.values.flatten().distinct() }
-                                            LaunchedEffect(allPubkeys) {
-                                                val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
-                                                if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-                                            }
-                                            LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
-                                            @Suppress("UNUSED_EXPRESSION") profileRevision
-                                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                                grouped.forEach { (emoji, _) ->
-                                                    val authors = detailReactionAuthors[emoji]
-                                                    if (!authors.isNullOrEmpty()) {
-                                                        authors.take(10).forEach { pubkey ->
-                                                            val author = profileCache.resolveAuthor(pubkey)
-                                                            Row(
-                                                                verticalAlignment = Alignment.CenterVertically,
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth()
-                                                                    .clickable { onProfileClick(author.id) }
-                                                                    .padding(vertical = 2.dp)
-                                                            ) {
-                                                                social.mycelium.android.ui.components.ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
-                                                                Spacer(Modifier.width(6.dp))
-                                                                social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                                                Spacer(Modifier.width(6.dp))
-                                                                Text(
-                                                                    text = author.displayName.ifBlank { author.id.take(8) + "..." },
-                                                                    style = MaterialTheme.typography.bodySmall,
-                                                                    color = MaterialTheme.colorScheme.primary,
-                                                                    maxLines = 1,
-                                                                    overflow = TextOverflow.Ellipsis
-                                                                )
-                                                                Text(" reacted", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                            }
-                                                        }
-                                                        if (authors.size > 10) {
-                                                            Text("  +${authors.size - 10} more", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                        }
-                                                    } else {
-                                                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 1.dp)) {
-                                                            Text(text = emoji, fontSize = 16.sp)
-                                                            Spacer(Modifier.width(8.dp))
-                                                            val c = detailReactionAuthors[emoji]?.size ?: 1
-                                                            Text(
-                                                                text = "$c reaction${if (c != 1) "s" else ""}",
-                                                                style = MaterialTheme.typography.bodySmall,
-                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Zaps section
-                                    if (hasZaps) {
-                                        var zapsExpanded by remember { mutableStateOf(false) }
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { zapsExpanded = !zapsExpanded }
-                                                .padding(vertical = 2.dp)
-                                        ) {
-                                            Icon(Icons.Default.Bolt, null, Modifier.size(14.dp), tint = Color(0xFFF59E0B))
-                                            Spacer(Modifier.width(8.dp))
-                                            if (detailZapTotalSats > 0) {
-                                                Text(
-                                                    "${social.mycelium.android.utils.ZapUtils.formatZapAmount(detailZapTotalSats)} sats",
-                                                    style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B)
-                                                )
-                                                Text(
-                                                    " ($detailZapCount zap${if (detailZapCount != 1) "s" else ""})",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            } else {
-                                                Text(
-                                                    "$detailZapCount zap${if (detailZapCount != 1) "s" else ""}",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            }
-                                            Icon(
-                                                if (zapsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                                null, Modifier.size(16.dp),
-                                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                            )
-                                        }
-                                        // Expanded: per-author zap lines with profile pictures
-                                        AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                                            var zapProfileRevision by remember { mutableIntStateOf(0) }
-                                            val allZapPubkeys = remember(detailZapAuthors) { detailZapAuthors.distinct() }
-                                            LaunchedEffect(allZapPubkeys) {
-                                                val uncached = allZapPubkeys.filter { profileCache.getAuthor(it) == null }
-                                                if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-                                            }
-                                            LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
-                                            @Suppress("UNUSED_EXPRESSION") zapProfileRevision
-                                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                                detailZapAuthors.take(10).forEach { pubkey ->
-                                                    val author = profileCache.resolveAuthor(pubkey)
-                                                    val zapSats = detailZapAmountByAuthor[pubkey] ?: 0L
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .clickable { onProfileClick(author.id) }
-                                                            .padding(vertical = 2.dp)
-                                                    ) {
-                                                        social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                                        Spacer(Modifier.width(6.dp))
-                                                        Text(
-                                                            text = author.displayName.ifBlank { author.id.take(8) + "..." },
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis,
-                                                            modifier = Modifier.weight(1f, fill = false)
-                                                        )
-                                                        if (zapSats > 0) {
-                                                            Text(
-                                                                " ⚡ ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapSats)} sats",
-                                                                style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B)
-                                                            )
-                                                        } else {
-                                                            Text(" zapped", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                        }
-                                                    }
-                                                }
-                                                if (detailZapAuthors.size > 10) {
-                                                    Text("+${detailZapAuthors.size - 10} more", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        }
-                        }
-                    }
-
-                }
-                    if (isControlsExpanded) {
-                    AnimatedVisibility(
-                        visible = isZapMenuExpanded,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 6.dp, horizontal = 12.dp),
-                            horizontalAlignment = Alignment.End
-                        ) {
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End,
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                val context = LocalContext.current
-                                LaunchedEffect(Unit) {
-                                    social.mycelium.android.utils.ZapAmountManager.initialize(context)
-                                }
-                                val zapAmounts by social.mycelium.android.utils.ZapAmountManager.zapAmounts.collectAsState()
-                                zapAmounts.sortedDescending().forEach { amount ->
-                                    FilterChip(
-                                        selected = amount == 1L,
-                                        onClick = {
-                                            onExpandZapMenu(reply.id)
-                                            onZap(reply.id, amount)
-                                        },
-                                        label = {
-                                            Text(
-                                                text = social.mycelium.android.utils.ZapUtils.formatZapAmount(amount),
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 14.sp
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = Icons.Filled.Bolt,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = Color(0xFFFFA500),
-                                            selectedLabelColor = Color.White,
-                                            selectedLeadingIconColor = Color.White,
-                                            containerColor = Color(0xFFFFA500),
-                                            labelColor = Color.White,
-                                            iconColor = Color.White
-                                        ),
-                                        border = BorderStroke(1.dp, Color(0xFFFFA500))
-                                    )
-                                }
-                                FilterChip(
-                                    selected = false,
-                                    onClick = {
-                                        onExpandZapMenu(reply.id)
-                                        onZapSettings()
-                                    },
-                                    label = { Text("Edit") },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Filled.Edit,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                                        labelColor = MaterialTheme.colorScheme.onSurface
-                                    )
-                                )
-                        }
-                    }
+                }  // Row (fillMaxWidth, Top)
+            }  // else (not collapsed)
+        }  // Card
+        // Root-only mode: show collapsed child count badge
+        if (collapsedChildCount != null && collapsedChildCount > 0) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onReadMoreReplies(reply.id) },
+                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.UnfoldMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = if (collapsedChildCount == 1) "1 reply in thread" else "$collapsedChildCount replies in thread",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                    )
                 }
             }
-                    }
         }
-        if (!state.isCollapsed) {
+        if (!state.isCollapsed && collapsedChildCount == null) {
             if (level >= MAX_THREAD_DEPTH && threadedReply.children.isNotEmpty()) {
                 val n = threadedReply.totalReplies
                 Surface(
@@ -2395,12 +2604,14 @@ private fun ThreadedReplyCard(
                         threadedReply = childReply,
                         isLastRootReply = true,
                         rootAuthorId = rootAuthorId,
+                        replyKind = replyKind,
                         commentStates = commentStates,
                         noteCountsByNoteId = noteCountsByNoteId,
                         onLike = onLike,
                         onReply = onReply,
                         onProfileClick = onProfileClick,
                         onRelayClick = onRelayClick,
+                        onNavigateToRelayList = onNavigateToRelayList,
                         shouldCloseZapMenus = shouldCloseZapMenus,
                         expandedZapMenuReplyId = expandedZapMenuReplyId,
                         onExpandZapMenu = onExpandZapMenu,

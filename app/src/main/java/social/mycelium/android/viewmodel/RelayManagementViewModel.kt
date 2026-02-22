@@ -167,6 +167,10 @@ class RelayManagementViewModel(
      * Re-apply the active relay subscription so newly added relays start
      * receiving kind-1 notes and kind-0 profiles immediately, even before
      * the user navigates back to the feed.
+     *
+     * Invalidates NotesRepository's idempotency guard so the next
+     * ensureSubscriptionToNotes call (when user returns to feed) re-applies
+     * the subscription with the updated relay set.
      */
     private fun refreshActiveSubscription() {
         val categories = _uiState.value.relayCategories
@@ -178,7 +182,12 @@ class RelayManagementViewModel(
         if (subscribedRelayUrls.isEmpty()) return
         val relayUrls = subscribedRelayUrls
         Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays")
-        RelayConnectionStateMachine.getInstance().requestFeedChange(relayUrls)
+        // Invalidate the idempotency guard so the feed re-subscribes with the new relay set
+        social.mycelium.android.repository.NotesRepository.getInstance().invalidateSubscriptionGuard()
+        // Preserve the current kind-1 filter (e.g. Following authors) so relay changes
+        // don't accidentally replace a Following subscription with a global one.
+        val currentFilter = RelayConnectionStateMachine.getInstance().getCurrentKind1Filter()
+        RelayConnectionStateMachine.getInstance().requestFeedChange(relayUrls, currentFilter)
     }
 
     fun showAddRelayDialog() {

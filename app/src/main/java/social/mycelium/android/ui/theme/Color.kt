@@ -39,30 +39,30 @@ private object VioletDark {
     val tertiaryContainer    = Color(0xFF3F2E6A)
     val onTertiaryContainer  = Color(0xFFEDE4FF)
 
-    val background                = Color(0xFF121018)
-    val onBackground              = Color(0xFFE6E1F0)
-    val surface                   = Color(0xFF1A1722)
-    val onSurface                 = Color(0xFFE6E1F0)
-    val surfaceDim                = Color(0xFF0E0C14)
-    val surfaceBright             = Color(0xFF2E2A3A)
-    val surfaceContainerLowest    = Color(0xFF0C0A12)
-    val surfaceContainerLow       = Color(0xFF16141E)
-    val surfaceContainer          = Color(0xFF1E1B28)
-    val surfaceContainerHigh      = Color(0xFF262332)
-    val surfaceContainerHighest   = Color(0xFF302C3E)
-    val surfaceVariant            = Color(0xFF2A2638)
-    val onSurfaceVariant          = Color(0xFF9A94AE)
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
 
-    val outline        = Color(0xFF44405A)
-    val outlineVariant = Color(0xFF332F48)
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
 
     val error            = Color(0xFFFFB4AB)
     val onError          = Color(0xFF690005)
     val errorContainer   = Color(0xFF4A1014)
     val onErrorContainer = Color(0xFFFFDAD6)
 
-    val inverseSurface   = Color(0xFFE6E1F0)
-    val inverseOnSurface = Color(0xFF1A1722)
+    val inverseSurface   = Color(0xFFE4E2E6)
+    val inverseOnSurface = Color(0xFF1E1216)
     val inversePrimary   = Color(0xFF6B4FC0)
     val scrim            = Color(0xFF000000)
     val surfaceTint      = Color(0xFFB49AFF)
@@ -85,29 +85,29 @@ private object VioletLight {
     val tertiaryContainer    = Color(0xFFF0E4FF)
     val onTertiaryContainer  = Color(0xFF4A3270)
 
-    val background                = Color(0xFFFCF8FF)
-    val onBackground              = Color(0xFF1A1722)
-    val surface                   = Color(0xFFFCF8FF)
-    val onSurface                 = Color(0xFF1A1722)
-    val surfaceDim                = Color(0xFFDDD8E8)
-    val surfaceBright             = Color(0xFFFCF8FF)
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
     val surfaceContainerLowest    = Color(0xFFFFFFFF)
-    val surfaceContainerLow       = Color(0xFFF6F2FC)
-    val surfaceContainer          = Color(0xFFF0ECF6)
-    val surfaceContainerHigh      = Color(0xFFEBE6F2)
-    val surfaceContainerHighest   = Color(0xFFE5E0EC)
-    val surfaceVariant            = Color(0xFFE8E0F0)
-    val onSurfaceVariant          = Color(0xFF4A4458)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
 
-    val outline        = Color(0xFF7B7490)
-    val outlineVariant = Color(0xFFCBC4DA)
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
 
     val error            = Color(0xFFBA1A1A)
     val onError          = Color(0xFFFFFFFF)
     val errorContainer   = Color(0xFFFFDAD6)
     val onErrorContainer = Color(0xFF410002)
 
-    val inverseSurface   = Color(0xFF302C3E)
+    val inverseSurface   = Color(0xFF333236)
     val inverseOnSurface = Color(0xFFF4EFF8)
     val inversePrimary   = Color(0xFFB49AFF)
     val scrim            = Color(0xFF000000)
@@ -118,46 +118,46 @@ private object VioletLight {
 //  GREEN — Dark
 // ══════════════════════════════════════════════════════════════════════
 private object GreenDark {
-    val primary              = Color(0xFF5AD8A6)
-    val onPrimary            = Color(0xFF003824)
-    val primaryContainer     = Color(0xFF0A5E3E)
-    val onPrimaryContainer   = Color(0xFFA8F5D4)
+    val primary              = Color(0xFF66DDAA)
+    val onPrimary            = Color(0xFF003D20)
+    val primaryContainer     = Color(0xFF006B3A)
+    val onPrimaryContainer   = Color(0xFFB8F5D8)
     val secondary            = Color(0xFF80C8A8)
     val onSecondary          = Color(0xFF0A3020)
     val secondaryContainer   = Color(0xFF1E4A36)
     val onSecondaryContainer = Color(0xFFC0E8D4)
     val tertiary             = Color(0xFF88E8C4)
-    val onTertiary           = Color(0xFF003828)
+    val onTertiary           = Color(0xFF003D20)
     val tertiaryContainer    = Color(0xFF0C5840)
     val onTertiaryContainer  = Color(0xFFB0F0DA)
 
-    val background                = Color(0xFF0C1610)
-    val onBackground              = Color(0xFFDCEDE4)
-    val surface                   = Color(0xFF121C16)
-    val onSurface                 = Color(0xFFDCEDE4)
-    val surfaceDim                = Color(0xFF08100C)
-    val surfaceBright             = Color(0xFF263830)
-    val surfaceContainerLowest    = Color(0xFF060E0A)
-    val surfaceContainerLow       = Color(0xFF101A14)
-    val surfaceContainer          = Color(0xFF18221C)
-    val surfaceContainerHigh      = Color(0xFF202C26)
-    val surfaceContainerHighest   = Color(0xFF2A3832)
-    val surfaceVariant            = Color(0xFF1E2E26)
-    val onSurfaceVariant          = Color(0xFF8AA898)
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
 
-    val outline        = Color(0xFF3E5A4C)
-    val outlineVariant = Color(0xFF2C4438)
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
 
     val error            = Color(0xFFFFB4AB)
     val onError          = Color(0xFF690005)
     val errorContainer   = Color(0xFF4A1014)
     val onErrorContainer = Color(0xFFFFDAD6)
 
-    val inverseSurface   = Color(0xFFDCEDE4)
+    val inverseSurface   = Color(0xFFE4E2E6)
     val inverseOnSurface = Color(0xFF121C16)
     val inversePrimary   = Color(0xFF1E8A5E)
     val scrim            = Color(0xFF000000)
-    val surfaceTint      = Color(0xFF5AD8A6)
+    val surfaceTint      = Color(0xFF66DDAA)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -166,44 +166,400 @@ private object GreenDark {
 private object GreenLight {
     val primary              = Color(0xFF1E8A5E)
     val onPrimary            = Color(0xFFFFFFFF)
-    val primaryContainer     = Color(0xFFA8F5D4)
-    val onPrimaryContainer   = Color(0xFF0A5E3E)
+    val primaryContainer     = Color(0xFFB8F5D8)
+    val onPrimaryContainer   = Color(0xFF006B3A)
     val secondary            = Color(0xFF3A6E54)
     val onSecondary          = Color(0xFFFFFFFF)
-    val secondaryContainer   = Color(0xFFBCECD4)
+    val secondaryContainer   = Color(0xFFC0E8D4)
     val onSecondaryContainer = Color(0xFF1E4A36)
     val tertiary             = Color(0xFF2A8868)
     val onTertiary           = Color(0xFFFFFFFF)
     val tertiaryContainer    = Color(0xFFB0F0DA)
     val onTertiaryContainer  = Color(0xFF0C5840)
 
-    val background                = Color(0xFFF5FBF8)
-    val onBackground              = Color(0xFF121C16)
-    val surface                   = Color(0xFFF5FBF8)
-    val onSurface                 = Color(0xFF121C16)
-    val surfaceDim                = Color(0xFFD4E4DC)
-    val surfaceBright             = Color(0xFFF5FBF8)
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
     val surfaceContainerLowest    = Color(0xFFFFFFFF)
-    val surfaceContainerLow       = Color(0xFFEFF6F2)
-    val surfaceContainer          = Color(0xFFE8F0EC)
-    val surfaceContainerHigh      = Color(0xFFE0EAE4)
-    val surfaceContainerHighest   = Color(0xFFDAE4DE)
-    val surfaceVariant            = Color(0xFFDCEDE4)
-    val onSurfaceVariant          = Color(0xFF3A4E44)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
 
-    val outline        = Color(0xFF6A8478)
-    val outlineVariant = Color(0xFFBED0C6)
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
 
     val error            = Color(0xFFBA1A1A)
     val onError          = Color(0xFFFFFFFF)
     val errorContainer   = Color(0xFFFFDAD6)
     val onErrorContainer = Color(0xFF410002)
 
-    val inverseSurface   = Color(0xFF2A3832)
+    val inverseSurface   = Color(0xFF333236)
     val inverseOnSurface = Color(0xFFECF4EE)
-    val inversePrimary   = Color(0xFF5AD8A6)
+    val inversePrimary   = Color(0xFF66DDAA)
     val scrim            = Color(0xFF000000)
     val surfaceTint      = Color(0xFF1E8A5E)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  BLUE — Dark
+// ══════════════════════════════════════════════════════════════════════
+private object BlueDark {
+    val primary              = Color(0xFF8AB4F8)
+    val onPrimary            = Color(0xFF0A2A5E)
+    val primaryContainer     = Color(0xFF1A4080)
+    val onPrimaryContainer   = Color(0xFFD4E4FF)
+    val secondary            = Color(0xFF8CA8D0)
+    val onSecondary          = Color(0xFF0E1E34)
+    val secondaryContainer   = Color(0xFF283850)
+    val onSecondaryContainer = Color(0xFFD0DCF0)
+    val tertiary             = Color(0xFFB0CCFF)
+    val onTertiary           = Color(0xFF0C2450)
+    val tertiaryContainer    = Color(0xFF1C3870)
+    val onTertiaryContainer  = Color(0xFFDCE8FF)
+
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
+
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
+
+    val error            = Color(0xFFFFB4AB)
+    val onError          = Color(0xFF690005)
+    val errorContainer   = Color(0xFF4A1014)
+    val onErrorContainer = Color(0xFFFFDAD6)
+
+    val inverseSurface   = Color(0xFFE4E2E6)
+    val inverseOnSurface = Color(0xFF14181E)
+    val inversePrimary   = Color(0xFF3070C0)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFF8AB4F8)
+}
+
+private object BlueLight {
+    val primary              = Color(0xFF3070C0)
+    val onPrimary            = Color(0xFFFFFFFF)
+    val primaryContainer     = Color(0xFFD4E4FF)
+    val onPrimaryContainer   = Color(0xFF1A4080)
+    val secondary            = Color(0xFF4A6488)
+    val onSecondary          = Color(0xFFFFFFFF)
+    val secondaryContainer   = Color(0xFFD0DCF0)
+    val onSecondaryContainer = Color(0xFF283850)
+    val tertiary             = Color(0xFF4060A0)
+    val onTertiary           = Color(0xFFFFFFFF)
+    val tertiaryContainer    = Color(0xFFDCE8FF)
+    val onTertiaryContainer  = Color(0xFF1C3870)
+
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
+    val surfaceContainerLowest    = Color(0xFFFFFFFF)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
+
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
+
+    val error            = Color(0xFFBA1A1A)
+    val onError          = Color(0xFFFFFFFF)
+    val errorContainer   = Color(0xFFFFDAD6)
+    val onErrorContainer = Color(0xFF410002)
+
+    val inverseSurface   = Color(0xFF333236)
+    val inverseOnSurface = Color(0xFFEEF0F8)
+    val inversePrimary   = Color(0xFF8AB4F8)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFF3070C0)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  TEAL — Dark
+// ══════════════════════════════════════════════════════════════════════
+private object TealDark {
+    val primary              = Color(0xFF5EC6C6)
+    val onPrimary            = Color(0xFF003838)
+    val primaryContainer     = Color(0xFF006060)
+    val onPrimaryContainer   = Color(0xFFB0F0F0)
+    val secondary            = Color(0xFF80B8B8)
+    val onSecondary          = Color(0xFF0A2828)
+    val secondaryContainer   = Color(0xFF1E4444)
+    val onSecondaryContainer = Color(0xFFC0E4E4)
+    val tertiary             = Color(0xFF78D8D8)
+    val onTertiary           = Color(0xFF003838)
+    val tertiaryContainer    = Color(0xFF0C5454)
+    val onTertiaryContainer  = Color(0xFFB8F0F0)
+
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
+
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
+
+    val error            = Color(0xFFFFB4AB)
+    val onError          = Color(0xFF690005)
+    val errorContainer   = Color(0xFF4A1014)
+    val onErrorContainer = Color(0xFFFFDAD6)
+
+    val inverseSurface   = Color(0xFFE4E2E6)
+    val inverseOnSurface = Color(0xFF121A1A)
+    val inversePrimary   = Color(0xFF1E8888)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFF5EC6C6)
+}
+
+private object TealLight {
+    val primary              = Color(0xFF1E8888)
+    val onPrimary            = Color(0xFFFFFFFF)
+    val primaryContainer     = Color(0xFFB0F0F0)
+    val onPrimaryContainer   = Color(0xFF006060)
+    val secondary            = Color(0xFF3A6868)
+    val onSecondary          = Color(0xFFFFFFFF)
+    val secondaryContainer   = Color(0xFFC0E4E4)
+    val onSecondaryContainer = Color(0xFF1E4444)
+    val tertiary             = Color(0xFF2A8080)
+    val onTertiary           = Color(0xFFFFFFFF)
+    val tertiaryContainer    = Color(0xFFB8F0F0)
+    val onTertiaryContainer  = Color(0xFF0C5454)
+
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
+    val surfaceContainerLowest    = Color(0xFFFFFFFF)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
+
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
+
+    val error            = Color(0xFFBA1A1A)
+    val onError          = Color(0xFFFFFFFF)
+    val errorContainer   = Color(0xFFFFDAD6)
+    val onErrorContainer = Color(0xFF410002)
+
+    val inverseSurface   = Color(0xFF333236)
+    val inverseOnSurface = Color(0xFFECF4F4)
+    val inversePrimary   = Color(0xFF5EC6C6)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFF1E8888)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  GOLD — Dark
+// ══════════════════════════════════════════════════════════════════════
+private object GoldDark {
+    val primary              = Color(0xFFFFD54F)
+    val onPrimary            = Color(0xFF3E2E00)
+    val primaryContainer     = Color(0xFF6A5000)
+    val onPrimaryContainer   = Color(0xFFFFE8A0)
+    val secondary            = Color(0xFFD4C080)
+    val onSecondary          = Color(0xFF2E2408)
+    val secondaryContainer   = Color(0xFF4A3C18)
+    val onSecondaryContainer = Color(0xFFF0E0C0)
+    val tertiary             = Color(0xFFFFE082)
+    val onTertiary           = Color(0xFF3A2C00)
+    val tertiaryContainer    = Color(0xFF5E4800)
+    val onTertiaryContainer  = Color(0xFFFFECC0)
+
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
+
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
+
+    val error            = Color(0xFFFFB4AB)
+    val onError          = Color(0xFF690005)
+    val errorContainer   = Color(0xFF4A1014)
+    val onErrorContainer = Color(0xFFFFDAD6)
+
+    val inverseSurface   = Color(0xFFE4E2E6)
+    val inverseOnSurface = Color(0xFF1C1A12)
+    val inversePrimary   = Color(0xFFB08C00)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFFFFD54F)
+}
+
+private object GoldLight {
+    val primary              = Color(0xFFB08C00)
+    val onPrimary            = Color(0xFFFFFFFF)
+    val primaryContainer     = Color(0xFFFFE8A0)
+    val onPrimaryContainer   = Color(0xFF6A5000)
+    val secondary            = Color(0xFF7A6830)
+    val onSecondary          = Color(0xFFFFFFFF)
+    val secondaryContainer   = Color(0xFFF0E0C0)
+    val onSecondaryContainer = Color(0xFF4A3C18)
+    val tertiary             = Color(0xFFA08000)
+    val onTertiary           = Color(0xFFFFFFFF)
+    val tertiaryContainer    = Color(0xFFFFECC0)
+    val onTertiaryContainer  = Color(0xFF5E4800)
+
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
+    val surfaceContainerLowest    = Color(0xFFFFFFFF)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
+
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
+
+    val error            = Color(0xFFBA1A1A)
+    val onError          = Color(0xFFFFFFFF)
+    val errorContainer   = Color(0xFFFFDAD6)
+    val onErrorContainer = Color(0xFF410002)
+
+    val inverseSurface   = Color(0xFF333236)
+    val inverseOnSurface = Color(0xFFF8F4E8)
+    val inversePrimary   = Color(0xFFFFD54F)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFFB08C00)
+}
+
+// ══════════════════════════════════════════════════════════════════════
+//  PINK — Dark
+// ══════════════════════════════════════════════════════════════════════
+private object PinkDark {
+    val primary              = Color(0xFFFF8AB4)
+    val onPrimary            = Color(0xFF4A0828)
+    val primaryContainer     = Color(0xFF7A1848)
+    val onPrimaryContainer   = Color(0xFFFFD0E0)
+    val secondary            = Color(0xFFD09098)
+    val onSecondary          = Color(0xFF301018)
+    val secondaryContainer   = Color(0xFF4C2430)
+    val onSecondaryContainer = Color(0xFFF0D0D8)
+    val tertiary             = Color(0xFFFFAAC8)
+    val onTertiary           = Color(0xFF401020)
+    val tertiaryContainer    = Color(0xFF6A2040)
+    val onTertiaryContainer  = Color(0xFFFFDCE8)
+
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
+
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
+
+    val error            = Color(0xFFFFB4AB)
+    val onError          = Color(0xFF690005)
+    val errorContainer   = Color(0xFF4A1014)
+    val onErrorContainer = Color(0xFFFFDAD6)
+
+    val inverseSurface   = Color(0xFFE4E2E6)
+    val inverseOnSurface = Color(0xFF1E1216)
+    val inversePrimary   = Color(0xFFC03060)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFFFF8AB4)
+}
+
+private object PinkLight {
+    val primary              = Color(0xFFC03060)
+    val onPrimary            = Color(0xFFFFFFFF)
+    val primaryContainer     = Color(0xFFFFD0E0)
+    val onPrimaryContainer   = Color(0xFF7A1848)
+    val secondary            = Color(0xFF7A4A54)
+    val onSecondary          = Color(0xFFFFFFFF)
+    val secondaryContainer   = Color(0xFFF0D0D8)
+    val onSecondaryContainer = Color(0xFF4C2430)
+    val tertiary             = Color(0xFFAA4060)
+    val onTertiary           = Color(0xFFFFFFFF)
+    val tertiaryContainer    = Color(0xFFFFDCE8)
+    val onTertiaryContainer  = Color(0xFF6A2040)
+
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
+    val surfaceContainerLowest    = Color(0xFFFFFFFF)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
+
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
+
+    val error            = Color(0xFFBA1A1A)
+    val onError          = Color(0xFFFFFFFF)
+    val errorContainer   = Color(0xFFFFDAD6)
+    val onErrorContainer = Color(0xFF410002)
+
+    val inverseSurface   = Color(0xFF333236)
+    val inverseOnSurface = Color(0xFFF8EEF0)
+    val inversePrimary   = Color(0xFFFF8AB4)
+    val scrim            = Color(0xFF000000)
+    val surfaceTint      = Color(0xFFC03060)
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -223,29 +579,29 @@ private object OrangeDark {
     val tertiaryContainer    = Color(0xFF5E3C08)
     val onTertiaryContainer  = Color(0xFFFFE4C0)
 
-    val background                = Color(0xFF18120C)
-    val onBackground              = Color(0xFFF0E4DA)
-    val surface                   = Color(0xFF1E1812)
-    val onSurface                 = Color(0xFFF0E4DA)
-    val surfaceDim                = Color(0xFF120E08)
-    val surfaceBright             = Color(0xFF383028)
-    val surfaceContainerLowest    = Color(0xFF100C06)
-    val surfaceContainerLow       = Color(0xFF1A1610)
-    val surfaceContainer          = Color(0xFF241E18)
-    val surfaceContainerHigh      = Color(0xFF2E2820)
-    val surfaceContainerHighest   = Color(0xFF3A322A)
-    val surfaceVariant            = Color(0xFF302820)
-    val onSurfaceVariant          = Color(0xFFAA9E90)
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
 
-    val outline        = Color(0xFF5C5248)
-    val outlineVariant = Color(0xFF463E36)
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
 
     val error            = Color(0xFFFFB4AB)
     val onError          = Color(0xFF690005)
     val errorContainer   = Color(0xFF4A1014)
     val onErrorContainer = Color(0xFFFFDAD6)
 
-    val inverseSurface   = Color(0xFFF0E4DA)
+    val inverseSurface   = Color(0xFFE4E2E6)
     val inverseOnSurface = Color(0xFF1E1812)
     val inversePrimary   = Color(0xFFC07020)
     val scrim            = Color(0xFF000000)
@@ -269,29 +625,29 @@ private object OrangeLight {
     val tertiaryContainer    = Color(0xFFFFE4C0)
     val onTertiaryContainer  = Color(0xFF5E3C08)
 
-    val background                = Color(0xFFFFF8F4)
-    val onBackground              = Color(0xFF1E1812)
-    val surface                   = Color(0xFFFFF8F4)
-    val onSurface                 = Color(0xFF1E1812)
-    val surfaceDim                = Color(0xFFE0D6CC)
-    val surfaceBright             = Color(0xFFFFF8F4)
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
     val surfaceContainerLowest    = Color(0xFFFFFFFF)
-    val surfaceContainerLow       = Color(0xFFFAF2EA)
-    val surfaceContainer          = Color(0xFFF4ECE4)
-    val surfaceContainerHigh      = Color(0xFFEEE6DE)
-    val surfaceContainerHighest   = Color(0xFFE8E0D6)
-    val surfaceVariant            = Color(0xFFF0E4DA)
-    val onSurfaceVariant          = Color(0xFF4E4438)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
 
-    val outline        = Color(0xFF807466)
-    val outlineVariant = Color(0xFFD0C4B8)
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
 
     val error            = Color(0xFFBA1A1A)
     val onError          = Color(0xFFFFFFFF)
     val errorContainer   = Color(0xFFFFDAD6)
     val onErrorContainer = Color(0xFF410002)
 
-    val inverseSurface   = Color(0xFF3A322A)
+    val inverseSurface   = Color(0xFF333236)
     val inverseOnSurface = Color(0xFFF8F0E8)
     val inversePrimary   = Color(0xFFFFAA5C)
     val scrim            = Color(0xFF000000)
@@ -315,29 +671,29 @@ private object RedDark {
     val tertiaryContainer    = Color(0xFF6A2020)
     val onTertiaryContainer  = Color(0xFFFFDCDC)
 
-    val background                = Color(0xFF180C0C)
-    val onBackground              = Color(0xFFF0E0E0)
-    val surface                   = Color(0xFF1E1212)
-    val onSurface                 = Color(0xFFF0E0E0)
-    val surfaceDim                = Color(0xFF120808)
-    val surfaceBright             = Color(0xFF382828)
-    val surfaceContainerLowest    = Color(0xFF100606)
-    val surfaceContainerLow       = Color(0xFF1A1010)
-    val surfaceContainer          = Color(0xFF241818)
-    val surfaceContainerHigh      = Color(0xFF2E2020)
-    val surfaceContainerHighest   = Color(0xFF3A2A2A)
-    val surfaceVariant            = Color(0xFF302020)
-    val onSurfaceVariant          = Color(0xFFAA9494)
+    val background                = Color(0xFF111113)
+    val onBackground              = Color(0xFFE4E2E6)
+    val surface                   = Color(0xFF141316)
+    val onSurface                 = Color(0xFFE4E2E6)
+    val surfaceDim                = Color(0xFF0E0D10)
+    val surfaceBright             = Color(0xFF2C2B2F)
+    val surfaceContainerLowest    = Color(0xFF0B0B0D)
+    val surfaceContainerLow       = Color(0xFF19181B)
+    val surfaceContainer          = Color(0xFF1E1D21)
+    val surfaceContainerHigh      = Color(0xFF28272B)
+    val surfaceContainerHighest   = Color(0xFF333236)
+    val surfaceVariant            = Color(0xFF46454A)
+    val onSurfaceVariant          = Color(0xFFC7C5CA)
 
-    val outline        = Color(0xFF5C4848)
-    val outlineVariant = Color(0xFF463636)
+    val outline        = Color(0xFF918F94)
+    val outlineVariant = Color(0xFF46454A)
 
     val error            = Color(0xFFFFB4AB)
     val onError          = Color(0xFF690005)
     val errorContainer   = Color(0xFF4A1014)
     val onErrorContainer = Color(0xFFFFDAD6)
 
-    val inverseSurface   = Color(0xFFF0E0E0)
+    val inverseSurface   = Color(0xFFE4E2E6)
     val inverseOnSurface = Color(0xFF1E1212)
     val inversePrimary   = Color(0xFFC03030)
     val scrim            = Color(0xFF000000)
@@ -361,30 +717,30 @@ private object RedLight {
     val tertiaryContainer    = Color(0xFFFFDCDC)
     val onTertiaryContainer  = Color(0xFF6A2020)
 
-    val background                = Color(0xFFFFF6F6)
-    val onBackground              = Color(0xFF1E1212)
-    val surface                   = Color(0xFFFFF6F6)
-    val onSurface                 = Color(0xFF1E1212)
-    val surfaceDim                = Color(0xFFE0D2D2)
-    val surfaceBright             = Color(0xFFFFF6F6)
+    val background                = Color(0xFFFCFCFE)
+    val onBackground              = Color(0xFF1B1B1E)
+    val surface                   = Color(0xFFFCFCFE)
+    val onSurface                 = Color(0xFF1B1B1E)
+    val surfaceDim                = Color(0xFFDBDBDE)
+    val surfaceBright             = Color(0xFFFCFCFE)
     val surfaceContainerLowest    = Color(0xFFFFFFFF)
-    val surfaceContainerLow       = Color(0xFFFAF0F0)
-    val surfaceContainer          = Color(0xFFF4EAEA)
-    val surfaceContainerHigh      = Color(0xFFEEE4E4)
-    val surfaceContainerHighest   = Color(0xFFE8DCDC)
-    val surfaceVariant            = Color(0xFFF0E0E0)
-    val onSurfaceVariant          = Color(0xFF4E3C3C)
+    val surfaceContainerLow       = Color(0xFFF5F5F7)
+    val surfaceContainer          = Color(0xFFEFEFF1)
+    val surfaceContainerHigh      = Color(0xFFE9E9EC)
+    val surfaceContainerHighest   = Color(0xFFE4E3E6)
+    val surfaceVariant            = Color(0xFFE2E1E6)
+    val onSurfaceVariant          = Color(0xFF46454A)
 
-    val outline        = Color(0xFF806868)
-    val outlineVariant = Color(0xFFD0C0C0)
+    val outline        = Color(0xFF76757A)
+    val outlineVariant = Color(0xFFC7C5CA)
 
     val error            = Color(0xFFBA1A1A)
     val onError          = Color(0xFFFFFFFF)
     val errorContainer   = Color(0xFFFFDAD6)
     val onErrorContainer = Color(0xFF410002)
 
-    val inverseSurface   = Color(0xFF3A2A2A)
-    val inverseOnSurface = Color(0xFFF8EEEE)
+    val inverseSurface   = Color(0xFF333236)
+    val inverseOnSurface = Color(0xFFF4F0F0)
     val inversePrimary   = Color(0xFFFF7B7B)
     val scrim            = Color(0xFF000000)
     val surfaceTint      = Color(0xFFC03030)
@@ -392,184 +748,64 @@ private object RedLight {
 
 // ── Palette builders ───────────────────────────────────────────────
 
+private inline fun <T> buildScheme(
+    obj: T,
+    builder: T.() -> ColorScheme
+): ColorScheme = obj.builder()
+
+private fun darkFrom(
+    primary: Color, onPrimary: Color, primaryContainer: Color, onPrimaryContainer: Color,
+    secondary: Color, onSecondary: Color, secondaryContainer: Color, onSecondaryContainer: Color,
+    tertiary: Color, onTertiary: Color, tertiaryContainer: Color, onTertiaryContainer: Color,
+    background: Color, onBackground: Color, surface: Color, onSurface: Color,
+    surfaceVariant: Color, onSurfaceVariant: Color, outline: Color, outlineVariant: Color,
+    error: Color, onError: Color, errorContainer: Color, onErrorContainer: Color,
+    inverseSurface: Color, inverseOnSurface: Color, inversePrimary: Color,
+    scrim: Color, surfaceTint: Color,
+    surfaceDim: Color, surfaceBright: Color,
+    surfaceContainerLowest: Color, surfaceContainerLow: Color,
+    surfaceContainer: Color, surfaceContainerHigh: Color, surfaceContainerHighest: Color
+) = darkColorScheme(
+    primary = primary, onPrimary = onPrimary,
+    primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
+    secondary = secondary, onSecondary = onSecondary,
+    secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
+    tertiary = tertiary, onTertiary = onTertiary,
+    tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
+    background = background, onBackground = onBackground,
+    surface = surface, onSurface = onSurface,
+    surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
+    outline = outline, outlineVariant = outlineVariant,
+    error = error, onError = onError,
+    errorContainer = errorContainer, onErrorContainer = onErrorContainer,
+    inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
+    inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
+    surfaceDim = surfaceDim, surfaceBright = surfaceBright,
+    surfaceContainerLowest = surfaceContainerLowest,
+    surfaceContainerLow = surfaceContainerLow,
+    surfaceContainer = surfaceContainer,
+    surfaceContainerHigh = surfaceContainerHigh,
+    surfaceContainerHighest = surfaceContainerHighest
+)
+
 fun accentDarkScheme(accent: AccentColor): ColorScheme = when (accent) {
-    AccentColor.VIOLET -> with(VioletDark) { darkColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
-    AccentColor.GREEN -> with(GreenDark) { darkColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
-    AccentColor.ORANGE -> with(OrangeDark) { darkColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
-    AccentColor.RED -> with(RedDark) { darkColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
+    AccentColor.VIOLET -> with(VioletDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.BLUE   -> with(BlueDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.TEAL   -> with(TealDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.GREEN  -> with(GreenDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.GOLD   -> with(GoldDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.ORANGE -> with(OrangeDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.RED    -> with(RedDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
+    AccentColor.PINK   -> with(PinkDark) { darkFrom(primary, onPrimary, primaryContainer, onPrimaryContainer, secondary, onSecondary, secondaryContainer, onSecondaryContainer, tertiary, onTertiary, tertiaryContainer, onTertiaryContainer, background, onBackground, surface, onSurface, surfaceVariant, onSurfaceVariant, outline, outlineVariant, error, onError, errorContainer, onErrorContainer, inverseSurface, inverseOnSurface, inversePrimary, scrim, surfaceTint, surfaceDim, surfaceBright, surfaceContainerLowest, surfaceContainerLow, surfaceContainer, surfaceContainerHigh, surfaceContainerHighest) }
 }
 
 fun accentLightScheme(accent: AccentColor): ColorScheme = when (accent) {
-    AccentColor.VIOLET -> with(VioletLight) { lightColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
-    AccentColor.GREEN -> with(GreenLight) { lightColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
-    AccentColor.ORANGE -> with(OrangeLight) { lightColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
-    AccentColor.RED -> with(RedLight) { lightColorScheme(
-        primary = primary, onPrimary = onPrimary,
-        primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer,
-        secondary = secondary, onSecondary = onSecondary,
-        secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer,
-        tertiary = tertiary, onTertiary = onTertiary,
-        tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer,
-        background = background, onBackground = onBackground,
-        surface = surface, onSurface = onSurface,
-        surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant,
-        outline = outline, outlineVariant = outlineVariant,
-        error = error, onError = onError,
-        errorContainer = errorContainer, onErrorContainer = onErrorContainer,
-        inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface,
-        inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint,
-        surfaceDim = surfaceDim, surfaceBright = surfaceBright,
-        surfaceContainerLowest = surfaceContainerLowest,
-        surfaceContainerLow = surfaceContainerLow,
-        surfaceContainer = surfaceContainer,
-        surfaceContainerHigh = surfaceContainerHigh,
-        surfaceContainerHighest = surfaceContainerHighest
-    )}
+    AccentColor.VIOLET -> with(VioletLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.BLUE   -> with(BlueLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.TEAL   -> with(TealLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.GREEN  -> with(GreenLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.GOLD   -> with(GoldLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.ORANGE -> with(OrangeLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.RED    -> with(RedLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
+    AccentColor.PINK   -> with(PinkLight) { lightColorScheme(primary = primary, onPrimary = onPrimary, primaryContainer = primaryContainer, onPrimaryContainer = onPrimaryContainer, secondary = secondary, onSecondary = onSecondary, secondaryContainer = secondaryContainer, onSecondaryContainer = onSecondaryContainer, tertiary = tertiary, onTertiary = onTertiary, tertiaryContainer = tertiaryContainer, onTertiaryContainer = onTertiaryContainer, background = background, onBackground = onBackground, surface = surface, onSurface = onSurface, surfaceVariant = surfaceVariant, onSurfaceVariant = onSurfaceVariant, outline = outline, outlineVariant = outlineVariant, error = error, onError = onError, errorContainer = errorContainer, onErrorContainer = onErrorContainer, inverseSurface = inverseSurface, inverseOnSurface = inverseOnSurface, inversePrimary = inversePrimary, scrim = scrim, surfaceTint = surfaceTint, surfaceDim = surfaceDim, surfaceBright = surfaceBright, surfaceContainerLowest = surfaceContainerLowest, surfaceContainerLow = surfaceContainerLow, surfaceContainer = surfaceContainer, surfaceContainerHigh = surfaceContainerHigh, surfaceContainerHighest = surfaceContainerHighest) }
 }

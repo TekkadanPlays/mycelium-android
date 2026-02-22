@@ -96,7 +96,7 @@ fun RelayDiscoveryScreen(
 
     val allRelays = remember(discoveredRelays, sortMode) {
         when (sortMode) {
-            "rtt" -> discoveredRelays.values.sortedBy { it.avgRttRead ?: Int.MAX_VALUE }
+            "rtt" -> discoveredRelays.values.sortedBy { it.bestRtt ?: Int.MAX_VALUE }
             "monitors" -> discoveredRelays.values.sortedByDescending { it.monitorCount }
             "name" -> discoveredRelays.values.sortedBy { (it.name ?: it.url).lowercase() }
             else -> discoveredRelays.values.toList()
@@ -755,12 +755,13 @@ private fun DiscoveredRelayRow(
     val displayName = if (relay.paymentRequired) "$rawName  $" else rawName
     val iconUrl = relay.icon
 
+    val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     Surface(
         modifier = modifier
             .fillMaxWidth()
             .clickable(
                 indication = null,
-                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                interactionSource = interactionSource,
                 onClick = onClick
             ),
         color = MaterialTheme.colorScheme.surface

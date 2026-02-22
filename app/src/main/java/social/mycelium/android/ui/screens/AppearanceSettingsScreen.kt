@@ -308,7 +308,11 @@ private fun AccentColorSheet(
 /** Returns the representative swatch color for an accent (dark-mode primary). */
 private fun accentSwatchColor(accent: AccentColor): Color = when (accent) {
     AccentColor.VIOLET -> Color(0xFFB49AFF)
-    AccentColor.GREEN  -> Color(0xFF5AD8A6)
+    AccentColor.BLUE   -> Color(0xFF8AB4F8)
+    AccentColor.TEAL   -> Color(0xFF5EC6C6)
+    AccentColor.GREEN  -> Color(0xFF66DDAA)
+    AccentColor.GOLD   -> Color(0xFFFFD54F)
     AccentColor.ORANGE -> Color(0xFFFFAA5C)
     AccentColor.RED    -> Color(0xFFFF7B7B)
+    AccentColor.PINK   -> Color(0xFFFF8AB4)
 }

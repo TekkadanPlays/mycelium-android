@@ -73,13 +73,11 @@ class ProfileMetadataCache {
         private const val DISK_SAVE_DEBOUNCE_MS = 2000L
         /** Profiles older than this are considered stale and will be re-fetched when encountered. */
         private const val PROFILE_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
+        /** How long to wait before checking if any profiles arrived (early-out for disconnected relays). */
+        private const val EARLY_PROBE_MS = 2000L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
-
-    // ── State-machine–backed profile subscription ────────────────────────
-    /** Active temporary subscription handle for the current batch fetch. Cancelled between batches. */
-    @Volatile private var activeProfileHandle: TemporarySubscriptionHandle? = null
 
     // ── Internal batching: accumulate pubkeys from all callers into one batch ──
     private val internalPendingPubkeys = Collections.synchronizedSet(HashSet<String>())
@@ -93,11 +91,16 @@ class ProfileMetadataCache {
     private val INTERNAL_BATCH_SIZE = 80
     /** Shared counter for profiles received across all pool connections. */
     private val poolReceived = AtomicInteger(0)
+    /** Consecutive early-out failures — drives exponential backoff to avoid retry spam. */
+    private var consecutiveEarlyOuts = 0
 
     /** Application context for SharedPreferences persistence. Set via [init]. */
     @Volatile private var appContext: Context? = null
     /** Debounced disk save job. */
     private var diskSaveJob: Job? = null
+    /** Prevents concurrent disk saves; if a save is in progress, new requests just mark dirty. */
+    private val diskSaveMutex = kotlinx.coroutines.sync.Mutex()
+    @Volatile private var diskDirtyAfterSave = false
 
     /** Pubkeys (lowercase) that should not be evicted by LRU when under HARD_CAP (e.g. follow list). */
     private val pinnedPubkeys = Collections.synchronizedSet(mutableSetOf<String>())
@@ -204,13 +207,17 @@ class ProfileMetadataCache {
         val key = normalizeKey(pubkey)
         val existingAt = profileCreatedAt[key] ?: 0L
         if (createdAt < existingAt) return false
+        val existing = cache[key]
+        val dataChanged = existing == null || existing != author || createdAt != existingAt
         cache[key] = author
         profileCreatedAt[key] = createdAt
         profileFetchedAt[key] = System.currentTimeMillis()
+        // Always emit so notes get their authors applied (even if data came from disk cache)
         scope.launch {
             _profileUpdated.emit(key)
         }
-        scheduleDiskSave()
+        // Only write to disk when the profile data actually changed
+        if (dataChanged) scheduleDiskSave()
         return true
     }
 
@@ -247,17 +254,17 @@ class ProfileMetadataCache {
     }
 
     /**
-     * Schedule the internal batch fetch. Resets the debounce timer on each call so pubkeys
-     * accumulate. In-flight fetches are never cancelled.
+     * Schedule the internal batch fetch. If no fetch is in-flight, resets the debounce timer.
+     * If a fetch IS in-flight, just let pubkeys accumulate — the while loop will pick them up.
      */
     private fun scheduleInternalBatch() {
+        // If a fetch is already running, pubkeys will be picked up by its while loop — no need to schedule
+        if (internalBatchFetchJob != null) return
         internalBatchScheduleJob?.cancel()
         internalBatchScheduleJob = scope.launch {
             delay(INTERNAL_BATCH_DELAY_MS)
-            // Wait for any in-flight fetch to finish
-            internalBatchFetchJob?.join()
             internalBatchFetchJob = scope.launch {
-                while (internalPendingPubkeys.isNotEmpty()) {
+                while (internalPendingPubkeys.isNotEmpty() && consecutiveEarlyOuts < 5) {
                     val batch = synchronized(internalPendingPubkeys) {
                         internalPendingPubkeys.take(INTERNAL_BATCH_SIZE).also { internalPendingPubkeys.removeAll(it.toSet()) }
                     }
@@ -297,9 +304,7 @@ class ProfileMetadataCache {
             limit = uncached.size
         )
 
-        // Cancel any lingering handle from a previous batch
-        activeProfileHandle?.cancel()
-
+        val batchReceived = AtomicInteger(0)
         val handle = RelayConnectionStateMachine.getInstance()
             .requestTemporarySubscription(allRelays, filter) { event: Event ->
                 if (event.kind == 0) {
@@ -309,22 +314,50 @@ class ProfileMetadataCache {
                     if (pubkey.isNotBlank() && content.isNotBlank()) {
                         val author = parseKind0Content(pubkey, content)
                         if (author != null && putProfileIfNewer(pubkey, author, createdAt)) {
+                            batchReceived.incrementAndGet()
                             poolReceived.incrementAndGet()
                         }
                     }
                 }
             }
-        activeProfileHandle = handle
 
-        val timeoutMs = if (uncached.size > BULK_THRESHOLD) KIND0_BULK_FETCH_TIMEOUT_MS else KIND0_FETCH_TIMEOUT_MS
-        delay(timeoutMs)
+        // Progressive early-out: poll every 500ms during the probe window so we catch relays
+        // that connect mid-probe (e.g. at 1.5s) instead of waiting the full window.
+        // Backoff only adds a delay BEFORE the next retry cycle, not during the probe.
+        val probeIntervalMs = 500L
+        val probeChecks = (EARLY_PROBE_MS / probeIntervalMs).toInt().coerceAtLeast(1)
+        var probeElapsed = 0L
+        for (i in 0 until probeChecks) {
+            delay(probeIntervalMs)
+            probeElapsed += probeIntervalMs
+            if (batchReceived.get() > 0) break
+        }
+        if (batchReceived.get() == 0) {
+            handle.cancel()
+            consecutiveEarlyOuts++
+            // Re-queue so next batch picks them up (relays may be connected by then)
+            synchronized(internalPendingPubkeys) { internalPendingPubkeys.addAll(uncached) }
+            // Hard cap: after 5 consecutive failures, stop retrying entirely.
+            // Pubkeys stay in the queue and will be picked up when new notes trigger a fresh batch.
+            if (consecutiveEarlyOuts >= 5) {
+                Log.d(TAG, "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts) — giving up, relays appear offline")
+                return
+            }
+            // Backoff delay before the while-loop retries: 0s, 1s, 2s, 4s, 8s cap
+            val backoffMs = if (consecutiveEarlyOuts <= 1) 0L
+                else (1000L * (1L shl (consecutiveEarlyOuts - 2).coerceAtMost(3))).coerceAtMost(8_000L)
+            Log.d(TAG, "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts, next backoff ${backoffMs}ms), re-queued")
+            if (backoffMs > 0) delay(backoffMs)
+            return
+        }
+        consecutiveEarlyOuts = 0 // Reset on success
 
-        // Clean up: cancel subscription so relay pool can release the connection if idle
+        // Relays are responding — wait for the full timeout
+        val remainingMs = ((if (uncached.size > BULK_THRESHOLD) KIND0_BULK_FETCH_TIMEOUT_MS else KIND0_FETCH_TIMEOUT_MS) - probeElapsed).coerceAtLeast(1000L)
+        delay(remainingMs)
+
         handle.cancel()
-        if (activeProfileHandle === handle) activeProfileHandle = null
-
-        val batchReceived = poolReceived.get() - beforeCount
-        Log.d(TAG, "Kind-0 fetch done: $batchReceived/${uncached.size} profiles from ${allRelays.size} relays")
+        Log.d(TAG, "Kind-0 fetch done: ${batchReceived.get()}/${uncached.size} profiles from ${allRelays.size} relays")
     }
 
     /**
@@ -398,10 +431,24 @@ class ProfileMetadataCache {
     /** Schedule a debounced save after a profile update. */
     private fun scheduleDiskSave() {
         if (appContext == null) return
+        // If a save is already in progress, mark dirty so it does one more pass after finishing
+        if (diskSaveMutex.isLocked) {
+            diskDirtyAfterSave = true
+            return
+        }
         diskSaveJob?.cancel()
         diskSaveJob = scope.launch {
             delay(DISK_SAVE_DEBOUNCE_MS)
-            saveProfileCacheToDisk()
+            if (diskSaveMutex.tryLock()) {
+                try {
+                    do {
+                        diskDirtyAfterSave = false
+                        saveProfileCacheToDisk()
+                    } while (diskDirtyAfterSave)
+                } finally {
+                    diskSaveMutex.unlock()
+                }
+            }
         }
     }
 

@@ -155,11 +155,12 @@ class Kind1RepliesViewModel : ViewModel() {
      * Update replies state with sorting and threaded structure (NIP-10 reply chains).
      * Fast-path: skip if reply set is unchanged (same count + same IDs) to avoid
      * redundant sort/thread/recompose when the second relay delivers identical events.
+     * @param forceResort when true, bypass the fast-path (e.g. sort order changed but replies are the same).
      */
-    private fun updateRepliesState(replies: List<Note>) {
+    private fun updateRepliesState(replies: List<Note>, forceResort: Boolean = false) {
         val current = _uiState.value
-        // Fast-path: skip if reply set is unchanged
-        if (replies.size == current.totalReplyCount && replies.size > 0) {
+        // Fast-path: skip if reply set is unchanged (unless sort order changed)
+        if (!forceResort && replies.size == current.totalReplyCount && replies.size > 0) {
             val currentIds = current.replies.mapTo(HashSet(current.replies.size)) { it.id }
             if (replies.all { it.id in currentIds }) return
         }
@@ -303,7 +304,7 @@ class Kind1RepliesViewModel : ViewModel() {
     fun setSortOrder(sortOrder: Kind1ReplySortOrder) {
         if (_uiState.value.sortOrder != sortOrder) {
             _uiState.update { it.copy(sortOrder = sortOrder) }
-            updateRepliesState(_uiState.value.replies)
+            updateRepliesState(_uiState.value.replies, forceResort = true)
         }
     }
 

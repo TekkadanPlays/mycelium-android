@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.flow.filter
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -133,10 +134,13 @@ fun RelayHealthScreen(
         }
     }
 
-    // Profile revision for live name updates
+    // Profile revision for live name updates — only recompose when a followed user's profile changes
     var profileRevision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        profileCache.profileUpdated.collect { profileRevision++ }
+    LaunchedEffect(followSet) {
+        if (followSet.isEmpty()) return@LaunchedEffect
+        profileCache.profileUpdated
+            .filter { it in followSet }
+            .collect { profileRevision++ }
     }
     @Suppress("UNUSED_EXPRESSION") profileRevision
 

@@ -67,7 +67,6 @@ fun ZapButtonWithMenu(
 ) {
     var isMenuExpanded by remember { mutableStateOf(false) }
     var showWalletConnectDialog by remember { mutableStateOf(false) }
-    var showZapConfigDialog by remember { mutableStateOf(false) }
     var showCustomZapDialog by remember { mutableStateOf(false) }
     
     // Initialize ZapAmountManager and get shared state
@@ -149,7 +148,7 @@ fun ZapButtonWithMenu(
                         selected = false,
                         onClick = {
                             isMenuExpanded = false
-                            showZapConfigDialog = true
+                            onSettingsClick()
                         },
                         label = { Text("Edit") },
                         leadingIcon = {
@@ -173,18 +172,6 @@ fun ZapButtonWithMenu(
     if (showWalletConnectDialog) {
         social.mycelium.android.ui.components.WalletConnectDialog(
             onDismiss = { showWalletConnectDialog = false }
-        )
-    }
-
-    // Zap Configuration dialog
-    if (showZapConfigDialog) {
-        ZapConfigurationDialog(
-            zapAmounts = zapAmounts,
-            onDismiss = { showZapConfigDialog = false },
-            onOpenWalletSettings = { 
-                showZapConfigDialog = false
-                showWalletConnectDialog = true
-            }
         )
     }
 
@@ -430,7 +417,8 @@ private fun ZapConfigurationDialog(
 @Composable
 fun ZapCustomDialog(
     onDismiss: () -> Unit,
-    onSendZap: (amountSats: Long, zapType: ZapType, message: String) -> Unit
+    onSendZap: (amountSats: Long, zapType: ZapType, message: String) -> Unit,
+    onZapSettings: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val nwcConfig = remember { NwcConfigRepository.getConfig(context) }
@@ -474,11 +462,18 @@ fun ZapCustomDialog(
                         style = MaterialTheme.typography.headlineSmall,
                         fontWeight = FontWeight.Bold
                     )
-                    Icon(
-                        imageVector = Icons.Filled.Settings,
-                        contentDescription = "Zap settings",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    IconButton(
+                        onClick = {
+                            onDismiss()
+                            onZapSettings?.invoke()
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Settings,
+                            contentDescription = "Zap settings",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))

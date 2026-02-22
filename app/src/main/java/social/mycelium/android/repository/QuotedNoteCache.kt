@@ -5,6 +5,7 @@ import social.mycelium.android.data.QuotedNoteMeta
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
+import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Collections
@@ -72,14 +73,14 @@ object QuotedNoteCache {
                 return null
             }
             val filter = Filter(
-                kinds = listOf(1),
+                kinds = listOf(1, 11, 1111),
                 ids = listOf(eventId),
                 limit = 1
             )
             val deferred = CompletableDeferred<Pair<Event, String>>()
             val stateMachine = RelayConnectionStateMachine.getInstance()
-            val handle = stateMachine.requestTemporarySubscriptionWithRelay(relays, filter) { e, relayUrl ->
-                if (e.kind == 1 && e.id == eventId) deferred.complete(e to relayUrl)
+            val handle = stateMachine.requestTemporarySubscriptionWithRelay(relays, filter, priority = SubscriptionPriority.NORMAL) { e, relayUrl ->
+                if (e.id == eventId) deferred.complete(e to relayUrl)
             }
             // Wait until event arrives or timeout — whichever comes first
             val result = withTimeoutOrNull(FETCH_TIMEOUT_MS) { deferred.await() }

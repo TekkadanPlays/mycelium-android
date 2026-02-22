@@ -37,6 +37,8 @@ import androidx.compose.ui.semantics.traversalIndex
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
@@ -1215,30 +1217,39 @@ fun DashboardScreen(
 
         // When not logged in, bypass Scaffold entirely to avoid bottom line artifact
         if (!isLoggedIn) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
-            ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                // Edge-to-edge GIF background
+                val gifContext = LocalContext.current
+                val gifModel = remember {
+                    coil.request.ImageRequest.Builder(gifContext)
+                        .data(social.mycelium.android.R.drawable.mycelium_scroller)
+                        .decoderFactory(coil.decode.GifDecoder.Factory())
+                        .build()
+                }
+                coil.compose.AsyncImage(
+                    model = gifModel,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+
+                // Semi-transparent scrim so text is readable
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                )
+
                 if (!accountsRestored) {
-                    // Account restore in progress — subtle fade-in spinner
-                    val restoreAlpha by animateFloatAsState(
-                        targetValue = 1f,
-                        animationSpec = tween(600, easing = FastOutSlowInEasing),
-                        label = "restore_alpha"
-                    )
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.graphicsLayer { alpha = restoreAlpha }
+                    // Account restore in progress
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = "\uD83C\uDF44",
-                            style = MaterialTheme.typography.displayLarge
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
                         CircularProgressIndicator(
-                            modifier = Modifier.size(32.dp),
-                            strokeWidth = 2.5.dp,
-                            color = Color(0xFF8B9D83)
+                            modifier = Modifier.size(48.dp),
+                            strokeWidth = 3.dp,
+                            color = MaterialTheme.colorScheme.primary
                         )
                     }
                 } else {
@@ -1260,48 +1271,65 @@ fun DashboardScreen(
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
                             .padding(horizontal = 32.dp, vertical = 24.dp)
                             .graphicsLayer {
                                 alpha = loginAlpha
                                 translationY = loginOffsetY
                             },
-                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                        verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
                             painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_mushroom_purple),
                             contentDescription = "Mycelium",
-                            modifier = Modifier.size(80.dp),
+                            modifier = Modifier.size(96.dp),
                             tint = Color.Unspecified
                         )
+                        Spacer(modifier = Modifier.height(12.dp))
                         Text(
-                            text = "Welcome to Mycelium",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.onSurface
+                            text = "Mycelium",
+                            style = MaterialTheme.typography.headlineLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Decentralized social",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Color.White.copy(alpha = 0.7f)
                         )
 
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(48.dp))
 
                         if (onLoginClick != null) {
                             Button(
                                 onClick = { onLoginClick.invoke() },
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary
+                                )
                             ) {
                                 Text("Login with Amber")
                             }
                         }
 
+                        Spacer(modifier = Modifier.height(12.dp))
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            HorizontalDivider(modifier = Modifier.weight(1f))
+                            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.3f))
                             Text(
                                 text = "  or  ",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = Color.White.copy(alpha = 0.5f)
                             )
-                            HorizontalDivider(modifier = Modifier.weight(1f))
+                            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.3f))
                         }
+
+                        Spacer(modifier = Modifier.height(12.dp))
 
                         val loginContext = LocalContext.current
                         TextButton(
@@ -1309,7 +1337,7 @@ fun DashboardScreen(
                                 loginContext.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/greenart7c3/Amber")))
                             }
                         ) {
-                            Text("Download Amber")
+                            Text("Download Amber", color = Color.White.copy(alpha = 0.8f))
                         }
                     }
                 }

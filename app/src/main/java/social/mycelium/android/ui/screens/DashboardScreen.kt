@@ -1218,20 +1218,33 @@ fun DashboardScreen(
         // When not logged in, bypass Scaffold entirely to avoid bottom line artifact
         if (!isLoggedIn) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Edge-to-edge GIF background
+                // Tiled GIF background — 250x250 square GIF tiled seamlessly to fill screen.
                 val gifContext = LocalContext.current
                 val gifModel = remember {
                     coil.request.ImageRequest.Builder(gifContext)
-                        .data(social.mycelium.android.R.drawable.mycelium_scroller)
+                        .data(social.mycelium.android.R.drawable.mycelium_slowscroll)
                         .decoderFactory(coil.decode.GifDecoder.Factory())
                         .build()
                 }
-                coil.compose.AsyncImage(
-                    model = gifModel,
-                    contentDescription = null,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
+                val tileSize = 90.dp // ~250px at mdpi, tiles seamlessly
+                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                    val cols = (maxWidth / tileSize).toInt() + 1
+                    val rows = (maxHeight / tileSize).toInt() + 1
+                    Column {
+                        repeat(rows) {
+                            Row {
+                                repeat(cols) {
+                                    coil.compose.AsyncImage(
+                                        model = gifModel,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(tileSize),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Semi-transparent scrim so text is readable
                 Box(

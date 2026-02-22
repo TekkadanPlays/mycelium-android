@@ -1217,44 +1217,27 @@ fun DashboardScreen(
 
         // When not logged in, bypass Scaffold entirely to avoid bottom line artifact
         if (!isLoggedIn) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // Tiled GIF background — 250x250 square GIF tiled seamlessly to fill screen.
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background)
+            ) {
+                // GIF banner at the top — spans full width, natural height
                 val gifContext = LocalContext.current
                 val gifModel = remember {
                     coil.request.ImageRequest.Builder(gifContext)
-                        .data(social.mycelium.android.R.drawable.mycelium_slowscroll)
+                        .data(social.mycelium.android.R.drawable.huge_scroller)
                         .decoderFactory(coil.decode.GifDecoder.Factory())
                         .build()
                 }
-                val tileSize = 90.dp // ~250px at mdpi, tiles seamlessly
-                BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-                    val cols = (maxWidth / tileSize).toInt() + 1
-                    val rows = (maxHeight / tileSize).toInt() + 1
-                    Column {
-                        repeat(rows) {
-                            Row {
-                                repeat(cols) {
-                                    coil.compose.AsyncImage(
-                                        model = gifModel,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(tileSize),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Semi-transparent scrim so text is readable
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.55f))
+                coil.compose.AsyncImage(
+                    model = gifModel,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentScale = ContentScale.FillWidth
                 )
 
                 if (!accountsRestored) {
-                    // Account restore in progress
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -1266,7 +1249,7 @@ fun DashboardScreen(
                         )
                     }
                 } else {
-                    // Sign-in prompt with fade-up animation
+                    // Sign-in controls
                     var loginVisible by remember { mutableStateOf(false) }
                     LaunchedEffect(Unit) { loginVisible = true }
 
@@ -1284,9 +1267,9 @@ fun DashboardScreen(
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .fillMaxSize()
-                            .statusBarsPadding()
-                            .padding(horizontal = 32.dp, vertical = 24.dp)
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .padding(horizontal = 32.dp)
                             .graphicsLayer {
                                 alpha = loginAlpha
                                 translationY = loginOffsetY
@@ -1296,32 +1279,16 @@ fun DashboardScreen(
                         Icon(
                             painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_mushroom_purple),
                             contentDescription = "Mycelium",
-                            modifier = Modifier.size(96.dp),
+                            modifier = Modifier.size(80.dp),
                             tint = Color.Unspecified
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Mycelium",
-                            style = MaterialTheme.typography.headlineLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Decentralized social",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color.White.copy(alpha = 0.7f)
-                        )
 
-                        Spacer(modifier = Modifier.height(48.dp))
+                        Spacer(modifier = Modifier.height(32.dp))
 
                         if (onLoginClick != null) {
                             Button(
                                 onClick = { onLoginClick.invoke() },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.primary
-                                )
+                                modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text("Login with Amber")
                             }
@@ -1333,13 +1300,13 @@ fun DashboardScreen(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.3f))
+                            HorizontalDivider(modifier = Modifier.weight(1f))
                             Text(
                                 text = "  or  ",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color.White.copy(alpha = 0.5f)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            HorizontalDivider(modifier = Modifier.weight(1f), color = Color.White.copy(alpha = 0.3f))
+                            HorizontalDivider(modifier = Modifier.weight(1f))
                         }
 
                         Spacer(modifier = Modifier.height(12.dp))
@@ -1350,7 +1317,7 @@ fun DashboardScreen(
                                 loginContext.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/greenart7c3/Amber")))
                             }
                         ) {
-                            Text("Download Amber", color = Color.White.copy(alpha = 0.8f))
+                            Text("Download Amber")
                         }
                     }
                 }

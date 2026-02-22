@@ -69,13 +69,28 @@ object DirectMessageRepository {
     /**
      * Start subscribing to gift-wrapped DMs for the given user.
      */
+    /** Well-known relays that commonly carry NIP-17 gift wraps. */
+    private val DM_FALLBACK_RELAYS = listOf(
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.nostr.band",
+        "wss://relay.primal.net",
+        "wss://purplepag.es",
+        "wss://auth.nostr1.com",
+        "wss://inbox.nostr.wine",
+        "wss://relay.nostr.net",
+    )
+
     fun startSubscription(pubkey: String, signer: NostrSigner, relayUrls: List<String>) {
-        if (relayUrls.isEmpty()) {
-            Log.w(TAG, "No relay URLs for DM subscription")
-            return
-        }
         userPubkey = pubkey
         userSigner = signer
+
+        // Merge user relays + well-known DM relays for broad coverage
+        val allRelays = (relayUrls + DM_FALLBACK_RELAYS)
+            .map { it.trim().removeSuffix("/") }
+            .distinct()
+
+        Log.d(TAG, "startSubscription: signer=${signer::class.simpleName}, pubkey=${pubkey.take(8)}, userRelays=${relayUrls.size}, total=${allRelays.size}")
 
         // Subscribe to kind 1059 with #p = our pubkey
         val since = (System.currentTimeMillis() / 1000) - TWO_WEEKS_SEC
@@ -85,15 +100,17 @@ object DirectMessageRepository {
             since = since,
             limit = 500
         )
+        Log.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, since=$since, limit=500")
 
         dmHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         dmHandle = stateMachine.requestTemporarySubscription(
-            relayUrls, filter, priority = SubscriptionPriority.NORMAL
+            allRelays, filter, priority = SubscriptionPriority.NORMAL
         ) { event ->
+            Log.d(TAG, "Received event kind=${event.kind} id=${event.id.take(8)} from=${event.pubKey.take(8)}")
             handleGiftWrap(event)
         }
-        Log.d(TAG, "DM subscription started on ${relayUrls.size} relays for ${pubkey.take(8)}...")
+        Log.d(TAG, "DM subscription started on ${allRelays.size} relays for ${pubkey.take(8)}...")
     }
 
     fun stopSubscription() {
@@ -216,18 +233,22 @@ object DirectMessageRepository {
         scope.launch {
             try {
                 // Step 1: Decrypt gift wrap content using our key + gift wrap pubkey
+                Log.d(TAG, "Step 1: Decrypting gift wrap ${event.id.take(8)} content(${event.content.length} chars) with wrapPubkey=${event.pubKey.take(8)}")
                 val sealJson = signer.nip44Decrypt(event.content, event.pubKey)
+                Log.d(TAG, "Step 1 result: sealJson length=${sealJson.length}, starts=${sealJson.take(60)}")
                 val seal = Event.fromJsonOrNull(sealJson)
                 if (seal == null || seal.kind != KIND_SEAL) {
-                    Log.w(TAG, "Invalid seal in gift wrap ${event.id.take(8)}")
+                    Log.w(TAG, "Invalid seal in gift wrap ${event.id.take(8)}, seal=${seal?.kind}, jsonLen=${sealJson.length}")
                     return@launch
                 }
 
                 // Step 2: Decrypt seal content using our key + seal pubkey (sender)
+                Log.d(TAG, "Step 2: Decrypting seal from ${seal.pubKey.take(8)}, content(${seal.content.length} chars)")
                 val rumorJson = signer.nip44Decrypt(seal.content, seal.pubKey)
+                Log.d(TAG, "Step 2 result: rumorJson length=${rumorJson.length}, starts=${rumorJson.take(60)}")
                 val rumor = Event.fromJsonOrNull(rumorJson)
                 if (rumor == null || rumor.kind != KIND_DM) {
-                    Log.w(TAG, "Invalid rumor in seal from ${seal.pubKey.take(8)}")
+                    Log.w(TAG, "Invalid rumor in seal from ${seal.pubKey.take(8)}, rumor=${rumor?.kind}")
                     return@launch
                 }
 

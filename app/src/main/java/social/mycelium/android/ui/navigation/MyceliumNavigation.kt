@@ -342,12 +342,6 @@ fun MyceliumNavigation(
             NotificationsRepository.setCacheRelayUrls(indexerUrls)
             NotificationsRepository.startSubscription(pubkey, allUserRelayUrls)
             Log.d("MyceliumNav", "Notif subscription started with ${allUserRelayUrls.size} relays")
-            // Start DM subscription (NIP-17 gift wraps)
-            val signer = accountStateViewModel.getCurrentSigner()
-            if (signer != null) {
-                social.mycelium.android.repository.DirectMessageRepository.startSubscription(pubkey, signer, allUserRelayUrls)
-                Log.d("MyceliumNav", "DM subscription started")
-            }
             // Fetch mute list (NIP-51 kind 10000) and bookmarks (kind 10003)
             social.mycelium.android.repository.MuteListRepository.fetchMuteList(pubkey, allUserRelayUrls)
             social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(pubkey, allUserRelayUrls)
@@ -355,6 +349,27 @@ fun MyceliumNavigation(
             accountStateViewModel.requestMySubscriptions()
         } else {
             Log.w("MyceliumNav", "Notif subscription skipped: no relay URLs found for ${pubkey.take(8)}")
+        }
+    }
+
+    // DM subscription: derive signer from composed amberState so Compose tracks the dependency
+    val currentSigner = remember(amberState, currentAccount) { accountStateViewModel.getCurrentSigner() }
+    LaunchedEffect(currentAccount, onboardingComplete, currentSigner) {
+        val pubkey = currentAccount?.toHexKey() ?: return@LaunchedEffect
+        if (!onboardingComplete) return@LaunchedEffect
+        val dmSigner = currentSigner ?: return@LaunchedEffect
+
+        val categories = storageManager.loadCategories(pubkey)
+        val outboxRelays = storageManager.loadOutboxRelays(pubkey)
+        val inboxRelays = storageManager.loadInboxRelays(pubkey)
+        val allUserRelayUrls = (categories.flatMap { it.relays }.map { it.url } +
+                outboxRelays.map { it.url } + inboxRelays.map { it.url })
+            .map { it.trim().removeSuffix("/") }
+            .distinct()
+
+        if (allUserRelayUrls.isNotEmpty()) {
+            social.mycelium.android.repository.DirectMessageRepository.startSubscription(pubkey, dmSigner, allUserRelayUrls)
+            Log.d("MyceliumNav", "DM subscription started: ${allUserRelayUrls.size} relays, signer=${dmSigner::class.simpleName}")
         }
     }
 
@@ -491,7 +506,8 @@ fun MyceliumNavigation(
                     // Instant transitions everywhere — seamless like Topics.
                     // Only thread routes get a slide animation (unique thread UX).
                     enterTransition = {
-                        val isThread = targetState.destination.route?.startsWith("thread/") == true
+                        val target = targetState.destination.route
+                        val isThread = target?.startsWith("thread/") == true || target?.startsWith("topic_thread/") == true
                         if (isThread) {
                             slideIntoContainer(
                                 towards = AnimatedContentTransitionScope.SlideDirection.Start,
@@ -500,7 +516,8 @@ fun MyceliumNavigation(
                         } else EnterTransition.None
                     },
                     exitTransition = {
-                        val isThread = targetState.destination.route?.startsWith("thread/") == true
+                        val target = targetState.destination.route
+                        val isThread = target?.startsWith("thread/") == true || target?.startsWith("topic_thread/") == true
                         if (isThread) {
                             slideOutOfContainer(
                                 towards = AnimatedContentTransitionScope.SlideDirection.Start,
@@ -509,7 +526,8 @@ fun MyceliumNavigation(
                         } else ExitTransition.None
                     },
                     popEnterTransition = {
-                        val isThread = initialState.destination.route?.startsWith("thread/") == true
+                        val initial = initialState.destination.route
+                        val isThread = initial?.startsWith("thread/") == true || initial?.startsWith("topic_thread/") == true
                         if (isThread) {
                             slideIntoContainer(
                                 towards = AnimatedContentTransitionScope.SlideDirection.End,
@@ -518,7 +536,8 @@ fun MyceliumNavigation(
                         } else EnterTransition.None
                     },
                     popExitTransition = {
-                        val isThread = initialState.destination.route?.startsWith("thread/") == true
+                        val initial = initialState.destination.route
+                        val isThread = initial?.startsWith("thread/") == true || initial?.startsWith("topic_thread/") == true
                         if (isThread) {
                             slideOutOfContainer(
                                 towards = AnimatedContentTransitionScope.SlideDirection.End,
@@ -2439,21 +2458,7 @@ fun MyceliumNavigation(
                     route = "topic_thread/{topicId}",
                     arguments = listOf(
                         navArgument("topicId") { type = NavType.StringType }
-                    ),
-                    enterTransition = {
-                        slideIntoContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.Start,
-                            animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
-                        )
-                    },
-                    exitTransition = { null },
-                    popEnterTransition = { null },
-                    popExitTransition = {
-                        slideOutOfContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.End,
-                            animationSpec = tween(300, easing = MaterialMotion.EasingStandardAccelerate)
-                        )
-                    }
+                    )
                 ) { backStackEntry ->
                     val topicId = backStackEntry.arguments?.getString("topicId") ?: return@composable
                     val topicsRepository = remember { social.mycelium.android.repository.TopicsRepository.getInstance(context) }

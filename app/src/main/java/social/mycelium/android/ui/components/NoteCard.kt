@@ -81,6 +81,26 @@ import java.util.*
 import java.util.concurrent.TimeUnit
 
 /**
+ * Persistent expanded state for quoted notes — survives LazyColumn recycling and
+ * fullscreen navigation (e.g. video player back gesture).
+ * Keyed by quoted event ID; bounded to avoid unbounded growth.
+ */
+object QuotedNoteExpandedState {
+    private const val MAX_ENTRIES = 500
+    private val map = mutableStateMapOf<String, Boolean>()
+
+    fun isExpanded(eventId: String): Boolean = map[eventId] ?: false
+
+    fun toggle(eventId: String) {
+        map[eventId] = !(map[eventId] ?: false)
+        if (map.size > MAX_ENTRIES) {
+            val keysToRemove = map.keys.take(map.size - MAX_ENTRIES)
+            keysToRemove.forEach { map.remove(it) }
+        }
+    }
+}
+
+/**
  * Defines which buttons appear in the NoteCard action row.
  * All controls are right-aligned with consistent sizing.
  *
@@ -302,7 +322,7 @@ private fun QuotedNoteContent(
     onOpenImageViewer: (List<String>, Int) -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
-    var quotedExpanded by remember(meta.eventId) { mutableStateOf(false) }
+    val quotedExpanded = QuotedNoteExpandedState.isExpanded(meta.eventId)
     val hasMore = meta.fullContent.length > meta.contentSnippet.length
 
     val quotedDisplayContent = if (quotedExpanded) meta.fullContent else meta.contentSnippet
@@ -428,7 +448,7 @@ private fun QuotedNoteContent(
                 meta = meta,
                 quotedAuthor = quotedAuthor,
                 isVisible = isVisible,
-                onExpandToggle = { quotedExpanded = !quotedExpanded },
+                onExpandToggle = { QuotedNoteExpandedState.toggle(meta.eventId) },
                 onProfileClick = onProfileClick,
                 onNoteClick = onNoteClick,
                 onVideoClick = onVideoClick,

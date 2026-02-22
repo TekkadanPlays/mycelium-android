@@ -396,7 +396,7 @@ private fun NoteCardContent(
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 quotedMetas.values.forEach { meta ->
                                     val quotedAuthor = remember(meta.authorId) { profileCache.resolveAuthor(meta.authorId) }
-                                    var quotedExpanded by remember(meta.eventId) { mutableStateOf(false) }
+                                    val quotedExpanded = QuotedNoteExpandedState.isExpanded(meta.eventId)
                                     val hasMore = meta.fullContent.length > meta.contentSnippet.length
 
                                     // Rich content blocks
@@ -594,7 +594,7 @@ private fun NoteCardContent(
                                                         .clickable(
                                                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                                                             indication = null
-                                                        ) { quotedExpanded = !quotedExpanded }
+                                                        ) { QuotedNoteExpandedState.toggle(meta.eventId) }
                                                 )
                                             }
                                         }

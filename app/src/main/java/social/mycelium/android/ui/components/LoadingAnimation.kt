@@ -14,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProgressIndicatorDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
@@ -32,7 +33,7 @@ import androidx.compose.ui.unit.dp
  * - Button loading: LoadingAnimation(indicatorSize = 16.dp)
  */
 
-// Sage-inspired color gradient for the loading animation
+// Sage-inspired color gradient for the loading animation (legacy — prefer themed variant)
 val SageLoadingColors = listOf(
     Color(0xFF8B9D83), // Sage green
     Color(0xFF6B7F66), // Darker sage
@@ -71,6 +72,19 @@ fun LoadingAnimation(
         label = "LoadingRotationAnimation",
     )
 
+    val primary = MaterialTheme.colorScheme.primary
+    val themedColors = remember(primary) {
+        listOf(
+            primary,
+            primary.copy(alpha = 0.7f),
+            primary.copy(alpha = 0.3f),
+            primary.copy(alpha = 0.1f),
+            primary.copy(alpha = 0.3f),
+            primary.copy(alpha = 0.7f),
+            primary,
+        )
+    }
+
     Box(
         modifier = modifier,
         contentAlignment = Alignment.Center
@@ -82,7 +96,7 @@ fun LoadingAnimation(
                 .rotate(degrees = rotateAnimation)
                 .border(
                     width = circleWidth,
-                    brush = Brush.sweepGradient(SageLoadingColors),
+                    brush = Brush.sweepGradient(themedColors),
                     shape = CircleShape,
                 ),
             color = MaterialTheme.colorScheme.background,
@@ -130,6 +144,6 @@ fun SageLoadingIndicator(
     CircularProgressIndicator(
         modifier = modifier.size(size),
         strokeWidth = strokeWidth,
-        color = Color(0xFF8B9D83) // Sage color
+        color = MaterialTheme.colorScheme.primary
     )
 }

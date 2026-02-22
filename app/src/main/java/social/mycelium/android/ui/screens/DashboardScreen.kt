@@ -112,13 +112,6 @@ private fun RelayConnectionLoadingIndicator(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.padding(horizontal = 48.dp)
     ) {
-        Icon(
-            painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_mushroom_purple),
-            contentDescription = null,
-            modifier = Modifier.size(48.dp),
-            tint = Color.Unspecified
-        )
-        Spacer(modifier = Modifier.height(16.dp))
         Box(
             contentAlignment = Alignment.Center,
             modifier = Modifier.size(80.dp)
@@ -135,7 +128,7 @@ private fun RelayConnectionLoadingIndicator(
                     progress = { animatedProgress },
                     modifier = Modifier.size(80.dp),
                     strokeWidth = 3.dp,
-                    color = Color(0xFF4CAF50).copy(alpha = 0.8f),
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
                     trackColor = Color.Transparent
                 )
             }
@@ -146,23 +139,12 @@ private fun RelayConnectionLoadingIndicator(
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
                 )
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                if (totalCount > 0) {
-                    Text(
-                        text = "$connectedCount",
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = if (connectedCount > 0) Color(0xFF4CAF50)
-                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                    )
-                    Text(
-                        text = "of $totalCount",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                        fontSize = 10.sp
-                    )
-                }
-            }
+            Icon(
+                painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_mushroom_purple),
+                contentDescription = null,
+                modifier = Modifier.size(36.dp),
+                tint = Color.Unspecified
+            )
         }
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -1285,9 +1267,11 @@ fun DashboardScreen(
                             },
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-                        Text(
-                            text = "\uD83C\uDF44",
-                            style = MaterialTheme.typography.displayLarge
+                        Icon(
+                            painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_mushroom_purple),
+                            contentDescription = "Mycelium",
+                            modifier = Modifier.size(80.dp),
+                            tint = Color.Unspecified
                         )
                         Text(
                             text = "Welcome to Mycelium",

@@ -1869,7 +1869,23 @@ fun MyceliumNavigation(
                                 launchSingleTop = true
                             }
                         },
-                        onNewMessage = { /* TODO: new message picker */ }
+                        onNewMessage = {
+                            navController.navigate("new_dm") {
+                                launchSingleTop = true
+                            }
+                        }
+                    )
+                }
+
+                composable("new_dm") {
+                    social.mycelium.android.ui.screens.NewDmScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onPeerSelected = { peerPubkey ->
+                            navController.navigate("chat/$peerPubkey") {
+                                popUpTo("messages") { inclusive = false }
+                                launchSingleTop = true
+                            }
+                        }
                     )
                 }
 

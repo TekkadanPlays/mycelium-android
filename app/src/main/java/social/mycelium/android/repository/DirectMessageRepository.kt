@@ -66,6 +66,10 @@ object DirectMessageRepository {
     private var userPubkey: String? = null
     private var userSigner: NostrSigner? = null
 
+    /** Debug: subscription status for UI display. */
+    private val _debugStatus = MutableStateFlow("Not started")
+    val debugStatus: StateFlow<String> = _debugStatus.asStateFlow()
+
     /**
      * Start subscribing to gift-wrapped DMs for the given user.
      */
@@ -90,6 +94,7 @@ object DirectMessageRepository {
             .map { it.trim().removeSuffix("/") }
             .distinct()
 
+        _debugStatus.value = "Subscribing on ${allRelays.size} relays..."
         Log.d(TAG, "startSubscription: signer=${signer::class.simpleName}, pubkey=${pubkey.take(8)}, userRelays=${relayUrls.size}, total=${allRelays.size}")
 
         // Subscribe to kind 1059 with #p = our pubkey
@@ -108,8 +113,10 @@ object DirectMessageRepository {
             allRelays, filter, priority = SubscriptionPriority.NORMAL
         ) { event ->
             Log.d(TAG, "Received event kind=${event.kind} id=${event.id.take(8)} from=${event.pubKey.take(8)}")
+            _debugStatus.value = "Received ${processedIds.size + 1} events, ${messagesById.size} decrypted"
             handleGiftWrap(event)
         }
+        _debugStatus.value = "Listening on ${allRelays.size} relays (${processedIds.size} events)"
         Log.d(TAG, "DM subscription started on ${allRelays.size} relays for ${pubkey.take(8)}...")
     }
 

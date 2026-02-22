@@ -164,6 +164,9 @@ class ProfileMetadataCache {
 
     fun getAuthor(pubkey: String): Author? = cache[normalizeKey(pubkey)]
 
+    /** Return a snapshot of all cached profiles (pubkey → Author). */
+    fun getAllCached(): Map<String, Author> = synchronized(cache) { HashMap(cache) }
+
     /** Check if a cached profile is stale (older than PROFILE_TTL_MS). Returns true if missing or stale. */
     fun isProfileStale(pubkey: String): Boolean {
         val key = normalizeKey(pubkey)

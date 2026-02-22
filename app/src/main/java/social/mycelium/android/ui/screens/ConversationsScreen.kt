@@ -261,6 +261,7 @@ private fun DmTabPill(
 
 @Composable
 private fun EmptyMessagesState(isRequests: Boolean) {
+    val debugStatus by DirectMessageRepository.debugStatus.collectAsState()
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -297,6 +298,14 @@ private fun EmptyMessagesState(isRequests: Boolean) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
                 modifier = Modifier.padding(horizontal = 24.dp),
                 lineHeight = 18.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            // Debug status
+            Spacer(Modifier.height(16.dp))
+            Text(
+                debugStatus,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
         }

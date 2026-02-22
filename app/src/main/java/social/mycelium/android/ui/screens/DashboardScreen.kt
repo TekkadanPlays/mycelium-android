@@ -598,6 +598,19 @@ private fun DashboardFeedContent(
                             Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
                         }
                     },
+                    onBoost = { n ->
+                        val err = accountStateViewModel.publishRepost(n.id, n.author.id)
+                        if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                    },
+                    onQuote = { n ->
+                        val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                        val encoded = android.net.Uri.encode("\nnostr:$nevent\n")
+                        onNavigateTo("compose?initialContent=$encoded")
+                    },
+                    onFork = { n ->
+                        val encoded = android.net.Uri.encode(n.content)
+                        onNavigateTo("compose?initialContent=$encoded")
+                    },
                     onProfileClick = onProfileClick,
                     onNoteClick = { n -> onThreadClick(n, null) },
                     onImageTap = onImageTap,
@@ -1416,8 +1429,7 @@ fun DashboardScreen(
                         },
                         onNavigateToTopics = { onNavigateTo("topics") },
                         onNavigateToLive = { onNavigateTo("live_explorer") },
-                        hasFollowedLiveActivity = hasFollowedLive,
-                        onMessagesClick = { onNavigateTo("conversations") }
+                        hasFollowedLiveActivity = hasFollowedLive
                     )
                 }
             },
@@ -1435,8 +1447,6 @@ fun DashboardScreen(
                             scope.launch { listState.animateScrollToItem(0) }
                         },
                         onCompose = { onNavigateTo("compose") },
-                        onClearRead = onClearRead,
-                        hasReadNotes = hasReadNotes,
                         modifier = Modifier.padding(bottom = 80.dp)
                     )
                 }

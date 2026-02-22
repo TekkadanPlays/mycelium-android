@@ -933,6 +933,27 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         return null
     }
 
+    /**
+     * Publish a Kind 6 repost (boost). The content is the JSON of the original event,
+     * with e-tag pointing to the original note and p-tag to its author.
+     */
+    fun publishRepost(noteId: String, noteAuthorPubkey: String, rawEventJson: String = ""): String? {
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val relaySet = getOutboxRelayUrlSet()
+        if (relaySet.isEmpty()) return "No outbox relays configured"
+        viewModelScope.launch {
+            val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 6, content = rawEventJson) {
+                add(arrayOf("e", noteId))
+                add(arrayOf("p", noteAuthorPubkey))
+            }
+            when (result) {
+                is PublishResult.Success -> _toastMessage.value = "Boosted"
+                is PublishResult.Error -> _toastMessage.value = "Boost failed: ${result.message}"
+            }
+        }
+        return null
+    }
+
     // ── NIP-22: Anchored Events ──────────────────────────────────────────
 
     /**

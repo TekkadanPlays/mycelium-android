@@ -29,11 +29,12 @@ fun ComposeNoteScreen(
     onBack: () -> Unit,
     accountStateViewModel: AccountStateViewModel,
     relayCategories: List<RelayCategory>? = null,
+    initialContent: String = "",
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
-    var content by remember { mutableStateOf("") }
+    var content by remember { mutableStateOf(initialContent) }
     var showRelayPicker by remember { mutableStateOf(false) }
     val outboxRelays = remember(currentAccount?.npub) {
         accountStateViewModel.getOutboxRelaysForPublish()

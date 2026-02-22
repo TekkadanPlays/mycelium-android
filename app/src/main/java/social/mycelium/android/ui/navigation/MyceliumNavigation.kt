@@ -424,20 +424,26 @@ fun MyceliumNavigation(
                     ScrollAwareBottomNavigationBar(
                         currentDestination = currentDestination,
                         onDestinationClick = { destination ->
-                            when (destination) {
-                                "home" -> {
-                                    if (currentDestination == "home") {
-                                        coroutineScope.launch {
-                                            dashboardListState.scrollToItem(0)
-                                        }
-                                    } else {
-                                        navController.navigate("dashboard") {
-                                            popUpTo("dashboard") { inclusive = false }
-                                            launchSingleTop = true
-                                        }
-                                    }
+                            // Skip navigation entirely if already on this tab — avoids re-triggering transitions
+                            if (destination == currentDestination) {
+                                // Scroll-to-top for list-based tabs
+                                when (destination) {
+                                    "home" -> coroutineScope.launch { dashboardListState.scrollToItem(0) }
+                                    "topics" -> coroutineScope.launch { topicsListState.scrollToItem(0) }
                                 }
-                                "messages" -> { /* TODO: Navigate to DMs when screen is ready */ }
+                                return@ScrollAwareBottomNavigationBar
+                            }
+                            when (destination) {
+                                "home" ->
+                                    navController.navigate("dashboard") {
+                                        popUpTo("dashboard") { inclusive = false }
+                                        launchSingleTop = true
+                                    }
+                                "messages" ->
+                                    navController.navigate("messages") {
+                                        popUpTo("dashboard") { inclusive = false }
+                                        launchSingleTop = true
+                                    }
                                 "wallet" ->
                                     navController.navigate("wallet") {
                                         popUpTo("dashboard") { inclusive = false }
@@ -448,18 +454,11 @@ fun MyceliumNavigation(
                                         popUpTo("dashboard") { inclusive = false }
                                         launchSingleTop = true
                                     }
-                                "topics" -> {
-                                    if (currentDestination == "topics") {
-                                        coroutineScope.launch {
-                                            topicsListState.scrollToItem(0)
-                                        }
-                                    } else {
-                                        navController.navigate("topics") {
-                                            popUpTo("dashboard") { inclusive = false }
-                                            launchSingleTop = true
-                                        }
+                                "topics" ->
+                                    navController.navigate("topics") {
+                                        popUpTo("dashboard") { inclusive = false }
+                                        launchSingleTop = true
                                     }
-                                }
                                 "notifications" ->
                                     navController.navigate("notifications") {
                                         popUpTo("dashboard") { inclusive = false }
@@ -468,8 +467,6 @@ fun MyceliumNavigation(
                                 "profile" ->
                                     currentAccount?.toHexKey()?.let { pubkey ->
                                         navController.navigateToProfile(pubkey)
-                                    } ?: run {
-                                        navController.navigate("dashboard")
                                     }
                             }
                         },
@@ -491,121 +488,43 @@ fun MyceliumNavigation(
             NavHost(
                     navController = navController,
                     startDestination = if (needsOnboarding) "onboarding" else "dashboard",
+                    // Instant transitions everywhere — seamless like Topics.
+                    // Only thread routes get a slide animation (unique thread UX).
                     enterTransition = {
-                        when {
-                            isMainScreen(initialState.destination.route) &&
-                                    isMainScreen(targetState.destination.route) -> {
-                                // Direction-aware horizontal slide for tab switches
-                                val fromIdx = routeToTabIndex(initialState.destination.route)
-                                val toIdx = routeToTabIndex(targetState.destination.route)
-                                val forward = toIdx >= fromIdx
-                                MaterialMotion.SharedAxisX.enterTransition(forward)
-                            }
-                            else -> {
-                                // Default: slide + fade (overridden by per-route transitions)
-                                slideIntoContainer(
-                                        towards =
-                                                AnimatedContentTransitionScope.SlideDirection.Start,
-                                        animationSpec =
-                                                tween(
-                                                        300,
-                                                        easing =
-                                                                MaterialMotion
-                                                                        .EasingStandardDecelerate
-                                                )
-                                ) + fadeIn(animationSpec = tween(300))
-                            }
-                        }
+                        val isThread = targetState.destination.route?.startsWith("thread/") == true
+                        if (isThread) {
+                            slideIntoContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingEmphasizedDecelerate)
+                            )
+                        } else EnterTransition.None
                     },
                     exitTransition = {
-                        // Overlay routes (viewers): keep underlying screen in place
-                        val overlayTargets = setOf("image_viewer", "video_viewer")
-                        when {
-                            targetState.destination.route in overlayTargets -> {
-                                // Dashboard stays in place — viewer fades in on top
-                                ExitTransition.None
-                            }
-                            isMainScreen(initialState.destination.route) &&
-                                    isMainScreen(targetState.destination.route) -> {
-                                // Direction-aware horizontal slide for tab switches
-                                val fromIdx = routeToTabIndex(initialState.destination.route)
-                                val toIdx = routeToTabIndex(targetState.destination.route)
-                                val forward = toIdx >= fromIdx
-                                MaterialMotion.SharedAxisX.exitTransition(forward)
-                            }
-                            else -> {
-                                // Default: slide + fade (overridden by per-route transitions)
-                                slideOutOfContainer(
-                                        towards =
-                                                AnimatedContentTransitionScope.SlideDirection.Start,
-                                        animationSpec =
-                                                tween(
-                                                        300,
-                                                        easing =
-                                                                MaterialMotion
-                                                                        .EasingStandardAccelerate
-                                                )
-                                ) + fadeOut(animationSpec = tween(300))
-                            }
-                        }
+                        val isThread = targetState.destination.route?.startsWith("thread/") == true
+                        if (isThread) {
+                            slideOutOfContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.Start,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingEmphasizedAccelerate)
+                            )
+                        } else ExitTransition.None
                     },
                     popEnterTransition = {
-                        val noAnimRoutes = setOf("image_viewer", "video_viewer", "reply_compose?rootId={rootId}&rootPubkey={rootPubkey}&parentId={parentId}&parentPubkey={parentPubkey}")
-                        when {
-                            initialState.destination.route in noAnimRoutes -> {
-                                EnterTransition.None
-                            }
-                            isMainScreen(initialState.destination.route) &&
-                                    isMainScreen(targetState.destination.route) -> {
-                                // Direction-aware horizontal slide for tab pop
-                                val fromIdx = routeToTabIndex(initialState.destination.route)
-                                val toIdx = routeToTabIndex(targetState.destination.route)
-                                val forward = toIdx >= fromIdx
-                                MaterialMotion.SharedAxisX.enterTransition(forward)
-                            }
-                            else -> {
-                                // Default: slide + fade (overridden by per-route transitions)
-                                slideIntoContainer(
-                                        towards = AnimatedContentTransitionScope.SlideDirection.End,
-                                        animationSpec =
-                                                tween(
-                                                        300,
-                                                        easing =
-                                                                MaterialMotion
-                                                                        .EasingStandardDecelerate
-                                                )
-                                ) + fadeIn(animationSpec = tween(300))
-                            }
-                        }
+                        val isThread = initialState.destination.route?.startsWith("thread/") == true
+                        if (isThread) {
+                            slideIntoContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.End,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingEmphasizedDecelerate)
+                            )
+                        } else EnterTransition.None
                     },
                     popExitTransition = {
-                        val noAnimRoutes = setOf("image_viewer", "video_viewer", "reply_compose?rootId={rootId}&rootPubkey={rootPubkey}&parentId={parentId}&parentPubkey={parentPubkey}")
-                        when {
-                            initialState.destination.route in noAnimRoutes -> {
-                                fadeOut(animationSpec = tween(200))
-                            }
-                            isMainScreen(initialState.destination.route) &&
-                                    isMainScreen(targetState.destination.route) -> {
-                                // Direction-aware horizontal slide for tab pop
-                                val fromIdx = routeToTabIndex(initialState.destination.route)
-                                val toIdx = routeToTabIndex(targetState.destination.route)
-                                val forward = toIdx >= fromIdx
-                                MaterialMotion.SharedAxisX.exitTransition(forward)
-                            }
-                            else -> {
-                                // Default: slide + fade (overridden by per-route transitions)
-                                slideOutOfContainer(
-                                        towards = AnimatedContentTransitionScope.SlideDirection.End,
-                                        animationSpec =
-                                                tween(
-                                                        300,
-                                                        easing =
-                                                                MaterialMotion
-                                                                        .EasingStandardAccelerate
-                                                )
-                                ) + fadeOut(animationSpec = tween(300))
-                            }
-                        }
+                        val isThread = initialState.destination.route?.startsWith("thread/") == true
+                        if (isThread) {
+                            slideOutOfContainer(
+                                towards = AnimatedContentTransitionScope.SlideDirection.End,
+                                animationSpec = tween(300, easing = MaterialMotion.EasingEmphasizedAccelerate)
+                            )
+                        } else ExitTransition.None
                     }
             ) {
                 // Dashboard - Home feed (thread opens as overlay so feed stays visible for slide-back)
@@ -659,31 +578,30 @@ fun MyceliumNavigation(
                             },
                             onNavigateTo = { screen ->
                                 when {
-                                    screen == "settings" -> navController.navigate("settings")
-                                    screen.startsWith("relays") -> navController.navigate(screen)
-                                    screen == "notifications" -> navController.navigate("notifications")
-                                    screen == "messages" -> navController.navigate("messages")
-                                    screen == "user_profile" -> currentAccount?.toHexKey()?.let { navController.navigateToProfile(it) }
-                                    screen == "compose" -> navController.navigate("compose")
+                                    screen == "settings" -> navController.navigate("settings") { launchSingleTop = true }
+                                    screen.startsWith("relays") -> navController.navigate(screen) { launchSingleTop = true }
+                                    screen == "notifications" -> navController.navigate("notifications") {
+                                        popUpTo("dashboard") { inclusive = false }
+                                        launchSingleTop = true
+                                    }
+                                    screen == "messages" -> navController.navigate("messages") {
+                                        popUpTo("dashboard") { inclusive = false }
+                                        launchSingleTop = true
+                                    }
+                                    screen == "user_profile" -> currentAccount?.toHexKey()?.let {
+                                        navController.navigateToProfile(it)
+                                    }
+                                    screen == "compose" || screen.startsWith("compose?") -> navController.navigate(screen) { launchSingleTop = true }
                                     screen == "topics" -> navController.navigate("topics") {
                                         popUpTo("dashboard") { inclusive = false }
                                         launchSingleTop = true
                                     }
-                                    screen.startsWith("live_stream/") -> navController.navigate(screen)
-                                    screen == "live_explorer" -> navController.navigate("live_explorer") {
-                                        launchSingleTop = true
-                                    }
-                                    screen == "conversations" -> navController.navigate("conversations") {
-                                        launchSingleTop = true
-                                    }
-                                    screen == "relay_discovery" -> navController.navigate("relay_discovery")
-                                    screen == "relay_connection_status" -> navController.navigate("relay_connection_status") {
-                                        launchSingleTop = true
-                                    }
-                                    screen == "onboarding" -> navController.navigate("onboarding") {
-                                        launchSingleTop = true
-                                    }
-                                    screen.startsWith("settings/") -> navController.navigate(screen)
+                                    screen.startsWith("live_stream/") -> navController.navigate(screen) { launchSingleTop = true }
+                                    screen == "live_explorer" -> navController.navigate("live_explorer") { launchSingleTop = true }
+                                    screen == "relay_discovery" -> navController.navigate("relay_discovery") { launchSingleTop = true }
+                                    screen == "relay_connection_status" -> navController.navigate("relay_connection_status") { launchSingleTop = true }
+                                    screen == "onboarding" -> navController.navigate("onboarding") { launchSingleTop = true }
+                                    screen.startsWith("settings/") -> navController.navigate(screen) { launchSingleTop = true }
                                 }
                             },
                             onThreadClick = { note, _ ->
@@ -734,7 +652,7 @@ fun MyceliumNavigation(
                             },
                             initialTopAppBarState = topAppBarState,
                             isDashboardVisible = (currentRoute == "dashboard"),
-                            onQrClick = { navController.navigate("user_qr") },
+                            onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
                             onSidebarRelayHealthClick = {
                                 navController.navigate("settings/relay_health") {
                                     launchSingleTop = true
@@ -747,7 +665,7 @@ fun MyceliumNavigation(
                             },
                             onRelayClick = { relayUrl ->
                                 val encoded = android.net.Uri.encode(relayUrl)
-                                navController.navigate("relay_log/$encoded")
+                                navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                             },
                             onSeeAllReactions = { note ->
                                 val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
@@ -856,15 +774,15 @@ fun MyceliumNavigation(
                                         },
                                         onImageTap = { _, urls, idx ->
                                             appViewModel.openImageViewer(urls, idx)
-                                            navController.navigate("image_viewer")
+                                            navController.navigate("image_viewer") { launchSingleTop = true }
                                         },
                                         onOpenImageViewer = { urls, idx ->
                                             appViewModel.openImageViewer(urls, idx)
-                                            navController.navigate("image_viewer")
+                                            navController.navigate("image_viewer") { launchSingleTop = true }
                                         },
                                         onVideoClick = { urls, idx ->
                                             appViewModel.openVideoViewer(urls, idx)
-                                            navController.navigate("video_viewer")
+                                            navController.navigate("video_viewer") { launchSingleTop = true }
                                         },
                                         onReact = { note, emoji ->
                                             val error = accountStateViewModel.sendReaction(note, emoji)
@@ -895,13 +813,13 @@ fun MyceliumNavigation(
                                             authState.userProfile?.pubkey?.let { navController.navigateToProfile(it) }
                                         },
                                         onHeaderAccountsClick = { },
-                                        onHeaderQrCodeClick = { navController.navigate("user_qr") },
-                                        onHeaderSettingsClick = { navController.navigate("settings") },
+                                        onHeaderQrCodeClick = { navController.navigate("user_qr") { launchSingleTop = true } },
+                                        onHeaderSettingsClick = { navController.navigate("settings") { launchSingleTop = true } },
                                         mediaPageForNote = { noteId -> appViewModel.getMediaPage(noteId) },
                                         onMediaPageChanged = { noteId, page -> appViewModel.updateMediaPage(noteId, page) },
                                         onRelayNavigate = { relayUrl ->
                                             val encoded = android.net.Uri.encode(relayUrl)
-                                            navController.navigate("relay_log/$encoded")
+                                            navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                                         },
                                         onNavigateToRelayList = { urls ->
                                             val encoded = urls.joinToString(",") { android.net.Uri.encode(it) }
@@ -1861,18 +1779,18 @@ fun MyceliumNavigation(
                             onBackClick = { navController.popBackStack() },
                             onNavigateTo = { screen ->
                                 when (screen) {
-                                    "general" -> navController.navigate("settings/general")
-                                    "appearance" -> navController.navigate("settings/appearance")
-                                    "media" -> navController.navigate("settings/media")
+                                    "general" -> navController.navigate("settings/general") { launchSingleTop = true }
+                                    "appearance" -> navController.navigate("settings/appearance") { launchSingleTop = true }
+                                    "media" -> navController.navigate("settings/media") { launchSingleTop = true }
                                     "account_preferences" ->
-                                            navController.navigate("settings/account_preferences")
-                                    "notifications" -> navController.navigate("settings/notifications")
-                                    "filters_blocks" -> navController.navigate("settings/filters_blocks")
-                                    "data_storage" -> navController.navigate("settings/data_storage")
-                                    "zap_settings" -> navController.navigate("zap_settings")
-                                    "about" -> navController.navigate("settings/about")
-                                    "relay_health" -> navController.navigate("settings/relay_health")
-                                    "direct_messages" -> navController.navigate("settings/direct_messages")
+                                            navController.navigate("settings/account_preferences") { launchSingleTop = true }
+                                    "notifications" -> navController.navigate("settings/notifications") { launchSingleTop = true }
+                                    "filters_blocks" -> navController.navigate("settings/filters_blocks") { launchSingleTop = true }
+                                    "data_storage" -> navController.navigate("settings/data_storage") { launchSingleTop = true }
+                                    "zap_settings" -> navController.navigate("zap_settings") { launchSingleTop = true }
+                                    "about" -> navController.navigate("settings/about") { launchSingleTop = true }
+                                    "relay_health" -> navController.navigate("settings/relay_health") { launchSingleTop = true }
+                                    "direct_messages" -> navController.navigate("settings/direct_messages") { launchSingleTop = true }
                                 }
                             },
                             onBugReportClick = {
@@ -1925,9 +1843,8 @@ fun MyceliumNavigation(
                     )
                 }
 
-                composable("conversations") {
+                composable("messages") {
                     social.mycelium.android.ui.screens.ConversationsScreen(
-                        onBackClick = { navController.popBackStack() },
                         onConversationClick = { peerPubkey ->
                             navController.navigate("chat/$peerPubkey") {
                                 launchSingleTop = true
@@ -2079,7 +1996,7 @@ fun MyceliumNavigation(
                         onBackClick = { navController.popBackStack() },
                         onRelayClick = { relayUrl ->
                             val encoded = android.net.Uri.encode(relayUrl)
-                            navController.navigate("relay_log/$encoded")
+                            navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                         },
                         selectionMode = isSelectionMode,
                         preSelectedUrls = preSelectedUrls,
@@ -2332,7 +2249,7 @@ fun MyceliumNavigation(
                                             launchSingleTop = true
                                         }
                                     } else {
-                                        navController.navigate(destination)
+                                        navController.navigate(destination) { launchSingleTop = true }
                                     }
                                 },
                                 onThreadClick = { note, relayUrls ->
@@ -2353,7 +2270,7 @@ fun MyceliumNavigation(
                                     onAmberLogin(loginIntent)
                                 },
                                 initialTopAppBarState = topAppBarState,
-                                onQrClick = { navController.navigate("user_qr") },
+                                onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
                                 onSidebarRelayHealthClick = {
                                     navController.navigate("settings/relay_health") {
                                         launchSingleTop = true
@@ -2366,11 +2283,11 @@ fun MyceliumNavigation(
                                 },
                                 onNavigateToCreateTopic = { hashtag ->
                                     val encoded = android.net.Uri.encode(hashtag ?: "")
-                                    navController.navigate("compose_topic?hashtag=$encoded")
+                                    navController.navigate("compose_topic?hashtag=$encoded") { launchSingleTop = true }
                                 },
                                 onRelayClick = { relayUrl ->
                                     val encoded = android.net.Uri.encode(relayUrl)
-                                    navController.navigate("relay_log/$encoded")
+                                    navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                                 },
                                 onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } }
                         )
@@ -2444,15 +2361,15 @@ fun MyceliumNavigation(
                                         onProfileClick = { navController.navigateToProfile(it) },
                                         onImageTap = { _, urls, idx ->
                                             appViewModel.openImageViewer(urls, idx)
-                                            navController.navigate("image_viewer")
+                                            navController.navigate("image_viewer") { launchSingleTop = true }
                                         },
                                         onOpenImageViewer = { urls, idx ->
                                             appViewModel.openImageViewer(urls, idx)
-                                            navController.navigate("image_viewer")
+                                            navController.navigate("image_viewer") { launchSingleTop = true }
                                         },
                                         onVideoClick = { urls, idx ->
                                             appViewModel.openVideoViewer(urls, idx)
-                                            navController.navigate("video_viewer")
+                                            navController.navigate("video_viewer") { launchSingleTop = true }
                                         },
                                         onReact = { note, emoji ->
                                             val error = accountStateViewModel.sendReaction(note, emoji)
@@ -2483,13 +2400,13 @@ fun MyceliumNavigation(
                                             authState.userProfile?.pubkey?.let { navController.navigateToProfile(it) }
                                         },
                                         onHeaderAccountsClick = { },
-                                        onHeaderQrCodeClick = { navController.navigate("user_qr") },
-                                        onHeaderSettingsClick = { navController.navigate("settings") },
+                                        onHeaderQrCodeClick = { navController.navigate("user_qr") { launchSingleTop = true } },
+                                        onHeaderSettingsClick = { navController.navigate("settings") { launchSingleTop = true } },
                                         mediaPageForNote = { noteId -> appViewModel.getMediaPage(noteId) },
                                         onMediaPageChanged = { noteId, page -> appViewModel.updateMediaPage(noteId, page) },
                                         onRelayNavigate = { relayUrl ->
                                             val encoded = android.net.Uri.encode(relayUrl)
-                                            navController.navigate("relay_log/$encoded")
+                                            navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                                         },
                                         onNavigateToRelayList = { urls ->
                                             val encoded = urls.joinToString(",") { android.net.Uri.encode(it) }
@@ -2570,25 +2487,25 @@ fun MyceliumNavigation(
                                 // Navigate to kind:1111 reply (existing reply compose)
                                 val rootId = topicId
                                 val rootPubkey = topic.author.id
-                                navController.navigate("reply_compose?rootId=$rootId&rootPubkey=$rootPubkey")
+                                navController.navigate("reply_compose?rootId=$rootId&rootPubkey=$rootPubkey") { launchSingleTop = true }
                             },
                             onReplyKind1Click = {
                                 // Navigate to kind:1 reply with I tags
                                 val encoded = android.net.Uri.encode(topicId)
-                                navController.navigate("compose_topic_reply/$encoded")
+                                navController.navigate("compose_topic_reply/$encoded") { launchSingleTop = true }
                             },
                             onProfileClick = { authorId ->
                                 navController.navigateToProfile(authorId)
                             },
                             onImageTap = { note, urls, index ->
                                 appViewModel.updateSelectedNote(note)
-                                navController.navigate("image_viewer")
+                                navController.navigate("image_viewer") { launchSingleTop = true }
                             },
                             onOpenImageViewer = { urls, index ->
-                                navController.navigate("image_viewer")
+                                navController.navigate("image_viewer") { launchSingleTop = true }
                             },
                             onVideoClick = { urls, index ->
-                                navController.navigate("video_viewer")
+                                navController.navigate("video_viewer") { launchSingleTop = true }
                             },
                             accountStateViewModel = accountStateViewModel,
                             relayUrls = topicRelayUrls,
@@ -2605,7 +2522,14 @@ fun MyceliumNavigation(
                     }
                 }
 
-                composable("compose") {
+                composable(
+                    route = "compose?initialContent={initialContent}",
+                    arguments = listOf(
+                        navArgument("initialContent") { type = NavType.StringType; defaultValue = "" }
+                    )
+                ) { backStackEntry ->
+                    val initialContent = backStackEntry.arguments?.getString("initialContent").orEmpty()
+                        .let { android.net.Uri.decode(it) }
                     val composeContext = LocalContext.current
                     val composeStorageManager = remember(composeContext) { RelayStorageManager(composeContext) }
                     val currentAccountForCompose by accountStateViewModel.currentAccount.collectAsState()
@@ -2617,7 +2541,8 @@ fun MyceliumNavigation(
                     ComposeNoteScreen(
                         onBack = { navController.popBackStack() },
                         accountStateViewModel = accountStateViewModel,
-                        relayCategories = relayCategoriesForCompose
+                        relayCategories = relayCategoriesForCompose,
+                        initialContent = initialContent
                     )
                 }
 
@@ -2704,7 +2629,7 @@ fun MyceliumNavigation(
             PipStreamOverlay(
                 onTapToReturn = { addressableId ->
                     val encoded = android.net.Uri.encode(addressableId)
-                    navController.navigate("live_stream/$encoded")
+                    navController.navigate("live_stream/$encoded") { launchSingleTop = true }
                 },
                 modifier = Modifier.zIndex(Float.MAX_VALUE)
             )

@@ -52,8 +52,6 @@ import androidx.compose.ui.unit.dp
 fun HomeFab(
     onScrollToTop: () -> Unit,
     onCompose: () -> Unit,
-    onClearRead: () -> Unit,
-    hasReadNotes: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -100,18 +98,6 @@ fun HomeFab(
                     onClick = {
                         expanded = false
                         onCompose()
-                    }
-                )
-
-                // Clear Read
-                HomeFabItem(
-                    label = "Clear read",
-                    icon = Icons.Outlined.CleaningServices,
-                    containerColor = if (hasReadNotes) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
-                    contentColor = if (hasReadNotes) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                    onClick = {
-                        expanded = false
-                        onClearRead()
                     }
                 )
             }

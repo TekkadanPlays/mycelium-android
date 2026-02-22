@@ -342,6 +342,15 @@ fun MyceliumNavigation(
             NotificationsRepository.setCacheRelayUrls(indexerUrls)
             NotificationsRepository.startSubscription(pubkey, allUserRelayUrls)
             Log.d("MyceliumNav", "Notif subscription started with ${allUserRelayUrls.size} relays")
+            // Start DM subscription (NIP-17 gift wraps)
+            val signer = accountStateViewModel.getCurrentSigner()
+            if (signer != null) {
+                social.mycelium.android.repository.DirectMessageRepository.startSubscription(pubkey, signer, allUserRelayUrls)
+                Log.d("MyceliumNav", "DM subscription started")
+            }
+            // Fetch mute list (NIP-51 kind 10000) and bookmarks (kind 10003)
+            social.mycelium.android.repository.MuteListRepository.fetchMuteList(pubkey, allUserRelayUrls)
+            social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(pubkey, allUserRelayUrls)
             // Load kind:30073 anchor subscriptions (favorites) for this user
             accountStateViewModel.requestMySubscriptions()
         } else {
@@ -662,6 +671,9 @@ fun MyceliumNavigation(
                                     }
                                     screen.startsWith("live_stream/") -> navController.navigate(screen)
                                     screen == "live_explorer" -> navController.navigate("live_explorer") {
+                                        launchSingleTop = true
+                                    }
+                                    screen == "conversations" -> navController.navigate("conversations") {
                                         launchSingleTop = true
                                     }
                                     screen == "relay_discovery" -> navController.navigate("relay_discovery")
@@ -1860,6 +1872,7 @@ fun MyceliumNavigation(
                                     "zap_settings" -> navController.navigate("zap_settings")
                                     "about" -> navController.navigate("settings/about")
                                     "relay_health" -> navController.navigate("settings/relay_health")
+                                    "direct_messages" -> navController.navigate("settings/direct_messages")
                                 }
                             },
                             onBugReportClick = {
@@ -1904,6 +1917,50 @@ fun MyceliumNavigation(
 
                 composable("settings/data_storage") {
                     DataStorageSettingsScreen(onBackClick = { navController.popBackStack() })
+                }
+
+                composable("settings/direct_messages") {
+                    social.mycelium.android.ui.screens.DmSettingsScreen(
+                        onBackClick = { navController.popBackStack() }
+                    )
+                }
+
+                composable("conversations") {
+                    social.mycelium.android.ui.screens.ConversationsScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onConversationClick = { peerPubkey ->
+                            navController.navigate("chat/$peerPubkey") {
+                                launchSingleTop = true
+                            }
+                        },
+                        onNewMessage = { /* TODO: new message picker */ }
+                    )
+                }
+
+                composable(
+                    route = "chat/{peerPubkey}",
+                    arguments = listOf(navArgument("peerPubkey") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val peerPubkey = backStackEntry.arguments?.getString("peerPubkey") ?: ""
+                    val chatSigner = accountStateViewModel.getCurrentSigner()
+                    val chatPubkey = accountStateViewModel.currentAccount.collectAsState().value?.toHexKey()
+                    val chatRelayUrls = remember {
+                        val ctx = navController.context
+                        val sm = social.mycelium.android.repository.RelayStorageManager(ctx)
+                        val pk = chatPubkey ?: ""
+                        (sm.loadOutboxRelays(pk).map { it.url } + sm.loadInboxRelays(pk).map { it.url })
+                            .map { it.trim().removeSuffix("/") }
+                            .distinct()
+                            .toSet()
+                    }
+                    social.mycelium.android.ui.screens.ChatScreen(
+                        peerPubkey = peerPubkey,
+                        signer = chatSigner,
+                        userPubkey = chatPubkey,
+                        relayUrls = chatRelayUrls,
+                        onBackClick = { navController.popBackStack() },
+                        onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) }
+                    )
                 }
 
                 composable("settings/about") {

@@ -84,6 +84,22 @@ class AmberSignerManager(private val context: Context) {
             ),
             Permission(
                 type = CommandType.SIGN_EVENT,
+                kind = 13 // NIP-17 seal (gift-wrapped DMs)
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 14 // NIP-17 chat message (rumor)
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 10000 // NIP-51 mute list
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 10003 // NIP-51 bookmarks
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
                 kind = 22242 // NIP-42 auth events
             ),
             Permission(

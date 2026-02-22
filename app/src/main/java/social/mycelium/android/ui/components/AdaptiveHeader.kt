@@ -83,6 +83,8 @@ fun AdaptiveHeader(
     onNavigateToLive: (() -> Unit)? = null,
     /** True when a followed user is currently hosting a NIP-53 live event. Turns the Live icon red. */
     hasFollowedLiveActivity: Boolean = false,
+    /** Navigate to conversations (DMs) screen. */
+    onMessagesClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -343,6 +345,17 @@ fun AdaptiveHeader(
                             contentDescription = "Search",
                             tint = MaterialTheme.colorScheme.onSurface
                         )
+                    }
+
+                    // Messages (DMs) button
+                    if (onMessagesClick != null) {
+                        IconButton(onClick = onMessagesClick) {
+                            Icon(
+                                imageVector = Icons.Outlined.Email,
+                                contentDescription = "Messages",
+                                tint = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
                     }
 
                     // Feed engagement filter (Replies, Likes, Zaps)

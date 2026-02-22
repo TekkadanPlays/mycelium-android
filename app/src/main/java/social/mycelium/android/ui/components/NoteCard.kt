@@ -656,6 +656,8 @@ fun NoteCard(
     onBlockAuthor: ((String) -> Unit)? = null,
     /** Mute the note's author. */
     onMuteAuthor: ((String) -> Unit)? = null,
+    /** Toggle bookmark for a note: (noteId, isCurrentlyBookmarked) -> Unit. */
+    onBookmarkToggle: ((String, Boolean) -> Unit)? = null,
     /** Current account npub for per-account recent emoji list. */
     accountNpub: String? = null,
     /** True while a zap is being sent for this note (shows loading on bolt). */
@@ -1019,15 +1021,21 @@ fun NoteCard(
                                     text = { Text("← Back") },
                                     onClick = { menuLevel = 0 }
                                 )
+                                val bookmarkedIds by social.mycelium.android.repository.BookmarkRepository.bookmarkedNoteIds.collectAsState()
+                                val isBookmarked = note.id in bookmarkedIds
                                 DropdownMenuItem(
-                                    text = { Text("Add to public") },
-                                    leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = { closeMenu(); /* TODO: public bookmark */ }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Add to private") },
-                                    leadingIcon = { Icon(Icons.Outlined.Lock, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = { closeMenu(); /* TODO: private bookmark */ }
+                                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add to public") },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    onClick = {
+                                        closeMenu()
+                                        onBookmarkToggle?.invoke(note.id, isBookmarked)
+                                    }
                                 )
                             }
                             // ═══ FILTERS & BLOCKS SUB-MENU ═══
@@ -1137,6 +1145,55 @@ fun NoteCard(
                         } else if (zapCount > 0) {
                             Text(text = "$zapCount", style = countStyle, color = zapYellow)
                             Text(text = " zap${if (zapCount == 1) "" else "s"}", style = countStyle, color = mutedText)
+                        }
+                    }
+                }
+
+                // ── Zapraiser progress bar (NIP-TBD) ──
+                val zapraiserGoal = remember(note.tags) {
+                    note.tags.firstOrNull { it.firstOrNull() == "zapraiser" }
+                        ?.getOrNull(1)?.toLongOrNull()
+                }
+                if (zapraiserGoal != null && zapraiserGoal > 0) {
+                    val raised = zapTotalSats
+                    val progress = (raised.toFloat() / zapraiserGoal).coerceIn(0f, 1f)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(raised)} raised",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFF59E0B)
+                            )
+                            Text(
+                                text = "Goal: ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapraiserGoal)} sats",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = mutedText.copy(alpha = 0.6f)
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(6.dp)
+                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp)),
+                            color = Color(0xFFF59E0B),
+                            trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        )
+                        if (raised >= zapraiserGoal) {
+                            Text(
+                                text = "Goal reached!",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF66DDAA),
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
                         }
                     }
                 }

@@ -625,10 +625,33 @@ private fun DashboardFeedContent(
                         if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                     },
                     onBlockAuthor = { pubkey ->
-                        Toast.makeText(context, "Block coming soon", Toast.LENGTH_SHORT).show()
+                        social.mycelium.android.repository.MuteListRepository.blockUser(pubkey)
+                        Toast.makeText(context, "Blocked", Toast.LENGTH_SHORT).show()
                     },
                     onMuteAuthor = { pubkey ->
-                        Toast.makeText(context, "Mute coming soon", Toast.LENGTH_SHORT).show()
+                        val signer = accountStateViewModel.getCurrentSigner()
+                        if (signer != null) {
+                            val relays = accountStateViewModel.getOutboxRelayUrlSet()
+                            social.mycelium.android.repository.MuteListRepository.muteUser(pubkey, signer, relays)
+                            Toast.makeText(context, "Muted", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Sign in to mute", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    onBookmarkToggle = { noteId, isCurrentlyBookmarked ->
+                        val signer = accountStateViewModel.getCurrentSigner()
+                        if (signer != null) {
+                            val relays = accountStateViewModel.getOutboxRelayUrlSet()
+                            if (isCurrentlyBookmarked) {
+                                social.mycelium.android.repository.BookmarkRepository.removeBookmark(noteId, signer, relays)
+                                Toast.makeText(context, "Bookmark removed", Toast.LENGTH_SHORT).show()
+                            } else {
+                                social.mycelium.android.repository.BookmarkRepository.addBookmark(noteId, signer, relays)
+                                Toast.makeText(context, "Bookmarked", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            Toast.makeText(context, "Sign in to bookmark", Toast.LENGTH_SHORT).show()
+                        }
                     },
                     accountNpub = accountNpub,
                     isZapInProgress = note.id in zapInProgressNoteIds,
@@ -1083,10 +1106,20 @@ fun DashboardScreen(
         }
     }
 
+    // Mute/block filtering: hide notes from muted or blocked authors
+    val mutedPubkeys by social.mycelium.android.repository.MuteListRepository.mutedPubkeys.collectAsState()
+    val blockedPubkeys by social.mycelium.android.repository.MuteListRepository.blockedPubkeys.collectAsState()
+    val mutedWords by social.mycelium.android.repository.MuteListRepository.mutedWords.collectAsState()
+
     // Sort by engagement type: Most Replies / Most Likes / Most Zaps
-    val engagementFilteredNotes by remember(sortedNotes, engagementFilter, replyCountByNoteId, countsByNoteId, hiddenNoteIds) {
+    val engagementFilteredNotes by remember(sortedNotes, engagementFilter, replyCountByNoteId, countsByNoteId, hiddenNoteIds, mutedPubkeys, blockedPubkeys, mutedWords) {
         derivedStateOf {
-            val base = if (hiddenNoteIds.isNotEmpty()) sortedNotes.filter { it.id !in hiddenNoteIds } else sortedNotes
+            val hiddenAuthors = mutedPubkeys + blockedPubkeys
+            val base = sortedNotes.filter { note ->
+                note.id !in hiddenNoteIds &&
+                note.author.id.lowercase() !in hiddenAuthors &&
+                (mutedWords.isEmpty() || mutedWords.none { word -> note.content.contains(word, ignoreCase = true) })
+            }
             when (engagementFilter) {
                 "replies" -> base.sortedByDescending { replyCountByNoteId[it.id] ?: 0 }
                 "likes" -> base.sortedByDescending {
@@ -1383,7 +1416,8 @@ fun DashboardScreen(
                         },
                         onNavigateToTopics = { onNavigateTo("topics") },
                         onNavigateToLive = { onNavigateTo("live_explorer") },
-                        hasFollowedLiveActivity = hasFollowedLive
+                        hasFollowedLiveActivity = hasFollowedLive,
+                        onMessagesClick = { onNavigateTo("conversations") }
                     )
                 }
             },

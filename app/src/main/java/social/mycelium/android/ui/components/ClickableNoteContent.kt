@@ -31,7 +31,8 @@ fun ClickableNoteContent(
     style: TextStyle,
     modifier: Modifier = Modifier,
     maxLines: Int = Int.MAX_VALUE,
-    onClick: (Int) -> Unit
+    onClick: (Int) -> Unit,
+    onLongPress: (() -> Unit)? = null
 ) {
     val clipboardManager = LocalClipboardManager.current
     var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -56,8 +57,10 @@ fun ClickableNoteContent(
                         if (url != null) {
                             urlToCopy = url
                             showCopyLinkMenu = true
+                        } else {
+                            onLongPress?.invoke()
                         }
-                    }
+                    } ?: onLongPress?.invoke()
                 }
             )
         },

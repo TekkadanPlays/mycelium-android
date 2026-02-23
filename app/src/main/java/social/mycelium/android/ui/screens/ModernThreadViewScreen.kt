@@ -1787,6 +1787,7 @@ private fun ReplyContentBody(
     onImageTap: (List<String>, Int) -> Unit,
     onVideoClick: (List<String>, Int) -> Unit,
     onToggleControls: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -1832,7 +1833,8 @@ private fun ReplyContentBody(
                                     url != null -> uriHandler.openUri(url.item)
                                     else -> onToggleControls()
                                 }
-                            }
+                            },
+                            onLongPress = onLongPress
                         )
                     }
                 }
@@ -2639,6 +2641,11 @@ private fun ThreadedReplyCard(
                             onImageTap = onImageTap,
                             onVideoClick = onVideoClick,
                             onToggleControls = onToggleControls,
+                            onLongPress = {
+                                if (canCollapse && !state.isCollapsed) {
+                                    commentStates[replyKey] = state.copy(isCollapsed = true, isExpanded = false)
+                                }
+                            },
                         )
 
                         // Reactions and zaps — extracted into ReplyControlsPanel

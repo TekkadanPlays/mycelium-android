@@ -91,8 +91,9 @@ object NotificationsRepository {
         val notificationId: String,
         val update: (NotificationData) -> (Note?) -> NotificationData,
     )
-    /** Buffer of pending target note fetches waiting to be flushed as one subscription. */
-    private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, PendingTargetFetch>()
+    /** Buffer of pending target note fetches waiting to be flushed as one subscription.
+     *  Keyed by parent noteId → list of notifications that need that parent verified. */
+    private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, MutableList<PendingTargetFetch>>()
     /** Debounce job for batched target note flush. */
     private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
     private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
@@ -301,6 +302,7 @@ object NotificationsRepository {
         // Don't show notifications for our own replies
         if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
         val rootId = getReplyRootNoteId(event)
+        val replyToId = getReplyToNoteId(event)
         // Check if user is directly cited in content (nostr:npub1... / nostr:nprofile1...)
         val isDirectlyCitedInContent = myPubkeyHex != null && isUserCitedInContent(event.content, myPubkeyHex!!)
         // No root and not cited in content → not useful
@@ -327,7 +329,7 @@ object NotificationsRepository {
             // Fetch the direct parent to verify the reply is TO one of our notes.
             // If the parent note author isn't us AND we're not cited in content,
             // the notification will be removed in flushTargetFetchBatch.
-            val parentId = getReplyToNoteId(event) ?: rootId
+            val parentId = replyToId ?: rootId
             scope.launch { fetchAndSetTargetNote(parentId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         }
         // Update today's summary
@@ -680,8 +682,8 @@ object NotificationsRepository {
 
     private fun fetchAndSetTargetNote(noteId: String, notificationId: String, update: (NotificationData) -> (Note?) -> NotificationData) {
         if (subscriptionRelayUrls.isEmpty()) return
-        // Buffer for batched fetch instead of creating individual subscriptions
-        pendingTargetFetches[noteId] = PendingTargetFetch(noteId, notificationId, update)
+        // Buffer for batched fetch — multiple notifications may share the same parent noteId
+        pendingTargetFetches.getOrPut(noteId) { mutableListOf() }.add(PendingTargetFetch(noteId, notificationId, update))
         scheduleTargetFetchFlush()
     }
 
@@ -713,55 +715,52 @@ object NotificationsRepository {
         }
         delay(2500)
         handle.cancel()
-
         // Apply fetched notes to their notifications; verify replies are actually TO us
         var removedCount = 0
-        for ((noteId, pending) in batch) {
-            val current = notificationsById[pending.notificationId] ?: continue
+        for ((noteId, pendingList) in batch) {
             val note = fetched[noteId]
-            // If parent note wasn't fetched, remove REPLY notifications (can't verify it's to us)
-            if (note == null) {
-                if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT) {
-                    val isCited = myPubkeyHex != null && current.note != null &&
-                        isUserCitedInContent(current.note.content, myPubkeyHex!!)
-                    if (!isCited) {
-                        Log.d(TAG, "Removing unverifiable reply ${pending.notificationId.take(8)}: parent note not fetched")
-                        notificationsById.remove(pending.notificationId)
-                        removedCount++
+            for (pending in pendingList) {
+                val current = notificationsById[pending.notificationId] ?: continue
+                // If parent note wasn't fetched, remove REPLY notifications (can't verify it's to us)
+                if (note == null) {
+                    if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT) {
+                        val isCited = myPubkeyHex != null && current.note != null &&
+                            isUserCitedInContent(current.note.content, myPubkeyHex!!)
+                        if (!isCited) {
+                            notificationsById.remove(pending.notificationId)
+                            removedCount++
+                        }
                     }
+                    continue
                 }
-                continue
-            }
-            val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
-            val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
+                val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
+                val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
 
-            // Kind-7 (like): only show if target note author is the current user
-            if (current.type == NotificationType.LIKE && !isOurNote) {
-                notificationsById.remove(pending.notificationId)
-                removedCount++
-                continue
-            }
-            // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
-            // This is the Amethyst-style tagsAnEventByUser check — being p-tagged alone is NOT
-            // sufficient; the reply must be TO one of our notes or directly cite us.
-            if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
-                val isCitedInContent = myPubkeyHex != null && current.note != null &&
-                    isUserCitedInContent(current.note.content, myPubkeyHex!!)
-                if (!isCitedInContent) {
-                    Log.d(TAG, "Removing false-positive reply ${pending.notificationId.take(8)}: parent author ${targetAuthorHex.take(8)} != us")
+                // Kind-7 (like): only show if target note author is the current user
+                if (current.type == NotificationType.LIKE && !isOurNote) {
                     notificationsById.remove(pending.notificationId)
                     removedCount++
                     continue
                 }
-            }
-            var updated = pending.update(current)(note)
-            if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {
-                val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
-                if (rootAuthorHex == myPubkeyHex) {
-                    updated = updated.copy(replyKind = 11, text = "${current.author?.displayName ?: "Someone"} replied to your thread")
+                // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
+                if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
+                    val isCitedInContent = myPubkeyHex != null && current.note != null &&
+                        isUserCitedInContent(current.note.content, myPubkeyHex!!)
+                    if (!isCitedInContent) {
+                        notificationsById.remove(pending.notificationId)
+                        removedCount++
+                        continue
+                    }
                 }
+                var updated = pending.update(current)(note)
+                if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {
+                    val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
+                    if (rootAuthorHex == myPubkeyHex) {
+                        updated = updated.copy(replyKind = 11, text = "${current.author?.displayName ?: "Someone"} replied to your thread")
+                    }
+                }
+                notificationsById[pending.notificationId] = updated
             }
-            notificationsById[pending.notificationId] = updated
         }
         if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
         emitSorted()

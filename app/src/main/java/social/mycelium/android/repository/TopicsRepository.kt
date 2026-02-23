@@ -396,6 +396,23 @@ class TopicsRepository private constructor(context: Context) {
     }
 
     /**
+     * Inject a locally published topic into the pending queue so the "x new topics" counter
+     * updates immediately. The user can then pull-to-refresh to see it (live awareness pattern).
+     */
+    fun injectLocalTopic(event: Event, relayUrl: String = "") {
+        val topic = convertEventToTopicNote(event, relayUrl)
+        topicsCache.put(topic.id, topic)
+        // Route to pending so the user sees "x new topics" banner
+        synchronized(pendingTopicsLock) {
+            if (_pendingNewTopics.none { it.id == topic.id } && !_topics.value.containsKey(topic.id)) {
+                _pendingNewTopics.add(topic)
+                _newTopicsCount.value = _pendingNewTopics.size
+            }
+        }
+        Log.d(TAG, "📌 Local topic → pending: ${topic.title} (${topic.id.take(8)})")
+    }
+
+    /**
      * Merge pending new topics into the main list (call from pull-to-refresh or when user taps "x new topics").
      */
     fun applyPendingTopics() {

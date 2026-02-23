@@ -180,6 +180,10 @@ class RelayConnectionStateMachine {
                 }
                 RelayHealthTracker.recordConnectionFailure(url, message)
             }
+
+            override fun onOk(url: String, eventId: String, success: Boolean, message: String) {
+                RelayHealthTracker.recordPublishOk(url, eventId, success, message)
+            }
         })
     }
 
@@ -593,6 +597,15 @@ class RelayConnectionStateMachine {
         relayPool.send(event, relayUrls)
     }
 
+    /** Return a snapshot of per-relay slot utilization for UI dashboards. */
+    fun getRelaySlotSnapshots(): List<com.example.cybin.relay.RelaySlotSnapshot> =
+        relayPool.getRelaySlotSnapshots()
+
+    /** Dump relay slot usage to logcat for diagnostics. */
+    fun dumpRelaySlots(label: String = "") {
+        relayPool.dumpRelaySlots(label)
+    }
+
     private fun executeDisconnect() {
         scope.launch {
             try {
@@ -796,6 +809,110 @@ class RelayConnectionStateMachine {
         ) { event, _ -> onEvent(event) }
         relayPool.connect()
         return CybinSubscriptionHandle(subscription, relayPool)
+    }
+
+    /**
+     * EOSE-based one-shot subscription: opens REQ, collects events until all relays send EOSE,
+     * then auto-CLOSEs after a short settle window. **No timers, no slot leaks.**
+     *
+     * Use for: bookmarks, mute list, contact list, profile metadata, anchor subs — anything
+     * that fetches stored data and doesn't need to stay open for live events.
+     *
+     * @param settleMs After EOSE, wait this long for stragglers before closing (default 500ms).
+     * @param maxWaitMs Hard timeout if EOSE never arrives (default 8s). Prevents permanent slot leak.
+     */
+    fun requestOneShotSubscription(
+        relayUrls: List<String>,
+        filter: Filter,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event) -> Unit,
+    ): TemporarySubscriptionHandle {
+        if (relayUrls.isEmpty()) return NoOpTemporaryHandle
+        val subscription = relayPool.subscribe(
+            relayUrls = relayUrls,
+            filters = listOf(filter),
+            priority = priority,
+        ) { event, _ -> onEvent(event) }
+        relayPool.connect()
+        val handle = CybinSubscriptionHandle(subscription, relayPool)
+
+        // Auto-close on EOSE + settle
+        val subId = subscription.id
+        val eoseRelays = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        val targetRelayCount = relayUrls.size
+        // Holder so the listener can remove itself from inside the callback
+        val listenerHolder = arrayOfNulls<com.example.cybin.relay.RelayConnectionListener>(1)
+        val eoseListener = object : com.example.cybin.relay.RelayConnectionListener {
+            override fun onEose(url: String, subscriptionId: String) {
+                if (subscriptionId != subId) return
+                eoseRelays.add(url)
+                if (eoseRelays.size >= targetRelayCount) {
+                    scope.launch {
+                        delay(settleMs)
+                        handle.cancel()
+                        listenerHolder[0]?.let { relayPool.removeListener(it) }
+                    }
+                }
+            }
+        }
+        listenerHolder[0] = eoseListener
+        relayPool.addListener(eoseListener)
+        // Hard timeout fallback
+        scope.launch {
+            delay(maxWaitMs)
+            handle.cancel()
+            relayPool.removeListener(eoseListener)
+        }
+        return handle
+    }
+
+    /**
+     * EOSE-based one-shot with multiple filters.
+     */
+    fun requestOneShotSubscription(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event) -> Unit,
+    ): TemporarySubscriptionHandle {
+        if (relayUrls.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
+        val subscription = relayPool.subscribe(
+            relayUrls = relayUrls,
+            filters = filters,
+            priority = priority,
+        ) { event, _ -> onEvent(event) }
+        relayPool.connect()
+        val handle = CybinSubscriptionHandle(subscription, relayPool)
+
+        val subId = subscription.id
+        val eoseRelays = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        val targetRelayCount = relayUrls.size
+        val listenerHolder = arrayOfNulls<com.example.cybin.relay.RelayConnectionListener>(1)
+        val eoseListener = object : com.example.cybin.relay.RelayConnectionListener {
+            override fun onEose(url: String, subscriptionId: String) {
+                if (subscriptionId != subId) return
+                eoseRelays.add(url)
+                if (eoseRelays.size >= targetRelayCount) {
+                    scope.launch {
+                        delay(settleMs)
+                        handle.cancel()
+                        listenerHolder[0]?.let { relayPool.removeListener(it) }
+                    }
+                }
+            }
+        }
+        listenerHolder[0] = eoseListener
+        relayPool.addListener(eoseListener)
+        scope.launch {
+            delay(maxWaitMs)
+            handle.cancel()
+            relayPool.removeListener(eoseListener)
+        }
+        return handle
     }
 
     companion object {

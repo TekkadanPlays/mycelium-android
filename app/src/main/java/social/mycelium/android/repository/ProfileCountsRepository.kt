@@ -189,7 +189,7 @@ object ProfileCountsRepository {
             var lastEmittedCount = 0
 
             val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.NORMAL) { event ->
+                .requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.LOW) { event ->
                     if (event.kind == 3) {
                         uniqueAuthors.add(event.pubKey.lowercase())
                         lastEventAt.set(System.currentTimeMillis())

@@ -67,6 +67,9 @@ fun ThreadFab(
     showRootOnly: Boolean = false,
     onToggleRootOnly: () -> Unit = {},
     rootOnlyAvailable: Boolean = false,
+    /** True = newest first (descending); false = oldest first (ascending, default). */
+    isNewestFirst: Boolean = false,
+    onToggleSortOrder: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -137,6 +140,19 @@ fun ThreadFab(
                         }
                     }
                 )
+
+                // Sort order toggle (newest/oldest first)
+                if (onToggleSortOrder != null) {
+                    MiniFabItem(
+                        label = if (isNewestFirst) "Newest" else "Oldest",
+                        icon = if (isNewestFirst) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                        containerColor = if (isNewestFirst) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = if (isNewestFirst) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface,
+                        onClick = {
+                            onToggleSortOrder()
+                        }
+                    )
+                }
 
                 // Toggle root/all replies — nearest to FAB
                 if (rootOnlyAvailable) {

@@ -57,8 +57,9 @@ object BookmarkRepository {
         )
         bookmarkHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        bookmarkHandle = stateMachine.requestTemporarySubscription(
-            relayUrls, filter, priority = SubscriptionPriority.LOW
+        bookmarkHandle = stateMachine.requestOneShotSubscription(
+            relayUrls, filter, priority = SubscriptionPriority.LOW,
+            settleMs = 500L, maxWaitMs = 6_000L,
         ) { event ->
             if (event.kind == KIND_BOOKMARKS && event.pubKey.equals(pubkey, ignoreCase = true)) {
                 val current = latestBookmarkEvent
@@ -68,7 +69,7 @@ object BookmarkRepository {
                 }
             }
         }
-        Log.d(TAG, "Fetching bookmarks for ${pubkey.take(8)} on ${relayUrls.size} relays")
+        Log.d(TAG, "Fetching bookmarks (one-shot) for ${pubkey.take(8)} on ${relayUrls.size} relays")
     }
 
     private fun parseBookmarks(event: Event) {

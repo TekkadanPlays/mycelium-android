@@ -38,13 +38,7 @@ fun ReactionsScreen(
     onBackClick: () -> Unit,
     onProfileClick: (String) -> Unit,
 ) {
-    val tabs = remember(data) {
-        buildList {
-            if (data.reactions.isNotEmpty()) add(RxTab.REACTIONS)
-            if (data.zapAuthors.isNotEmpty()) add(RxTab.ZAPS)
-            if (data.boostAuthors.isNotEmpty()) add(RxTab.BOOSTS)
-        }
-    }
+    val tabs = remember { listOf(RxTab.REACTIONS, RxTab.ZAPS, RxTab.BOOSTS) }
 
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
@@ -66,45 +60,36 @@ fun ReactionsScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (tabs.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No reaction data", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                return@Scaffold
-            }
-
-            if (tabs.size > 1) {
-                TabRow(
-                    selectedTabIndex = pagerState.currentPage,
-                    containerColor = MaterialTheme.colorScheme.surface,
-                    contentColor = MaterialTheme.colorScheme.primary,
-                ) {
-                    tabs.forEachIndexed { index, tab ->
-                        Tab(
-                            selected = pagerState.currentPage == index,
-                            onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
-                            text = {
-                                Text(
-                                    when (tab) {
-                                        RxTab.REACTIONS -> {
-                                            val count = if (data.reactionAuthors.isNotEmpty()) data.reactionAuthors.values.sumOf { it.size } else data.reactions.size
-                                            "Reactions ($count)"
-                                        }
-                                        RxTab.ZAPS -> "Zaps (${data.zapAuthors.size})"
-                                        RxTab.BOOSTS -> "Boosts (${data.boostAuthors.size})"
-                                    },
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                            },
-                            icon = {
+            TabRow(
+                selectedTabIndex = pagerState.currentPage,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+            ) {
+                tabs.forEachIndexed { index, tab ->
+                    Tab(
+                        selected = pagerState.currentPage == index,
+                        onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
+                        text = {
+                            Text(
                                 when (tab) {
-                                    RxTab.REACTIONS -> Icon(Icons.Filled.Favorite, null, Modifier.size(16.dp), tint = Color(0xFFE91E63))
-                                    RxTab.ZAPS -> Icon(Icons.Filled.Bolt, null, Modifier.size(16.dp), tint = Color(0xFFF59E0B))
-                                    RxTab.BOOSTS -> Icon(Icons.Filled.Repeat, null, Modifier.size(16.dp), tint = Color(0xFF4CAF50))
-                                }
+                                    RxTab.REACTIONS -> {
+                                        val count = if (data.reactionAuthors.isNotEmpty()) data.reactionAuthors.values.sumOf { it.size } else data.reactions.size
+                                        "Likes ($count)"
+                                    }
+                                    RxTab.ZAPS -> "Zaps (${data.zapAuthors.size})"
+                                    RxTab.BOOSTS -> "Boosts (${data.boostAuthors.size})"
+                                },
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        },
+                        icon = {
+                            when (tab) {
+                                RxTab.REACTIONS -> Icon(Icons.Filled.Favorite, null, Modifier.size(16.dp), tint = Color(0xFFE91E63))
+                                RxTab.ZAPS -> Icon(Icons.Filled.Bolt, null, Modifier.size(16.dp), tint = Color(0xFFF59E0B))
+                                RxTab.BOOSTS -> Icon(Icons.Filled.Repeat, null, Modifier.size(16.dp), tint = Color(0xFF4CAF50))
                             }
-                        )
-                    }
+                        }
+                    )
                 }
             }
 
@@ -157,6 +142,13 @@ private fun RxReactionsTab(
     val grouped = remember(reactions, reactionAuthors) {
         reactions.map { emoji -> emoji to (reactionAuthors[emoji] ?: emptyList()) }
             .sortedByDescending { it.second.size }
+    }
+
+    if (reactions.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No likes yet", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
     }
 
     LazyColumn(
@@ -213,6 +205,13 @@ private fun RxZapsTab(
         zapAuthors.distinct().sortedByDescending { zapAmountByAuthor[it] ?: 0L }
     }
 
+    if (zapAuthors.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No zaps yet", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
@@ -258,6 +257,13 @@ private fun RxBoostsTab(
     boostAuthors: List<Author>,
     onProfileClick: (String) -> Unit,
 ) {
+    if (boostAuthors.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No boosts yet", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),

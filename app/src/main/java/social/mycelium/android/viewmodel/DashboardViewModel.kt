@@ -190,7 +190,7 @@ class DashboardViewModel : ViewModel() {
         // Fast path: push notes to UI immediately
         viewModelScope.launch {
             try {
-                notesRepository.notes.collect { notes ->
+                notesRepository.displayedNotes.collect { notes ->
                     try {
                         _uiState.update {
                             it.copy(

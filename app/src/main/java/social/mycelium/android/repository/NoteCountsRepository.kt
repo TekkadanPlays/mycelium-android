@@ -46,7 +46,11 @@ data class NoteCounts(
     /** Pubkeys of authors who zapped this note (ordered by receipt time). */
     val zapAuthors: List<String> = emptyList(),
     /** NIP-30 custom emoji URLs: maps ":shortcode:" to image URL for custom emoji reactions. */
-    val customEmojiUrls: Map<String, String> = emptyMap()
+    val customEmojiUrls: Map<String, String> = emptyMap(),
+    /** Number of kind-6 reposts (boosts). */
+    val repostCount: Int = 0,
+    /** Pubkeys of authors who reposted this note (kind-6). */
+    val repostAuthors: List<String> = emptyList()
 )
 
 object NoteCountsRepository {
@@ -232,7 +236,7 @@ object NoteCountsRepository {
         countsSubscriptionHandle = rsm.requestTemporarySubscriptionPerRelay(
             relayFilters = relayFilters,
             onEvent = { event -> onCountsEvent(event) },
-            priority = SubscriptionPriority.NORMAL,
+            priority = SubscriptionPriority.LOW,
         )
     }
 
@@ -243,18 +247,20 @@ object NoteCountsRepository {
         )
     }
 
-    /** Phase 2 filters: kind-7 reactions + kind-9735 zaps (enrichment). */
+    /** Phase 2 filters: kind-6 reposts + kind-7 reactions + kind-9735 zaps (enrichment). */
     private fun buildPhase2Filters(noteIds: List<String>): List<Filter> {
         return listOf(
+            Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
             Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
             Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200)
         )
     }
 
-    /** All-kinds filters: kind-1 + kind-7 + kind-9735 in one subscription. */
+    /** All-kinds filters: kind-1 + kind-6 + kind-7 + kind-9735 in one subscription. */
     private fun buildAllKindsFilters(noteIds: List<String>): List<Filter> {
         return listOf(
             Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
+            Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
             Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
             Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200)
         )
@@ -278,7 +284,7 @@ object NoteCountsRepository {
     fun onCountsEvent(event: Event) {
         // Dedup across relays
         if (!processedEventIds.add(event.id)) return
-        if (event.kind != 1 && event.kind != 7 && event.kind != 9735) return
+        if (event.kind != 1 && event.kind != 6 && event.kind != 7 && event.kind != 9735) return
         pendingCountEvents.add(event)
         if (firstPendingEventTs == 0L) firstPendingEventTs = System.currentTimeMillis()
         scheduleCountsFlush()
@@ -324,6 +330,7 @@ object NoteCountsRepository {
         for (event in batch) {
             when (event.kind) {
                 1 -> applyKind1Reply(event, snapshot, changedReplyNoteIds)
+                6 -> applyKind6Repost(event, snapshot)
                 7 -> applyKind7(event, snapshot)
                 9735 -> applyKind9735(event, snapshot)
             }
@@ -378,6 +385,15 @@ object NoteCountsRepository {
         val m2 = tag.getOrNull(2)
         if (m2 == "root" || m2 == "reply") return m2
         return null
+    }
+
+    private fun applyKind6Repost(event: Event, snapshot: MutableMap<String, NoteCounts>) {
+        val noteId = event.tags.filter { it.getOrNull(0) == "e" }.firstOrNull()?.getOrNull(1) ?: return
+        val authorPubkey = event.pubKey
+        val counts = snapshot[noteId] ?: NoteCounts()
+        val authors = counts.repostAuthors.toMutableList()
+        if (authorPubkey !in authors) authors.add(authorPubkey)
+        snapshot[noteId] = counts.copy(repostCount = authors.size, repostAuthors = authors)
     }
 
     private fun applyKind7(event: Event, snapshot: MutableMap<String, NoteCounts>) {

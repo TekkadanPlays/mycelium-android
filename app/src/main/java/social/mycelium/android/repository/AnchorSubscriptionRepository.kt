@@ -130,17 +130,13 @@ class AnchorSubscriptionRepository private constructor() {
             authors = listOf(pubkey),
             limit = 5
         )
-        val handle = RelayConnectionStateMachine.getInstance().requestTemporarySubscription(
+        RelayConnectionStateMachine.getInstance().requestOneShotSubscription(
             relayUrls = relays.toList(),
             filter = filter,
             priority = SubscriptionPriority.BACKGROUND,
+            settleMs = 300L, maxWaitMs = 4_000L,
             onEvent = { event -> handleSubscriptionEvent(event) }
         )
-        // Auto-cancel after 10 seconds (one-shot fetch)
-        scope.launch {
-            delay(10_000)
-            handle.cancel()
-        }
-        Log.d("AnchorSubscriptionRepo", "Fetching kind:30073 for ${pubkey.take(8)} from ${relays.size} relays")
+        Log.d("AnchorSubscriptionRepo", "Fetching kind:30073 (one-shot) for ${pubkey.take(8)} from ${relays.size} relays")
     }
 }

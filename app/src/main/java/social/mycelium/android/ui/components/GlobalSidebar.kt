@@ -47,6 +47,8 @@ fun GlobalSidebar(
     onIndexerClick: () -> Unit = {},
     onRelayHealthClick: () -> Unit = {},
     onRelayDiscoveryClick: () -> Unit = {},
+    troubleRelayCount: Int = 0,
+    gesturesEnabled: Boolean = true,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
@@ -54,6 +56,7 @@ fun GlobalSidebar(
 
     ModalNavigationDrawer(
         drawerState = drawerState,
+        gesturesEnabled = gesturesEnabled,
         drawerContent = {
             ModalDrawerSheet {
                 DrawerContent(
@@ -73,6 +76,7 @@ fun GlobalSidebar(
                     onIndexerClick = onIndexerClick,
                     onRelayHealthClick = onRelayHealthClick,
                     onRelayDiscoveryClick = onRelayDiscoveryClick,
+                    troubleRelayCount = troubleRelayCount,
                     onClose = {
                         scope.launch {
                             drawerState.close()
@@ -105,6 +109,7 @@ private fun DrawerContent(
     onIndexerClick: () -> Unit = {},
     onRelayHealthClick: () -> Unit = {},
     onRelayDiscoveryClick: () -> Unit = {},
+    troubleRelayCount: Int = 0,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -156,10 +161,26 @@ private fun DrawerContent(
                 },
                 modifier = Modifier.size(40.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.HealthAndSafety,
-                    contentDescription = "Relay Health"
-                )
+                Box {
+                    Icon(
+                        imageVector = Icons.Outlined.HealthAndSafety,
+                        contentDescription = "Relay Health",
+                        tint = if (troubleRelayCount > 0) MaterialTheme.colorScheme.error
+                               else LocalContentColor.current
+                    )
+                    if (troubleRelayCount > 0) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .offset(x = 3.dp, y = (-3).dp)
+                                .size(8.dp)
+                                .background(
+                                    color = MaterialTheme.colorScheme.error,
+                                    shape = androidx.compose.foundation.shape.CircleShape
+                                )
+                        )
+                    }
+                }
             }
             IconButton(
                 onClick = {
@@ -175,7 +196,7 @@ private fun DrawerContent(
             }
         }
 
-        // Connection status summary — uses real per-relay counts from RelayConnectionStateMachine
+        // Connection status — simple dot + label
         val isConnecting = relayState is RelayState.Connecting
         val isConnected = relayState is RelayState.Connected || relayState is RelayState.Subscribed
         Row(
@@ -206,11 +227,7 @@ private fun DrawerContent(
             }
             Text(
                 text = when {
-                    connectedRelayCount > 0 -> {
-                        val base = "Connected $connectedRelayCount/$subscribedRelayCount"
-                        if (indexerRelayCount > 0) "$base  ·  Indexers $connectedIndexerCount/$indexerRelayCount"
-                        else base
-                    }
+                    connectedRelayCount > 0 -> "Connected"
                     isConnecting -> "Connecting\u2026"
                     relayState is RelayState.ConnectFailed -> "Connection failed"
                     else -> "Disconnected"
@@ -269,29 +286,28 @@ private fun DrawerContent(
             }
         }
 
-        // ── Fixed relay sections: Outbox, Inbox, Indexer ──
-        if (outboxRelays.isNotEmpty()) {
+        // ── Merged Outbox + Inbox section with r/w tags ──
+        if (outboxRelays.isNotEmpty() || inboxRelays.isNotEmpty()) {
+            val mergedRelays = remember(outboxRelays, inboxRelays) {
+                val inboxUrls = inboxRelays.map { it.url.trimEnd('/').lowercase() }.toSet()
+                val byUrl = linkedMapOf<String, UserRelay>()
+                outboxRelays.forEach { r -> byUrl[r.url.trimEnd('/').lowercase()] = r.copy(write = true, read = r.url.trimEnd('/').lowercase() in inboxUrls) }
+                inboxRelays.forEach { r ->
+                    val key = r.url.trimEnd('/').lowercase()
+                    if (key !in byUrl) byUrl[key] = r.copy(read = true, write = false)
+                }
+                byUrl.values.toList()
+            }
             FixedRelaySection(
                 title = "Outbox",
-                icon = Icons.Default.Upload,
-                relays = outboxRelays,
+                icon = Icons.Default.SwapVert,
+                relays = mergedRelays,
                 sectionId = "outbox",
                 isExpanded = expandedCategories.contains("outbox"),
                 connectionStatus = connectionStatus,
                 onToggle = { onToggleCategory("outbox") },
-                onRelayClick = { url -> onItemClick("relay:$url"); onClose() }
-            )
-        }
-        if (inboxRelays.isNotEmpty()) {
-            FixedRelaySection(
-                title = "Inbox",
-                icon = Icons.Default.Download,
-                relays = inboxRelays,
-                sectionId = "inbox",
-                isExpanded = expandedCategories.contains("inbox"),
-                connectionStatus = connectionStatus,
-                onToggle = { onToggleCategory("inbox") },
-                onRelayClick = { url -> onItemClick("relay:$url"); onClose() }
+                onRelayClick = { url -> onItemClick("relay:$url"); onClose() },
+                showRwTags = true
             )
         }
         // ── Active Profile categories ──
@@ -371,7 +387,8 @@ private fun FixedRelaySection(
     isExpanded: Boolean,
     connectionStatus: Map<String, RelayConnectionStatus>,
     onToggle: () -> Unit,
-    onRelayClick: (String) -> Unit
+    onRelayClick: (String) -> Unit,
+    showRwTags: Boolean = false
 ) {
     Row(
         modifier = Modifier
@@ -408,7 +425,13 @@ private fun FixedRelaySection(
             SidebarRelayRow(
                 relay = relay,
                 relayConnected = relayConnected,
-                onClick = { onRelayClick(relay.url) }
+                onClick = { onRelayClick(relay.url) },
+                rwTag = if (showRwTags) when {
+                    relay.read && relay.write -> "r/w"
+                    relay.read -> "r"
+                    relay.write -> "w"
+                    else -> null
+                } else null
             )
         }
     }
@@ -493,7 +516,8 @@ private fun ActiveProfileSection(
 private fun SidebarRelayRow(
     relay: UserRelay,
     relayConnected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    rwTag: String? = null
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val nip11Cache = remember { social.mycelium.android.cache.Nip11CacheManager.getInstance(context) }
@@ -546,5 +570,13 @@ private fun SidebarRelayRow(
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
+        if (rwTag != null) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = rwTag,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+        }
     }
 }

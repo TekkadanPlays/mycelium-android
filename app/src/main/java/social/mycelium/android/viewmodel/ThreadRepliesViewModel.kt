@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import social.mycelium.android.services.EventPublisher
 import java.util.UUID
 
 @Immutable
@@ -28,7 +29,11 @@ data class ThreadRepliesUiState(
     val isLoading: Boolean = false,
     val error: String? = null,
     val totalReplyCount: Int = 0,
-    val sortOrder: ReplySortOrder = ReplySortOrder.CHRONOLOGICAL
+    val sortOrder: ReplySortOrder = ReplySortOrder.CHRONOLOGICAL,
+    /** Count of pending new replies not yet shown (live awareness). */
+    val newReplyCount: Int = 0,
+    /** Pending reply counts per parent ID (for inline 'x new replies' buttons). */
+    val newRepliesByParent: Map<String, Int> = emptyMap()
 )
 
 enum class ReplySortOrder {
@@ -63,6 +68,21 @@ class ThreadRepliesViewModel : ViewModel() {
         observeRepliesFromRepository()
         ProfileMetadataCache.getInstance().profileUpdated
             .onEach { pubkey -> repository.updateAuthorInReplies(pubkey) }
+            .launchIn(viewModelScope)
+        // Observe published events: inject kind-1111/kind-1 replies into pending for live awareness
+        EventPublisher.publishedEvents
+            .onEach { event ->
+                if (event.kind == 1111 || event.kind == 1) {
+                    val noteId = _uiState.value.note?.id ?: return@onEach
+                    // Check if this reply targets the current thread (root E/e tag matches)
+                    val tags = event.tags.map { it.toList() }
+                    val rootId = tags.firstOrNull { it.size >= 2 && it[0] == "E" }?.get(1)
+                        ?: tags.firstOrNull { it.size >= 4 && it[0] == "e" && it[3] == "root" }?.get(1)
+                    if (rootId == noteId) {
+                        repository.injectLocalReply(noteId, event)
+                    }
+                }
+            }
             .launchIn(viewModelScope)
     }
 
@@ -100,6 +120,18 @@ class ThreadRepliesViewModel : ViewModel() {
                 if (error != null) {
                     _uiState.update { it.copy(error = error) }
                 }
+            }
+        }
+
+        viewModelScope.launch {
+            repository.newReplyCount.collect { count ->
+                _uiState.update { it.copy(newReplyCount = count) }
+            }
+        }
+
+        viewModelScope.launch {
+            repository.newRepliesByParent.collect { byParent ->
+                _uiState.update { it.copy(newRepliesByParent = byParent) }
             }
         }
     }
@@ -174,9 +206,8 @@ class ThreadRepliesViewModel : ViewModel() {
         val threadedReplies = organizeRepliesIntoThreads(sortedReplies)
 
         _uiState.update { it.copy(replies = sortedReplies, threadedReplies = threadedReplies, totalReplyCount = merged.size, isLoading = false) }
-        // Cache only direct (depth-1) reply count for feed cards — not the entire chain
-        val directCount = merged.count { it.replyToId == noteId || it.replyToId == null }
-        social.mycelium.android.repository.ReplyCountCache.set(noteId, directCount)
+        // Cache total reply count for feed cards
+        social.mycelium.android.repository.ReplyCountCache.set(noteId, merged.size)
 
         Log.d(TAG, "Updated replies state: ${merged.size} replies, ${threadedReplies.size} threads")
     }
@@ -261,13 +292,24 @@ class ThreadRepliesViewModel : ViewModel() {
     }
 
     /**
-     * Refresh replies for current note
+     * Refresh replies: merge pending into displayed (non-destructive).
+     * Only does a full re-fetch if relayUrls are provided and there are no pending replies.
      */
     fun refreshReplies(relayUrls: List<String>) {
-        val currentNote = _uiState.value.note
-        if (currentNote != null) {
+        val currentNote = _uiState.value.note ?: return
+        if (_uiState.value.newReplyCount > 0) {
+            repository.applyPendingReplies(currentNote.id)
+        } else {
             loadRepliesForNote(currentNote, relayUrls)
         }
+    }
+
+    /**
+     * Apply pending replies for a specific parent (inline 'load new replies' button).
+     */
+    fun applyPendingRepliesForParent(parentId: String) {
+        val noteId = _uiState.value.note?.id ?: return
+        repository.applyPendingRepliesForParent(noteId, parentId)
     }
 
     /**

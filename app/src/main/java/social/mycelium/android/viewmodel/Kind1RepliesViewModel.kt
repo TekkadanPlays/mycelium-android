@@ -175,10 +175,9 @@ class Kind1RepliesViewModel : ViewModel() {
 
         val noteId = current.note?.id
         _uiState.update { it.copy(replies = sortedReplies, threadedReplies = threadedReplies, totalReplyCount = replies.size, isLoading = false) }
-        // Cache only direct (depth-1) reply count for feed cards — not the entire chain
+        // Cache total reply count for feed cards
         if (noteId != null) {
-            val directCount = replies.count { it.replyToId == noteId || it.replyToId == null }
-            social.mycelium.android.repository.ReplyCountCache.set(noteId, directCount)
+            social.mycelium.android.repository.ReplyCountCache.set(noteId, replies.size)
         }
 
         // Thread completeness trace

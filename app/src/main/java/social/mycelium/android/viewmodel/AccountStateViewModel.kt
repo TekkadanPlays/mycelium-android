@@ -17,7 +17,9 @@ import social.mycelium.android.repository.ContactListRepository
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.ReactionsRepository
 import social.mycelium.android.repository.ZapStatePersistence
+import social.mycelium.android.repository.NotesRepository
 import social.mycelium.android.repository.TopicsPublishService
+import social.mycelium.android.repository.TopicsRepository
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.bechToBytes
 import com.example.cybin.nip19.NPub
@@ -767,15 +769,19 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
     // ── Publishing helpers ─────────────────────────────────────────────
 
-    /** Get the current NostrSigner (Amber external signer), or null if unavailable. */
+    /** Get the current NostrSigner (Amber or nsec-based), or null if unavailable. */
     private fun getSignerOrNull(): com.example.cybin.signer.NostrSigner? {
-        return (amberSignerManager.state.value as? AmberState.LoggedIn)?.signer
+        return getCurrentSigner()
     }
 
     /** Human-readable error when signer is unavailable. */
     private fun signerUnavailableMessage(): String {
-        if (_currentAccount.value == null) return "Sign in to continue"
-        return "Amber signer not available"
+        val account = _currentAccount.value ?: return "Sign in to continue"
+        return when {
+            account.isExternalSigner -> "Amber signer not available"
+            account.hasPrivateKey -> "Private key not available. Sign in again with nsec."
+            else -> "Sign in with nsec or Amber to publish"
+        }
     }
 
     /** Outbox relay URLs as a Set<String> (raw URL strings, pre-normalization happens at publish time). */
@@ -853,17 +859,22 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Publish a Kind 11 topic (title, content, hashtags). Signs with Amber and sends to outbox relays.
+     * Publish a Kind 11 topic (title, content, hashtags). Signs with Amber and sends to selected relays.
+     * @param relayUrls Relay URLs to publish to (from relay picker). Falls back to outbox if empty.
      * Returns null on success, or an error message.
      */
-    fun publishTopic(title: String, content: String, hashtags: List<String>): String? {
+    fun publishTopic(title: String, content: String, hashtags: List<String>, relayUrls: Set<String> = emptySet()): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
+        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
         if (relaySet.isEmpty()) return "No outbox relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildTopicEventTemplate(title, content, hashtags)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
-                is PublishResult.Success -> Log.d("AccountStateViewModel", "Topic published: ${result.eventId.take(8)}")
+                is PublishResult.Success -> {
+                    Log.d("AccountStateViewModel", "Topic published: ${result.eventId.take(8)}")
+                    // Inject into TopicsRepository so "x new topics" counter updates immediately
+                    TopicsRepository.getInstance(getApplication()).injectLocalTopic(result.event)
+                }
                 is PublishResult.Error -> _toastMessage.value = "Topic failed: ${result.message}"
             }
         }
@@ -871,18 +882,20 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Publish a Kind 1111 thread reply. Signs with Amber and sends to outbox relays.
+     * Publish a Kind 1111 thread reply. Signs with Amber and sends to selected relays.
      * rootThreadId/rootThreadPubkey = the Kind 11 topic; parentReplyId/parentReplyPubkey = optional parent reply (Kind 1111).
+     * @param relayUrls Relay URLs to publish to. Falls back to outbox if empty.
      */
     fun publishThreadReply(
         rootThreadId: String,
         rootThreadPubkey: String,
         parentReplyId: String?,
         parentReplyPubkey: String?,
-        content: String
+        content: String,
+        relayUrls: Set<String> = emptySet()
     ): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
+        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
         if (relaySet.isEmpty()) return "No outbox relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildThreadReplyEventTemplate(
@@ -905,11 +918,12 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         rootPubkey: String,
         parentId: String?,
         parentPubkey: String?,
-        content: String
+        content: String,
+        relayUrls: Set<String> = emptySet()
     ): String? {
         if (content.isBlank()) return "Reply is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
+        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
         if (relaySet.isEmpty()) return "No outbox relays configured"
         viewModelScope.launch {
             val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 1, content = content) {
@@ -937,17 +951,24 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Publish a Kind 6 repost (boost). The content is the JSON of the original event,
      * with e-tag pointing to the original note and p-tag to its author.
      */
-    fun publishRepost(noteId: String, noteAuthorPubkey: String, rawEventJson: String = ""): String? {
+    fun publishRepost(noteId: String, noteAuthorPubkey: String, rawEventJson: String = "", originalNote: social.mycelium.android.data.Note? = null): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = getOutboxRelayUrlSet()
         if (relaySet.isEmpty()) return "No outbox relays configured"
+        val pubkey = currentAccount.value?.toHexKey()
         viewModelScope.launch {
             val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 6, content = rawEventJson) {
                 add(arrayOf("e", noteId))
                 add(arrayOf("p", noteAuthorPubkey))
             }
             when (result) {
-                is PublishResult.Success -> _toastMessage.value = "Boosted"
+                is PublishResult.Success -> {
+                    _toastMessage.value = "Boosted"
+                    // Inject repost locally so it appears instantly in the feed
+                    if (originalNote != null && pubkey != null) {
+                        NotesRepository.getInstance().injectLocalRepost(originalNote, pubkey)
+                    }
+                }
                 is PublishResult.Error -> _toastMessage.value = "Boost failed: ${result.message}"
             }
         }
@@ -1277,13 +1298,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         content: String,
         topicId: String,
         topicAuthorPubkey: String,
-        hashtags: List<String>
+        hashtags: List<String>,
+        relayUrls: Set<String> = emptySet()
     ) {
         val signer = getSignerOrNull() ?: run {
             _toastMessage.value = signerUnavailableMessage()
             return
         }
-        val relaySet = getOutboxRelayUrlSet()
+        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
         if (relaySet.isEmpty()) {
             _toastMessage.value = "No outbox relays configured"
             return

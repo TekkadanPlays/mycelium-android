@@ -11,6 +11,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -22,7 +23,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -290,17 +293,19 @@ private fun QuotedNoteBody(
     }
 
     if (hasMore) {
-        Text(
-            text = if (isExpanded) "Show less" else "Read more",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.primary,
+        Row(
             modifier = Modifier
-                .padding(top = 2.dp)
-                .clickable(
-                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                    indication = null
-                ) { onExpandToggle() }
-        )
+                .fillMaxWidth()
+                .clickable { onExpandToggle() }
+                .padding(top = 4.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.End
+        ) {
+            Text(
+                text = if (isExpanded) "Show less" else "Read more",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
     }
 }
 
@@ -588,6 +593,29 @@ private fun NoteMediaCarousel(
                             }
                         }
                     )
+                    // Fullscreen magnifier icon — one per image
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(8.dp)
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.45f))
+                            .clickable(
+                                indication = null,
+                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                            ) {
+                                onOpenImageViewer(allMediaUrls, groupStartIndex + page)
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Outlined.Fullscreen,
+                            contentDescription = "View fullscreen",
+                            modifier = Modifier.size(20.dp),
+                            tint = Color.White
+                        )
+                    }
                 }
             }
         }
@@ -616,6 +644,815 @@ private fun NoteMediaCarousel(
             }
         }
     }
+}
+
+/**
+ * Extracted expandable details panel — boosts, reactions, zaps breakdown.
+ * Splits the inner AnimatedVisibility of NoteCard to reduce ART JIT instruction count.
+ */
+@Composable
+private fun NoteDetailsPanel(
+    note: Note,
+    isDetailsExpanded: Boolean,
+    overrideReactions: List<String>?,
+    overrideReactionAuthors: Map<String, List<String>>?,
+    overrideZapCount: Int?,
+    overrideZapTotalSats: Long?,
+    overrideZapAuthors: List<String>?,
+    overrideZapAmountByAuthor: Map<String, Long>?,
+    overrideCustomEmojiUrls: Map<String, String>?,
+    overrideRepostAuthors: List<String>? = null,
+    isZapped: Boolean,
+    myZappedAmount: Long?,
+    onProfileClick: (String) -> Unit,
+    onSeeAllReactions: (() -> Unit)?,
+) {
+    AnimatedVisibility(
+        visible = isDetailsExpanded,
+        enter = expandVertically() + fadeIn(),
+        exit = shrinkVertically() + fadeOut()
+    ) {
+        val profileCache = remember { ProfileMetadataCache.getInstance() }
+        val detailReactions = overrideReactions ?: note.reactions
+        val detailZapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
+        // Merge repost authors from note + NoteCountsRepository
+        val boostAuthors = remember(note.repostedByAuthors, overrideRepostAuthors) {
+            if (overrideRepostAuthors.isNullOrEmpty()) {
+                note.repostedByAuthors
+            } else {
+                val existingIds = note.repostedByAuthors.map { it.id }.toSet()
+                val extra = overrideRepostAuthors.filter { it !in existingIds }.map { profileCache.resolveAuthor(it) }
+                (note.repostedByAuthors + extra).distinctBy { it.id }
+            }
+        }
+        val hasBoosts = boostAuthors.isNotEmpty()
+        val hasReactions = detailReactions.isNotEmpty()
+        val hasZaps = detailZapCount > 0
+
+        var boostsExpanded by remember { mutableStateOf(false) }
+        var reactionsExpanded by remember { mutableStateOf(false) }
+        var zapsExpanded by remember { mutableStateOf(false) }
+        if (hasBoosts || hasReactions || hasZaps) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { /* consume clicks — dead zone */ }
+                    )
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                    // Boosts summary row (tappable)
+                    if (hasBoosts) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { boostsExpanded = !boostsExpanded }
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Repeat,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = Color(0xFF4CAF50)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            val boostAvatars = boostAuthors.take(5)
+                            Box(modifier = Modifier.width((20 + (boostAvatars.size - 1).coerceAtLeast(0) * 12).dp)) {
+                                boostAvatars.forEachIndexed { i, author ->
+                                    Box(modifier = Modifier.offset(x = (i * 12).dp)) {
+                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "${boostAuthors.size} boost${if (boostAuthors.size != 1) "s" else ""}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Icon(
+                                imageVector = if (boostsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                        // Expanded: 3 latest boosters
+                        AnimatedVisibility(visible = boostsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                boostAuthors.take(3).forEach { author ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                        Spacer(Modifier.width(8.dp))
+                                        Text(
+                                            text = authorDisplayLabel(author),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.clickable { onProfileClick(author.id) }
+                                        )
+                                    }
+                                }
+                                if (boostAuthors.size > 3 && onSeeAllReactions != null) {
+                                    Text(
+                                        text = "see all ${boostAuthors.size} boosts",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .clickable { onSeeAllReactions() }
+                                            .padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Reactions summary row (tappable)
+                    if (hasReactions) {
+                        val detailReactionAuthors = overrideReactionAuthors ?: emptyMap()
+                        // Sort emojis by actual popularity (number of authors), not just presence
+                        val grouped = remember(detailReactions, detailReactionAuthors) {
+                            detailReactions.map { emoji ->
+                                emoji to (detailReactionAuthors[emoji]?.size ?: 1)
+                            }.sortedByDescending { it.second }
+                        }
+                        val totalReactionCount = if (detailReactionAuthors.isNotEmpty()) {
+                            detailReactionAuthors.values.sumOf { it.size }
+                        } else detailReactions.size
+                        val detailEmojiUrls = overrideCustomEmojiUrls ?: emptyMap()
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { reactionsExpanded = !reactionsExpanded }
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Favorite,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = Color(0xFFE91E63)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = "Reactions",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            // Show top 5 emoji chips inline sorted by popularity
+                            val showcased = grouped.take(5)
+                            showcased.forEach { (emoji, count) ->
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    modifier = Modifier.padding(end = 4.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 13.sp, imageSize = 14.dp)
+                                        if (count > 1) {
+                                            Spacer(Modifier.width(2.dp))
+                                            Text(text = "$count", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.weight(1f))
+                            if (totalReactionCount > 0) {
+                                Text(
+                                    text = "$totalReactionCount",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFE57373)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            Icon(
+                                imageVector = if (reactionsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                        // Expanded: 3 latest individual reactions across all emojis
+                        AnimatedVisibility(visible = reactionsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                            val rxProfileCache = remember { ProfileMetadataCache.getInstance() }
+                            // Build flat list of (emoji, pubkey) pairs — latest 3
+                            val latestReactions = remember(overrideReactionAuthors) {
+                                val flat = mutableListOf<Pair<String, String>>()
+                                overrideReactionAuthors?.forEach { (emoji, authors) ->
+                                    authors.forEach { pubkey -> flat.add(emoji to pubkey) }
+                                }
+                                flat.takeLast(3).reversed() // latest first
+                            }
+                            val rxPubkeys = remember(latestReactions) { latestReactions.map { it.second }.distinct() }
+                            var rxProfileRevision by remember { mutableIntStateOf(0) }
+                            LaunchedEffect(rxPubkeys) {
+                                val uncached = rxPubkeys.filter { rxProfileCache.getAuthor(it) == null }
+                                if (uncached.isNotEmpty()) rxProfileCache.requestProfiles(uncached, rxProfileCache.getConfiguredRelayUrls())
+                            }
+                            LaunchedEffect(Unit) { rxProfileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) rxProfileRevision++ } }
+                            @Suppress("UNUSED_EXPRESSION") rxProfileRevision
+                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                latestReactions.forEach { (emoji, pubkey) ->
+                                    val author = rxProfileCache.resolveAuthor(pubkey)
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
+                                        Spacer(Modifier.width(6.dp))
+                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = authorDisplayLabel(author),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.clickable { onProfileClick(author.id) }
+                                        )
+                                    }
+                                }
+                                if (totalReactionCount > 3 && onSeeAllReactions != null) {
+                                    Text(
+                                        text = "see all $totalReactionCount reactions",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .clickable { onSeeAllReactions() }
+                                            .padding(vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // Zaps summary row (tappable)
+                    if (hasZaps) {
+                        val detailZapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { zapsExpanded = !zapsExpanded }
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Bolt,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = Color(0xFFF59E0B)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            if (detailZapTotalSats > 0) {
+                                Text(
+                                    text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(detailZapTotalSats)} sats",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = Color(0xFFF59E0B)
+                                )
+                                Text(
+                                    text = " ($detailZapCount zap${if (detailZapCount != 1) "s" else ""})",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            } else {
+                                Text(
+                                    text = "$detailZapCount zap${if (detailZapCount != 1) "s" else ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            Icon(
+                                imageVector = if (zapsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                        // Expanded: 3 latest zappers
+                        AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                            val zapProfileCache = remember { ProfileMetadataCache.getInstance() }
+                            val allZapPubkeys = remember(overrideZapAuthors) { overrideZapAuthors?.distinct() ?: emptyList() }
+                            var zapProfileRevision by remember { mutableIntStateOf(0) }
+                            LaunchedEffect(allZapPubkeys) {
+                                val uncached = allZapPubkeys.filter { zapProfileCache.getAuthor(it) == null }
+                                if (uncached.isNotEmpty()) zapProfileCache.requestProfiles(uncached, zapProfileCache.getConfiguredRelayUrls())
+                            }
+                            LaunchedEffect(Unit) { zapProfileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
+                            @Suppress("UNUSED_EXPRESSION") zapProfileRevision
+                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                if (isZapped && myZappedAmount != null && myZappedAmount > 0) {
+                                    Text(
+                                        text = "You zapped $myZappedAmount sats",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color(0xFFF59E0B)
+                                    )
+                                }
+                                if (!overrideZapAuthors.isNullOrEmpty()) {
+                                    val sortedZapAuthors = remember(overrideZapAuthors, overrideZapAmountByAuthor) {
+                                        overrideZapAuthors.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
+                                    }
+                                    sortedZapAuthors.take(3).forEach { pubkey ->
+                                        val author = zapProfileCache.resolveAuthor(pubkey)
+                                        val zapSats = overrideZapAmountByAuthor?.get(pubkey) ?: 0L
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 2.dp)
+                                        ) {
+                                            ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = authorDisplayLabel(author),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false).clickable { onProfileClick(author.id) }
+                                            )
+                                            if (zapSats > 0) {
+                                                Text(
+                                                    text = " ⚡ ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapSats)} sats",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = Color(0xFFF59E0B)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    if (allZapPubkeys.size > 3 && onSeeAllReactions != null) {
+                                        Text(
+                                            text = "see all ${allZapPubkeys.size} zaps",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier
+                                                .clickable { onSeeAllReactions() }
+                                                .padding(vertical = 2.dp)
+                                        )
+                                    }
+                                } else {
+                                    Text(
+                                        text = "$detailZapCount total zap${if (detailZapCount != 1) "s" else ""}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // "see all" link to open full ReactionsScreen
+                    if (onSeeAllReactions != null) {
+                        Text(
+                            text = "see all",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSeeAllReactions() }
+                                .padding(vertical = 4.dp),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+        } else {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                shape = RectangleShape
+            ) {
+                Text(
+                    text = "No reactions yet",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Extracted action row + 3-dot menu + zap menu.
+ * Splits the deeply nested DropdownMenu lambdas out of NoteCard to reduce ART JIT instruction count.
+ */
+@OptIn(ExperimentalFoundationApi::class, FlowPreview::class)
+@Composable
+private fun NoteActionRow(
+    note: Note,
+    actionRowSchema: ActionRowSchema,
+    isZapInProgress: Boolean,
+    isZapped: Boolean,
+    reactionEmoji: String?,
+    isDetailsExpanded: Boolean,
+    onDetailsToggle: () -> Unit,
+    isZapMenuExpanded: Boolean,
+    onZapMenuToggle: () -> Unit,
+    onShowCustomZapDialog: () -> Unit,
+    onShowReactionPicker: () -> Unit,
+    onComment: (String) -> Unit,
+    onBoost: ((Note) -> Unit)?,
+    onQuote: ((Note) -> Unit)?,
+    onFork: ((Note) -> Unit)?,
+    onZap: (String, Long) -> Unit,
+    onCustomZap: (String) -> Unit,
+    onZapSettings: () -> Unit,
+    onProfileClick: (String) -> Unit,
+    isAuthorFollowed: Boolean,
+    onFollowAuthor: ((String) -> Unit)?,
+    onUnfollowAuthor: ((String) -> Unit)?,
+    onMessageAuthor: ((String) -> Unit)?,
+    onBlockAuthor: ((String) -> Unit)?,
+    onMuteAuthor: ((String) -> Unit)?,
+    onBookmarkToggle: ((String, Boolean) -> Unit)?,
+    extraMoreMenuItems: List<Pair<String, () -> Unit>>,
+    translationResult: social.mycelium.android.repository.TranslationService.TranslationResult?,
+    isTranslating: Boolean,
+    showOriginal: Boolean,
+    onTranslate: () -> Unit,
+    onShowOriginal: () -> Unit,
+    onShowTranslation: () -> Unit,
+) {
+    var showRepostMenu by remember { mutableStateOf(false) }
+    var showHeaderMenu by remember { mutableStateOf(false) }
+    var menuLevel by remember { mutableIntStateOf(0) }
+    val context = LocalContext.current
+
+    // Menu content and helpers declared before Row so DropdownMenu inside Box can reference them
+    val authorLabel = remember(note.author) { authorDisplayLabel(note.author) }
+    val closeMenu = { showHeaderMenu = false; menuLevel = 0 }
+
+    @Composable
+    fun MoreMenuContent() {
+        when (menuLevel) {
+            // ═══ ROOT LEVEL ═══
+            0 -> {
+                // Follow / Unfollow
+                if (isAuthorFollowed) {
+                    onUnfollowAuthor?.let { unfollow ->
+                        DropdownMenuItem(
+                            text = { Text("Unfollow $authorLabel") },
+                            leadingIcon = { Icon(Icons.Default.PersonRemove, null, modifier = Modifier.size(18.dp)) },
+                            onClick = { closeMenu(); unfollow(note.author.id) }
+                        )
+                    }
+                } else {
+                    onFollowAuthor?.let { follow ->
+                        DropdownMenuItem(
+                            text = { Text("Follow $authorLabel") },
+                            leadingIcon = { Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(18.dp)) },
+                            onClick = { closeMenu(); follow(note.author.id) }
+                        )
+                    }
+                }
+                // Message author
+                onMessageAuthor?.let { msg ->
+                    DropdownMenuItem(
+                        text = { Text("Message $authorLabel") },
+                        leadingIcon = { Icon(Icons.Default.Send, null, modifier = Modifier.size(18.dp)) },
+                        onClick = { closeMenu(); msg(note.author.id) }
+                    )
+                }
+                // Copy → sub-menu
+                DropdownMenuItem(
+                    text = { Text("Copy\u2026") },
+                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                    onClick = { menuLevel = 1 }
+                )
+                // Bookmarks → sub-menu
+                DropdownMenuItem(
+                    text = { Text("Bookmarks") },
+                    leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null, modifier = Modifier.size(18.dp)) },
+                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                    onClick = { menuLevel = 2 }
+                )
+                // Share (direct action)
+                DropdownMenuItem(
+                    text = { Text("Share") },
+                    leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
+                    onClick = {
+                        closeMenu()
+                        val nevent = com.example.cybin.nip19.encodeNevent(
+                            eventIdHex = note.id,
+                            relays = note.relayUrls.take(2),
+                            authorHex = note.author.id
+                        )
+                        val sendIntent = android.content.Intent().apply {
+                            action = android.content.Intent.ACTION_SEND
+                            putExtra(android.content.Intent.EXTRA_TEXT, "https://njump.me/$nevent")
+                            type = "text/plain"
+                        }
+                        context.startActivity(android.content.Intent.createChooser(sendIntent, "Share note"))
+                    }
+                )
+                // Translate / Show Original
+                if (translationResult != null && !showOriginal) {
+                    DropdownMenuItem(
+                        text = { Text("Show original") },
+                        leadingIcon = { Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp)) },
+                        onClick = { onShowOriginal(); closeMenu() }
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = {
+                            if (isTranslating) Text("Translating\u2026")
+                            else if (translationResult != null) Text("Show translation")
+                            else Text("Translate")
+                        },
+                        leadingIcon = {
+                            if (isTranslating) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp)
+                            else Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp))
+                        },
+                        onClick = {
+                            closeMenu()
+                            if (translationResult != null) {
+                                onShowTranslation()
+                            } else {
+                                onTranslate()
+                            }
+                        }
+                    )
+                }
+                // Filters & Blocks → sub-menu
+                if (onBlockAuthor != null || onMuteAuthor != null) {
+                    DropdownMenuItem(
+                        text = { Text("Filters & Blocks") },
+                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
+                        trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                        onClick = { menuLevel = 3 }
+                    )
+                }
+                // Report
+                DropdownMenuItem(
+                    text = { Text("Report") },
+                    leadingIcon = { Icon(Icons.Default.Report, null, modifier = Modifier.size(18.dp)) },
+                    onClick = { closeMenu() }
+                )
+                // Extra items from caller
+                extraMoreMenuItems.forEach { (label, action) ->
+                    DropdownMenuItem(
+                        text = { Text(label) },
+                        onClick = { action(); closeMenu() }
+                    )
+                }
+            }
+            // ═══ COPY SUB-MENU ═══
+            1 -> {
+                DropdownMenuItem(
+                    text = { Text("Copy text") },
+                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+                    onClick = {
+                        closeMenu()
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Note text", note.content))
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy author npub") },
+                    leadingIcon = { Icon(Icons.Outlined.Person, null, modifier = Modifier.size(18.dp)) },
+                    onClick = {
+                        closeMenu()
+                        val npub = note.author.id.toNpub()
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("npub", npub))
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Copy nevent") },
+                    leadingIcon = { Icon(Icons.Outlined.Link, null, modifier = Modifier.size(18.dp)) },
+                    onClick = {
+                        closeMenu()
+                        val nevent = com.example.cybin.nip19.encodeNevent(
+                            eventIdHex = note.id,
+                            relays = note.relayUrls.take(2),
+                            authorHex = note.author.id
+                        )
+                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("nevent", nevent))
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("← Back") },
+                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                    onClick = { menuLevel = 0 }
+                )
+            }
+            // ═══ BOOKMARKS SUB-MENU ═══
+            2 -> {
+                val bookmarkedIds by social.mycelium.android.repository.BookmarkRepository.bookmarkedNoteIds.collectAsState()
+                val isBookmarked = note.id in bookmarkedIds
+                DropdownMenuItem(
+                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add to public") },
+                    leadingIcon = {
+                        Icon(
+                            if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                            null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    },
+                    onClick = {
+                        closeMenu()
+                        onBookmarkToggle?.invoke(note.id, isBookmarked)
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("← Back") },
+                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                    onClick = { menuLevel = 0 }
+                )
+            }
+            // ═══ FILTERS & BLOCKS SUB-MENU ═══
+            3 -> {
+                onBlockAuthor?.let { block ->
+                    DropdownMenuItem(
+                        text = { Text("Block ${authorDisplayLabel(note.author)}") },
+                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
+                        onClick = { closeMenu(); block(note.author.id) }
+                    )
+                }
+                onMuteAuthor?.let { mute ->
+                    DropdownMenuItem(
+                        text = { Text("Mute ${authorDisplayLabel(note.author)}") },
+                        leadingIcon = { Icon(Icons.Outlined.VolumeOff, null, modifier = Modifier.size(18.dp)) },
+                        onClick = { closeMenu(); mute(note.author.id) }
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text("← Back") },
+                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                    onClick = { menuLevel = 0 }
+                )
+            }
+        }
+    }
+
+    // Action row — layout driven by actionRowSchema, right-aligned with consistent sizing
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val showVoting = actionRowSchema != ActionRowSchema.KIND1_FEED
+        val showBoost = actionRowSchema != ActionRowSchema.KIND1111_REPLY
+        val showReply = actionRowSchema == ActionRowSchema.KIND1111_REPLY
+
+        // Upvote / Downvote — kind-11 feed + kind-1111 replies
+        if (showVoting) {
+            ActionButton(
+                icon = Icons.Outlined.ArrowUpward,
+                contentDescription = "Upvote",
+                onClick = { /* TODO: Upvote */ }
+            )
+            ActionButton(
+                icon = Icons.Outlined.ArrowDownward,
+                contentDescription = "Downvote",
+                onClick = { /* TODO: Downvote */ }
+            )
+        }
+
+        // Boost (Repost / Quote / Fork) — kind-1 feed + kind-11 feed
+        if (showBoost) {
+            ActionButton(
+                icon = Icons.Outlined.Repeat,
+                contentDescription = "Repost",
+                onClick = { showRepostMenu = true }
+            )
+        }
+
+        // Lightning (Zap) — all schemas
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .combinedClickable(
+                    onClick = onZapMenuToggle,
+                    onLongClick = onShowCustomZapDialog
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                isZapInProgress -> CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp
+                )
+                else -> Icon(
+                    imageVector = Icons.Filled.Bolt,
+                    contentDescription = "Zap",
+                    tint = if (isZapped) Color(0xFFFFD700) else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
+        // Likes / React button (NIP-25) — all schemas
+        ReactionButton(
+            emoji = reactionEmoji,
+            onClick = onShowReactionPicker
+        )
+
+        // Reply — kind-1111 replies only
+        if (showReply) {
+            ActionButton(
+                icon = Icons.Outlined.ChatBubbleOutline,
+                contentDescription = "Reply",
+                onClick = { onComment(note.id) }
+            )
+        }
+
+        // Reactions caret — all schemas
+        ActionButton(
+            icon = if (isDetailsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+            contentDescription = "Details",
+            onClick = onDetailsToggle
+        )
+
+        // 3-dot More menu
+        ActionButton(
+            icon = Icons.Default.MoreVert,
+            contentDescription = "More",
+            onClick = { showHeaderMenu = true }
+        )
+    }
+
+    // ── Boost dialog — centered floating menu ──
+    if (showRepostMenu) {
+        Dialog(onDismissRequest = { showRepostMenu = false }) {
+            @OptIn(ExperimentalMaterial3Api::class)
+            CompositionLocalProvider(LocalRippleConfiguration provides RippleConfiguration()) {
+                Surface(
+                    shape = RectangleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.fillMaxWidth(0.75f)
+                ) {
+                    Column {
+                        DropdownMenuItem(
+                            text = { Text("Boost") },
+                            leadingIcon = { Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = { showRepostMenu = false; onBoost?.invoke(note) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Quote") },
+                            leadingIcon = { Icon(Icons.Outlined.FormatQuote, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = { showRepostMenu = false; onQuote?.invoke(note) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Fork") },
+                            leadingIcon = { Icon(Icons.Outlined.ForkRight, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = { showRepostMenu = false; onFork?.invoke(note) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // ── More menu dialog — centered floating menu ──
+    if (showHeaderMenu) {
+        Dialog(onDismissRequest = { showHeaderMenu = false; menuLevel = 0 }) {
+            @OptIn(ExperimentalMaterial3Api::class)
+            CompositionLocalProvider(LocalRippleConfiguration provides RippleConfiguration()) {
+                Surface(
+                    shape = RectangleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Column {
+                        MoreMenuContent()
+                    }
+                }
+            }
+        }
+    }
+
+    // Zap menu - completely separate, appears below action buttons; Custom chip opens dialog
+    ZapMenuRow(
+        isExpanded = isZapMenuExpanded,
+        onExpandedChange = { /* controlled by parent */ },
+        onZap = { amount -> onZap(note.id, amount) },
+        onCustomZap = { onShowCustomZapDialog(); onCustomZap(note.id) },
+        onSettingsClick = onZapSettings
+    )
 }
 
 /** Display name for author: prefer displayName, fall back to username, then short pubkey. */
@@ -728,9 +1565,6 @@ fun NoteCard(
     var showReactionPicker by remember { mutableStateOf(false) }
     var showCustomZapDialog by remember { mutableStateOf(false) }
     var isDetailsExpanded by remember { mutableStateOf(false) }
-    var showRepostMenu by remember { mutableStateOf(false) }
-    // Multi-tiered menu: 0=root, 1=copy, 2=bookmarks, 3=filters&blocks
-    var menuLevel by remember { mutableIntStateOf(0) }
     val context = LocalContext.current
     var reactionEmoji by remember(note.id) { mutableStateOf(ReactionsRepository.getLastReaction(note.id)) }
     var recentEmojis by remember(accountNpub) { mutableStateOf(ReactionsRepository.getRecentEmojis(context, accountNpub)) }
@@ -856,232 +1690,6 @@ fun NoteCard(
                 }
                 val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
                 RelayOrbs(relayUrls = relayUrlsForOrbs, onRelayClick = onRelayClick, onNavigateToRelayList = onNavigateToRelayList)
-                Spacer(modifier = Modifier.width(8.dp))
-                var showHeaderMenu by remember { mutableStateOf(false) }
-                Box {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "More",
-                        modifier = Modifier
-                            .size(20.dp)
-                            .clickable(
-                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                                indication = null
-                            ) { showHeaderMenu = true },
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    DropdownMenu(
-                        expanded = showHeaderMenu,
-                        onDismissRequest = { showHeaderMenu = false; menuLevel = 0 }
-                    ) {
-                        val authorLabel = authorDisplayLabel(note.author)
-                        val closeMenu = { showHeaderMenu = false; menuLevel = 0 }
-                        when (menuLevel) {
-                            // ═══ ROOT LEVEL ═══
-                            0 -> {
-                                // Follow / Unfollow
-                                if (isAuthorFollowed) {
-                                    onUnfollowAuthor?.let { unfollow ->
-                                        DropdownMenuItem(
-                                            text = { Text("Unfollow $authorLabel") },
-                                            leadingIcon = { Icon(Icons.Default.PersonRemove, null, modifier = Modifier.size(18.dp)) },
-                                            onClick = { closeMenu(); unfollow(note.author.id) }
-                                        )
-                                    }
-                                } else {
-                                    onFollowAuthor?.let { follow ->
-                                        DropdownMenuItem(
-                                            text = { Text("Follow $authorLabel") },
-                                            leadingIcon = { Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(18.dp)) },
-                                            onClick = { closeMenu(); follow(note.author.id) }
-                                        )
-                                    }
-                                }
-                                // Message author
-                                onMessageAuthor?.let { msg ->
-                                    DropdownMenuItem(
-                                        text = { Text("Message $authorLabel") },
-                                        leadingIcon = { Icon(Icons.Default.Send, null, modifier = Modifier.size(18.dp)) },
-                                        onClick = { closeMenu(); msg(note.author.id) }
-                                    )
-                                }
-                                // Copy → sub-menu
-                                DropdownMenuItem(
-                                    text = { Text("Copy\u2026") },
-                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
-                                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = { menuLevel = 1 }
-                                )
-                                // Bookmarks → sub-menu
-                                DropdownMenuItem(
-                                    text = { Text("Bookmarks") },
-                                    leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null, modifier = Modifier.size(18.dp)) },
-                                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = { menuLevel = 2 }
-                                )
-                                // Share (direct action)
-                                DropdownMenuItem(
-                                    text = { Text("Share") },
-                                    leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = {
-                                        closeMenu()
-                                        val nevent = com.example.cybin.nip19.encodeNevent(
-                                            eventIdHex = note.id,
-                                            relays = note.relayUrls.take(2),
-                                            authorHex = note.author.id
-                                        )
-                                        val sendIntent = android.content.Intent().apply {
-                                            action = android.content.Intent.ACTION_SEND
-                                            putExtra(android.content.Intent.EXTRA_TEXT, "https://njump.me/$nevent")
-                                            type = "text/plain"
-                                        }
-                                        context.startActivity(android.content.Intent.createChooser(sendIntent, "Share note"))
-                                    }
-                                )
-                                // Translate / Show Original
-                                if (translationResult != null && !showOriginal) {
-                                    DropdownMenuItem(
-                                        text = { Text("Show original") },
-                                        leadingIcon = { Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp)) },
-                                        onClick = { showOriginal = true; closeMenu() }
-                                    )
-                                } else {
-                                    DropdownMenuItem(
-                                        text = {
-                                            if (isTranslating) Text("Translating\u2026")
-                                            else if (translationResult != null) Text("Show translation")
-                                            else Text("Translate")
-                                        },
-                                        leadingIcon = {
-                                            if (isTranslating) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp)
-                                            else Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp))
-                                        },
-                                        onClick = {
-                                            closeMenu()
-                                            if (translationResult != null) {
-                                                showOriginal = false
-                                            } else if (!isTranslating) {
-                                                isTranslating = true
-                                                translationScope.launch {
-                                                    val result = social.mycelium.android.repository.TranslationService.translate(note.id, note.content)
-                                                    translationResult = result
-                                                    isTranslating = false
-                                                    if (result != null) showOriginal = false
-                                                }
-                                            }
-                                        }
-                                    )
-                                }
-                                // Filters & Blocks → sub-menu
-                                if (onBlockAuthor != null || onMuteAuthor != null) {
-                                    DropdownMenuItem(
-                                        text = { Text("Filters & Blocks") },
-                                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
-                                        trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
-                                        onClick = { menuLevel = 3 }
-                                    )
-                                }
-                                // Report
-                                DropdownMenuItem(
-                                    text = { Text("Report") },
-                                    leadingIcon = { Icon(Icons.Default.Report, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = { closeMenu() }
-                                )
-                                // Extra items from caller
-                                extraMoreMenuItems.forEach { (label, action) ->
-                                    DropdownMenuItem(
-                                        text = { Text(label) },
-                                        onClick = { action(); closeMenu() }
-                                    )
-                                }
-                            }
-                            // ═══ COPY SUB-MENU ═══
-                            1 -> {
-                                DropdownMenuItem(
-                                    text = { Text("← Back") },
-                                    onClick = { menuLevel = 0 }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Copy text") },
-                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = {
-                                        closeMenu()
-                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Note text", note.content))
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Copy author npub") },
-                                    leadingIcon = { Icon(Icons.Outlined.Person, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = {
-                                        closeMenu()
-                                        val npub = note.author.id.toNpub()
-                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("npub", npub))
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Copy nevent") },
-                                    leadingIcon = { Icon(Icons.Outlined.Link, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = {
-                                        closeMenu()
-                                        val nevent = com.example.cybin.nip19.encodeNevent(
-                                            eventIdHex = note.id,
-                                            relays = note.relayUrls.take(2),
-                                            authorHex = note.author.id
-                                        )
-                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("nevent", nevent))
-                                    }
-                                )
-                            }
-                            // ═══ BOOKMARKS SUB-MENU ═══
-                            2 -> {
-                                DropdownMenuItem(
-                                    text = { Text("← Back") },
-                                    onClick = { menuLevel = 0 }
-                                )
-                                val bookmarkedIds by social.mycelium.android.repository.BookmarkRepository.bookmarkedNoteIds.collectAsState()
-                                val isBookmarked = note.id in bookmarkedIds
-                                DropdownMenuItem(
-                                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add to public") },
-                                    leadingIcon = {
-                                        Icon(
-                                            if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                                            null,
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    },
-                                    onClick = {
-                                        closeMenu()
-                                        onBookmarkToggle?.invoke(note.id, isBookmarked)
-                                    }
-                                )
-                            }
-                            // ═══ FILTERS & BLOCKS SUB-MENU ═══
-                            3 -> {
-                                DropdownMenuItem(
-                                    text = { Text("← Back") },
-                                    onClick = { menuLevel = 0 }
-                                )
-                                onBlockAuthor?.let { block ->
-                                    DropdownMenuItem(
-                                        text = { Text("Block $authorLabel") },
-                                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
-                                        onClick = { closeMenu(); block(note.author.id) }
-                                    )
-                                }
-                                onMuteAuthor?.let { mute ->
-                                    DropdownMenuItem(
-                                        text = { Text("Mute $authorLabel") },
-                                        leadingIcon = { Icon(Icons.Outlined.VolumeOff, null, modifier = Modifier.size(18.dp)) },
-                                        onClick = { closeMenu(); mute(note.author.id) }
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
             }
 
             val uriHandler = LocalUriHandler.current
@@ -1657,542 +2265,68 @@ fun NoteCard(
             }
 
             if (showActionRow) {
-            // Action row — layout driven by actionRowSchema, right-aligned with consistent sizing
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                val showVoting = actionRowSchema != ActionRowSchema.KIND1_FEED
-                val showBoost = actionRowSchema != ActionRowSchema.KIND1111_REPLY
-                val showReply = actionRowSchema == ActionRowSchema.KIND1111_REPLY
-
-                // Upvote / Downvote — kind-11 feed + kind-1111 replies
-                if (showVoting) {
-                    ActionButton(
-                        icon = Icons.Outlined.ArrowUpward,
-                        contentDescription = "Upvote",
-                        onClick = { /* TODO: Upvote */ }
-                    )
-                    ActionButton(
-                        icon = Icons.Outlined.ArrowDownward,
-                        contentDescription = "Downvote",
-                        onClick = { /* TODO: Downvote */ }
-                    )
-                }
-
-                // Boost (Repost / Quote / Fork) — kind-1 feed + kind-11 feed
-                if (showBoost) {
-                    Box {
-                        ActionButton(
-                            icon = Icons.Outlined.Repeat,
-                            contentDescription = "Repost",
-                            onClick = { showRepostMenu = true }
-                        )
-                        DropdownMenu(
-                            expanded = showRepostMenu,
-                            onDismissRequest = { showRepostMenu = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("Boost") },
-                                leadingIcon = { Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                                onClick = { showRepostMenu = false; onBoost?.invoke(note) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Quote") },
-                                leadingIcon = { Icon(Icons.Outlined.FormatQuote, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                                onClick = { showRepostMenu = false; onQuote?.invoke(note) }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Fork") },
-                                leadingIcon = { Icon(Icons.Outlined.ForkRight, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                                onClick = { showRepostMenu = false; onFork?.invoke(note) }
-                            )
+            NoteActionRow(
+                note = note,
+                actionRowSchema = actionRowSchema,
+                isZapInProgress = isZapInProgress,
+                isZapped = isZapped,
+                reactionEmoji = reactionEmoji,
+                isDetailsExpanded = isDetailsExpanded,
+                onDetailsToggle = { isDetailsExpanded = !isDetailsExpanded },
+                isZapMenuExpanded = isZapMenuExpanded,
+                onZapMenuToggle = { isZapMenuExpanded = !isZapMenuExpanded },
+                onShowCustomZapDialog = { showCustomZapDialog = true },
+                onShowReactionPicker = { showReactionPicker = true },
+                onComment = onComment,
+                onBoost = onBoost,
+                onQuote = onQuote,
+                onFork = onFork,
+                onZap = onZap,
+                onCustomZap = onCustomZap,
+                onZapSettings = onZapSettings,
+                onProfileClick = onProfileClick,
+                isAuthorFollowed = isAuthorFollowed,
+                onFollowAuthor = onFollowAuthor,
+                onUnfollowAuthor = onUnfollowAuthor,
+                onMessageAuthor = onMessageAuthor,
+                onBlockAuthor = onBlockAuthor,
+                onMuteAuthor = onMuteAuthor,
+                onBookmarkToggle = onBookmarkToggle,
+                extraMoreMenuItems = extraMoreMenuItems,
+                translationResult = translationResult,
+                isTranslating = isTranslating,
+                showOriginal = showOriginal,
+                onTranslate = {
+                    if (!isTranslating) {
+                        isTranslating = true
+                        translationScope.launch {
+                            val result = social.mycelium.android.repository.TranslationService.translate(note.id, note.content)
+                            translationResult = result
+                            isTranslating = false
+                            if (result != null) showOriginal = false
                         }
                     }
-                }
-
-                // Lightning (Zap) — all schemas
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .combinedClickable(
-                            onClick = { isZapMenuExpanded = !isZapMenuExpanded },
-                            onLongClick = { showCustomZapDialog = true }
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    when {
-                        isZapInProgress -> CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp
-                        )
-                        else -> Icon(
-                            imageVector = Icons.Filled.Bolt,
-                            contentDescription = "Zap",
-                            tint = if (isZapped) Color(0xFFFFD700) else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-
-                // Likes / React button (NIP-25) — all schemas
-                ReactionButton(
-                    emoji = reactionEmoji,
-                    onClick = { showReactionPicker = true }
-                )
-
-                // Reply — kind-1111 replies only
-                if (showReply) {
-                    ActionButton(
-                        icon = Icons.Outlined.ChatBubbleOutline,
-                        contentDescription = "Reply",
-                        onClick = { onComment(note.id) }
-                    )
-                }
-
-                // Reactions caret — all schemas
-                ActionButton(
-                    icon = if (isDetailsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = "Details",
-                    onClick = { isDetailsExpanded = !isDetailsExpanded }
-                )
-            }
-
-            // Zap menu - completely separate, appears below action buttons; Custom chip opens dialog
-            ZapMenuRow(
-                isExpanded = isZapMenuExpanded,
-                onExpandedChange = { isZapMenuExpanded = it },
-                onZap = { amount -> onZap(note.id, amount) },
-                onCustomZap = { showCustomZapDialog = true; onCustomZap(note.id) },
-                onSettingsClick = onZapSettings
+                },
+                onShowOriginal = { showOriginal = true },
+                onShowTranslation = { showOriginal = false },
             )
 
-            // Expandable details panel — boosts, reactions, zaps (tappable to reveal individuals)
-            AnimatedVisibility(
-                visible = isDetailsExpanded,
-                enter = expandVertically() + fadeIn(),
-                exit = shrinkVertically() + fadeOut()
-            ) {
-                val detailReactions = overrideReactions ?: note.reactions
-                val detailZapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
-                val hasBoosts = note.repostedByAuthors.isNotEmpty()
-                val hasReactions = detailReactions.isNotEmpty()
-                val hasZaps = detailZapCount > 0
-
-                var boostsExpanded by remember { mutableStateOf(false) }
-                var reactionsExpanded by remember { mutableStateOf(false) }
-                var zapsExpanded by remember { mutableStateOf(false) }
-                if (hasBoosts || hasReactions || hasZaps) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                        shape = RectangleShape
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            // Boosts summary row (tappable)
-                            if (hasBoosts) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { boostsExpanded = !boostsExpanded }
-                                        .padding(vertical = 2.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Repeat,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                        tint = Color(0xFF4CAF50)
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    val boostAuthors = note.repostedByAuthors.take(5)
-                                    Box(modifier = Modifier.width((20 + (boostAuthors.size - 1).coerceAtLeast(0) * 12).dp)) {
-                                        boostAuthors.forEachIndexed { i, author ->
-                                            Box(modifier = Modifier.offset(x = (i * 12).dp)) {
-                                                ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        text = "${note.repostedByAuthors.size} boost${if (note.repostedByAuthors.size != 1) "s" else ""}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Icon(
-                                        imageVector = if (boostsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    )
-                                }
-                                // Expanded: individual boosters
-                                AnimatedVisibility(visible = boostsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                                    Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        note.repostedByAuthors.forEach { author ->
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .clickable { onProfileClick(author.id) }
-                                                    .padding(vertical = 2.dp)
-                                            ) {
-                                                ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                                Spacer(Modifier.width(8.dp))
-                                                Text(
-                                                    text = authorDisplayLabel(author),
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurface,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Reactions summary row (tappable)
-                            if (hasReactions) {
-                                val detailReactionAuthors = overrideReactionAuthors ?: emptyMap()
-                                // Sort emojis by actual popularity (number of authors), not just presence
-                                val grouped = remember(detailReactions, detailReactionAuthors) {
-                                    detailReactions.map { emoji ->
-                                        emoji to (detailReactionAuthors[emoji]?.size ?: 1)
-                                    }.sortedByDescending { it.second }
-                                }
-                                val totalReactionCount = if (detailReactionAuthors.isNotEmpty()) {
-                                    detailReactionAuthors.values.sumOf { it.size }
-                                } else detailReactions.size
-                                val detailEmojiUrls = overrideCustomEmojiUrls ?: emptyMap()
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { reactionsExpanded = !reactionsExpanded }
-                                        .padding(vertical = 2.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Favorite,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                        tint = Color(0xFFE91E63)
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        text = "Reactions",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    // Show top 5 emoji chips inline sorted by popularity
-                                    val showcased = grouped.take(5)
-                                    showcased.forEach { (emoji, count) ->
-                                        Surface(
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = MaterialTheme.colorScheme.surfaceVariant,
-                                            modifier = Modifier.padding(end = 4.dp)
-                                        ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                                verticalAlignment = Alignment.CenterVertically
-                                            ) {
-                                                ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 13.sp, imageSize = 14.dp)
-                                                if (count > 1) {
-                                                    Spacer(Modifier.width(2.dp))
-                                                    Text(text = "$count", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    // Show top 3 un-showcased reactions (beyond the top 5) with +N more
-                                    val unshowcased = grouped.drop(5)
-                                    if (unshowcased.isNotEmpty()) {
-                                        Spacer(Modifier.width(2.dp))
-                                        unshowcased.take(3).forEach { (emoji, count) ->
-                                            Surface(
-                                                shape = RoundedCornerShape(12.dp),
-                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                                modifier = Modifier.padding(end = 2.dp)
-                                            ) {
-                                                Row(
-                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp),
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 11.sp, imageSize = 12.dp)
-                                                    if (count > 1) {
-                                                        Spacer(Modifier.width(1.dp))
-                                                        Text(text = "$count", style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp), color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f))
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        val remaining = unshowcased.size - 3
-                                        if (remaining > 0) {
-                                            Spacer(Modifier.width(2.dp))
-                                            Text(
-                                                text = "+$remaining",
-                                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                            )
-                                        }
-                                    }
-                                    Spacer(Modifier.weight(1f))
-                                    if (totalReactionCount > 0) {
-                                        Text(
-                                            text = "$totalReactionCount",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = Color(0xFFE57373)
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                    }
-                                    Icon(
-                                        imageVector = if (reactionsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    )
-                                }
-                                // Expanded: full reaction breakdown with author names
-                                AnimatedVisibility(visible = reactionsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                                    val profileCache = remember { ProfileMetadataCache.getInstance() }
-                                    // Fetch uncached profiles for reaction authors and recompose when they arrive
-                                    var profileRevision by remember { mutableIntStateOf(0) }
-                                    val allReactionPubkeys = remember(overrideReactionAuthors) {
-                                        overrideReactionAuthors?.values?.flatten()?.distinct() ?: emptyList()
-                                    }
-                                    LaunchedEffect(allReactionPubkeys) {
-                                        val uncached = allReactionPubkeys.filter { profileCache.getAuthor(it) == null }
-                                        if (uncached.isNotEmpty()) {
-                                            val relays = profileCache.getConfiguredRelayUrls()
-                                            profileCache.requestProfiles(uncached, relays)
-                                        }
-                                    }
-                                    LaunchedEffect(Unit) {
-                                        profileCache.profileUpdated.collect { pubkey ->
-                                            if (pubkey in allReactionPubkeys) profileRevision++
-                                        }
-                                    }
-                                    @Suppress("UNUSED_EXPRESSION") profileRevision // force recomposition
-                                    Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        grouped.forEach { (emoji, count) ->
-                                            val emojiAuthors = overrideReactionAuthors?.get(emoji)
-                                            if (!emojiAuthors.isNullOrEmpty()) {
-                                                emojiAuthors.take(10).forEach { pubkey ->
-                                                    val author = profileCache.resolveAuthor(pubkey)
-                                                    Row(
-                                                        verticalAlignment = Alignment.CenterVertically,
-                                                        modifier = Modifier
-                                                            .fillMaxWidth()
-                                                            .clickable { onProfileClick(author.id) }
-                                                            .padding(vertical = 2.dp)
-                                                    ) {
-                                                        ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
-                                                        Spacer(Modifier.width(6.dp))
-                                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                                        Spacer(Modifier.width(6.dp))
-                                                        Text(
-                                                            text = authorDisplayLabel(author),
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
-                                                        )
-                                                        Text(
-                                                            text = " reacted",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                }
-                                                if (emojiAuthors.size > 10) {
-                                                    Text(
-                                                        text = "  +${emojiAuthors.size - 10} more",
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                }
-                                            } else {
-                                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 1.dp)) {
-                                                    Text(text = emoji, fontSize = 16.sp)
-                                                    Spacer(Modifier.width(8.dp))
-                                                    Text(
-                                                        text = "$count reaction${if (count != 1) "s" else ""}",
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                    )
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Zaps summary row (tappable)
-                            if (hasZaps) {
-                                val detailZapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable { zapsExpanded = !zapsExpanded }
-                                        .padding(vertical = 2.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Bolt,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(14.dp),
-                                        tint = Color(0xFFF59E0B)
-                                    )
-                                    Spacer(Modifier.width(8.dp))
-                                    if (detailZapTotalSats > 0) {
-                                        Text(
-                                            text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(detailZapTotalSats)} sats",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = Color(0xFFF59E0B)
-                                        )
-                                        Text(
-                                            text = " ($detailZapCount zap${if (detailZapCount != 1) "s" else ""})",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                    } else {
-                                        Text(
-                                            text = "$detailZapCount zap${if (detailZapCount != 1) "s" else ""}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                    }
-                                    Icon(
-                                        imageVector = if (zapsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                    )
-                                }
-                                // Expanded: zap details with author names
-                                AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                                    val profileCache = remember { ProfileMetadataCache.getInstance() }
-                                    // Fetch uncached profiles for zap authors and recompose when they arrive
-                                    var zapProfileRevision by remember { mutableIntStateOf(0) }
-                                    val allZapPubkeys = remember(overrideZapAuthors) {
-                                        overrideZapAuthors?.distinct() ?: emptyList()
-                                    }
-                                    LaunchedEffect(allZapPubkeys) {
-                                        val uncached = allZapPubkeys.filter { profileCache.getAuthor(it) == null }
-                                        if (uncached.isNotEmpty()) {
-                                            val relays = profileCache.getConfiguredRelayUrls()
-                                            profileCache.requestProfiles(uncached, relays)
-                                        }
-                                    }
-                                    LaunchedEffect(Unit) {
-                                        profileCache.profileUpdated.collect { pubkey ->
-                                            if (pubkey in allZapPubkeys) zapProfileRevision++
-                                        }
-                                    }
-                                    @Suppress("UNUSED_EXPRESSION") zapProfileRevision // force recomposition
-                                    Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                        if (isZapped && myZappedAmount != null && myZappedAmount > 0) {
-                                            Text(
-                                                text = "You zapped $myZappedAmount sats",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = Color(0xFFF59E0B)
-                                            )
-                                        }
-                                        if (!overrideZapAuthors.isNullOrEmpty()) {
-                                            val sortedZapAuthors = remember(overrideZapAuthors, overrideZapAmountByAuthor) {
-                                                overrideZapAuthors.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
-                                            }
-                                            sortedZapAuthors.take(10).forEach { pubkey ->
-                                                val author = profileCache.resolveAuthor(pubkey)
-                                                val zapSats = overrideZapAmountByAuthor?.get(pubkey) ?: 0L
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically,
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .clickable { onProfileClick(author.id) }
-                                                        .padding(vertical = 2.dp)
-                                                ) {
-                                                    ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                                    Spacer(Modifier.width(6.dp))
-                                                    Text(
-                                                        text = authorDisplayLabel(author),
-                                                        style = MaterialTheme.typography.bodySmall,
-                                                        color = MaterialTheme.colorScheme.primary,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                        modifier = Modifier.weight(1f, fill = false)
-                                                    )
-                                                    if (zapSats > 0) {
-                                                        Text(
-                                                            text = " ⚡ ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapSats)} sats",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = Color(0xFFF59E0B)
-                                                        )
-                                                    } else {
-                                                        Text(
-                                                            text = " zapped",
-                                                            style = MaterialTheme.typography.bodySmall,
-                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                }
-                                            }
-                                            if (overrideZapAuthors.size > 10) {
-                                                Text(
-                                                    text = "+${overrideZapAuthors.size - 10} more",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                )
-                                            }
-                                        } else {
-                                            Text(
-                                                text = "$detailZapCount total zap${if (detailZapCount != 1) "s" else ""}",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // "See all" link to open full ReactionsScreen
-                            if (onSeeAllReactions != null) {
-                                Text(
-                                    text = "See all",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier
-                                        .clickable { onSeeAllReactions() }
-                                        .padding(vertical = 4.dp)
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                        shape = RectangleShape
-                    ) {
-                        Text(
-                            text = "No reactions yet",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                        )
-                    }
-                }
-            }
+            NoteDetailsPanel(
+                note = note,
+                isDetailsExpanded = isDetailsExpanded,
+                overrideReactions = overrideReactions,
+                overrideReactionAuthors = overrideReactionAuthors,
+                overrideZapCount = overrideZapCount,
+                overrideZapTotalSats = overrideZapTotalSats,
+                overrideZapAuthors = overrideZapAuthors,
+                overrideZapAmountByAuthor = overrideZapAmountByAuthor,
+                overrideCustomEmojiUrls = overrideCustomEmojiUrls,
+                overrideRepostAuthors = countsByNoteId[note.originalNoteId ?: note.id]?.repostAuthors,
+                isZapped = isZapped,
+                myZappedAmount = myZappedAmount,
+                onProfileClick = onProfileClick,
+                onSeeAllReactions = onSeeAllReactions,
+            )
             }
 
             if (showCustomZapDialog) {

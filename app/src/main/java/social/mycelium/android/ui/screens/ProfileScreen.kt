@@ -52,6 +52,9 @@ import social.mycelium.android.data.SampleData
 import social.mycelium.android.ui.components.ModernSearchBar
 import social.mycelium.android.repository.ZapType
 import social.mycelium.android.ui.components.NoteCard
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
 
 // ─── Profile tab definitions ────────────────────────────────────────────────
 
@@ -243,7 +246,7 @@ fun ProfileScreen(
                 }
             }
 
-            // ═══ Tab content (notes for selected tab) ═══
+            // ═══ Tab content ═══
             val tabNotes = when (selectedTab) {
                 0 -> notesOnly
                 1 -> repliesOnly
@@ -281,47 +284,61 @@ fun ProfileScreen(
                 }
             }
 
-            items(tabNotes, key = { "tab${selectedTab}_${it.id}" }) { note ->
-                val counts = countsForNote(note.id)
-                NoteCard(
-                    note = note,
-                    onLike = onLike,
-                    onShare = onShare,
-                    onComment = onComment,
-                    onReact = onReact,
-                    onProfileClick = onProfileClick,
-                    onNoteClick = onNoteClick,
-                    onImageTap = onImageTap,
-                    onOpenImageViewer = onOpenImageViewer,
-                    onVideoClick = onVideoClick,
-                    onCustomZapSend = onCustomZapSend,
-                    onZap = onZap,
-                    isZapInProgress = isZapInProgress(note.id),
-                    isZapped = isZapped(note.id),
-                    myZappedAmount = myZappedAmountForNote(note.id),
-                    overrideReplyCount = overrideReplyCountForNote(note.id),
-                    overrideZapCount = counts?.zapCount,
-                    overrideZapTotalSats = counts?.zapTotalSats,
-                    overrideReactions = counts?.reactions,
-                    overrideReactionAuthors = counts?.reactionAuthors,
-                    overrideZapAuthors = counts?.zapAuthors,
-                    overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
-                    overrideCustomEmojiUrls = counts?.customEmojiUrls,
-                    onRelayClick = onRelayClick,
-                    accountNpub = accountNpub,
-                    onSeeAllReactions = { onSeeAllReactions(note) },
-                    modifier = Modifier.fillMaxWidth()
-                )
+            // ── Media tab: 2-column square grid ──
+            if (selectedTab == 2 && mediaOnly.isNotEmpty()) {
+                item(key = "media_grid") {
+                    MediaGrid(
+                        notes = mediaOnly,
+                        onNoteClick = onNoteClick,
+                        onOpenImageViewer = onOpenImageViewer
+                    )
+                }
             }
 
-            // Load more trigger: fires when the last note becomes visible
+            // ── Notes and Replies tabs: standard NoteCard list ──
+            if (selectedTab != 2) {
+                items(tabNotes, key = { "tab${selectedTab}_${it.id}" }) { note ->
+                    val counts = countsForNote(note.id)
+                    NoteCard(
+                        note = note,
+                        onLike = onLike,
+                        onShare = onShare,
+                        onComment = onComment,
+                        onReact = onReact,
+                        onProfileClick = onProfileClick,
+                        onNoteClick = onNoteClick,
+                        onImageTap = onImageTap,
+                        onOpenImageViewer = onOpenImageViewer,
+                        onVideoClick = onVideoClick,
+                        onCustomZapSend = onCustomZapSend,
+                        onZap = onZap,
+                        isZapInProgress = isZapInProgress(note.id),
+                        isZapped = isZapped(note.id),
+                        myZappedAmount = myZappedAmountForNote(note.id),
+                        overrideReplyCount = overrideReplyCountForNote(note.id),
+                        overrideZapCount = counts?.zapCount,
+                        overrideZapTotalSats = counts?.zapTotalSats,
+                        overrideReactions = counts?.reactions,
+                        overrideReactionAuthors = counts?.reactionAuthors,
+                        overrideZapAuthors = counts?.zapAuthors,
+                        overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
+                        overrideCustomEmojiUrls = counts?.customEmojiUrls,
+                        onRelayClick = onRelayClick,
+                        accountNpub = accountNpub,
+                        onSeeAllReactions = { onSeeAllReactions(note) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+
+            // Load more trigger
             if (tabNotes.isNotEmpty() && hasMore && !isLoadingMore) {
                 item(key = "load_more_trigger") {
                     LaunchedEffect(Unit) { onLoadMore() }
                 }
             }
 
-            // Loading indicator at the bottom
+            // Loading indicator
             if (isProfileLoading || isLoadingMore) {
                 item(key = "loading_indicator") {
                     Box(
@@ -339,7 +356,7 @@ fun ProfileScreen(
                 }
             }
 
-            // End of feed indicator
+            // End of feed
             if (!hasMore && tabNotes.isNotEmpty()) {
                 item(key = "end_of_feed") {
                     Box(
@@ -683,6 +700,104 @@ private fun ProfileIdentity(
             )
         }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ─── Media Grid (2-column square thumbnails) ────────────────────────────────
+
+@Composable
+private fun MediaGrid(
+    notes: List<Note>,
+    onNoteClick: (Note) -> Unit,
+    onOpenImageViewer: (List<String>, Int) -> Unit
+) {
+    // Flatten notes into (url, note) pairs for grid cells
+    val mediaEntries = remember(notes) {
+        notes.flatMap { note ->
+            note.mediaUrls.map { url -> url to note }
+        }
+    }
+    val columns = 2
+    val rows = (mediaEntries.size + columns - 1) / columns
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        repeat(rows) { rowIdx ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                repeat(columns) { colIdx ->
+                    val idx = rowIdx * columns + colIdx
+                    if (idx < mediaEntries.size) {
+                        val (url, note) = mediaEntries[idx]
+                        val isVideo = url.contains(".mp4", true) || url.contains(".webm", true) ||
+                            url.contains(".mov", true) || url.contains(".m3u8", true)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .aspectRatio(1f)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                .clickable { onNoteClick(note) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AsyncImage(
+                                model = url,
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                            // Video badge
+                            if (isVideo) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(6.dp)
+                                        .size(24.dp)
+                                        .clip(CircleShape)
+                                        .background(Color.Black.copy(alpha = 0.5f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Filled.PlayArrow,
+                                        contentDescription = "Video",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color.White
+                                    )
+                                }
+                            }
+                            // Fullscreen magnifier icon — bottom-end
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(6.dp)
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.4f))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                                    ) {
+                                        val allUrls = notes.flatMap { it.mediaUrls }
+                                        onOpenImageViewer(allUrls, allUrls.indexOf(url).coerceAtLeast(0))
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Fullscreen,
+                                    contentDescription = "View fullscreen",
+                                    modifier = Modifier.size(18.dp),
+                                    tint = Color.White
+                                )
+                            }
+                        }
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+            if (rowIdx < rows - 1) Spacer(Modifier.height(2.dp))
+        }
     }
 }
 

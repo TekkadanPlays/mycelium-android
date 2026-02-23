@@ -3,8 +3,11 @@ package social.mycelium.android.relay
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -66,12 +69,19 @@ object RelayHealthTracker {
     /** Consecutive failures before a relay is flagged. */
     private const val FLAG_CONSECUTIVE_FAILURES = 5
 
+    /** Consecutive failures before a relay is auto-blocked. */
+    private const val AUTO_BLOCK_CONSECUTIVE_FAILURES = 5
+
+    /** Duration of auto-block cooldown (6 hours). */
+    private const val AUTO_BLOCK_DURATION_MS = 6 * 60 * 60 * 1000L
+
     /** Max latency samples to keep per relay for rolling average. */
     private const val MAX_LATENCY_SAMPLES = 10
 
     /** SharedPreferences key for blocked relay list. */
     private const val PREFS_NAME = "relay_health"
     private const val KEY_BLOCKED_RELAYS = "blocked_relays"
+    private const val KEY_AUTO_BLOCK_EXPIRY = "auto_block_expiry"
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -96,6 +106,13 @@ object RelayHealthTracker {
     private val healthData = mutableMapOf<String, MutableHealthData>()
     private val lock = Any()
 
+    /** Auto-block expiry timestamps: relay URL → epoch ms when auto-block expires. */
+    private val autoBlockExpiry = mutableMapOf<String, Long>()
+
+    /** Observable map of auto-block expiry times for UI display. */
+    private val _autoBlockExpiryMap = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val autoBlockExpiryMap: StateFlow<Map<String, Long>> = _autoBlockExpiryMap.asStateFlow()
+
     // --- Public observable state ---
 
     private val _healthByRelay = MutableStateFlow<Map<String, RelayHealthInfo>>(emptyMap())
@@ -111,6 +128,141 @@ object RelayHealthTracker {
     val blockedRelays: StateFlow<Set<String>> = _blockedRelays.asStateFlow()
 
     private var prefs: SharedPreferences? = null
+
+    // --- Publish failure tracking ---
+
+    /** A single relay's response to a published event. */
+    data class PublishRelayResult(
+        val relayUrl: String,
+        val success: Boolean,
+        val message: String = ""
+    )
+
+    /** Summary of a publish attempt across all targeted relays. */
+    data class PublishReport(
+        val eventId: String,
+        val kind: Int,
+        val timestamp: Long = System.currentTimeMillis(),
+        val targetRelayCount: Int,
+        val results: List<PublishRelayResult> = emptyList()
+    ) {
+        val successCount get() = results.count { it.success }
+        val failureCount get() = results.count { !it.success }
+        val pendingCount get() = targetRelayCount - results.size
+        val hasFailures get() = failureCount > 0
+    }
+
+    /** Pending publishes awaiting OK responses, keyed by eventId. */
+    private data class PendingPublish(
+        val kind: Int,
+        val targetRelays: Set<String>,
+        val results: MutableList<PublishRelayResult> = mutableListOf(),
+        val createdAt: Long = System.currentTimeMillis()
+    )
+
+    private val pendingPublishes = mutableMapOf<String, PendingPublish>()
+
+    /** Recent publish reports (last 50). Observable by UI. */
+    private val _publishReports = MutableStateFlow<List<PublishReport>>(emptyList())
+    val publishReports: StateFlow<List<PublishReport>> = _publishReports.asStateFlow()
+
+    /** One-shot flow for publish failure notifications (UI shows snackbar). */
+    private val _publishFailure = MutableSharedFlow<PublishReport>(extraBufferCapacity = 8)
+    val publishFailure: SharedFlow<PublishReport> = _publishFailure.asSharedFlow()
+
+    /**
+     * Register a pending publish so we can track OK responses from relays.
+     * Call immediately after sending the event to relays.
+     */
+    fun registerPendingPublish(eventId: String, kind: Int, relayUrls: Set<String>) {
+        synchronized(lock) {
+            pendingPublishes[eventId] = PendingPublish(kind, relayUrls)
+        }
+        Log.d(TAG, "Registered pending publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
+    }
+
+    /**
+     * Called when a relay responds with OK to a published event.
+     * Tracks per-relay success/failure and finalizes the report when all relays respond
+     * or when [finalizePendingPublish] is called after timeout.
+     */
+    fun recordPublishOk(relayUrl: String, eventId: String, success: Boolean, message: String) {
+        val url = normalize(relayUrl)
+        var report: PublishReport? = null
+        synchronized(lock) {
+            val pending = pendingPublishes[eventId] ?: return
+            pending.results.add(PublishRelayResult(url, success, message))
+            // If all relays responded, finalize
+            if (pending.results.size >= pending.targetRelays.size) {
+                report = finalizeReport(eventId, pending)
+            }
+        }
+        report?.let { handleCompletedReport(it) }
+    }
+
+    /**
+     * Finalize any pending publish after a timeout. Relays that haven't responded
+     * are treated as failures with "No response (timeout)".
+     */
+    fun finalizePendingPublish(eventId: String) {
+        var report: PublishReport? = null
+        synchronized(lock) {
+            val pending = pendingPublishes[eventId] ?: return
+            // Add timeout entries for relays that didn't respond
+            val respondedUrls = pending.results.map { it.relayUrl }.toSet()
+            for (relay in pending.targetRelays) {
+                val normalizedRelay = normalize(relay)
+                if (normalizedRelay !in respondedUrls) {
+                    pending.results.add(PublishRelayResult(normalizedRelay, false, "No response (timeout)"))
+                }
+            }
+            report = finalizeReport(eventId, pending)
+        }
+        report?.let { handleCompletedReport(it) }
+    }
+
+    private fun finalizeReport(eventId: String, pending: PendingPublish): PublishReport {
+        pendingPublishes.remove(eventId)
+        return PublishReport(
+            eventId = eventId,
+            kind = pending.kind,
+            timestamp = pending.createdAt,
+            targetRelayCount = pending.targetRelays.size,
+            results = pending.results.toList()
+        )
+    }
+
+    private fun handleCompletedReport(report: PublishReport) {
+        // Add to recent reports (keep last 50)
+        val current = _publishReports.value.toMutableList()
+        current.add(0, report)
+        if (current.size > 50) current.subList(50, current.size).clear()
+        _publishReports.value = current
+
+        if (report.hasFailures) {
+            _publishFailure.tryEmit(report)
+            Log.w(TAG, "Publish ${report.eventId.take(8)} kind-${report.kind}: " +
+                "${report.successCount}/${report.targetRelayCount} OK, ${report.failureCount} failed")
+            // Record failures in per-relay health
+            report.results.filter { !it.success }.forEach { result ->
+                recordPublishFailure(result.relayUrl, result.message)
+            }
+        } else {
+            Log.d(TAG, "Publish ${report.eventId.take(8)} kind-${report.kind}: " +
+                "${report.successCount}/${report.targetRelayCount} OK")
+        }
+    }
+
+    /** Record a publish failure for a specific relay (updates health metrics). */
+    private fun recordPublishFailure(relayUrl: String, error: String) {
+        val url = normalize(relayUrl)
+        synchronized(lock) {
+            val data = getOrCreate(url)
+            data.lastError = "Publish failed: $error"
+            data.lastFailedAt = System.currentTimeMillis()
+        }
+        emitState()
+    }
 
     // --- Initialization ---
 
@@ -167,6 +319,7 @@ object RelayHealthTracker {
     fun recordConnectionFailure(relayUrl: String, error: String?) {
         val url = normalize(relayUrl)
         var nowFlagged = false
+        var nowAutoBlocked = false
         synchronized(lock) {
             val data = getOrCreate(url)
             data.connectionFailures++
@@ -179,9 +332,23 @@ object RelayHealthTracker {
                 data.isFlagged = true
                 nowFlagged = true
             }
+            // Auto-block: block after threshold consecutive failures (with timed cooldown)
+            if (!data.isBlocked && data.consecutiveFailures >= AUTO_BLOCK_CONSECUTIVE_FAILURES) {
+                data.isBlocked = true
+                nowAutoBlocked = true
+                val expiry = System.currentTimeMillis() + AUTO_BLOCK_DURATION_MS
+                autoBlockExpiry[url] = expiry
+            }
         }
         if (nowFlagged) {
             Log.w(TAG, "Relay $url FLAGGED after $FLAG_CONSECUTIVE_FAILURES consecutive failures: $error")
+        }
+        if (nowAutoBlocked) {
+            _blockedRelays.value = _blockedRelays.value + url
+            _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
+            persistBlockedRelays()
+            persistAutoBlockExpiry()
+            Log.w(TAG, "Relay $url AUTO-BLOCKED for ${AUTO_BLOCK_DURATION_MS / 3600000}h after $AUTO_BLOCK_CONSECUTIVE_FAILURES consecutive failures")
         }
         emitState()
         RelayLogBuffer.logError(url, error ?: "Connection failed")
@@ -209,16 +376,19 @@ object RelayHealthTracker {
         return _blockedRelays.value.contains(normalize(relayUrl))
     }
 
-    /** Block a relay. Persisted immediately. */
+    /** Block a relay manually (no expiry). Persisted immediately. */
     fun blockRelay(relayUrl: String) {
         val url = normalize(relayUrl)
         synchronized(lock) {
             getOrCreate(url).isBlocked = true
+            autoBlockExpiry.remove(url) // manual block has no expiry
         }
         _blockedRelays.value = _blockedRelays.value + url
+        _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
         persistBlockedRelays()
+        persistAutoBlockExpiry()
         emitState()
-        Log.i(TAG, "Relay BLOCKED: $url")
+        Log.i(TAG, "Relay BLOCKED (manual): $url")
     }
 
     /** Unblock a relay. Persisted immediately. */
@@ -226,11 +396,54 @@ object RelayHealthTracker {
         val url = normalize(relayUrl)
         synchronized(lock) {
             getOrCreate(url).isBlocked = false
+            getOrCreate(url).isFlagged = false
+            getOrCreate(url).consecutiveFailures = 0
+            autoBlockExpiry.remove(url)
         }
         _blockedRelays.value = _blockedRelays.value - url
+        _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
         persistBlockedRelays()
+        persistAutoBlockExpiry()
         emitState()
         Log.i(TAG, "Relay UNBLOCKED: $url")
+    }
+
+    /**
+     * Check and release any auto-blocked relays whose cooldown has expired.
+     * Call periodically (e.g. every 60s from a LaunchedEffect on the health screen).
+     */
+    fun releaseExpiredAutoBlocks() {
+        val now = System.currentTimeMillis()
+        val expired = mutableListOf<String>()
+        synchronized(lock) {
+            val iter = autoBlockExpiry.iterator()
+            while (iter.hasNext()) {
+                val (url, expiry) = iter.next()
+                if (now >= expiry) {
+                    iter.remove()
+                    val data = healthData[url]
+                    if (data != null && data.isBlocked) {
+                        data.isBlocked = false
+                        data.isFlagged = false
+                        data.consecutiveFailures = 0
+                        expired.add(url)
+                    }
+                }
+            }
+        }
+        if (expired.isNotEmpty()) {
+            _blockedRelays.value = _blockedRelays.value - expired.toSet()
+            _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
+            persistBlockedRelays()
+            persistAutoBlockExpiry()
+            emitState()
+            expired.forEach { Log.i(TAG, "Relay auto-block EXPIRED, unblocked: $it") }
+        }
+    }
+
+    /** Check if a relay is auto-blocked (vs manually blocked). */
+    fun isAutoBlocked(relayUrl: String): Boolean {
+        return autoBlockExpiry.containsKey(normalize(relayUrl))
     }
 
     /** Unflag a relay (user reviewed it and decided it's fine). */
@@ -319,6 +532,16 @@ object RelayHealthTracker {
                 }
                 Log.d(TAG, "Loaded ${list.size} blocked relays")
             }
+            // Load auto-block expiry times
+            val expiryRaw = prefs?.getString(KEY_AUTO_BLOCK_EXPIRY, null)
+            if (expiryRaw != null) {
+                val map = json.decodeFromString<Map<String, Long>>(expiryRaw)
+                autoBlockExpiry.putAll(map)
+                _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
+                Log.d(TAG, "Loaded ${map.size} auto-block expiry entries")
+            }
+            // Release any already-expired auto-blocks on startup
+            releaseExpiredAutoBlocks()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load blocked relays: ${e.message}", e)
         }
@@ -330,6 +553,14 @@ object RelayHealthTracker {
             prefs?.edit()?.putString(KEY_BLOCKED_RELAYS, json.encodeToString(list))?.apply()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to persist blocked relays: ${e.message}", e)
+        }
+    }
+
+    private fun persistAutoBlockExpiry() {
+        try {
+            prefs?.edit()?.putString(KEY_AUTO_BLOCK_EXPIRY, json.encodeToString(autoBlockExpiry.toMap()))?.apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to persist auto-block expiry: ${e.message}", e)
         }
     }
 }

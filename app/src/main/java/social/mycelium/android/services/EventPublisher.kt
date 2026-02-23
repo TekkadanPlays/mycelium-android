@@ -9,12 +9,21 @@ import com.example.cybin.core.EventTemplate
 import com.example.cybin.core.TagArrayBuilder
 import com.example.cybin.signer.NostrSigner
 import com.example.cybin.relay.RelayUrlNormalizer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import social.mycelium.android.relay.RelayHealthTracker
 
 /**
  * Result of an event publish attempt.
  */
 sealed class PublishResult {
-    data class Success(val eventId: String) : PublishResult()
+    data class Success(val eventId: String, val event: Event) : PublishResult()
     data class Error(val message: String) : PublishResult()
 }
 
@@ -30,6 +39,14 @@ sealed class PublishResult {
 object EventPublisher {
 
     private const val TAG = "EventPublisher"
+    private const val PUBLISH_OK_TIMEOUT_MS = 10_000L
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /** Shared event bus: emits every successfully published event so active ViewModels can
+     *  inject them into their pending lists for live awareness (e.g. thread replies, topics). */
+    private val _publishedEvents = MutableSharedFlow<Event>(extraBufferCapacity = 16)
+    val publishedEvents: SharedFlow<Event> = _publishedEvents.asSharedFlow()
 
     /**
      * Build, sign, and send a Nostr event.
@@ -71,8 +88,16 @@ object EventPublisher {
             // Send
             RelayConnectionStateMachine.getInstance().send(signed, normalized)
             Log.d(TAG, "Kind-$kind published: ${signed.id.take(8)} → ${normalized.size} relays")
+            _publishedEvents.tryEmit(signed)
 
-            PublishResult.Success(signed.id)
+            // Track publish results per relay
+            RelayHealthTracker.registerPendingPublish(signed.id, kind, normalized)
+            scope.launch {
+                delay(PUBLISH_OK_TIMEOUT_MS)
+                RelayHealthTracker.finalizePendingPublish(signed.id)
+            }
+
+            PublishResult.Success(signed.id, signed)
         } catch (e: Exception) {
             Log.e(TAG, "Kind-$kind publish failed: ${e.message}", e)
             PublishResult.Error(e.message?.take(80) ?: "Unknown error")
@@ -107,8 +132,16 @@ object EventPublisher {
 
             RelayConnectionStateMachine.getInstance().send(signed, normalized)
             Log.d(TAG, "Kind-${template.kind} published: ${signed.id.take(8)} → ${normalized.size} relays")
+            _publishedEvents.tryEmit(signed)
 
-            PublishResult.Success(signed.id)
+            // Track publish results per relay
+            RelayHealthTracker.registerPendingPublish(signed.id, template.kind, normalized)
+            scope.launch {
+                delay(PUBLISH_OK_TIMEOUT_MS)
+                RelayHealthTracker.finalizePendingPublish(signed.id)
+            }
+
+            PublishResult.Success(signed.id, signed)
         } catch (e: Exception) {
             Log.e(TAG, "Kind-${template.kind} publish failed: ${e.message}", e)
             PublishResult.Error(e.message?.take(80) ?: "Unknown error")

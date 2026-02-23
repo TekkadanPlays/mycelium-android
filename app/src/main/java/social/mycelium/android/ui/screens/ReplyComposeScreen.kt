@@ -13,12 +13,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
+import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.UserRelay
+import social.mycelium.android.repository.Nip65RelayListRepository
 import android.widget.Toast
 
 /**
  * Dedicated screen for replying to a comment. Shows the note being replied to at the top,
- * then a content field and Publish (like compose from home feed).
+ * then a content field and Publish → relay selection → sign and send.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -28,12 +32,55 @@ fun ReplyComposeScreen(
     rootPubkey: String,
     parentId: String?,
     parentPubkey: String?,
-    onPublish: (rootId: String, rootPubkey: String, parentId: String?, parentPubkey: String?, content: String) -> String?,
+    onPublish: (rootId: String, rootPubkey: String, parentId: String?, parentPubkey: String?, content: String, relayUrls: Set<String>) -> String?,
     onBack: () -> Unit,
+    myAuthor: Author? = null,
+    myOutboxRelays: List<UserRelay> = emptyList(),
+    relayCategories: List<RelayCategory>? = null,
     modifier: Modifier = Modifier
 ) {
     var content by remember { mutableStateOf("") }
+    var showRelayPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    // Resolve target user's inbox relays from NIP-65 cache
+    val targetPubkey = parentPubkey ?: rootPubkey
+    val targetAuthor = replyToNote?.author
+    val targetInboxRelays = remember(targetPubkey) {
+        val authorRelays = Nip65RelayListRepository.getCachedAuthorRelays(targetPubkey)
+        authorRelays?.readRelays ?: emptyList()
+    }
+
+    // Build relay sections with target user + our profile
+    val sections = remember(targetAuthor, targetInboxRelays, myAuthor, myOutboxRelays, relayCategories, replyToNote) {
+        buildRelaySections(
+            targetAuthor = targetAuthor,
+            targetInboxRelays = targetInboxRelays,
+            myAuthor = myAuthor,
+            myOutboxRelays = myOutboxRelays,
+            relayCategories = relayCategories ?: emptyList(),
+            noteRelayUrls = replyToNote?.relayUrls ?: emptyList()
+        )
+    }
+
+    if (showRelayPicker) {
+        RelaySelectionScreen(
+            title = "Publish reply",
+            sections = sections,
+            onConfirm = { selectedUrls ->
+                showRelayPicker = false
+                val err = onPublish(rootId, rootPubkey, parentId?.takeIf { it.isNotBlank() }, parentPubkey?.takeIf { it.isNotBlank() }, content, selectedUrls)
+                if (err != null) {
+                    Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(context, "Reply sent", Toast.LENGTH_SHORT).show()
+                    onBack()
+                }
+            },
+            onBack = { showRelayPicker = false }
+        )
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -97,15 +144,7 @@ fun ReplyComposeScreen(
                 maxLines = 20
             )
             Button(
-                onClick = {
-                    val err = onPublish(rootId, rootPubkey, parentId?.takeIf { it.isNotBlank() }, parentPubkey?.takeIf { it.isNotBlank() }, content)
-                    if (err != null) {
-                        Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(context, "Reply sent", Toast.LENGTH_SHORT).show()
-                        onBack()
-                    }
-                },
+                onClick = { showRelayPicker = true },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = content.isNotBlank()
             ) {

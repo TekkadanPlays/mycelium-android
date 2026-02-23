@@ -122,6 +122,7 @@ fun TopicsScreen(
     onRelayClick: (String) -> Unit = {},
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
+    onDrawerStateChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -133,6 +134,11 @@ fun TopicsScreen(
     val onboardingComplete by accountStateViewModel.onboardingComplete.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // Report drawer state to parent (for hiding bottom nav when drawer is open)
+    LaunchedEffect(drawerState.currentValue) {
+        onDrawerStateChanged(drawerState.isOpen)
+    }
 
     // NIP-22: Observe scoped moderation state for off-topic badges
     val moderationRepo = remember { ScopedModerationRepository.getInstance() }
@@ -355,6 +361,13 @@ fun TopicsScreen(
 
     val uriHandler = LocalUriHandler.current
 
+    // Relay health: trouble count for sidebar badge
+    val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
+    val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
+    val troubleRelayCount = remember(flaggedRelays, blockedRelays) {
+        (flaggedRelays + blockedRelays).distinct().size
+    }
+
     GlobalSidebar(
         drawerState = drawerState,
         activeProfile = activeProfile,
@@ -370,6 +383,7 @@ fun TopicsScreen(
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
         onRelayHealthClick = onSidebarRelayHealthClick,
         onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,
+        troubleRelayCount = troubleRelayCount,
         onItemClick = { itemId ->
             when {
                 itemId == "global" -> {
@@ -661,15 +675,9 @@ fun TopicsScreen(
                     AnimatedContent(
                         targetState = isViewingHashtagFeed,
                         transitionSpec = {
-                            if (targetState) {
-                                // Entering feed: slide in from right + fade
-                                (slideInHorizontally { it } + fadeIn()) togetherWith
-                                    (slideOutHorizontally { -it / 3 } + fadeOut())
-                            } else {
-                                // Returning to list: slide in from left + fade
-                                (slideInHorizontally { -it } + fadeIn()) togetherWith
-                                    (slideOutHorizontally { it / 3 } + fadeOut())
-                            }
+                            // Instant transition — like switching between Home and Topics tabs.
+                            // Thread overlays from within a #topic feed use the slide animation.
+                            EnterTransition.None togetherWith ExitTransition.None
                         },
                         label = "topics_content"
                     ) { viewingFeed ->
@@ -1108,7 +1116,11 @@ private fun Kind11TopicCard(
                     }
                 }
                 // Relay orbs
-                val displayRelayUrls = topic.relayUrls.ifEmpty { listOfNotNull(topic.relayUrl).filter { it.isNotEmpty() } }.distinct().take(4)
+                val displayRelayUrls = run {
+                    val raw = topic.relayUrls.ifEmpty { listOfNotNull(topic.relayUrl).filter { it.isNotEmpty() } }
+                    val seen = mutableSetOf<String>()
+                    raw.filter { url -> seen.add(url.trimEnd('/').lowercase()) }.take(4)
+                }
                 if (displayRelayUrls.isNotEmpty()) {
                     social.mycelium.android.ui.components.RelayOrbs(
                         relayUrls = displayRelayUrls,

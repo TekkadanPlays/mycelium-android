@@ -93,9 +93,8 @@ private fun createRelayWithNip11Info(
 }
 
 private enum class RelayTab(val label: String) {
-    OUTBOX("Outbox"),
-    INBOX("Inbox"),
-    INDEXER("Indexer")
+    INDEXER("Indexers"),
+    OUTBOX("Outbox")
 }
 
 // ── Main Screen ──
@@ -197,6 +196,10 @@ fun RelayManagementScreen(
     var showInputByTab by remember { mutableStateOf<Map<Int, Boolean>>(emptyMap()) }
     var fabExpanded by remember { mutableStateOf(false) }
 
+    // Outbox add-relay designation picker
+    var showDesignationPicker by remember { mutableStateOf(false) }
+    var pendingRelayUrl by remember { mutableStateOf("") }
+
     // Category state
     var editingCategoryId by remember { mutableStateOf<String?>(null) }
     var editingCategoryName by remember { mutableStateOf("") }
@@ -249,10 +252,9 @@ fun RelayManagementScreen(
     }
     val initialPage = remember(initialTab) {
         when (initialTab.lowercase()) {
-            "outbox" -> RelayTab.OUTBOX.ordinal
-            "inbox" -> RelayTab.INBOX.ordinal
             "indexer" -> RelayTab.INDEXER.ordinal
-            else -> 0
+            "outbox", "inbox" -> RelayTab.OUTBOX.ordinal
+            else -> RelayTab.OUTBOX.ordinal
         }
     }
     val pagerState = rememberPagerState(initialPage = initialPage) { totalPageCount }
@@ -310,7 +312,7 @@ fun RelayManagementScreen(
                 ) {
                     // Secondary: Update Indexers (Outbox/Inbox tabs only)
                     AnimatedVisibility(
-                        visible = fabExpanded && (currentFixedTab == RelayTab.OUTBOX || currentFixedTab == RelayTab.INBOX),
+                        visible = fabExpanded && currentFixedTab == RelayTab.OUTBOX,
                         enter = fadeIn() + slideInVertically { it / 2 },
                         exit = fadeOut() + slideOutVertically { it / 2 }
                     ) {
@@ -407,17 +409,22 @@ fun RelayManagementScreen(
                         }
                         // Health icon with trouble badge
                         IconButton(onClick = onOpenRelayHealth) {
-                            BadgedBox(
-                                badge = {
-                                    if (troubleCount > 0) {
-                                        Badge(
-                                            containerColor = MaterialTheme.colorScheme.error,
-                                            contentColor = MaterialTheme.colorScheme.onError
-                                        ) { Text("$troubleCount") }
-                                    }
+                            Box {
+                                Icon(Icons.Outlined.HealthAndSafety, "Relay Health",
+                                    tint = if (troubleCount > 0) MaterialTheme.colorScheme.error
+                                           else LocalContentColor.current)
+                                if (troubleCount > 0) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .offset(x = 3.dp, y = (-3).dp)
+                                            .size(8.dp)
+                                            .background(
+                                                color = MaterialTheme.colorScheme.error,
+                                                shape = CircleShape
+                                            )
+                                    )
                                 }
-                            ) {
-                                Icon(Icons.Outlined.HealthAndSafety, "Relay Health")
                             }
                         }
                     },
@@ -447,9 +454,8 @@ fun RelayManagementScreen(
                     // Fixed tabs
                     fixedTabs.forEachIndexed { index, tab ->
                         val count = when (tab) {
-                            RelayTab.OUTBOX -> outboxRelays.size
-                            RelayTab.INBOX -> inboxRelays.size
                             RelayTab.INDEXER -> indexerRelays.size
+                            RelayTab.OUTBOX -> outboxRelays.size + inboxRelays.size
                         }
                         Tab(
                             selected = pagerState.currentPage == index,
@@ -479,19 +485,20 @@ fun RelayManagementScreen(
                             selected = isSelected,
                             onClick = { pagerScope.launch { pagerState.animateScrollToPage(pageIndex) } },
                             text = {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Text(profile.name, style = MaterialTheme.typography.labelMedium,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
                                     if (profile.isActive) {
-                                        Spacer(Modifier.height(2.dp))
                                         Box(
                                             Modifier
-                                                .width(24.dp)
-                                                .height(2.dp)
-                                                .clip(RoundedCornerShape(1.dp))
+                                                .size(6.dp)
+                                                .clip(CircleShape)
                                                 .background(MaterialTheme.colorScheme.primary)
                                         )
                                     }
+                                    Text(profile.name, style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                             }
                         )
@@ -508,38 +515,6 @@ fun RelayManagementScreen(
             ) { page ->
                 if (page < fixedTabs.size) {
                     when (fixedTabs[page]) {
-                        RelayTab.OUTBOX -> RelayListTab(
-                            relays = outboxRelays, perRelayState = perRelayState,
-                            showInput = showInputByTab[page] == true,
-                            relayUrlInput = relayUrlInput,
-                            onRelayUrlChange = { relayUrlInput = it },
-                            onAddRelay = { addRelayTo(relayUrlInput, outboxRelays) { viewModel.addOutboxRelay(it) } },
-                            onEditRelay = { url ->
-                                val relay = outboxRelays.find { it.url == url }
-                                if (relay != null) {
-                                    editRelayTarget = relay; editRelayCategoryId = "outbox"; editRelayProfileId = null
-                                    editRelayUrl = relay.url; showEditRelayDialog = true
-                                }
-                            },
-                            onOpenRelayLog = onOpenRelayLog, nip65Source = nip65Source, nip65CreatedAt = nip65CreatedAt,
-                            emptyMessage = "Where you write to.\nThis should be found via indexer relays — but you can add some now if you'd like.",
-                            modifier = Modifier.fillMaxSize())
-                        RelayTab.INBOX -> RelayListTab(
-                            relays = inboxRelays, perRelayState = perRelayState,
-                            showInput = showInputByTab[page] == true,
-                            relayUrlInput = relayUrlInput,
-                            onRelayUrlChange = { relayUrlInput = it },
-                            onAddRelay = { addRelayTo(relayUrlInput, inboxRelays) { viewModel.addInboxRelay(it) } },
-                            onEditRelay = { url ->
-                                val relay = inboxRelays.find { it.url == url }
-                                if (relay != null) {
-                                    editRelayTarget = relay; editRelayCategoryId = "inbox"; editRelayProfileId = null
-                                    editRelayUrl = relay.url; showEditRelayDialog = true
-                                }
-                            },
-                            onOpenRelayLog = onOpenRelayLog, nip65Source = nip65Source, nip65CreatedAt = nip65CreatedAt,
-                            emptyMessage = "Where you receive replies.\nThis should be found via indexer relays — but you can add some now if you'd like.",
-                            modifier = Modifier.fillMaxSize())
                         RelayTab.INDEXER -> RelayListTab(
                             relays = indexerRelays, perRelayState = perRelayState,
                             showInput = showInputByTab[page] == true,
@@ -556,6 +531,62 @@ fun RelayManagementScreen(
                             onOpenRelayLog = onOpenRelayLog, nip65Source = null, nip65CreatedAt = null,
                             emptyMessage = "Indexer relays for profile lookups and search.\nThese are discovered via NIP-66 during sign-in.",
                             modifier = Modifier.fillMaxSize())
+                        RelayTab.OUTBOX -> {
+                            // Compute Both / Outbox-only / Inbox-only groups
+                            val outboxUrlSet = remember(outboxRelays) { outboxRelays.map { it.url.trimEnd('/').lowercase() }.toSet() }
+                            val inboxUrlSet = remember(inboxRelays) { inboxRelays.map { it.url.trimEnd('/').lowercase() }.toSet() }
+                            val bothRelays = remember(outboxRelays, inboxRelays) {
+                                outboxRelays.filter { it.url.trimEnd('/').lowercase() in inboxUrlSet }
+                                    .map { it.copy(read = true, write = true) }
+                            }
+                            val outboxOnlyRelays = remember(outboxRelays, inboxUrlSet) {
+                                outboxRelays.filter { it.url.trimEnd('/').lowercase() !in inboxUrlSet }
+                                    .map { it.copy(write = true, read = false) }
+                            }
+                            val inboxOnlyRelays = remember(inboxRelays, outboxUrlSet) {
+                                inboxRelays.filter { it.url.trimEnd('/').lowercase() !in outboxUrlSet }
+                                    .map { it.copy(read = true, write = false) }
+                            }
+                            val allMerged = bothRelays + outboxOnlyRelays + inboxOnlyRelays
+                            OutboxSectionedTab(
+                                bothRelays = bothRelays,
+                                outboxOnlyRelays = outboxOnlyRelays,
+                                inboxOnlyRelays = inboxOnlyRelays,
+                                perRelayState = perRelayState,
+                                showInput = showInputByTab[page] == true,
+                                relayUrlInput = relayUrlInput,
+                                onRelayUrlChange = { relayUrlInput = it },
+                                onAddRelay = {
+                                    val normalized = normalizeRelayUrl(relayUrlInput)
+                                    if (relayUrlInput.isBlank()) return@OutboxSectionedTab
+                                    if (isDuplicateRelay(normalized, allMerged)) {
+                                        toastMessage = "$normalized already exists"; showToast = true
+                                    } else {
+                                        pendingRelayUrl = relayUrlInput
+                                        showDesignationPicker = true
+                                    }
+                                },
+                                onEditRelay = { url ->
+                                    val relay = outboxRelays.find { it.url == url }
+                                        ?: inboxRelays.find { it.url == url }
+                                    if (relay != null) {
+                                        val inInbox = relay.url.trimEnd('/').lowercase() in inboxUrlSet
+                                        val inOutbox = relay.url.trimEnd('/').lowercase() in outboxUrlSet
+                                        editRelayTarget = relay.copy(read = inInbox, write = inOutbox)
+                                        editRelayCategoryId = when {
+                                            inOutbox && inInbox -> "both"
+                                            inOutbox -> "outbox"
+                                            else -> "inbox"
+                                        }
+                                        editRelayProfileId = null
+                                        editRelayUrl = relay.url; showEditRelayDialog = true
+                                    }
+                                },
+                                onOpenRelayLog = onOpenRelayLog,
+                                nip65Source = nip65Source, nip65CreatedAt = nip65CreatedAt,
+                                emptyMessage = "Outbox & inbox relays.\nThese should be found via indexer relays — but you can add some now if you'd like.",
+                                modifier = Modifier.fillMaxSize())
+                        }
                     }
                 } else {
                     val profileIdx = page - fixedTabs.size
@@ -788,8 +819,7 @@ fun RelayManagementScreen(
                                 checked = profile.isActive,
                                 onCheckedChange = { checked ->
                                     editProfileTarget = profile.copy(isActive = checked)
-                                    if (checked) viewModel.activateProfile(profile.id)
-                                    else viewModel.updateProfile(profile.id, profile.copy(isActive = false))
+                                    viewModel.activateProfile(profile.id)
                                 }
                             )
                         }
@@ -1018,6 +1048,10 @@ fun RelayManagementScreen(
                                 val newRelay = createRelayWithNip11Info(newNorm, read = editRelayTarget!!.read, write = editRelayTarget!!.write, nip11Cache = nip11Cache)
                                 val section = catId ?: ""
                                 when (section) {
+                                    "both" -> {
+                                        viewModel.removeOutboxRelay(oldNorm); viewModel.removeInboxRelay(oldNorm)
+                                        viewModel.addOutboxRelay(newRelay); viewModel.addInboxRelay(newRelay)
+                                    }
                                     "outbox" -> { viewModel.removeOutboxRelay(oldNorm); viewModel.addOutboxRelay(newRelay) }
                                     "inbox" -> { viewModel.removeInboxRelay(oldNorm); viewModel.addInboxRelay(newRelay) }
                                     "indexer" -> { viewModel.removeIndexerRelay(oldNorm); viewModel.addIndexerRelay(newRelay) }
@@ -1053,6 +1087,7 @@ fun RelayManagementScreen(
                     viewModel.removeRelayFromProfileCategory(profId, catId, oldUrl)
                 } else {
                     when (catId) {
+                        "both" -> { viewModel.removeOutboxRelay(oldUrl); viewModel.removeInboxRelay(oldUrl) }
                         "outbox" -> viewModel.removeOutboxRelay(oldUrl)
                         "inbox" -> viewModel.removeInboxRelay(oldUrl)
                         "indexer" -> viewModel.removeIndexerRelay(oldUrl)
@@ -1086,6 +1121,65 @@ fun RelayManagementScreen(
                 showPublishConfirmation = false
             },
             onDismiss = { showPublishConfirmation = false }
+        )
+    }
+
+    // Designation picker dialog — choose Both / Outbox / Inbox when adding relay
+    if (showDesignationPicker && pendingRelayUrl.isNotBlank()) {
+        AlertDialog(
+            onDismissRequest = { showDesignationPicker = false; pendingRelayUrl = "" },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(16.dp),
+            icon = { Icon(Icons.Outlined.SwapVert, null, Modifier.size(28.dp),
+                tint = MaterialTheme.colorScheme.primary) },
+            title = { Text("Relay Designation", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        normalizeRelayUrl(pendingRelayUrl),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    DesignationOption(
+                        label = "Both (Read + Write)",
+                        description = "Publish to and receive from this relay",
+                        icon = Icons.Outlined.SwapVert
+                    ) {
+                        val r = createRelayWithNip11Info(normalizeRelayUrl(pendingRelayUrl), read = true, write = true, nip11Cache = nip11Cache)
+                        viewModel.addOutboxRelay(r); viewModel.addInboxRelay(r)
+                        relayUrlInput = ""; showInputByTab = showInputByTab - pagerState.currentPage
+                        showDesignationPicker = false; pendingRelayUrl = ""
+                    }
+                    DesignationOption(
+                        label = "Outbox (Write only)",
+                        description = "Publish your notes to this relay",
+                        icon = Icons.Outlined.Upload
+                    ) {
+                        val r = createRelayWithNip11Info(normalizeRelayUrl(pendingRelayUrl), read = false, write = true, nip11Cache = nip11Cache)
+                        viewModel.addOutboxRelay(r)
+                        relayUrlInput = ""; showInputByTab = showInputByTab - pagerState.currentPage
+                        showDesignationPicker = false; pendingRelayUrl = ""
+                    }
+                    DesignationOption(
+                        label = "Inbox (Read only)",
+                        description = "Receive DMs and replies at this relay",
+                        icon = Icons.Outlined.Download
+                    ) {
+                        val r = createRelayWithNip11Info(normalizeRelayUrl(pendingRelayUrl), read = true, write = false, nip11Cache = nip11Cache)
+                        viewModel.addInboxRelay(r)
+                        relayUrlInput = ""; showInputByTab = showInputByTab - pagerState.currentPage
+                        showDesignationPicker = false; pendingRelayUrl = ""
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                OutlinedButton(onClick = { showDesignationPicker = false; pendingRelayUrl = "" }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 
@@ -1138,6 +1232,7 @@ private fun RelayListTab(
     nip65Source: String?,
     nip65CreatedAt: Long?,
     emptyMessage: String,
+    showRwTags: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
@@ -1161,7 +1256,8 @@ private fun RelayListTab(
                 RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
                     onOpenRelayLog = onOpenRelayLog,
                     onEdit = { onEditRelay(relay.url) },
-                    showDivider = idx < relays.size - 1)
+                    showDivider = idx < relays.size - 1,
+                    showRwTag = showRwTags)
             }
         }
     }
@@ -1269,7 +1365,8 @@ private fun RelayItem(
     connectionStatus: RelayEndpointStatus?,
     onOpenRelayLog: (String) -> Unit,
     onEdit: () -> Unit,
-    showDivider: Boolean = true
+    showDivider: Boolean = true,
+    showRwTag: Boolean = false
 ) {
     Row(modifier = Modifier.fillMaxWidth().clickable { onOpenRelayLog(relay.url) }
         .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
@@ -1292,8 +1389,24 @@ private fun RelayItem(
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(relay.displayName, style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(relay.displayName, style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false))
+                if (showRwTag) {
+                    Spacer(Modifier.width(6.dp))
+                    val tag = when {
+                        relay.read && relay.write -> "r/w"
+                        relay.read -> "r"
+                        relay.write -> "w"
+                        else -> ""
+                    }
+                    if (tag.isNotEmpty()) {
+                        Text(tag, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                    }
+                }
+            }
             Text(relay.url, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1605,4 +1718,163 @@ private fun PublishNip65Dialog(
         },
         confirmButton = { Button(onClick = onConfirm) { Text("Publish") } },
         dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Cancel") } })
+}
+
+//  Outbox Sectioned Tab (Both / Outbox / Inbox sub-sections) 
+
+@Composable
+private fun OutboxSectionedTab(
+    bothRelays: List<UserRelay>,
+    outboxOnlyRelays: List<UserRelay>,
+    inboxOnlyRelays: List<UserRelay>,
+    perRelayState: Map<String, RelayEndpointStatus>,
+    showInput: Boolean,
+    relayUrlInput: String,
+    onRelayUrlChange: (String) -> Unit,
+    onAddRelay: () -> Unit,
+    onEditRelay: (String) -> Unit,
+    onOpenRelayLog: (String) -> Unit,
+    nip65Source: String?,
+    nip65CreatedAt: Long?,
+    emptyMessage: String,
+    modifier: Modifier = Modifier
+) {
+    val allEmpty = bothRelays.isEmpty() && outboxOnlyRelays.isEmpty() && inboxOnlyRelays.isEmpty()
+
+    LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+        if (nip65Source != null && !allEmpty) {
+            item(key = "source_banner") { Nip65SourceBanner(nip65Source, nip65CreatedAt) }
+        }
+        if (showInput) {
+            item(key = "input") { RelayUrlInput(value = relayUrlInput, onValueChange = onRelayUrlChange, onAdd = onAddRelay) }
+        }
+        if (allEmpty && !showInput) {
+            item(key = "empty") {
+                Box(Modifier.fillMaxWidth().padding(vertical = 64.dp), contentAlignment = Alignment.Center) {
+                    Text(emptyMessage, style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                }
+            }
+        }
+        // ── Both (r/w) section ──
+        if (bothRelays.isNotEmpty()) {
+            item(key = "header_both") {
+                SectionHeader(
+                    label = "Both",
+                    count = bothRelays.size,
+                    icon = Icons.Outlined.SwapVert,
+                    description = "Read + Write"
+                )
+            }
+            bothRelays.forEachIndexed { idx, relay ->
+                item(key = "both_${relay.url}") {
+                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onEdit = { onEditRelay(relay.url) },
+                        showDivider = idx < bothRelays.size - 1,
+                        showRwTag = true)
+                }
+            }
+        }
+        // ── Outbox (write only) section ──
+        if (outboxOnlyRelays.isNotEmpty()) {
+            item(key = "header_outbox") {
+                SectionHeader(
+                    label = "Outbox",
+                    count = outboxOnlyRelays.size,
+                    icon = Icons.Outlined.Upload,
+                    description = "Write only"
+                )
+            }
+            outboxOnlyRelays.forEachIndexed { idx, relay ->
+                item(key = "outbox_${relay.url}") {
+                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onEdit = { onEditRelay(relay.url) },
+                        showDivider = idx < outboxOnlyRelays.size - 1,
+                        showRwTag = true)
+                }
+            }
+        }
+        // ── Inbox (read only) section ──
+        if (inboxOnlyRelays.isNotEmpty()) {
+            item(key = "header_inbox") {
+                SectionHeader(
+                    label = "Inbox",
+                    count = inboxOnlyRelays.size,
+                    icon = Icons.Outlined.Download,
+                    description = "Read only"
+                )
+            }
+            inboxOnlyRelays.forEachIndexed { idx, relay ->
+                item(key = "inbox_${relay.url}") {
+                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onEdit = { onEditRelay(relay.url) },
+                        showDivider = idx < inboxOnlyRelays.size - 1,
+                        showRwTag = true)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(
+    label: String,
+    count: Int,
+    icon: ImageVector,
+    description: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(icon, null, Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.primary)
+        Text(
+            "$label ($count)",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            "· $description",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+    }
+}
+
+@Composable
+private fun DesignationOption(
+    label: String,
+    description: String,
+    icon: ImageVector,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, null, Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(label, style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium)
+                Text(description, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
 }

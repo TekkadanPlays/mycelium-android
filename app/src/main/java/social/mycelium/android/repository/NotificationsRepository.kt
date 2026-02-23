@@ -65,8 +65,9 @@ object NotificationsRepository {
 
     private val notificationsById = ConcurrentHashMap<String, NotificationData>()
     private var notificationsHandle: TemporarySubscriptionHandle? = null
-    private var notificationsHandle2: TemporarySubscriptionHandle? = null
-    private var threadRepliesHandle: TemporarySubscriptionHandle? = null
+
+    /** Event IDs already processed — prevents re-processing on relay reconnect (which replays all stored events). */
+    private val seenEventIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     // ── Summary counts (today) ──────────────────────────────────────────────
     private val _todayReplies = MutableStateFlow(0)
@@ -81,6 +82,8 @@ object NotificationsRepository {
     private var subscriptionRelayUrls = listOf<String>()
     /** Current user hex pubkey (p-tag); used to filter kind-7 so we only show reactions to our notes. */
     private var myPubkeyHex: String? = null
+    /** Our kind-11 topic IDs — replies to these are "Thread replies" (replyKind=11), not "Comments" (1111). */
+    private val myTopicIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     private var prefs: SharedPreferences? = null
 
@@ -173,6 +176,7 @@ object NotificationsRepository {
         // This preserves seen state and existing notifications across navigation
         if (isNewUser) {
             notificationsById.clear()
+            seenEventIds.clear()
             likeByTargetId.clear()
             likeEmojiByTargetId.clear()
             repostByTargetId.clear()
@@ -190,42 +194,44 @@ object NotificationsRepository {
             limit = 500
         )
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.NORMAL) { event -> handleEvent(event) }
+        // Merge all notification kinds into a single multi-filter subscription (saves 2 relay slots)
+        val filters = mutableListOf(filter)
         // Secondary filter: lower-volume kinds (reports, highlights)
-        val filter2 = Filter(
+        filters.add(Filter(
             kinds = listOf(NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT),
             tags = mapOf("p" to listOf(pubkey)),
             since = since,
             limit = 100
-        )
-        notificationsHandle2 = stateMachine.requestTemporarySubscription(relayUrls, filter2, priority = SubscriptionPriority.LOW) { event -> handleEvent(event) }
-        Log.d(TAG, "Notifications subscription started for ${pubkey.take(8)}... on ${relayUrls.size} relays")
+        ))
+        notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filters, priority = SubscriptionPriority.LOW) { event -> handleEvent(event) }
+        Log.d(TAG, "Notifications subscription started for ${pubkey.take(8)}... on ${relayUrls.size} relays (${filters.size} filters, 1 slot)")
 
-        // Second subscription: fetch user's kind-11 topic IDs, then subscribe for kind-1111 replies
-        // to those topics. This catches replies that don't p-tag the topic author.
+        // Fetch user's kind-11 topic IDs, then add thread replies filter to the same subscription
         scope.launch {
             val topicIds = fetchUserTopicIds(pubkey, relayUrls, since)
+            myTopicIds.addAll(topicIds)
             if (topicIds.isNotEmpty()) {
-                Log.d(TAG, "Found ${topicIds.size} user topics, subscribing for kind-1111 replies")
-                val threadFilter = Filter(
+                Log.d(TAG, "Found ${topicIds.size} user topics, re-subscribing with thread replies filter")
+                // Re-create subscription with the additional thread replies filter
+                notificationsHandle?.cancel()
+                val allFilters = filters + Filter(
                     kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
                     tags = mapOf("E" to topicIds),
                     since = since,
                     limit = 200
                 )
-                threadRepliesHandle = stateMachine.requestTemporarySubscription(relayUrls, threadFilter, priority = SubscriptionPriority.NORMAL) { event ->
+                notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, allFilters, priority = SubscriptionPriority.LOW) { event ->
                     handleEvent(event)
                 }
+                Log.d(TAG, "Notifications re-subscribed with ${allFilters.size} filters (still 1 slot)")
             } else {
-                Log.d(TAG, "No user topics found, skipping thread replies subscription")
+                Log.d(TAG, "No user topics found, skipping thread replies filter")
             }
         }
     }
 
     fun stopSubscription() {
         try { notificationsHandle?.cancel(); notificationsHandle = null } catch (_: Exception) { }
-        try { notificationsHandle2?.cancel(); notificationsHandle2 = null } catch (_: Exception) { }
-        try { threadRepliesHandle?.cancel(); threadRepliesHandle = null } catch (_: Exception) { }
         Log.d(TAG, "Notifications subscription stopped")
     }
 
@@ -237,6 +243,8 @@ object NotificationsRepository {
 
     private fun handleEvent(event: Event) {
         if (event.kind !in ACCEPTED_KINDS) return
+        // Deduplicate: skip events already processed (relay reconnects replay all stored events)
+        if (!seenEventIds.add(event.id)) return
         // Skip notifications from muted/blocked users
         if (MuteListRepository.isHidden(event.pubKey)) return
         val author = profileCache.resolveAuthor(event.pubKey)
@@ -382,15 +390,20 @@ object NotificationsRepository {
         // Accept if user is p-tagged; otherwise still create the notification and verify
         // via fetchAndSetTargetNote (which removes it if root author isn't us)
         val note = eventToNote(event)
+        // If root note is one of our known topics, immediately classify as thread reply (replyKind=11)
+        // so it appears in the Threads tab without waiting for target fetch enrichment.
+        val isOurTopic = rootId in myTopicIds
+        val kind = if (isOurTopic) 11 else NOTIFICATION_KIND_TOPIC_REPLY
+        val text = if (isOurTopic) "${author.displayName} replied to your thread" else "${author.displayName} commented on your post"
         val data = NotificationData(
             id = event.id,
             type = NotificationType.REPLY,
-            text = "${author.displayName} commented on your post",
+            text = text,
             note = note,
             author = author,
             rootNoteId = rootId,
             replyNoteId = event.id,
-            replyKind = NOTIFICATION_KIND_TOPIC_REPLY,
+            replyKind = kind,
             sortTimestamp = ts
         )
         notificationsById[event.id] = data
@@ -518,6 +531,9 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
+        // Always fetch the reposted note so flushTargetFetchBatch can verify authorship
+        // (even if we parsed it from content — content parsing doesn't verify it's OUR note)
+        scope.launch { fetchAndSetTargetNote(repostedNoteId, data.id) { d -> { n -> d.copy(targetNote = n) } } }
         updateTodaySummary(NotificationType.REPOST, ts, 0L)
     }
 
@@ -652,13 +668,15 @@ object NotificationsRepository {
             since = since,
             limit = 100
         )
-        val handle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.BACKGROUND) { ev ->
+        val handle = stateMachine.requestOneShotSubscription(relayUrls, filter,
+            priority = SubscriptionPriority.BACKGROUND, settleMs = 300L, maxWaitMs = 4_000L,
+        ) { ev ->
             if (ev.kind == 11) {
                 synchronized(topicIds) { topicIds.add(ev.id) }
             }
         }
-        delay(3000)
-        handle.cancel()
+        // Wait for EOSE-based auto-close (maxWaitMs + buffer)
+        delay(4_500L)
         Log.d(TAG, "fetchUserTopicIds: found ${topicIds.size} topics for ${pubkey.take(8)}...")
         return topicIds.distinct()
     }
@@ -722,16 +740,10 @@ object NotificationsRepository {
             val note = fetched[noteId]
             for (pending in pendingList) {
                 val current = notificationsById[pending.notificationId] ?: continue
-                // If parent note wasn't fetched, remove REPLY notifications (can't verify it's to us)
+                // If parent note wasn't fetched, skip enrichment but keep the notification.
+                // We can't verify authorship without the target, but removing creates false negatives
+                // (legitimate replies vanish when the relay is slow or doesn't carry the parent).
                 if (note == null) {
-                    if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT) {
-                        val isCited = myPubkeyHex != null && current.note != null &&
-                            isUserCitedInContent(current.note.content, myPubkeyHex!!)
-                        if (!isCited) {
-                            notificationsById.remove(pending.notificationId)
-                            removedCount++
-                        }
-                    }
                     continue
                 }
                 val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
@@ -740,6 +752,14 @@ object NotificationsRepository {
                 // Kind-7 (like): only show if target note author is the current user
                 if (current.type == NotificationType.LIKE && !isOurNote) {
                     notificationsById.remove(pending.notificationId)
+                    removedCount++
+                    continue
+                }
+                // Kind-6/16 (repost): only show if the reposted note is authored by us
+                if (current.type == NotificationType.REPOST && !isOurNote) {
+                    notificationsById.remove(pending.notificationId)
+                    // Also clean up the repostByTargetId aggregation entry
+                    repostByTargetId.remove(noteId)
                     removedCount++
                     continue
                 }
@@ -752,6 +772,13 @@ object NotificationsRepository {
                         removedCount++
                         continue
                     }
+                    // Parent isn't ours but we're cited → reclassify as MENTION (not a direct reply)
+                    val mentionUpdate = current.copy(
+                        type = NotificationType.MENTION,
+                        text = "${current.author?.displayName ?: "Someone"} mentioned you"
+                    )
+                    notificationsById[pending.notificationId] = mentionUpdate
+                    continue
                 }
                 var updated = pending.update(current)(note)
                 if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {

@@ -64,8 +64,15 @@ private val RELEVANT_LOG_TYPES = setOf(
 fun RelayLogScreen(
     relayUrl: String,
     onBack: () -> Unit,
-    /** Called when user wants to add this relay to a relay profile. Passes (relayUrl, profileType). */
-    onAddToRelayProfile: ((relayUrl: String, profileType: String) -> Unit)? = null
+    /** Called when user wants to add this relay to a relay profile. Passes (relayUrl, profileType).
+     *  profileType is "outbox", "inbox", "indexer", or "profile:<profileId>" for custom profiles. */
+    onAddToRelayProfile: ((relayUrl: String, profileType: String) -> Unit)? = null,
+    /** Custom relay profiles for the "Add to..." menu. */
+    relayProfiles: List<social.mycelium.android.data.RelayProfile> = emptyList(),
+    /** Navigate to dedicated relay users screen. */
+    onOpenRelayUsers: (() -> Unit)? = null,
+    /** Number of followed users who write/read to this relay per NIP-65. */
+    followedUserCount: Int = 0
 ) {
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
@@ -142,11 +149,16 @@ fun RelayLogScreen(
                                     leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(20.dp)) },
                                     onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "indexer") }
                                 )
-                                DropdownMenuItem(
-                                    text = { Text("Add to Feed Relays") },
-                                    leadingIcon = { Icon(Icons.Outlined.RssFeed, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                                    onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "feed") }
-                                )
+                                if (relayProfiles.isNotEmpty()) {
+                                    HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                                    relayProfiles.forEach { profile ->
+                                        DropdownMenuItem(
+                                            text = { Text("Add to ${profile.name}") },
+                                            leadingIcon = { Icon(Icons.Outlined.RssFeed, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                            onClick = { showAddMenu = false; onAddToRelayProfile?.invoke(relayUrl, "profile:${profile.id}") }
+                                        )
+                                    }
+                                }
                             }
                         }
                     },
@@ -216,6 +228,55 @@ fun RelayLogScreen(
             if (operatorPubkey != null || contact != null) {
                 item(key = "operator") {
                     OperatorCard(pubkey = operatorPubkey, contact = contact)
+                }
+            }
+
+            // ── Followed Users ──
+            if (followedUserCount > 0 && onOpenRelayUsers != null) {
+                item(key = "followed_users") {
+                    Surface(
+                        onClick = onOpenRelayUsers,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.surfaceContainerLow
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = androidx.compose.foundation.shape.CircleShape,
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.size(40.dp)
+                            ) {
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                    Icon(
+                                        Icons.Outlined.People, null,
+                                        Modifier.size(22.dp),
+                                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                            }
+                            Spacer(Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Followed Users",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "$followedUserCount user${if (followedUserCount != 1) "s" else ""} write or read here",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.Outlined.ChevronRight, null,
+                                Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
                 }
             }
 

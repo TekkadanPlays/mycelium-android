@@ -585,17 +585,19 @@ private fun NoteCardContent(
                                             }
 
                                             if (hasMore) {
-                                                Text(
-                                                    text = if (quotedExpanded) "Show less" else "Read more",
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = MaterialTheme.colorScheme.primary,
+                                                Row(
                                                     modifier = Modifier
-                                                        .padding(top = 2.dp)
-                                                        .clickable(
-                                                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                                                            indication = null
-                                                        ) { QuotedNoteExpandedState.toggle(meta.eventId) }
-                                                )
+                                                        .fillMaxWidth()
+                                                        .clickable { QuotedNoteExpandedState.toggle(meta.eventId) }
+                                                        .padding(top = 4.dp, bottom = 4.dp),
+                                                    horizontalArrangement = Arrangement.End
+                                                ) {
+                                                    Text(
+                                                        text = if (quotedExpanded) "Show less" else "Read more",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = MaterialTheme.colorScheme.primary,
+                                                    )
+                                                }
                                             }
                                         }
                                         }

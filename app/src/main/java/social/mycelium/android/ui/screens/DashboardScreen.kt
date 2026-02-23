@@ -16,6 +16,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -243,31 +245,44 @@ private fun RelayConnectionLoadingIndicator(
             }
             else -> "Loading\u2026"
         }
-        Text(
-            text = statusText,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-            letterSpacing = 0.3.sp,
-            maxLines = 1
-        )
-
-        if (totalCount > 0 && (failedCount > 0 || connectingCount > 0)) {
-            Spacer(modifier = Modifier.height(4.dp))
-            val detail = buildString {
-                if (connectingCount > 0) append("$connectingCount connecting")
-                if (failedCount > 0) {
-                    if (isNotEmpty()) append(" \u00b7 ")
-                    append("$failedCount failed")
+        // Fixed-height container prevents layout jitter when status text changes
+        Box(
+            modifier = Modifier.height(36.dp),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                androidx.compose.animation.Crossfade(
+                    targetState = statusText,
+                    animationSpec = tween(300),
+                    label = "status_crossfade"
+                ) { text ->
+                    Text(
+                        text = text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        letterSpacing = 0.3.sp,
+                        maxLines = 1
+                    )
+                }
+                if (totalCount > 0 && (failedCount > 0 || connectingCount > 0)) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    val detail = buildString {
+                        if (connectingCount > 0) append("$connectingCount connecting")
+                        if (failedCount > 0) {
+                            if (isNotEmpty()) append(" \u00b7 ")
+                            append("$failedCount failed")
+                        }
+                    }
+                    Text(
+                        text = detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (failedCount > 0) MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                        fontSize = 10.sp,
+                        maxLines = 1
+                    )
                 }
             }
-            Text(
-                text = detail,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (failedCount > 0) MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
-                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
-                fontSize = 10.sp,
-                maxLines = 1
-            )
         }
     }
 }
@@ -509,7 +524,7 @@ private fun DashboardFeedContent(
                 val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                 lastVisible to totalItems
             }.collect { (lastVisible, totalItems) ->
-                if (totalItems > 5 && lastVisible >= totalItems - 3 && !isLoadingOlder) {
+                if (totalItems > 5 && lastVisible >= totalItems - 500 && !isLoadingOlder) {
                     notesRepo.loadOlderNotes()
                 }
             }
@@ -583,7 +598,7 @@ private fun DashboardFeedContent(
                         }
                     },
                     onBoost = { n ->
-                        val err = accountStateViewModel.publishRepost(n.id, n.author.id)
+                        val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
                         if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                     },
                     onQuote = { n ->
@@ -760,6 +775,7 @@ fun DashboardScreen(
     hasReadNotes: Boolean = false,
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
+    onDrawerStateChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -776,6 +792,11 @@ fun DashboardScreen(
     val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+
+    // Report drawer state to parent (for hiding bottom nav when drawer is open)
+    LaunchedEffect(drawerState.currentValue) {
+        onDrawerStateChanged(drawerState.isOpen)
+    }
 
     // NIP-53: true when a followed user is currently hosting a live activity
     val hasFollowedLive by LiveActivityRepository.getInstance().hasFollowedLiveActivity.collectAsState()
@@ -1149,6 +1170,13 @@ fun DashboardScreen(
 
     val uriHandler = LocalUriHandler.current
 
+    // Relay health: trouble count for sidebar badge
+    val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
+    val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
+    val troubleRelayCount = remember(flaggedRelays, blockedRelays) {
+        (flaggedRelays + blockedRelays).distinct().size
+    }
+
     GlobalSidebar(
         drawerState = drawerState,
         activeProfile = activeProfile,
@@ -1165,6 +1193,8 @@ fun DashboardScreen(
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
         onRelayHealthClick = onSidebarRelayHealthClick,
         onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,
+        troubleRelayCount = troubleRelayCount,
+        gesturesEnabled = currentAccount != null,
         onItemClick = { itemId ->
             when {
                 itemId == "global" -> {
@@ -1436,7 +1466,7 @@ fun DashboardScreen(
                 ) {
                     social.mycelium.android.ui.components.HomeFab(
                         onScrollToTop = {
-                            scope.launch { listState.animateScrollToItem(0) }
+                            scope.launch { listState.scrollToItem(0) }
                         },
                         onCompose = { onNavigateTo("compose") },
                         modifier = Modifier.padding(bottom = 80.dp)

@@ -249,6 +249,8 @@ fun ModernThreadViewScreen(
     val savedScrollByDepth = remember { mutableMapOf<Int, Pair<Int, Int>>() }
     /** Root-only mode: when true, only show level-0 replies with descendant count badges. */
     var showRootOnly by remember { mutableStateOf(false) }
+    /** Sort order: false = oldest first (chronological), true = newest first. */
+    var isNewestFirst by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -533,7 +535,7 @@ fun ModernThreadViewScreen(
                 }
             }
             // Show ThreadFab when there are reply actions OR when there are replies to navigate
-            if (replyItems.isNotEmpty() || repliesState.totalReplyCount > 0) {
+            if (replyItems.isNotEmpty() || repliesState.replies.isNotEmpty()) {
                 val hasNestedReplies = repliesState.threadedReplies.any { it.children.isNotEmpty() }
                 social.mycelium.android.ui.components.ThreadFab(
                     listState = listState,
@@ -542,19 +544,50 @@ fun ModernThreadViewScreen(
                     totalItems = 2 + repliesState.totalReplyCount,
                     showRootOnly = showRootOnly,
                     onToggleRootOnly = { showRootOnly = !showRootOnly },
-                    rootOnlyAvailable = hasNestedReplies && currentRootReplyId == null
+                    rootOnlyAvailable = hasNestedReplies && currentRootReplyId == null,
+                    isNewestFirst = isNewestFirst,
+                    onToggleSortOrder = {
+                        isNewestFirst = !isNewestFirst
+                        when (replyKind) {
+                            1 -> kind1RepliesViewModel.setSortOrder(
+                                if (isNewestFirst) Kind1ReplySortOrder.REVERSE_CHRONOLOGICAL
+                                else Kind1ReplySortOrder.CHRONOLOGICAL
+                            )
+                            else -> threadRepliesViewModel.setSortOrder(
+                                if (isNewestFirst) ReplySortOrder.REVERSE_CHRONOLOGICAL
+                                else ReplySortOrder.CHRONOLOGICAL
+                            )
+                        }
+                    }
                 )
             }
         }
     ) { paddingValues ->
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                isRefreshing = true
+                scope.launch {
+                    if (replyKind == 1) {
+                        // TODO: Kind1RepliesViewModel pending support
+                    } else {
+                        threadRepliesViewModel.refreshReplies(relayUrls)
+                    }
+                    delay(300)
+                    isRefreshing = false
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
         LazyColumn(
             state = listState,
             modifier = modifier
-                .fillMaxSize()
-                .padding(paddingValues),
+                .fillMaxSize(),
             contentPadding = PaddingValues(top = 8.dp, bottom = 160.dp)
         ) {
-            // Main note card - no pull to refresh, uses predictive back
+            // Main note card - pull to refresh loads pending replies
             item(key = "main_note") {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     NoteCard(
@@ -595,12 +628,6 @@ fun ModernThreadViewScreen(
                         actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.ActionRowSchema.KIND1_FEED
                             else social.mycelium.android.ui.components.ActionRowSchema.KIND11_FEED,
                         onSeeAllReactions = { onSeeAllReactions(note.id) },
-                        extraMoreMenuItems = listOf(
-                            Pair("Copy text") {
-                                copyTextContent = note.content
-                                showCopyTextDialog = true
-                            }
-                        ),
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -618,8 +645,49 @@ fun ModernThreadViewScreen(
             item(key = "replies_section") {
                 Column(modifier = Modifier.fillMaxWidth()) {
                     Spacer(modifier = Modifier.height(4.dp))
+
+                    // "x new replies" banner (tappable to load pending replies)
+                    val newRootCount = repliesState.newRepliesByParent[note.id] ?: 0
+                    val totalNewCount = repliesState.newReplyCount
+                    if (totalNewCount > 0) {
+                        Surface(
+                            onClick = {
+                                if (replyKind == 1) {
+                                    // TODO: Kind1RepliesViewModel pending support
+                                } else {
+                                    threadRepliesViewModel.refreshReplies(relayUrls)
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = MaterialTheme.shapes.small
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = "$totalNewCount new ${if (totalNewCount == 1) "reply" else "replies"}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                    }
+
                     // Reply count header (no loader; fallback message for no replies only)
-                    if (repliesState.totalReplyCount > 0) {
+                    if (repliesState.totalReplyCount > 0 || totalNewCount > 0) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -629,15 +697,26 @@ fun ModernThreadViewScreen(
                         ) {
                             val directCount = repliesState.replies.size
                             val totalCount = repliesState.totalReplyCount
-                            Text(
-                                text = when {
-                                    totalCount <= 1 -> if (totalCount == 1) "1 reply" else ""
-                                    directCount == totalCount -> "$totalCount replies"
-                                    else -> "$directCount replies, $totalCount total"
-                                },
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = when {
+                                        totalCount <= 1 -> if (totalCount == 1) "1 reply" else ""
+                                        directCount == totalCount -> "$totalCount replies"
+                                        else -> "$directCount replies, $totalCount total"
+                                    },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                if (totalNewCount > 0) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = "($totalNewCount new)",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
 
                             // Sort button
                             if (repliesState.totalReplyCount > 0) {
@@ -829,8 +908,46 @@ fun ModernThreadViewScreen(
                             onImageTap = { urls, idx -> onImageTap(note, urls, idx) },
                             onVideoClick = onVideoClick,
                             collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
+                            isScrolling = listState.isScrollInProgress,
                             modifier = Modifier.fillMaxWidth()
                         )
+
+                        // Per-reply "x new replies" inline indicator
+                        val pendingForThisReply = repliesState.newRepliesByParent[threadedReply.reply.id] ?: 0
+                        if (pendingForThisReply > 0) {
+                            Surface(
+                                onClick = {
+                                    if (replyKind != 1) {
+                                        threadRepliesViewModel.applyPendingRepliesForParent(threadedReply.reply.id)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = (16 + (threadedReply.level * 24)).dp, end = 16.dp, top = 2.dp, bottom = 2.dp),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                                shape = MaterialTheme.shapes.extraSmall
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.SubdirectoryArrowRight,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = "$pendingForThisReply new ${if (pendingForThisReply == 1) "reply" else "replies"}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                            }
+                        }
+
                         if (index < displayList.size - 1) {
                             Spacer(modifier = Modifier.height(4.dp))
                         }
@@ -838,6 +955,7 @@ fun ModernThreadViewScreen(
                 }
             }
         }
+        } // PullToRefreshBox
     }
 
     // Zap configuration: now navigates to zap_settings page via onNavigateToZapSettings
@@ -1615,12 +1733,6 @@ private fun ReplyHeader(
                             color = Color(0xFFFFD700)
                         )
                     }
-                    // Relay orbs — left of timestamp
-                    val replyRelayUrls = reply.relayUrls.distinct().take(6)
-                    if (replyRelayUrls.isNotEmpty()) {
-                        RelayOrbs(relayUrls = replyRelayUrls, onRelayClick = onRelayClick, onNavigateToRelayList = onNavigateToRelayList)
-                        Spacer(modifier = Modifier.width(4.dp))
-                    }
                     Text(
                         text = formatReplyTimestamp(reply.timestamp),
                         style = MaterialTheme.typography.bodySmall,
@@ -1911,6 +2023,9 @@ private fun ReplyControlsPanel(
     onZap: (String, Long) -> Unit,
     onZapSettings: () -> Unit,
     onReact: (Note, String) -> Unit,
+    onRelayClick: (String) -> Unit = {},
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
+    isScrolling: Boolean = false,
 ) {
     var isDetailsExpanded by remember { mutableStateOf(false) }
 
@@ -1923,8 +2038,20 @@ private fun ReplyControlsPanel(
             Spacer(modifier = Modifier.height(6.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                // Relay orbs — tucked into the expandable drawer
+                val replyRelayUrls = reply.relayUrls.distinct().take(6)
+                if (replyRelayUrls.isNotEmpty()) {
+                    RelayOrbs(
+                        relayUrls = replyRelayUrls,
+                        onRelayClick = onRelayClick,
+                        onNavigateToRelayList = onNavigateToRelayList
+                    )
+                } else {
+                    Spacer(modifier = Modifier.width(1.dp))
+                }
                 Row(
                     modifier = Modifier
                         .background(
@@ -1960,6 +2087,10 @@ private fun ReplyControlsPanel(
                     // Likes / React button — heart icon, tap opens emoji picker
                     Box {
                         var showReactionMenu by remember { mutableStateOf(false) }
+                        // Close reaction menu on scroll
+                        LaunchedEffect(isScrolling) {
+                            if (isScrolling && showReactionMenu) showReactionMenu = false
+                        }
                         CompactModernButton(
                             icon = if (reply.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                             contentDescription = "React",
@@ -2126,16 +2257,17 @@ private fun ReplyDetailsPanel(
         exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
     ) {
         val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-            shape = RectangleShape
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                    onClick = { /* consume clicks — dead zone */ }
+                )
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
                 // Reactions section
                 if (hasReactions) {
                     var reactionsExpanded by remember { mutableStateOf(false) }
@@ -2191,57 +2323,44 @@ private fun ReplyDetailsPanel(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
                     }
-                    // Expanded: per-author reaction lines with profile pictures
+                    // Expanded: 3 latest individual reactions
                     AnimatedVisibility(visible = reactionsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                        val latestReactions = remember(detailReactionAuthors) {
+                            val flat = mutableListOf<Pair<String, String>>()
+                            detailReactionAuthors.forEach { (emoji, authors) ->
+                                authors.forEach { pubkey -> flat.add(emoji to pubkey) }
+                            }
+                            flat.takeLast(3).reversed()
+                        }
+                        val rxPubkeys = remember(latestReactions) { latestReactions.map { it.second }.distinct() }
                         var profileRevision by remember { mutableIntStateOf(0) }
-                        val allPubkeys = remember(detailReactionAuthors) { detailReactionAuthors.values.flatten().toSet() }
-                        LaunchedEffect(allPubkeys) {
-                            val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
+                        LaunchedEffect(rxPubkeys) {
+                            val uncached = rxPubkeys.filter { profileCache.getAuthor(it) == null }
                             if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
                         }
-                        LaunchedEffect(allPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
+                        LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) profileRevision++ } }
                         @Suppress("UNUSED_EXPRESSION") profileRevision
                         Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                            grouped.forEach { (emoji, _) ->
-                                val authors = detailReactionAuthors[emoji]
-                                if (!authors.isNullOrEmpty()) {
-                                    authors.take(10).forEach { pubkey ->
-                                        val author = profileCache.resolveAuthor(pubkey)
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { onProfileClick(author.id) }
-                                                .padding(vertical = 2.dp)
-                                        ) {
-                                            social.mycelium.android.ui.components.ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
-                                            Spacer(Modifier.width(6.dp))
-                                            social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                text = author.displayName.ifBlank { author.id.take(8) + "..." },
-                                                style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
-                                            Text(" reacted", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                    if (authors.size > 10) {
-                                        Text("  +${authors.size - 10} more", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                } else {
-                                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 1.dp)) {
-                                        Text(text = emoji, fontSize = 16.sp)
-                                        Spacer(Modifier.width(8.dp))
-                                        val c = detailReactionAuthors[emoji]?.size ?: 1
-                                        Text(
-                                            text = "$c reaction${if (c != 1) "s" else ""}",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
+                            latestReactions.forEach { (emoji, pubkey) ->
+                                val author = profileCache.resolveAuthor(pubkey)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp)
+                                ) {
+                                    social.mycelium.android.ui.components.ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
+                                    Spacer(Modifier.width(6.dp))
+                                    social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = author.displayName.ifBlank { author.id.take(8) + "..." },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.clickable { onProfileClick(author.id) }
+                                    )
                                 }
                             }
                         }
@@ -2285,28 +2404,27 @@ private fun ReplyDetailsPanel(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                         )
                     }
-                    // Expanded: per-author zap lines with profile pictures
+                    // Expanded: 3 latest zappers
                     AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                        val allZapPubkeys = remember(detailZapAuthors) { detailZapAuthors.distinct() }
                         var zapProfileRevision by remember { mutableIntStateOf(0) }
-                        val allZapPubkeys = remember(detailZapAuthors) { detailZapAuthors.toSet() }
                         LaunchedEffect(allZapPubkeys) {
                             val uncached = allZapPubkeys.filter { profileCache.getAuthor(it) == null }
                             if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
                         }
-                        LaunchedEffect(allZapPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
+                        LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
                         @Suppress("UNUSED_EXPRESSION") zapProfileRevision
                         Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             val sortedZapAuthors = remember(detailZapAuthors, detailZapAmountByAuthor) {
                                 detailZapAuthors.sortedByDescending { detailZapAmountByAuthor[it] ?: 0L }
                             }
-                            sortedZapAuthors.take(10).forEach { pubkey ->
+                            sortedZapAuthors.take(3).forEach { pubkey ->
                                 val author = profileCache.resolveAuthor(pubkey)
                                 val zapSats = detailZapAmountByAuthor[pubkey] ?: 0L
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .clickable { onProfileClick(author.id) }
                                         .padding(vertical = 2.dp)
                                 ) {
                                     social.mycelium.android.ui.components.ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
@@ -2317,26 +2435,20 @@ private fun ReplyDetailsPanel(
                                         color = MaterialTheme.colorScheme.primary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false)
+                                        modifier = Modifier.weight(1f, fill = false).clickable { onProfileClick(author.id) }
                                     )
                                     if (zapSats > 0) {
                                         Text(
                                             " ⚡ ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapSats)} sats",
                                             style = MaterialTheme.typography.bodySmall, color = Color(0xFFF59E0B)
                                         )
-                                    } else {
-                                        Text(" zapped", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                 }
-                            }
-                            if (detailZapAuthors.size > 10) {
-                                Text("+${detailZapAuthors.size - 10} more", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
                 }
             }
-        }
     }
 }
 
@@ -2378,6 +2490,8 @@ private fun ThreadedReplyCard(
     onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
     /** When non-null and > 0, shows "N replies in thread" badge (root-only mode). */
     collapsedChildCount: Int? = null,
+    /** When true, suppress click/longClick to prevent accidental triggers during fast fling. */
+    isScrolling: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val reply = threadedReply.reply
@@ -2449,6 +2563,7 @@ private fun ThreadedReplyCard(
                     interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                     indication = null,
                     onClick = {
+                        if (isScrolling) return@combinedClickable
                         if (state.isCollapsed) {
                             commentStates[replyKey] = state.copy(isCollapsed = false, isExpanded = true)
                         } else {
@@ -2456,6 +2571,7 @@ private fun ThreadedReplyCard(
                         }
                     },
                     onLongClick = {
+                        if (isScrolling) return@combinedClickable
                         if (canCollapse && !state.isCollapsed) {
                             commentStates[replyKey] = state.copy(isCollapsed = true, isExpanded = false)
                         }
@@ -2538,6 +2654,9 @@ private fun ThreadedReplyCard(
                             onZap = onZap,
                             onZapSettings = onZapSettings,
                             onReact = onReact,
+                            onRelayClick = onRelayClick,
+                            onNavigateToRelayList = onNavigateToRelayList,
+                            isScrolling = isScrolling,
                         )
                     }  // Column (weight 1f, padding)
 

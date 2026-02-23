@@ -14,6 +14,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import social.mycelium.android.data.Author
+import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.UserRelay
+import social.mycelium.android.repository.Nip65RelayListRepository
+import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.TopicNote
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -34,11 +39,54 @@ fun ComposeTopicReplyScreen(
     topic: TopicNote,
     onBack: () -> Unit = {},
     accountStateViewModel: AccountStateViewModel = viewModel(),
+    myAuthor: Author? = null,
+    myOutboxRelays: List<UserRelay> = emptyList(),
+    relayCategories: List<RelayCategory>? = null,
     modifier: Modifier = Modifier
 ) {
     var content by remember { mutableStateOf("") }
     var isPublishing by remember { mutableStateOf(false) }
+    var showRelayPicker by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
+
+    // Resolve target user's inbox relays from NIP-65 cache
+    val targetInboxRelays = remember(topic.author.id) {
+        val authorRelays = Nip65RelayListRepository.getCachedAuthorRelays(topic.author.id)
+        authorRelays?.readRelays ?: emptyList()
+    }
+
+    // Build relay sections with target user + our profile
+    val sections = remember(topic, myAuthor, myOutboxRelays, relayCategories, targetInboxRelays) {
+        buildRelaySections(
+            targetAuthor = topic.author,
+            targetInboxRelays = targetInboxRelays,
+            myAuthor = myAuthor,
+            myOutboxRelays = myOutboxRelays,
+            relayCategories = relayCategories ?: emptyList(),
+            noteRelayUrls = topic.relayUrls
+        )
+    }
+
+    if (showRelayPicker) {
+        RelaySelectionScreen(
+            title = "Publish reply",
+            sections = sections,
+            onConfirm = { selectedUrls ->
+                showRelayPicker = false
+                isPublishing = true
+                accountStateViewModel.publishTopicReply(
+                    content = content,
+                    topicId = topic.id,
+                    topicAuthorPubkey = topic.author.id,
+                    hashtags = topic.hashtags,
+                    relayUrls = selectedUrls
+                )
+                onBack()
+            },
+            onBack = { showRelayPicker = false }
+        )
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -63,15 +111,7 @@ fun ComposeTopicReplyScreen(
                     TextButton(
                         onClick = {
                             if (content.isNotBlank() && !isPublishing) {
-                                isPublishing = true
-                                // Publish kind:1 note with I tags and e tag
-                                accountStateViewModel.publishTopicReply(
-                                    content = content,
-                                    topicId = topic.id,
-                                    topicAuthorPubkey = topic.author.id,
-                                    hashtags = topic.hashtags
-                                )
-                                onBack()
+                                showRelayPicker = true
                             }
                         },
                         enabled = content.isNotBlank() && !isPublishing

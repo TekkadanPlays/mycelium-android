@@ -79,7 +79,7 @@ object QuotedNoteCache {
             )
             val deferred = CompletableDeferred<Pair<Event, String>>()
             val stateMachine = RelayConnectionStateMachine.getInstance()
-            val handle = stateMachine.requestTemporarySubscriptionWithRelay(relays, filter, priority = SubscriptionPriority.NORMAL) { e, relayUrl ->
+            val handle = stateMachine.requestTemporarySubscriptionWithRelay(relays, filter, priority = SubscriptionPriority.LOW) { e, relayUrl ->
                 if (e.id == eventId) deferred.complete(e to relayUrl)
             }
             // Wait until event arrives or timeout — whichever comes first

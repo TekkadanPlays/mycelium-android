@@ -37,9 +37,24 @@ class ThreadRepliesRepository {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
     private val relayStateMachine = RelayConnectionStateMachine.getInstance()
 
-    // Replies for a specific note ID
+    // Displayed replies for a specific note ID (shown in UI)
     private val _replies = MutableStateFlow<Map<String, List<ThreadReply>>>(emptyMap())
     val replies: StateFlow<Map<String, List<ThreadReply>>> = _replies.asStateFlow()
+
+    // Pending new replies that arrived after the initial load window (not yet shown)
+    private val pendingRepliesLock = Any()
+    private val _pendingReplies = mutableMapOf<String, MutableList<ThreadReply>>() // noteId -> pending replies
+    /** Total count of pending new replies for the current thread root. */
+    private val _newReplyCount = MutableStateFlow(0)
+    val newReplyCount: StateFlow<Int> = _newReplyCount.asStateFlow()
+    /** Pending reply counts per parent ID (for inline 'x new replies' buttons on individual replies). */
+    private val _newRepliesByParent = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val newRepliesByParent: StateFlow<Map<String, Int>> = _newRepliesByParent.asStateFlow()
+
+    /** Cutoff: replies arriving after this timestamp go to pending. 0 = no cutoff (initial load). */
+    @Volatile private var replyCutoffTimestampMs: Long = 0L
+    /** Set to true after the initial load window completes; new replies go to pending after this. */
+    @Volatile private var initialLoadComplete: Boolean = false
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -86,6 +101,7 @@ class ThreadRepliesRepository {
         activeSubscriptions.clear()
         connectedRelays = emptyList()
         _replies.value = emptyMap()
+        clearPendingReplies()
     }
 
     /**
@@ -95,8 +111,8 @@ class ThreadRepliesRepository {
      * @param relayUrls Optional list of relays to query (uses connected relays if not provided)
      * @param limit Maximum number of replies to fetch
      */
-    /** Tracks which root notes are kind-11 topics (for accepting kind-1 replies alongside kind-1111). */
-    private val topicRootIds = mutableSetOf<String>()
+    /** Tracks root notes that accept kind-1 replies (kind-11 topics AND kind-1 notes). */
+    private val kind1RootIds = mutableSetOf<String>()
 
     suspend fun fetchRepliesForNote(
         noteId: String,
@@ -116,6 +132,9 @@ class ThreadRepliesRepository {
 
         _isLoading.value = true
         _error.value = null
+        initialLoadComplete = false
+        replyCutoffTimestampMs = 0L
+        clearPendingReplies()
 
         // Clear all other notes from the replies map so only the current thread is tracked.
         // This prevents stale replies from lingering when navigating between threads.
@@ -128,12 +147,12 @@ class ThreadRepliesRepository {
             _replies.value = _replies.value + (noteId to emptyList())
         }
 
-        // Track kind-11 roots so handleReplyEvent knows to accept kind-1 replies too
-        if (rootKind == 11) topicRootIds.add(noteId) else topicRootIds.remove(noteId)
+        // Track roots that accept kind-1 replies (kind-11 topics AND kind-1 notes)
+        if (rootKind == 11 || rootKind == 1) kind1RootIds.add(noteId) else kind1RootIds.remove(noteId)
 
         try {
-            // For kind-11 topics, also fetch kind-1 replies alongside kind-1111
-            val replyKinds = if (rootKind == 11) listOf(1, 1111) else listOf(1111)
+            // For kind-11 topics and kind-1 notes, fetch kind-1 replies alongside kind-1111
+            val replyKinds = if (rootKind == 11 || rootKind == 1) listOf(1, 1111) else listOf(1111)
             Log.d(TAG, "Fetching kind $replyKinds replies for note ${noteId.take(8)}... from ${targetRelays.size} relays (shared client)")
 
             // Create filters for replies (NIP-22 root can be "e" or "E")
@@ -163,10 +182,12 @@ class ThreadRepliesRepository {
             activeSubscriptions[noteId] = lowerHandle
             activeSubscriptions["$noteId:root"] = upperHandle
 
-            // Clear loading after short window so UI shows live; subscription stays open for streaming replies
+            // Clear loading after short window; after this, new replies go to pending
             delay(INITIAL_LOAD_WINDOW_MS)
             _isLoading.value = false
-            Log.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} so far)")
+            initialLoadComplete = true
+            replyCutoffTimestampMs = System.currentTimeMillis()
+            Log.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} displayed, cutoff set)")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching replies: ${e.message}", e)
@@ -176,18 +197,17 @@ class ThreadRepliesRepository {
     }
 
     /**
-     * Handle incoming reply event from relay
+     * Handle incoming reply event from relay.
+     * During initial load window: replies go directly to displayed.
+     * After cutoff: new replies go to pending (user sees "y new" badge).
      */
     private fun handleReplyEvent(noteId: String, event: Event, relayUrl: String = "") {
         try {
-            // Accept kind-1111 always; accept kind-1 only when root is a kind-11 topic
-            if (event.kind == 1111 || (event.kind == 1 && noteId in topicRootIds)) {
+            // Accept kind-1111 always; accept kind-1 when root is a kind-11 topic or kind-1 note
+            if (event.kind == 1111 || (event.kind == 1 && noteId in kind1RootIds)) {
                 val reply = convertEventToThreadReply(event, relayUrl).let { r ->
                     if (r.rootNoteId == null) r.copy(rootNoteId = noteId) else r
                 }
-
-                // Add reply to the collection for this note
-                val currentReplies = _replies.value[noteId]?.toMutableList() ?: mutableListOf()
 
                 // Track which relays yielded replies (for parent note RelayOrbs enrichment)
                 if (relayUrl.isNotBlank()) {
@@ -197,29 +217,123 @@ class ThreadRepliesRepository {
                     }
                 }
 
-                val existing = currentReplies.indexOfFirst { it.id == reply.id }
-                if (existing < 0) {
-                    currentReplies.add(reply)
+                // Check if already displayed or pending (dedup)
+                val currentReplies = _replies.value[noteId] ?: emptyList()
+                if (currentReplies.any { it.id == reply.id }) {
+                    // Already displayed — just merge relay URLs if needed
+                    mergeRelayUrls(noteId, reply)
+                    return
+                }
+                val alreadyPending = synchronized(pendingRepliesLock) {
+                    _pendingReplies[noteId]?.any { it.id == reply.id } == true
+                }
+                if (alreadyPending) return
 
-                    // Update the flow with new replies (live update)
-                    _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
-
-                    // Clear loading as soon as we have at least one reply so UI shows content immediately
-                    _isLoading.value = false
-                    Log.d(TAG, "Added reply from ${reply.author.username}: ${reply.content.take(50)}... (Total: ${currentReplies.size})")
-                } else if (reply.relayUrls.isNotEmpty()) {
-                    // Same reply from a different relay — merge relay URLs
-                    val existingReply = currentReplies[existing]
-                    val merged = (existingReply.relayUrls + reply.relayUrls).distinct()
-                    if (merged.size > existingReply.relayUrls.size) {
-                        currentReplies[existing] = existingReply.copy(relayUrls = merged)
-                        _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
-                    }
+                // Route: during initial load → display immediately; after cutoff → pending
+                if (!initialLoadComplete) {
+                    addToDisplayed(noteId, reply)
+                } else {
+                    addToPending(noteId, reply)
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling reply event: ${e.message}", e)
         }
+    }
+
+    /** Add a reply directly to the displayed list (during initial load). */
+    private fun addToDisplayed(noteId: String, reply: ThreadReply) {
+        val currentReplies = (_replies.value[noteId] ?: emptyList()).toMutableList()
+        currentReplies.add(reply)
+        _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
+        _isLoading.value = false
+    }
+
+    /** Add a reply to the pending list (after initial load cutoff). */
+    private fun addToPending(noteId: String, reply: ThreadReply) {
+        synchronized(pendingRepliesLock) {
+            _pendingReplies.getOrPut(noteId) { mutableListOf() }.add(reply)
+        }
+        updatePendingCounts(noteId)
+        Log.d(TAG, "📬 Pending reply from ${reply.author.displayName}: ${reply.content.take(40)}...")
+    }
+
+    /** Merge relay URLs for an already-displayed reply (same event from different relay). */
+    private fun mergeRelayUrls(noteId: String, reply: ThreadReply) {
+        if (reply.relayUrls.isEmpty()) return
+        val currentReplies = (_replies.value[noteId] ?: return).toMutableList()
+        val idx = currentReplies.indexOfFirst { it.id == reply.id }
+        if (idx < 0) return
+        val existing = currentReplies[idx]
+        val merged = (existing.relayUrls + reply.relayUrls).distinct()
+        if (merged.size > existing.relayUrls.size) {
+            currentReplies[idx] = existing.copy(relayUrls = merged)
+            _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
+        }
+    }
+
+    /** Update pending count flows after adding to pending. */
+    private fun updatePendingCounts(noteId: String) {
+        synchronized(pendingRepliesLock) {
+            val pending = _pendingReplies[noteId] ?: emptyList()
+            _newReplyCount.value = pending.size
+            // Count per parent: replies whose replyToId is the root note or another reply
+            val byParent = mutableMapOf<String, Int>()
+            for (r in pending) {
+                val parentId = r.replyToId ?: noteId // root-level replies have no replyToId
+                byParent[parentId] = (byParent[parentId] ?: 0) + 1
+            }
+            _newRepliesByParent.value = byParent
+        }
+    }
+
+    /**
+     * Merge ALL pending replies into the displayed list (pull-to-refresh).
+     */
+    fun applyPendingReplies(noteId: String) {
+        val toMerge: List<ThreadReply>
+        synchronized(pendingRepliesLock) {
+            toMerge = _pendingReplies[noteId]?.toList() ?: return
+            _pendingReplies.remove(noteId)
+        }
+        if (toMerge.isEmpty()) return
+        val currentReplies = (_replies.value[noteId] ?: emptyList()).toMutableList()
+        val existingIds = currentReplies.map { it.id }.toSet()
+        toMerge.filter { it.id !in existingIds }.forEach { currentReplies.add(it) }
+        _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
+        updatePendingCounts(noteId)
+        Log.d(TAG, "Applied ${toMerge.size} pending replies for ${noteId.take(8)}")
+    }
+
+    /**
+     * Merge pending replies for a specific parent into the displayed list
+     * (inline "load new replies" button on a specific reply chain).
+     */
+    fun applyPendingRepliesForParent(noteId: String, parentId: String) {
+        val toMerge: List<ThreadReply>
+        synchronized(pendingRepliesLock) {
+            val pending = _pendingReplies[noteId] ?: return
+            val (forParent, rest) = pending.partition { (it.replyToId ?: noteId) == parentId }
+            toMerge = forParent
+            if (rest.isEmpty()) _pendingReplies.remove(noteId)
+            else _pendingReplies[noteId] = rest.toMutableList()
+        }
+        if (toMerge.isEmpty()) return
+        val currentReplies = (_replies.value[noteId] ?: emptyList()).toMutableList()
+        val existingIds = currentReplies.map { it.id }.toSet()
+        toMerge.filter { it.id !in existingIds }.forEach { currentReplies.add(it) }
+        _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
+        updatePendingCounts(noteId)
+        Log.d(TAG, "Applied ${toMerge.size} pending replies for parent ${parentId.take(8)} in ${noteId.take(8)}")
+    }
+
+    /** Clear all pending replies and reset counts. */
+    private fun clearPendingReplies() {
+        synchronized(pendingRepliesLock) {
+            _pendingReplies.clear()
+        }
+        _newReplyCount.value = 0
+        _newRepliesByParent.value = emptyMap()
     }
 
     /**
@@ -268,6 +382,18 @@ class ThreadRepliesRepository {
             relayUrls = if (relayUrl.isNotBlank()) listOf(relayUrl) else emptyList(),
             kind = event.kind
         )
+    }
+
+    /**
+     * Inject a locally published reply directly into the replies map for instant UI update.
+     * Bypasses the relay round-trip so the user sees their own reply immediately.
+     *
+     * @param rootNoteId The root note this reply belongs to (must match an active subscription).
+     * @param event The signed Event that was just published.
+     */
+    fun injectLocalReply(rootNoteId: String, event: Event) {
+        handleReplyEvent(rootNoteId, event, "")
+        Log.d(TAG, "📌 Injected local reply: ${event.id.take(8)} into thread ${rootNoteId.take(8)}")
     }
 
     /**

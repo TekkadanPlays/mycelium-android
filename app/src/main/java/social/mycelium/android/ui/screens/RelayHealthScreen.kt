@@ -54,6 +54,13 @@ import coil.request.ImageRequest
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayInformation
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import com.example.cybin.relay.RelaySlotSnapshot
+import kotlinx.coroutines.delay
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.relay.RelayHealthInfo
@@ -95,12 +102,15 @@ fun RelayHealthScreen(
     onOpenRelayManager: () -> Unit,
     onOpenRelayDiscovery: () -> Unit = {},
     onOpenRelayLog: (String) -> Unit = {},
+    onOpenRelayUsers: (String) -> Unit = {},
+    onOpenNeedsAttention: () -> Unit = {},
     onProfileClick: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val healthMap by RelayHealthTracker.healthByRelay.collectAsState()
     val flaggedRelays by RelayHealthTracker.flaggedRelays.collectAsState()
     val blockedRelays by RelayHealthTracker.blockedRelays.collectAsState()
+    val publishReports by RelayHealthTracker.publishReports.collectAsState()
     val perRelayState by RelayConnectionStateMachine.getInstance().perRelayState.collectAsState()
     val profileCache = remember { ProfileMetadataCache.getInstance() }
     val scope = rememberCoroutineScope()
@@ -206,6 +216,25 @@ fun RelayHealthScreen(
             .sortedByDescending { it.health?.eventsReceived ?: 0 }
     }
 
+    // ── Live slot snapshots (refresh every 500ms for real-time feel) ──
+    val relayStateMachine = remember { RelayConnectionStateMachine.getInstance() }
+    var slotSnapshots by remember { mutableStateOf<List<RelaySlotSnapshot>>(emptyList()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            slotSnapshots = relayStateMachine.getRelaySlotSnapshots()
+            delay(500)
+        }
+    }
+    // Periodically release expired auto-blocks (every 60s)
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(60_000)
+            RelayHealthTracker.releaseExpiredAutoBlocks()
+        }
+    }
+    val slotsByUrl = remember(slotSnapshots) { slotSnapshots.associateBy { it.url.trimEnd('/') } }
+
+    val autoBlockExpiryMap by RelayHealthTracker.autoBlockExpiryMap.collectAsState()
     val troubleRelays = remember(flaggedRelays, blockedRelays) {
         (flaggedRelays + blockedRelays).distinct().sorted()
     }
@@ -213,10 +242,24 @@ fun RelayHealthScreen(
     val totalTracked = healthMap.size
     val followingRelayCount = followingOutbox.size + followingInbox.size
 
+    // Aggregate stats for overview card
+    val totalEvents = remember(healthMap) { healthMap.values.sumOf { it.eventsReceived } }
+    val totalActiveSubs = remember(slotSnapshots) { slotSnapshots.sumOf { it.activeCount } }
+    val totalQueuedSubs = remember(slotSnapshots) { slotSnapshots.sumOf { it.queuedCount } }
+    val avgLatency = remember(healthMap) {
+        val latencies = healthMap.values.filter { it.avgLatencyMs > 0 }.map { it.avgLatencyMs }
+        if (latencies.isNotEmpty()) latencies.average().toLong() else 0L
+    }
+    val healthScore = remember(connectedCount, totalTracked, troubleRelays) {
+        if (totalTracked == 0) 0f
+        else ((connectedCount.toFloat() / totalTracked) * 100f * (1f - troubleRelays.size.toFloat() / totalTracked.coerceAtLeast(1))).coerceIn(0f, 100f)
+    }
+
     val topAppBarState = rememberTopAppBarState()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
     // Section expand state
+    var publishesExpanded by remember { mutableStateOf(true) }
     var myRelaysExpanded by remember { mutableStateOf(true) }
     var followingOutboxExpanded by remember { mutableStateOf(true) }
     var followingInboxExpanded by remember { mutableStateOf(false) }
@@ -271,6 +314,7 @@ fun RelayHealthScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .clickable(onClick = onOpenNeedsAttention)
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -285,116 +329,53 @@ fun RelayHealthScreen(
                             "${troubleRelays.size} relay${if (troubleRelays.size != 1) "s" else ""} need attention",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            Icons.Filled.ChevronRight,
+                            contentDescription = "View all",
+                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.6f),
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
-                troubleRelays.forEach { url ->
-                    item(key = "trouble_$url") {
-                        val health = healthMap[url]
-                        val isBlocked = url in blockedRelays
-                        val isFlagged = url in flaggedRelays
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 3.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                            ) {
-                                Box(
-                                    Modifier
-                                        .size(8.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.error)
-                                )
-                                Spacer(Modifier.width(12.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        url.removePrefix("wss://").removePrefix("ws://"),
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    val statusText = when {
-                                        isBlocked -> "Blocked by you"
-                                        health != null -> "${health.consecutiveFailures} consecutive failures" +
-                                            (health.lastError?.let { " — ${it.take(40)}" } ?: "")
-                                        else -> "Flagged"
-                                    }
-                                    Text(
-                                        statusText,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f),
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                if (isBlocked) {
-                                    TextButton(
-                                        onClick = { RelayHealthTracker.unblockRelay(url) },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                        modifier = Modifier.height(28.dp)
-                                    ) { Text("Unblock", style = MaterialTheme.typography.labelSmall) }
-                                } else if (isFlagged) {
-                                    TextButton(
-                                        onClick = { RelayHealthTracker.blockRelay(url) },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                        modifier = Modifier.height(28.dp),
-                                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                                    ) { Text("Block", style = MaterialTheme.typography.labelSmall) }
-                                    TextButton(
-                                        onClick = { RelayHealthTracker.unflagRelay(url) },
-                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                        modifier = Modifier.height(28.dp)
-                                    ) { Text("Dismiss", style = MaterialTheme.typography.labelSmall) }
-                                }
-                            }
-                        }
-                    }
-                }
                 item(key = "attention_spacer") {
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
                 }
             }
 
-            // ── Summary Stats Row ──
-            item(key = "summary") {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    StatPill(
-                        label = "Connected",
-                        value = "$connectedCount",
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatPill(
-                        label = "Tracked",
-                        value = "$totalTracked",
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatPill(
-                        label = "Following",
-                        value = "$followingRelayCount",
-                        color = if (followingRelayCount > 0) Color(0xFF4CAF50) else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.weight(1f)
-                    )
-                    StatPill(
-                        label = "Flagged",
-                        value = "${flaggedRelays.size + blockedRelays.size}",
-                        color = if (flaggedRelays.isNotEmpty() || blockedRelays.isNotEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.weight(1f)
+            // ── Recent Publishes (publish failure reports) ──
+            if (publishReports.isNotEmpty()) {
+                item(key = "section_publishes") {
+                    SectionHeader(
+                        title = "Recent Publishes",
+                        count = publishReports.size,
+                        icon = Icons.Outlined.Publish,
+                        expanded = publishesExpanded,
+                        onToggle = { publishesExpanded = !publishesExpanded }
                     )
                 }
+                if (publishesExpanded) {
+                    items(publishReports.take(20), key = { "pub_${it.eventId}" }) { report ->
+                        PublishReportRow(report = report)
+                    }
+                }
+            }
+
+            // ── Network Overview Card ──
+            item(key = "overview") {
+                NetworkOverviewCard(
+                    healthScore = healthScore,
+                    connectedCount = connectedCount,
+                    totalTracked = totalTracked,
+                    totalEvents = totalEvents,
+                    totalActiveSubs = totalActiveSubs,
+                    totalQueuedSubs = totalQueuedSubs,
+                    avgLatency = avgLatency,
+                    troubleCount = troubleRelays.size,
+                    followingRelayCount = followingRelayCount
+                )
             }
 
             // ── Loading indicator for NIP-65 batch fetch ──
@@ -438,10 +419,12 @@ fun RelayHealthScreen(
                         RelayDirectoryRow(
                             entry = entry,
                             liveStatus = perRelayState[entry.url],
+                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
                             nip11 = nip11,
                             profileCache = profileCache,
                             profileRevision = profileRevision,
                             onRelayClick = { onOpenRelayLog(entry.url) },
+                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
                             onProfileClick = onProfileClick,
                             modifier = Modifier.animateItem()
                         )
@@ -465,10 +448,12 @@ fun RelayHealthScreen(
                         RelayDirectoryRow(
                             entry = entry,
                             liveStatus = perRelayState[entry.url],
+                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
                             nip11 = nip11,
                             profileCache = profileCache,
                             profileRevision = profileRevision,
                             onRelayClick = { onOpenRelayLog(entry.url) },
+                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
                             onProfileClick = onProfileClick,
                             modifier = Modifier.animateItem()
                         )
@@ -492,10 +477,12 @@ fun RelayHealthScreen(
                         RelayDirectoryRow(
                             entry = entry,
                             liveStatus = perRelayState[entry.url],
+                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
                             nip11 = nip11,
                             profileCache = profileCache,
                             profileRevision = profileRevision,
                             onRelayClick = { onOpenRelayLog(entry.url) },
+                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
                             onProfileClick = onProfileClick,
                             modifier = Modifier.animateItem()
                         )
@@ -519,10 +506,12 @@ fun RelayHealthScreen(
                         RelayDirectoryRow(
                             entry = entry,
                             liveStatus = perRelayState[entry.url],
+                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
                             nip11 = nip11,
                             profileCache = profileCache,
                             profileRevision = profileRevision,
                             onRelayClick = { onOpenRelayLog(entry.url) },
+                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
                             onProfileClick = onProfileClick,
                             modifier = Modifier.animateItem()
                         )
@@ -546,10 +535,12 @@ fun RelayHealthScreen(
                         RelayDirectoryRow(
                             entry = entry,
                             liveStatus = perRelayState[entry.url],
+                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
                             nip11 = nip11,
                             profileCache = profileCache,
                             profileRevision = profileRevision,
                             onRelayClick = { onOpenRelayLog(entry.url) },
+                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
                             onProfileClick = onProfileClick,
                             modifier = Modifier.animateItem()
                         )
@@ -592,6 +583,125 @@ fun RelayHealthScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Publish report row ──
+
+@Composable
+private fun PublishReportRow(report: RelayHealthTracker.PublishReport) {
+    var expanded by remember { mutableStateOf(false) }
+    val kindLabel = when (report.kind) {
+        1 -> "Note"
+        7 -> "Reaction"
+        11 -> "Topic"
+        1111 -> "Reply"
+        6 -> "Repost"
+        else -> "Kind ${report.kind}"
+    }
+    val ageMs = System.currentTimeMillis() - report.timestamp
+    val timeAgo = when {
+        ageMs < 60_000 -> "just now"
+        ageMs < 3_600_000 -> "${ageMs / 60_000}m ago"
+        ageMs < 86_400_000 -> "${ageMs / 3_600_000}h ago"
+        else -> "${ageMs / 86_400_000}d ago"
+    }
+    val hasFailures = report.hasFailures
+    val containerColor = if (hasFailures)
+        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+    else
+        MaterialTheme.colorScheme.surfaceContainerLow
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp)
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(10.dp),
+        color = containerColor
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Status dot
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (hasFailures) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary
+                        )
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = kindLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "${report.successCount}/${report.targetRelayCount} OK" +
+                            if (hasFailures) " · ${report.failureCount} failed" else "",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (hasFailures) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Text(
+                    text = timeAgo,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.width(4.dp))
+                Icon(
+                    Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    modifier = Modifier
+                        .size(16.dp)
+                        .rotate(if (expanded) 0f else -90f),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
+            }
+
+            // Expanded: per-relay results
+            AnimatedVisibility(visible = expanded) {
+                Column(modifier = Modifier.padding(top = 6.dp)) {
+                    report.results.forEach { result ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp, horizontal = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                if (result.success) Icons.Filled.CheckCircle else Icons.Filled.Cancel,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                                tint = if (result.success) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.error
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = result.relayUrl.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (result.message.isNotBlank()) {
+                                Text(
+                                    text = result.message.take(30),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -789,35 +899,279 @@ private fun RelayIcon(
     }
 }
 
-// ── Stat pill (summary row) ──
+// ── Network Overview Card ──
 
 @Composable
-private fun StatPill(
+private fun NetworkOverviewCard(
+    healthScore: Float,
+    connectedCount: Int,
+    totalTracked: Int,
+    totalEvents: Long,
+    totalActiveSubs: Int,
+    totalQueuedSubs: Int,
+    avgLatency: Long,
+    troubleCount: Int,
+    followingRelayCount: Int
+) {
+    val scoreColor = when {
+        healthScore >= 80f -> Color(0xFF4CAF50)
+        healthScore >= 50f -> Color(0xFFFFA726)
+        healthScore > 0f -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val statusLabel = when {
+        totalTracked == 0 -> "No relays"
+        healthScore >= 80f -> "Healthy"
+        healthScore >= 50f -> "Degraded"
+        troubleCount > 0 -> "Issues"
+        else -> "Connecting"
+    }
+    val animatedScore by animateFloatAsState(
+        targetValue = healthScore / 100f,
+        animationSpec = tween(800),
+        label = "healthScore"
+    )
+    val animatedColor by animateColorAsState(
+        targetValue = scoreColor,
+        animationSpec = tween(500),
+        label = "scoreColor"
+    )
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 1.dp
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Top row: health ring + status + connection count
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Health score ring
+                Box(modifier = Modifier.size(56.dp), contentAlignment = Alignment.Center) {
+                    val trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    Canvas(modifier = Modifier.size(56.dp)) {
+                        val strokeWidth = 6.dp.toPx()
+                        val arcSize = size.width - strokeWidth
+                        val topLeft = Offset(strokeWidth / 2, strokeWidth / 2)
+                        drawArc(
+                            color = trackColor,
+                            startAngle = -90f,
+                            sweepAngle = 360f,
+                            useCenter = false,
+                            topLeft = topLeft,
+                            size = Size(arcSize, arcSize),
+                            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                        )
+                        drawArc(
+                            color = animatedColor,
+                            startAngle = -90f,
+                            sweepAngle = animatedScore * 360f,
+                            useCenter = false,
+                            topLeft = topLeft,
+                            size = Size(arcSize, arcSize),
+                            style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
+                        )
+                    }
+                    Text(
+                        text = "${healthScore.toInt()}",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = animatedColor
+                    )
+                }
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = statusLabel,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = animatedColor
+                    )
+                    Text(
+                        text = "$connectedCount / $totalTracked relays connected",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (troubleCount > 0) {
+                        Text(
+                            text = "$troubleCount need${if (troubleCount == 1) "s" else ""} attention",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(14.dp))
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+            Spacer(Modifier.height(10.dp))
+
+            // Stats grid: 2 rows × 3 columns
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                OverviewStat(
+                    label = "Events",
+                    value = formatCount(totalEvents),
+                    icon = Icons.Outlined.Email
+                )
+                OverviewStat(
+                    label = "Subs",
+                    value = "$totalActiveSubs",
+                    icon = Icons.Outlined.Sync,
+                    accent = if (totalQueuedSubs > 0) Color(0xFFFFA726) else null,
+                    badge = if (totalQueuedSubs > 0) "+$totalQueuedSubs queued" else null
+                )
+                OverviewStat(
+                    label = "Latency",
+                    value = if (avgLatency > 0) "${avgLatency}ms" else "—",
+                    icon = Icons.Outlined.Speed,
+                    accent = when {
+                        avgLatency in 1..199 -> Color(0xFF4CAF50)
+                        avgLatency in 200..499 -> Color(0xFFFFA726)
+                        avgLatency >= 500 -> MaterialTheme.colorScheme.error
+                        else -> null
+                    }
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                OverviewStat(
+                    label = "Following",
+                    value = "$followingRelayCount",
+                    icon = Icons.Outlined.People
+                )
+                OverviewStat(
+                    label = "Flagged",
+                    value = "$troubleCount",
+                    icon = Icons.Outlined.Warning,
+                    accent = if (troubleCount > 0) MaterialTheme.colorScheme.error else null
+                )
+                OverviewStat(
+                    label = "Slots",
+                    value = "$totalActiveSubs / ${totalActiveSubs + totalQueuedSubs}",
+                    icon = Icons.Outlined.ViewWeek
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OverviewStat(
     label: String,
     value: String,
-    color: Color,
-    modifier: Modifier = Modifier
+    icon: ImageVector,
+    accent: Color? = null,
+    badge: String? = null
 ) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    val color = accent ?: MaterialTheme.colorScheme.onSurface
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.padding(vertical = 4.dp).widthIn(min = 80.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = color.copy(alpha = 0.7f)
+        )
+        Spacer(Modifier.height(2.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = color
+        )
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (badge != null) {
             Text(
-                text = value,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = color
-            )
-            Text(
-                text = label,
+                text = badge,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
+                color = accent ?: MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 9.sp
+            )
+        }
+    }
+}
+
+// ── Slot utilization bar ──
+
+@Composable
+private fun SlotUtilizationBar(snapshot: RelaySlotSnapshot) {
+    val limit = snapshot.effectiveLimit.coerceAtLeast(1)
+    val activeFraction = (snapshot.activeCount.toFloat() / limit).coerceIn(0f, 1f)
+    val eoseFraction = (snapshot.eoseCount.toFloat() / limit).coerceIn(0f, activeFraction)
+    val activeNonEose = activeFraction - eoseFraction
+
+    val activeColor = MaterialTheme.colorScheme.primary
+    val eoseColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+    val trackColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(trackColor)
+        ) {
+            // EOSE'd portion (lighter)
+            if (eoseFraction > 0f) {
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(eoseFraction)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(eoseColor)
+                )
+            }
+            // Active (non-EOSE) portion on top
+            if (activeFraction > 0f) {
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(activeFraction)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                0f to eoseColor,
+                                eoseFraction / activeFraction.coerceAtLeast(0.01f) to eoseColor,
+                                eoseFraction / activeFraction.coerceAtLeast(0.01f) to activeColor,
+                                1f to activeColor
+                            )
+                        )
+                )
+            }
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "${snapshot.activeCount}/${snapshot.effectiveLimit}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 10.sp
+        )
+        if (snapshot.queuedCount > 0) {
+            Spacer(Modifier.width(4.dp))
+            Text(
+                text = "+${snapshot.queuedCount}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Color(0xFFFFA726),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 10.sp
             )
         }
     }
@@ -829,10 +1183,12 @@ private fun StatPill(
 private fun RelayDirectoryRow(
     entry: RelayDirectoryEntry,
     liveStatus: RelayEndpointStatus?,
+    slotSnapshot: RelaySlotSnapshot?,
     nip11: Nip11CacheManager,
     profileCache: ProfileMetadataCache,
     profileRevision: Int,
     onRelayClick: () -> Unit,
+    onOpenRelayUsers: () -> Unit = {},
     onProfileClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -863,8 +1219,6 @@ private fun RelayDirectoryRow(
     val relayInfo = remember(url) { nip11.getCachedRelayInfo(url) }
     val displayName = relayInfo?.name?.takeIf { it.isNotBlank() }
         ?: url.removePrefix("wss://").removePrefix("ws://")
-
-    var usersExpanded by remember { mutableStateOf(false) }
 
     Column(modifier = modifier) {
         Surface(
@@ -938,11 +1292,22 @@ private fun RelayDirectoryRow(
                                 )
                             }
                             if (health != null && health.avgLatencyMs > 0) {
+                                val latColor = when {
+                                    health.avgLatencyMs < 200 -> Color(0xFF4CAF50)
+                                    health.avgLatencyMs < 500 -> Color(0xFFFFA726)
+                                    else -> MaterialTheme.colorScheme.error
+                                }
                                 MetricLabel(
                                     icon = Icons.Outlined.Speed,
-                                    text = "${health.avgLatencyMs}ms"
+                                    text = "${health.avgLatencyMs}ms",
+                                    tint = latColor
                                 )
                             }
+                        }
+                        // Slot utilization bar
+                        if (slotSnapshot != null && slotSnapshot.effectiveLimit > 0) {
+                            Spacer(Modifier.height(4.dp))
+                            SlotUtilizationBar(snapshot = slotSnapshot)
                         }
                     }
 
@@ -967,13 +1332,13 @@ private fun RelayDirectoryRow(
                         }
                     } else if (totalUsers > 0) {
                         IconButton(
-                            onClick = { usersExpanded = !usersExpanded },
+                            onClick = onOpenRelayUsers,
                             modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
-                                if (usersExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = if (usersExpanded) "Collapse" else "Show users",
-                                modifier = Modifier.size(20.dp),
+                                Icons.Filled.ChevronRight,
+                                contentDescription = "View users",
+                                modifier = Modifier.size(18.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
                             )
                         }
@@ -984,68 +1349,6 @@ private fun RelayDirectoryRow(
                             modifier = Modifier.size(18.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
                         )
-                    }
-                }
-
-                // Expandable user list
-                AnimatedVisibility(
-                    visible = usersExpanded && totalUsers > 0,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    val allUsers = remember(outboxUsers, inboxUsers) {
-                        (outboxUsers + inboxUsers).distinct()
-                    }
-                    val outboxSet = remember(outboxUsers) { outboxUsers.toSet() }
-                    val inboxSet = remember(inboxUsers) { inboxUsers.toSet() }
-
-                    Column(
-                        modifier = Modifier.padding(start = 48.dp, top = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        allUsers.take(20).forEach { pk ->
-                            @Suppress("UNUSED_EXPRESSION") profileRevision
-                            val author = remember(pk, profileRevision) {
-                                profileCache.getAuthor(normalizeAuthorIdForCache(pk))
-                                    ?: Author(id = pk, username = pk.take(8) + "…", displayName = pk.take(8) + "…")
-                            }
-                            val isWriter = pk in outboxSet
-                            val isReader = pk in inboxSet
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onProfileClick(pk) }
-                                    .padding(vertical = 3.dp)
-                            ) {
-                                ProfilePicture(author = author, size = 22.dp, onClick = { onProfileClick(pk) })
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = author.displayName.ifBlank { author.username.ifBlank { pk.take(8) + "…" } },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                if (isWriter) {
-                                    Spacer(Modifier.width(4.dp))
-                                    StatusBadge(text = "w", color = MaterialTheme.colorScheme.primary)
-                                }
-                                if (isReader) {
-                                    Spacer(Modifier.width(4.dp))
-                                    StatusBadge(text = "r", color = Color(0xFF4CAF50))
-                                }
-                            }
-                        }
-                        if (allUsers.size > 20) {
-                            Text(
-                                text = "… and ${allUsers.size - 20} more",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(vertical = 4.dp)
-                            )
-                        }
                     }
                 }
             }

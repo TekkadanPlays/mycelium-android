@@ -369,7 +369,7 @@ object Nip65RelayListRepository {
             RelayHealthTracker.recordConnectionAttempt(indexerUrl)
 
             val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscriptionWithRelay(listOf(indexerUrl), filter, priority = SubscriptionPriority.NORMAL) { event, _ ->
+                .requestTemporarySubscriptionWithRelay(listOf(indexerUrl), filter, priority = SubscriptionPriority.LOW) { event, _ ->
                     if (event.kind == KIND_RELAY_LIST && event.pubKey == pubkeyHex) {
                         val current = bestEvent
                         if (current == null || event.createdAt > current.createdAt) {

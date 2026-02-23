@@ -190,11 +190,16 @@ fun AdaptiveHeader(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
+                                val caretRotation by animateFloatAsState(
+                                    targetValue = if (logoMenuExpanded) 180f else 0f,
+                                    animationSpec = tween(250),
+                                    label = "caret_rotation"
+                                )
                                 Icon(
                                     imageVector = Icons.Default.KeyboardArrowDown,
                                     contentDescription = "Feed options",
                                     tint = MaterialTheme.colorScheme.onSurface,
-                                    modifier = Modifier.size(20.dp)
+                                    modifier = Modifier.size(20.dp).rotate(caretRotation)
                                 )
                             }
                             // Adaptive logo dropdown menu

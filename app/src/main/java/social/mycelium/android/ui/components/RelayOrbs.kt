@@ -49,8 +49,12 @@ import social.mycelium.android.data.RelayInformation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Relay URLs for display (relayUrls if set, else single relayUrl). */
-fun Note.displayRelayUrls(): List<String> = relayUrls.ifEmpty { listOfNotNull(relayUrl) }.distinct()
+/** Relay URLs for display (relayUrls if set, else single relayUrl). Normalizes trailing slashes for dedup. */
+fun Note.displayRelayUrls(): List<String> {
+    val raw = relayUrls.ifEmpty { listOfNotNull(relayUrl) }
+    val seen = mutableSetOf<String>()
+    return raw.filter { url -> seen.add(url.trimEnd('/').lowercase()) }
+}
 
 /** Max orbs shown in the stacked group before showing a "+N" badge. */
 private const val MAX_VISIBLE_ORBS = 3

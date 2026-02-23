@@ -69,8 +69,9 @@ object MuteListRepository {
         )
         muteHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        muteHandle = stateMachine.requestTemporarySubscription(
-            relayUrls, filter, priority = SubscriptionPriority.LOW
+        muteHandle = stateMachine.requestOneShotSubscription(
+            relayUrls, filter, priority = SubscriptionPriority.LOW,
+            settleMs = 500L, maxWaitMs = 6_000L,
         ) { event ->
             if (event.kind == KIND_MUTE_LIST && event.pubKey.equals(pubkey, ignoreCase = true)) {
                 // Keep the latest version (highest created_at)
@@ -81,7 +82,7 @@ object MuteListRepository {
                 }
             }
         }
-        Log.d(TAG, "Fetching mute list for ${pubkey.take(8)} on ${relayUrls.size} relays")
+        Log.d(TAG, "Fetching mute list (one-shot) for ${pubkey.take(8)} on ${relayUrls.size} relays")
     }
 
     private fun parseMuteList(event: Event) {

@@ -425,7 +425,7 @@ class RelayManagementViewModel(
     fun activateProfile(profileId: String) {
         _uiState.update { state ->
             state.copy(relayProfiles = state.relayProfiles.map {
-                it.copy(isActive = it.id == profileId)
+                if (it.id == profileId) it.copy(isActive = !it.isActive) else it
             })
         }
         saveToStorage()

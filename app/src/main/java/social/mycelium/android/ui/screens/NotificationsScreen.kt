@@ -175,12 +175,11 @@ fun NotificationsScreen(
                 it.type == NotificationType.REPLY && (it.replyKind == null || it.replyKind == 1)
             },
             NotifTab("Threads", { Icon(Icons.Outlined.Forum, null, modifier = Modifier.size(18.dp)) }) {
-                it.type == NotificationType.REPLY && it.replyKind == 1111 &&
-                    it.targetNote?.kind == 11 && myPubkeyHex != null &&
-                    normalizeAuthorIdForCache(it.targetNote!!.author.id) == myPubkeyHex
+                // After enrichment, replyKind is set to 11 for kind-1111 replies targeting our kind-11 threads
+                it.type == NotificationType.REPLY && it.replyKind == 11
             },
             NotifTab("Comments", { Icon(Icons.Outlined.ChatBubble, null, modifier = Modifier.size(18.dp)) }) {
-                it.type == NotificationType.REPLY && it.replyKind == 1111
+                it.type == NotificationType.REPLY && (it.replyKind == 1111 || it.replyKind == 11)
             },
             NotifTab("Likes", { Icon(Icons.Default.Favorite, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.LIKE },
             NotifTab("Zaps", { Icon(Icons.Default.Bolt, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.ZAP },
@@ -206,9 +205,11 @@ fun NotificationsScreen(
     LaunchedEffect(selectedTabIndex) {
         if (pagerState.currentPage != selectedTabIndex) pagerState.animateScrollToPage(selectedTabIndex)
     }
-    // Sync: pager swipe -> external tab selection
-    LaunchedEffect(pagerState.currentPage) {
-        if (pagerState.currentPage != selectedTabIndex) onTabSelected(pagerState.currentPage)
+    // Sync: pager swipe -> external tab selection (use settledPage to avoid firing every animation frame)
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            if (page != selectedTabIndex) onTabSelected(page)
+        }
     }
     // Scroll to top when pager settles on a new page (after animation completes)
     LaunchedEffect(pagerState) {
@@ -244,27 +245,31 @@ fun NotificationsScreen(
                     },
                     actions = {
                         val unseenInTab = tabUnseenCounts.getOrElse(selectedTabIndex) { 0 }
-                        if (unseenInTab > 0) {
-                            IconButton(onClick = {
-                                if (selectedTabIndex == 0) {
-                                    NotificationsRepository.markAllAsSeen()
-                                } else {
-                                    val tabFilter = tabs[selectedTabIndex].filter
-                                    allNotifications.filter(tabFilter).forEach { NotificationsRepository.markAsSeen(it.id) }
-                                }
-                            }) {
-                                Icon(
-                                    Icons.Outlined.DoneAll,
-                                    contentDescription = "Mark all as read",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                        }
                         IconButton(onClick = onNavigateToSettings) {
                             Icon(
                                 Icons.Outlined.Settings,
                                 contentDescription = "Notification settings",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                if (unseenInTab > 0) {
+                                    if (selectedTabIndex == 0) {
+                                        NotificationsRepository.markAllAsSeen()
+                                    } else {
+                                        val tabFilter = tabs[selectedTabIndex].filter
+                                        allNotifications.filter(tabFilter).forEach { NotificationsRepository.markAsSeen(it.id) }
+                                    }
+                                }
+                            },
+                            enabled = unseenInTab > 0
+                        ) {
+                            Icon(
+                                Icons.Outlined.DoneAll,
+                                contentDescription = "Mark all as read",
+                                tint = if (unseenInTab > 0) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.outlineVariant
                             )
                         }
                     },
@@ -280,7 +285,7 @@ fun NotificationsScreen(
                 // Scrollable tab row
                 @Suppress("DEPRECATION")
                 ScrollableTabRow(
-                    selectedTabIndex = selectedTabIndex,
+                    selectedTabIndex = pagerState.currentPage,
                     edgePadding = 12.dp,
                     containerColor = MaterialTheme.colorScheme.surface,
                     contentColor = MaterialTheme.colorScheme.onSurface,
@@ -294,7 +299,7 @@ fun NotificationsScreen(
                     tabs.forEachIndexed { index, tab ->
                         val unseenForTab = tabUnseenCounts.getOrElse(index) { 0 }
                         Tab(
-                            selected = selectedTabIndex == index,
+                            selected = pagerState.currentPage == index,
                             onClick = { coroutineScope.launch { pagerState.animateScrollToPage(index) } },
                             text = {
                                 Box {
@@ -325,26 +330,58 @@ fun NotificationsScreen(
             }
         }
     ) { paddingValues ->
+        // Pre-compute filtered + grouped lists per tab outside the pager.
+        // This avoids re-filtering inside each page lambda on every recomposition.
+        val filteredByTab = remember(allNotifications) {
+            Array(tabs.size) { tabIdx -> allNotifications.filter(tabs[tabIdx].filter) }
+        }
+        val groupedByTab = remember(filteredByTab) {
+            Array(tabs.size) { tabIdx -> filteredByTab[tabIdx].groupBy { timeGroupFor(it.sortTimestamp) } }
+        }
+
+        // Threads tab (index 2): condensed per-thread grouping
+        val threadsTabIndex = 2
+        val threadGroups = remember(filteredByTab) {
+            val threadsNotifs = filteredByTab.getOrElse(threadsTabIndex) { emptyList() }
+            threadsNotifs
+                .groupBy { it.rootNoteId ?: it.id }
+                .map { (rootId, notifs) ->
+                    val sorted = notifs.sortedByDescending { it.sortTimestamp }
+                    val uniqueAuthors = notifs.mapNotNull { it.author }.distinctBy { it.id }
+                    val latestTs = sorted.first().sortTimestamp
+                    val targetNote = notifs.firstNotNullOfOrNull { it.targetNote }
+                    ThreadSummary(
+                        rootNoteId = rootId,
+                        replyCount = notifs.size,
+                        latestTimestamp = latestTs,
+                        replierAuthors = uniqueAuthors.take(5),
+                        latestReply = sorted.first(),
+                        targetNote = targetNote,
+                        allNotifIds = notifs.map { it.id },
+                        replyKind = sorted.first().replyKind ?: 11,
+                        targetNoteFromAny = notifs.firstNotNullOfOrNull { it.targetNote }
+                    )
+                }
+                .sortedByDescending { it.latestTimestamp }
+        }
+
         HorizontalPager(
             state = pagerState,
             modifier = modifier
                 .fillMaxSize()
                 .consumeWindowInsets(paddingValues)
                 .padding(paddingValues),
-            beyondViewportPageCount = 1
+            beyondViewportPageCount = 1,
+            key = { it }
         ) { page ->
-            val pageFilter = tabs[page].filter
-            val filteredNotifications = remember(allNotifications, page) {
-                allNotifications.filter(pageFilter)
-            }
-            val grouped = remember(filteredNotifications) {
-                filteredNotifications.groupBy { timeGroupFor(it.sortTimestamp) }
-            }
+            val filteredNotifications = filteredByTab[page]
+            val grouped = groupedByTab[page]
             val pageListState = tabListStates.getOrElse(page) { tabListStates[0] }
 
             LazyColumn(
                 state = pageListState,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(bottom = 80.dp)
             ) {
                 if (filteredNotifications.isEmpty()) {
                     item(key = "empty") {
@@ -372,65 +409,90 @@ fun NotificationsScreen(
                     }
                 }
 
-                for (group in TimeGroup.entries) {
-                    val items = grouped[group] ?: continue
-                    stickyHeader(key = "header_${group.name}") {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                        ) {
-                            Text(
-                                text = group.label,
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                            )
-                        }
-                    }
-
+                if (page == threadsTabIndex) {
+                    // ── Condensed per-thread view ──
                     items(
-                        items = items,
-                        key = { it.id }
-                    ) { notification ->
-                        val isSeen = notification.id in seenIds
-                        val isCompact = notification.type in listOf(
-                            NotificationType.LIKE,
-                            NotificationType.REPOST,
-                            NotificationType.ZAP
+                        items = threadGroups,
+                        key = { "thread:${it.rootNoteId}" }
+                    ) { summary ->
+                        ThreadSummaryCard(
+                            summary = summary,
+                            seenIds = seenIds,
+                            timeTick = timeTick,
+                            onProfileClick = onProfileClick,
+                            onClick = {
+                                summary.allNotifIds.forEach { NotificationsRepository.markAsSeen(it) }
+                                onOpenThreadForRootId(
+                                    summary.rootNoteId,
+                                    summary.replyKind,
+                                    summary.latestReply.replyNoteId,
+                                    summary.targetNote
+                                )
+                            }
                         )
-                        if (isCompact) {
-                            CompactNotificationRow(
-                                notification = notification,
-                                isSeen = isSeen,
-                                timeTick = timeTick,
-                                onProfileClick = onProfileClick,
-                                onClick = {
-                                    NotificationsRepository.markAsSeen(notification.id)
-                                    when {
-                                        notification.targetNote != null -> onNoteClick(notification.targetNote!!)
-                                        notification.note != null -> onNoteClick(notification.note!!)
-                                    }
-                                }
+                    }
+                } else {
+                    // ── Default time-grouped view for all other tabs ──
+                    for (group in TimeGroup.entries) {
+                        val items = grouped[group] ?: continue
+                        stickyHeader(key = "header_${group.name}") {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                            ) {
+                                Text(
+                                    text = group.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                )
+                            }
+                        }
+
+                        items(
+                            items = items,
+                            key = { it.id }
+                        ) { notification ->
+                            val isSeen = notification.id in seenIds
+                            val isCompact = notification.type in listOf(
+                                NotificationType.LIKE,
+                                NotificationType.REPOST,
+                                NotificationType.ZAP
                             )
-                        } else {
-                            FullNotificationCard(
-                                notification = notification,
-                                isSeen = isSeen,
-                                timeTick = timeTick,
-                                onProfileClick = onProfileClick,
-                                onClick = {
-                                    NotificationsRepository.markAsSeen(notification.id)
-                                    when {
-                                        notification.type == NotificationType.REPLY && notification.rootNoteId != null ->
-                                            onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
-                                        notification.type == NotificationType.MENTION && notification.note != null ->
-                                            onNoteClick(notification.note!!)
-                                        notification.targetNote != null -> onNoteClick(notification.targetNote!!)
-                                        notification.note != null -> onNoteClick(notification.note!!)
+                            if (isCompact) {
+                                CompactNotificationRow(
+                                    notification = notification,
+                                    isSeen = isSeen,
+                                    timeTick = timeTick,
+                                    onProfileClick = onProfileClick,
+                                    onClick = {
+                                        NotificationsRepository.markAsSeen(notification.id)
+                                        when {
+                                            notification.targetNote != null -> onNoteClick(notification.targetNote!!)
+                                            notification.note != null -> onNoteClick(notification.note!!)
+                                        }
                                     }
-                                }
-                            )
+                                )
+                            } else {
+                                FullNotificationCard(
+                                    notification = notification,
+                                    isSeen = isSeen,
+                                    timeTick = timeTick,
+                                    onProfileClick = onProfileClick,
+                                    onClick = {
+                                        NotificationsRepository.markAsSeen(notification.id)
+                                        when {
+                                            notification.type == NotificationType.REPLY && notification.rootNoteId != null ->
+                                                onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
+                                            notification.type == NotificationType.MENTION && notification.note != null ->
+                                                onNoteClick(notification.note!!)
+                                            notification.targetNote != null -> onNoteClick(notification.targetNote!!)
+                                            notification.note != null -> onNoteClick(notification.note!!)
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -784,31 +846,25 @@ private fun FullNotificationCard(
 
             Spacer(Modifier.height(8.dp))
 
-            // Replier: author row + their reply content
+            // Replier: compact single-line "Name replied"
             Row(verticalAlignment = Alignment.CenterVertically) {
                 ProfilePicture(
                     author = displayAuthor,
-                    size = 32.dp,
+                    size = 22.dp,
                     onClick = { notification.author?.id?.let { onProfileClick(it) } }
                 )
-                Spacer(Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" },
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        text = notification.text,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = buildString {
+                        append(displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" })
+                        append(" replied")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
 
             // Inline reply content
@@ -1081,6 +1137,187 @@ private fun formatSummaryZap(sats: Long): String = when {
     sats >= 1_000_000 -> "${sats / 1_000_000}.${(sats % 1_000_000) / 100_000}M ⚡"
     sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K ⚡"
     else -> "$sats ⚡"
+}
+
+// ─── Threads tab: condensed per-thread grouping ──────────────────────────────
+
+private data class ThreadSummary(
+    val rootNoteId: String,
+    val replyCount: Int,
+    val latestTimestamp: Long,
+    val replierAuthors: List<Author>,
+    val latestReply: NotificationData,
+    val targetNote: Note?,
+    val allNotifIds: List<String>,
+    val replyKind: Int,
+    val targetNoteFromAny: Note?,
+)
+
+@Composable
+private fun ThreadSummaryCard(
+    summary: ThreadSummary,
+    seenIds: Set<String>,
+    timeTick: Long,
+    onProfileClick: (String) -> Unit,
+    onClick: () -> Unit,
+) {
+    val hasUnseen = summary.allNotifIds.any { it !in seenIds }
+    val accentColor = MaterialTheme.colorScheme.primary
+
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        color = if (hasUnseen)
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.06f)
+        else
+            MaterialTheme.colorScheme.surface
+    ) {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            // Unseen accent bar (left edge)
+            if (hasUnseen) {
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .fillMaxHeight()
+                        .background(accentColor)
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                // Lead avatar — latest replier or thread icon fallback
+                val leadAuthor = summary.replierAuthors.firstOrNull()
+                if (leadAuthor != null) {
+                    ProfilePicture(
+                        author = leadAuthor,
+                        size = 40.dp,
+                        onClick = { onProfileClick(leadAuthor.id) }
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.secondaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Forum,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    // Top row: replier names + time
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val names = summary.replierAuthors.take(3).joinToString(", ") {
+                            it.displayName.ifBlank { it.username.ifBlank { it.id.take(8) + "…" } }
+                        }
+                        val extra = if (summary.replierAuthors.size > 3) " +${summary.replierAuthors.size - 3}" else ""
+                        Text(
+                            text = names + extra,
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = if (hasUnseen) FontWeight.Bold else FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = formatTimeAgo(summary.latestTimestamp, timeTick),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Thread root preview (what the thread is about)
+                    val threadTitle = summary.targetNote?.content
+                        ?: summary.targetNoteFromAny?.content
+                    if (threadTitle != null) {
+                        Text(
+                            text = threadTitle.take(100).replace('\n', ' '),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    // Latest reply preview
+                    val latestContent = summary.latestReply.note?.content
+                    if (latestContent != null && latestContent != threadTitle) {
+                        Text(
+                            text = latestContent.take(140).replace('\n', ' '),
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                        )
+                    }
+
+                    // Bottom row: reply count + additional avatars
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Forum,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "${summary.replyCount} ${if (summary.replyCount == 1) "reply" else "replies"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        // Additional avatars (skip first since it's the lead)
+                        if (summary.replierAuthors.size > 1) {
+                            Spacer(Modifier.width(2.dp))
+                            Box(modifier = Modifier.height(20.dp)) {
+                                summary.replierAuthors.drop(1).take(3).forEachIndexed { idx, author ->
+                                    Box(
+                                        modifier = Modifier
+                                            .offset(x = (idx * 14).dp)
+                                            .size(20.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                                    ) {
+                                        ProfilePicture(
+                                            author = author,
+                                            size = 20.dp,
+                                            onClick = { onProfileClick(author.id) }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    HorizontalDivider(
+        thickness = 0.5.dp,
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+    )
 }
 
 @Preview(showBackground = true)

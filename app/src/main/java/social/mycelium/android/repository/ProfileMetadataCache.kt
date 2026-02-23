@@ -5,6 +5,7 @@ import android.util.Log
 import social.mycelium.android.data.Author
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
+import com.example.cybin.relay.SubscriptionPriority
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -309,7 +310,7 @@ class ProfileMetadataCache {
 
         val batchReceived = AtomicInteger(0)
         val handle = RelayConnectionStateMachine.getInstance()
-            .requestTemporarySubscription(allRelays, filter) { event: Event ->
+            .requestTemporarySubscription(allRelays, filter, priority = SubscriptionPriority.LOW) { event: Event ->
                 if (event.kind == 0) {
                     val pubkey = event.pubKey
                     val content = event.content

@@ -196,6 +196,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // Initialize theme preferences (SharedPreferences-backed, must happen before setContent)
         social.mycelium.android.ui.theme.ThemePreferences.init(applicationContext)
         social.mycelium.android.ui.settings.MediaPreferences.init(applicationContext)
+        social.mycelium.android.ui.settings.NotificationPreferences.init(applicationContext)
 
         setContent {
             MyceliumTheme {
@@ -250,11 +251,13 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             accountStateViewModel.clearAmberActivityContext()
         }
         networkMonitor?.stop()
-        RelayConnectionStateMachine.getInstance().stopKeepalive()
-        // Stop the foreground service — after process kill it has no relay state
-        // to work with and just leaves a useless notification. The feed will
-        // re-establish connections when the user reopens the app.
-        stopRelayForegroundService()
+        if (isFinishing) {
+            // User explicitly closed the app — stop service and keepalive
+            RelayConnectionStateMachine.getInstance().stopKeepalive()
+            stopRelayForegroundService()
+        }
+        // When system reclaims the activity (backgrounding), keep the foreground
+        // service running so the process stays alive and relay connections persist.
         super.onDestroy()
     }
 

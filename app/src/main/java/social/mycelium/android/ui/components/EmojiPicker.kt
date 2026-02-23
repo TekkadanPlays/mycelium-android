@@ -78,9 +78,9 @@ fun EmojiPickerDialog(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp)
                 .heightIn(max = 520.dp),
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            shadowElevation = 12.dp
+            shape = androidx.compose.ui.graphics.RectangleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 0.dp
         ) {
             Column(modifier = Modifier.fillMaxWidth()) {
                 // Header

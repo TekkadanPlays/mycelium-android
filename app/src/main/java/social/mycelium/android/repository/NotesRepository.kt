@@ -263,6 +263,7 @@ class NotesRepository private constructor() {
                     (_notes.value + feedNotes).sortedByDescending { it.repostTimestamp ?: it.timestamp }
                 )
                 _notes.value = merged
+                advancePaginationCursor(feedNotes)
                 if (firstNoteDisplayedAtMs == 0L && merged.isNotEmpty()) {
                     firstNoteDisplayedAtMs = now
                 }
@@ -362,7 +363,7 @@ class NotesRepository private constructor() {
     @Volatile
     private var followFilter: Set<String>? = null
     @Volatile
-    private var followFilterEnabled: Boolean = false
+    private var followFilterEnabled: Boolean = true
 
     /** True when user is viewing All/Global feed. Global notes are ephemeral: never cached, destroyed on exit. */
     @Volatile
@@ -437,7 +438,7 @@ class NotesRepository private constructor() {
     companion object {
         private const val TAG = "NotesRepository"
         /** Max notes kept in memory; oldest dropped to keep feed bounded (scroll/layout performance). */
-        private const val MAX_NOTES_IN_MEMORY = 1000
+        private const val MAX_NOTES_IN_MEMORY = 5000
         /** Limit for following feed; relays return only notes from followed authors so we can ask for more. */
         private const val FOLLOWING_FEED_LIMIT = 1000
         private const val FEED_SINCE_DAYS = 7
@@ -452,6 +453,8 @@ class NotesRepository private constructor() {
         private const val OLDER_NOTES_TIMEOUT_MS = 8_000L
         /** After last event arrives, wait this long for more before declaring done. */
         private const val OLDER_NOTES_SETTLE_MS = 1_200L
+        /** Max cursor jump per page (14 days). Prevents a single outlier from skipping weeks. */
+        private const val MAX_CURSOR_JUMP_MS = 14L * 86_400_000L
 
         @Volatile
         private var instance: NotesRepository? = null
@@ -656,6 +659,8 @@ class NotesRepository private constructor() {
             _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
             initialLoadComplete = false
             firstNoteDisplayedAtMs = 0L
+            paginationCursorMs = 0L
+            paginationExtraCap = 0
             feedCutoffTimestampMs = System.currentTimeMillis()
             Log.d(TAG, "Entering Global mode — feed cleared, live-only")
         } else if (leavingGlobal) {
@@ -682,6 +687,8 @@ class NotesRepository private constructor() {
                 _notes.value = emptyList()
                 _displayedNotes.value = emptyList()
                 initialLoadComplete = false
+                paginationCursorMs = 0L
+                paginationExtraCap = 0
                 feedCutoffTimestampMs = System.currentTimeMillis()
                 scope.launch { loadFeedCacheFromDisk() }
                 Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from disk cache")
@@ -926,19 +933,55 @@ class NotesRepository private constructor() {
         }
     }
 
+    /** Pagination cursor: timestamp (ms) of the oldest kind-1 note we've shown in the feed.
+     *  Updated as notes are added. Excludes repost timestamps so a repost of a 2020 note
+     *  doesn't jump the cursor back years. */
+    @Volatile private var paginationCursorMs: Long = 0L
+    /** Extra capacity added by pagination; grows by page size each time loadOlderNotes fires. */
+    @Volatile private var paginationExtraCap: Int = 0
+
+    /** Called from flushKind1Events after merging feed notes to advance the pagination cursor.
+     *  Uses 5th-percentile timestamp to resist outliers. If cursor stalls (same value after a
+     *  page), falls back to absolute min to guarantee forward progress. */
+    private fun advancePaginationCursor(notes: List<Note>) {
+        if (notes.isEmpty()) return
+        val timestamps = notes.map { it.timestamp }.sorted()
+        // 5th percentile: skip bottom 5% outliers
+        val p5Index = (timestamps.size * 0.05).toInt().coerceIn(0, timestamps.lastIndex)
+        val candidate = timestamps[p5Index]
+        val absMin = timestamps.first()
+        val prev = paginationCursorMs
+        if (prev == 0L || candidate < prev) {
+            paginationCursorMs = candidate
+            Log.d(TAG, "Cursor advanced: ${fmtMs(prev)} → ${fmtMs(candidate)} (p5, absMin=${fmtMs(absMin)})")
+        } else if (absMin < prev) {
+            // Stall: p5 didn't advance (outlier cluster), fall back to absolute min
+            paginationCursorMs = absMin
+            Log.d(TAG, "Cursor stall-break: ${fmtMs(prev)} → ${fmtMs(absMin)} (absMin fallback)")
+        }
+    }
+
+    private fun fmtMs(ms: Long): String =
+        if (ms <= 0) "0" else java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.US).format(ms)
+
     /**
      * Load older notes beyond the current feed. Creates a temporary subscription with
-     * `until` = oldest note timestamp (relay-side cursor pagination).
+     * `until` = pagination cursor (relay-side cursor pagination).
      * No `since` parameter — let the relay return whatever it has up to `limit`.
      * Called when user scrolls to the bottom of the feed.
+     *
+     * Uses HIGH priority so it can preempt NORMAL enrichment subs (counts, profiles)
+     * on constrained relays (e.g. single-relay testing).
      */
     fun loadOlderNotes() {
         if (_isLoadingOlder.value) return
         val currentNotes = _notes.value
         if (currentNotes.isEmpty()) return
 
-        val oldestTimestampMs = currentNotes.minOf { it.repostTimestamp ?: it.timestamp }
-        val untilSec = oldestTimestampMs / 1000
+        // Use the dedicated pagination cursor if available; fall back to oldest note timestamp
+        val cursorMs = if (paginationCursorMs > 0) paginationCursorMs
+            else currentNotes.minOf { it.timestamp }
+        val untilSec = cursorMs / 1000
 
         val authors = if (followFilterEnabled) followFilter?.toList() else null
         if (followFilterEnabled && authors.isNullOrEmpty()) return
@@ -947,8 +990,11 @@ class NotesRepository private constructor() {
 
         _isLoadingOlder.value = true
         olderNotesHandle?.cancel()
+        paginationExtraCap += 200
         val beforeCount = currentNotes.size
-        Log.d(TAG, "Loading older notes: until=${java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.US).format(oldestTimestampMs)} from ${relays.size} relays")
+        Log.d(TAG, "Loading older notes: until=${java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.US).format(cursorMs)} cursor=${cursorMs} from ${relays.size} relays")
+        // Dump relay slot state so we can diagnose starvation
+        relayStateMachine.dumpRelaySlots("loadOlder")
 
         val filter = if (authors != null) {
             Filter(kinds = listOf(1), authors = authors, limit = 200, until = untilSec)
@@ -957,13 +1003,17 @@ class NotesRepository private constructor() {
         }
 
         val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
+        val eventCount = java.util.concurrent.atomic.AtomicInteger(0)
         olderNotesHandle = relayStateMachine.requestTemporarySubscription(
             relayUrls = relays,
             filters = listOf(filter),
-            priority = SubscriptionPriority.NORMAL,
+            priority = SubscriptionPriority.CRITICAL,
         ) { event ->
             if (event.kind == 1) {
                 lastEventAt.set(System.currentTimeMillis())
+                eventCount.incrementAndGet()
+                // Cursor advancement handled by advancePaginationCursor in flushKind1Events
+                // (outlier-resistant, 5th-percentile, capped jump)
                 pendingKind1Events.add(event to "")
                 scheduleKind1Flush()
             }
@@ -984,7 +1034,7 @@ class NotesRepository private constructor() {
             olderNotesHandle = null
             _isLoadingOlder.value = false
             val newSize = _notes.value.size
-            Log.d(TAG, "Older notes loaded: feed now has $newSize notes (was $beforeCount, +${newSize - beforeCount})")
+            Log.d(TAG, "Older notes loaded: feed now has $newSize notes (was $beforeCount, +${newSize - beforeCount}, received=${eventCount.get()})")
         }
     }
 
@@ -1120,9 +1170,12 @@ class NotesRepository private constructor() {
         )
     }
 
-    /** Keep only the newest notes to cap memory; list must be sorted by timestamp descending. */
-    private fun trimNotesToCap(notes: List<Note>): List<Note> =
-        if (notes.size <= MAX_NOTES_IN_MEMORY) notes else notes.take(MAX_NOTES_IN_MEMORY)
+    /** Keep only the newest notes to cap memory; list must be sorted by timestamp descending.
+     *  Cap grows dynamically as the user paginates older notes so they don't get trimmed immediately. */
+    private fun trimNotesToCap(notes: List<Note>): List<Note> {
+        val effectiveCap = MAX_NOTES_IN_MEMORY + paginationExtraCap
+        return if (notes.size <= effectiveCap) notes else notes.take(effectiveCap)
+    }
 
     /**
      * Handle kind-6 repost event: parse the reposted kind-1 note from the event content (JSON),
@@ -1177,6 +1230,27 @@ class NotesRepository private constructor() {
                 val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(noteContent)
                 val originalTimestampMs = noteCreatedAt * 1000L
 
+                // Parse NIP-10 e-tags from JSON to detect if the reposted note is a reply
+                val jsonTags = (jsonObj["tags"] as? kotlinx.serialization.json.JsonArray)
+                val eTags = jsonTags?.mapNotNull { tag ->
+                    val arr = tag as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
+                    if (arr.size >= 2 && (arr[0] as? kotlinx.serialization.json.JsonPrimitive)?.content == "e") {
+                        arr.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "" }.toTypedArray()
+                    } else null
+                } ?: emptyList()
+                // Detect root and reply-to using same NIP-10 logic as Nip10ReplyDetector
+                val repostRootId = eTags.firstOrNull { it.size >= 4 && (it.getOrNull(3) == "root" || it.getOrNull(4) == "root") }?.getOrNull(1)
+                    ?: eTags.firstOrNull()?.getOrNull(1)
+                val repostReplyToId = eTags.lastOrNull { it.size >= 4 && (it.getOrNull(3) == "reply" || it.getOrNull(4) == "reply") }?.getOrNull(1)
+                    ?: if (eTags.size >= 2) eTags.last().getOrNull(1) else eTags.firstOrNull()?.getOrNull(1)
+                val repostIsReply = eTags.isNotEmpty() && eTags.any { tag ->
+                    when {
+                        tag.size <= 3 -> true
+                        tag.size >= 4 -> tag.getOrNull(3) == "reply" || tag.getOrNull(3) == "root" || tag.getOrNull(4) == "reply" || tag.getOrNull(4) == "root"
+                        else -> false
+                    }
+                }
+
                 val note = Note(
                     id = "repost:$originalNoteId",
                     author = noteAuthor,
@@ -1186,7 +1260,9 @@ class NotesRepository private constructor() {
                     hashtags = hashtags, mediaUrls = mediaUrls, quotedEventIds = quotedEventIds,
                     relayUrl = relayUrl.ifEmpty { null },
                     relayUrls = if (relayUrl.isNotEmpty()) listOf(relayUrl) else emptyList(),
-                    isReply = false,
+                    isReply = repostIsReply,
+                    rootNoteId = if (repostIsReply) repostRootId else null,
+                    replyToId = if (repostIsReply) repostReplyToId else null,
                     originalNoteId = originalNoteId,
                     repostedByAuthors = listOf(reposterAuthor),
                     repostTimestamp = repostTimestampMs
@@ -1306,6 +1382,37 @@ class NotesRepository private constructor() {
         }
     }
 
+    /**
+     * Inject a local repost into the feed immediately after the user publishes a boost.
+     * This makes the boost appear instantly without waiting for the relay echo.
+     * @param originalNote The note being boosted
+     * @param reposterPubkey The current user's pubkey
+     */
+    fun injectLocalRepost(originalNote: Note, reposterPubkey: String) {
+        scope.launch {
+            try {
+                val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
+                val repostTimestampMs = System.currentTimeMillis()
+                val compositeId = "repost:${originalNote.id}"
+
+                // Check if already in feed (avoid duplicate)
+                val currentNotes = _notes.value
+                if (currentNotes.any { it.id == compositeId }) return@launch
+
+                val note = originalNote.copy(
+                    id = compositeId,
+                    originalNoteId = originalNote.id,
+                    repostedByAuthors = listOf(reposterAuthor),
+                    repostTimestamp = repostTimestampMs
+                )
+                insertRepostNote(note, repostTimestampMs)
+                Log.d(TAG, "Injected local repost for ${originalNote.id.take(8)} by ${reposterPubkey.take(8)}")
+            } catch (e: Throwable) {
+                Log.e(TAG, "injectLocalRepost failed: ${e.message}", e)
+            }
+        }
+    }
+
     /** Schedule a debounced flush of the repost buffer. Resets on each new repost so we batch them. */
     private fun scheduleRepostBatchFlush() {
         repostBatchJob?.cancel()
@@ -1353,6 +1460,11 @@ class NotesRepository private constructor() {
                         val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(noteContent)
                         val originalTimestampMs = originalEvent.createdAt * 1000L
 
+                        // Parse NIP-10 e-tags to detect if the reposted note is a reply
+                        val isReply = Nip10ReplyDetector.isReply(originalEvent)
+                        val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(originalEvent) else null
+                        val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(originalEvent) else null
+
                         val note = Note(
                             id = pending.compositeId,
                             author = noteAuthor,
@@ -1362,7 +1474,9 @@ class NotesRepository private constructor() {
                             hashtags = hashtags, mediaUrls = mediaUrls, quotedEventIds = quotedEventIds,
                             relayUrl = pending.relayUrl.ifEmpty { null },
                             relayUrls = if (pending.relayUrl.isNotEmpty()) listOf(pending.relayUrl) else emptyList(),
-                            isReply = false,
+                            isReply = isReply,
+                            rootNoteId = rootNoteId,
+                            replyToId = replyToId,
                             originalNoteId = pending.originalNoteId,
                             repostedByAuthors = listOf(pending.reposterAuthor),
                             repostTimestamp = pending.repostTimestampMs
@@ -1379,7 +1493,7 @@ class NotesRepository private constructor() {
 
         // Auto-cancel after timeout to avoid leaking subscriptions
         scope.launch {
-            delay(15_000L)
+            delay(8_000L)
             handle.cancel()
             // Clean up any pending that didn't get fetched
             batch.values.forEach { pendingRepostFetches.remove(it.compositeId) }
@@ -1513,6 +1627,8 @@ class NotesRepository private constructor() {
         latestNoteTimestampAtOpen = 0L
         initialLoadComplete = false
         firstNoteDisplayedAtMs = 0L
+        paginationCursorMs = 0L
+        paginationExtraCap = 0
         _feedSessionState.value = FeedSessionState.Idle
         // Also clear on-disk feed cache so old account's notes don't leak on next cold start
         appContext?.let { ctx ->
@@ -1574,19 +1690,54 @@ class NotesRepository private constructor() {
     /**
      * Fetch a single note by id from relays (one-off subscription). Use when opening thread from
      * reply notification and the root note is not in the feed cache.
+     * No kinds filter — event IDs are globally unique, and the root may be any kind.
      */
     suspend fun fetchNoteById(noteId: String, relayUrls: List<String>): Note? {
         if (relayUrls.isEmpty()) return null
-        val filter = Filter(kinds = listOf(1, 11, 1111), ids = listOf(noteId), limit = 1)
+        val filter = Filter(ids = listOf(noteId), limit = 1)
         var fetched: Note? = null
         val relayUrl = relayUrls.firstOrNull() ?: ""
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val handle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.HIGH) { ev ->
-            if (ev.kind == 1 || ev.kind == 11 || ev.kind == 1111) fetched = convertEventToNote(ev, relayUrl)
+            fetched = convertEventToNote(ev, relayUrl)
         }
-        delay(3000)
+        delay(5000)
         handle.cancel()
         return fetched
+    }
+
+    /** Well-known indexer relays that archive most public events (fallback for old threads). */
+    val INDEXER_RELAYS = listOf(
+        "wss://relay.nostr.band",
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.primal.net"
+    )
+
+    /**
+     * Fetch a note by ID using an expanded relay strategy (Amethyst-inspired):
+     * 1. Relay hints from e-tags (where the event was seen)
+     * 2. Author's NIP-65 outbox relays (where they publish)
+     * 3. User's configured relays
+     * 4. Well-known indexer relays as fallback
+     */
+    suspend fun fetchNoteByIdExpanded(
+        noteId: String,
+        userRelayUrls: List<String>,
+        relayHints: List<String> = emptyList(),
+        authorPubkey: String? = null
+    ): Note? {
+        // Build expanded relay list: hints first (most likely to have it), then outbox, then user relays, then indexers
+        val expandedRelays = buildList {
+            addAll(relayHints.filter { it.startsWith("wss://") || it.startsWith("ws://") })
+            if (authorPubkey != null) {
+                Nip65RelayListRepository.getCachedOutboxRelays(authorPubkey)?.let { addAll(it) }
+            }
+            addAll(userRelayUrls)
+            addAll(INDEXER_RELAYS)
+        }.distinct().take(12) // cap to avoid flooding
+
+        return fetchNoteById(noteId, expandedRelays)
     }
 
     /**

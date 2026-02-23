@@ -136,6 +136,7 @@ fun NotificationsScreen(
     onShare: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onProfileClick: (String) -> Unit = {},
+    onNavigateToSettings: () -> Unit = {},
     listState: LazyListState = rememberLazyListState(),
     topAppBarState: TopAppBarState = rememberTopAppBarState(),
     selectedTabIndex: Int = 0,
@@ -148,6 +149,7 @@ fun NotificationsScreen(
     val coroutineScope = rememberCoroutineScope()
     val allNotifications by NotificationsRepository.notifications.collectAsState()
     val seenIds by NotificationsRepository.seenIds.collectAsState()
+    val myPubkeyHex = NotificationsRepository.getMyPubkeyHex()
     val timeTick = rememberTimeTick()
 
     // Batch-request profiles for all notification and note authors
@@ -165,15 +167,17 @@ fun NotificationsScreen(
         if (authorIds.isNotEmpty()) profileCache.requestProfiles(authorIds, cacheRelayUrls)
     }
 
-    // Tab definitions
-    val tabs = remember {
+    // Tab definitions (keyed on myPubkeyHex so Threads filter captures correct value)
+    val tabs = remember(myPubkeyHex) {
         listOf(
             NotifTab("All", { Icon(Icons.Default.Notifications, null, modifier = Modifier.size(18.dp)) }) { true },
             NotifTab("Replies", { Icon(Icons.AutoMirrored.Outlined.Reply, null, modifier = Modifier.size(18.dp)) }) {
                 it.type == NotificationType.REPLY && (it.replyKind == null || it.replyKind == 1)
             },
             NotifTab("Threads", { Icon(Icons.Outlined.Forum, null, modifier = Modifier.size(18.dp)) }) {
-                it.type == NotificationType.REPLY && it.replyKind == 11
+                it.type == NotificationType.REPLY && it.replyKind == 1111 &&
+                    it.targetNote?.kind == 11 && myPubkeyHex != null &&
+                    normalizeAuthorIdForCache(it.targetNote!!.author.id) == myPubkeyHex
             },
             NotifTab("Comments", { Icon(Icons.Outlined.ChatBubble, null, modifier = Modifier.size(18.dp)) }) {
                 it.type == NotificationType.REPLY && it.replyKind == 1111
@@ -251,10 +255,17 @@ fun NotificationsScreen(
                             }) {
                                 Icon(
                                     Icons.Outlined.DoneAll,
-                                    contentDescription = "Mark all as seen",
+                                    contentDescription = "Mark all as read",
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                             }
+                        }
+                        IconButton(onClick = onNavigateToSettings) {
+                            Icon(
+                                Icons.Outlined.Settings,
+                                contentDescription = "Notification settings",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     },
                     windowInsets = WindowInsets(0),
@@ -945,6 +956,12 @@ private fun NotificationTargetPreview(
     linkStyle: SpanStyle,
     onProfileClick: (String) -> Unit,
 ) {
+    val imageUrls = remember(target.mediaUrls) {
+        target.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
+    }
+    val videoUrls = remember(target.mediaUrls) {
+        target.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+    }
     Spacer(Modifier.height(6.dp))
     Row(
         verticalAlignment = Alignment.Top,
@@ -953,7 +970,7 @@ private fun NotificationTargetPreview(
         Box(
             modifier = Modifier
                 .width(2.dp)
-                .height(36.dp)
+                .defaultMinSize(minHeight = 36.dp)
                 .background(
                     MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                     RoundedCornerShape(1.dp)
@@ -1000,15 +1017,38 @@ private fun NotificationTargetPreview(
                     lineHeight = 16.sp
                 )
             }
-        }
-        if (target.mediaUrls.isNotEmpty()) {
-            Spacer(Modifier.width(4.dp))
-            Icon(
-                imageVector = Icons.Outlined.Image,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
+            // Embedded media thumbnails for the target note
+            if (imageUrls.isNotEmpty() || videoUrls.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    imageUrls.take(3).forEach { url ->
+                        AsyncImage(
+                            model = url,
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                        )
+                    }
+                    videoUrls.take(1).forEach { _ ->
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Video",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

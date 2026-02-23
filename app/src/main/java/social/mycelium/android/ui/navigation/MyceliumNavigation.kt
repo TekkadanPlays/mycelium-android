@@ -2229,6 +2229,11 @@ fun MyceliumNavigation(
                             onProfileClick = { authorId ->
                                 navController.navigateToProfile(authorId)
                             },
+                            onNavigateToSettings = {
+                                navController.navigate("settings/notifications") {
+                                    launchSingleTop = true
+                                }
+                            },
                             topAppBarState = topAppBarState
                     )
                 }

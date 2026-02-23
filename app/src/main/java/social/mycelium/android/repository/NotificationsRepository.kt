@@ -121,6 +121,8 @@ object NotificationsRepository {
 
     fun getCacheRelayUrls(): List<String> = cacheRelayUrls
 
+    fun getMyPubkeyHex(): String? = myPubkeyHex
+
     /** Mark all current notifications as seen (e.g. when user opens the notifications screen). Clears badge. */
     fun markAllAsSeen() {
         _seenIds.value = _notifications.value.mapTo(mutableSetOf()) { it.id }
@@ -705,13 +707,12 @@ object NotificationsRepository {
         val allNoteIds = batch.keys.toList()
         Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (was ${allNoteIds.size} individual subs)")
 
-        val filter = Filter(kinds = listOf(1, 11, 1111), ids = allNoteIds, limit = allNoteIds.size)
+        // No kinds restriction: kind-1111 comments can target ANY event kind
+        val filter = Filter(ids = allNoteIds, limit = allNoteIds.size)
         val fetched = java.util.concurrent.ConcurrentHashMap<String, Note>()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.LOW) { ev ->
-            if (ev.kind == 1 || ev.kind == 11 || ev.kind == 1111) {
-                fetched[ev.id] = eventToNote(ev)
-            }
+            fetched[ev.id] = eventToNote(ev)
         }
         delay(2500)
         handle.cancel()

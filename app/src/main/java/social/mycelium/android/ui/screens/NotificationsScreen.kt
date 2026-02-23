@@ -143,7 +143,7 @@ fun NotificationsScreen(
     modifier: Modifier = Modifier
 ) {
     // Per-tab scroll states so each tab remembers its own position
-    val tabListStates = remember { List(8) { LazyListState() } }
+    val tabListStates = remember { List(11) { LazyListState() } }
     val currentListState = tabListStates.getOrElse(selectedTabIndex) { tabListStates[0] }
     val coroutineScope = rememberCoroutineScope()
     val allNotifications by NotificationsRepository.notifications.collectAsState()
@@ -165,10 +165,11 @@ fun NotificationsScreen(
         if (authorIds.isNotEmpty()) profileCache.requestProfiles(authorIds, cacheRelayUrls)
     }
 
-    // Tab definitions (All, Replies, Threads, Comments, Likes, Zaps, Reposts, Mentions)
-    val tabs = remember {
+    // Tab definitions — keyed on seenIds so the Unseen filter closure stays current
+    val tabs = remember(seenIds) {
         listOf(
             NotifTab("All", { Icon(Icons.Default.Notifications, null, modifier = Modifier.size(18.dp)) }) { true },
+            NotifTab("Unseen", { Icon(Icons.Outlined.FiberNew, null, modifier = Modifier.size(18.dp)) }) { it.id !in seenIds },
             NotifTab("Replies", { Icon(Icons.AutoMirrored.Outlined.Reply, null, modifier = Modifier.size(18.dp)) }) {
                 it.type == NotificationType.REPLY && (it.replyKind == null || it.replyKind == 1)
             },
@@ -181,7 +182,9 @@ fun NotificationsScreen(
             NotifTab("Likes", { Icon(Icons.Default.Favorite, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.LIKE },
             NotifTab("Zaps", { Icon(Icons.Default.Bolt, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.ZAP },
             NotifTab("Reposts", { Icon(Icons.Default.Repeat, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPOST },
-            NotifTab("Mentions", { Icon(Icons.Outlined.AlternateEmail, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.MENTION }
+            NotifTab("Mentions", { Icon(Icons.Outlined.AlternateEmail, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.MENTION },
+            NotifTab("Highlights", { Icon(Icons.Outlined.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.HIGHLIGHT },
+            NotifTab("Reports", { Icon(Icons.Outlined.Flag, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPORT }
         )
     }
 
@@ -263,6 +266,26 @@ fun NotificationsScreen(
                         navigationIconContentColor = MaterialTheme.colorScheme.onSurface
                     )
                 )
+
+                // Today's summary bar
+                val todayReplies by NotificationsRepository.todayReplies.collectAsState()
+                val todayBoosts by NotificationsRepository.todayBoosts.collectAsState()
+                val todayReactions by NotificationsRepository.todayReactions.collectAsState()
+                val todayZapSats by NotificationsRepository.todayZapSats.collectAsState()
+                if (todayReplies > 0 || todayBoosts > 0 || todayReactions > 0 || todayZapSats > 0L) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (todayReplies > 0) SummaryChip(Icons.AutoMirrored.Outlined.Reply, "$todayReplies", MaterialTheme.colorScheme.primary)
+                        if (todayBoosts > 0) SummaryChip(Icons.Default.Repeat, "$todayBoosts", MaterialTheme.colorScheme.tertiary)
+                        if (todayReactions > 0) SummaryChip(Icons.Default.Favorite, "$todayReactions", MaterialTheme.colorScheme.error)
+                        if (todayZapSats > 0L) SummaryChip(Icons.Default.Bolt, formatSummaryZap(todayZapSats), Color(0xFFFF9800))
+                    }
+                }
 
                 // Scrollable tab row
                 @Suppress("DEPRECATION")
@@ -689,6 +712,8 @@ private fun FullNotificationCard(
     val typeColor = when (notification.type) {
         NotificationType.REPLY -> MaterialTheme.colorScheme.secondary
         NotificationType.MENTION -> MaterialTheme.colorScheme.tertiary
+        NotificationType.HIGHLIGHT -> Color(0xFF9C27B0)
+        NotificationType.REPORT -> Color(0xFFF44336)
         else -> MaterialTheme.colorScheme.primary
     }
     val linkColor = MaterialTheme.colorScheme.primary
@@ -721,20 +746,28 @@ private fun FullNotificationCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
-                    imageVector = if (notification.type == NotificationType.REPLY) Icons.AutoMirrored.Outlined.Reply else Icons.Outlined.AlternateEmail,
+                    imageVector = when (notification.type) {
+                        NotificationType.REPLY -> Icons.AutoMirrored.Outlined.Reply
+                        NotificationType.HIGHLIGHT -> Icons.Outlined.FormatQuote
+                        NotificationType.REPORT -> Icons.Outlined.Flag
+                        else -> Icons.Outlined.AlternateEmail
+                    },
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                     tint = typeColor
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    text = if (notification.type == NotificationType.REPLY) {
-                        when (notification.replyKind) {
+                    text = when (notification.type) {
+                        NotificationType.REPLY -> when (notification.replyKind) {
                             11 -> "Thread reply"
                             1111 -> "Comment"
                             else -> "Reply"
                         }
-                    } else "Mention",
+                        NotificationType.HIGHLIGHT -> "Highlight"
+                        NotificationType.REPORT -> "Report"
+                        else -> "Mention"
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = typeColor
@@ -1009,6 +1042,26 @@ private fun formatSatsCompact(sats: Long): String {
         sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K"
         else -> "$sats"
     }
+}
+
+@Composable
+private fun SummaryChip(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, tint: Color) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = Modifier
+            .background(tint.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Icon(icon, null, modifier = Modifier.size(14.dp), tint = tint)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = tint, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+private fun formatSummaryZap(sats: Long): String = when {
+    sats >= 1_000_000 -> "${sats / 1_000_000}.${(sats % 1_000_000) / 100_000}M ⚡"
+    sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K ⚡"
+    else -> "$sats ⚡"
 }
 
 @Preview(showBackground = true)

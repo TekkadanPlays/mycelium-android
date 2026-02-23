@@ -44,5 +44,7 @@ enum class NotificationType {
     REPLY,
     MENTION,
     REPOST,
-    ZAP
+    ZAP,
+    HIGHLIGHT,
+    REPORT
 }

@@ -40,7 +40,10 @@ object NotificationsRepository {
     private const val NOTIFICATION_KIND_TEXT = 1
     private const val NOTIFICATION_KIND_REPOST = 6
     private const val NOTIFICATION_KIND_REACTION = 7
+    private const val NOTIFICATION_KIND_GENERIC_REPOST = 16
+    private const val NOTIFICATION_KIND_REPORT = 1984
     private const val NOTIFICATION_KIND_ZAP = 9735
+    private const val NOTIFICATION_KIND_HIGHLIGHT = 9802
     private const val NOTIFICATION_KIND_TOPIC_REPLY = 1111
     private const val ONE_WEEK_SEC = 7 * 24 * 60 * 60L
     private const val PREFS_NAME = "notifications_seen"
@@ -62,7 +65,18 @@ object NotificationsRepository {
 
     private val notificationsById = ConcurrentHashMap<String, NotificationData>()
     private var notificationsHandle: TemporarySubscriptionHandle? = null
+    private var notificationsHandle2: TemporarySubscriptionHandle? = null
     private var threadRepliesHandle: TemporarySubscriptionHandle? = null
+
+    // ── Summary counts (today) ──────────────────────────────────────────────
+    private val _todayReplies = MutableStateFlow(0)
+    val todayReplies: StateFlow<Int> = _todayReplies.asStateFlow()
+    private val _todayBoosts = MutableStateFlow(0)
+    val todayBoosts: StateFlow<Int> = _todayBoosts.asStateFlow()
+    private val _todayReactions = MutableStateFlow(0)
+    val todayReactions: StateFlow<Int> = _todayReactions.asStateFlow()
+    private val _todayZapSats = MutableStateFlow(0L)
+    val todayZapSats: StateFlow<Long> = _todayZapSats.asStateFlow()
     private var cacheRelayUrls = listOf<String>()
     private var subscriptionRelayUrls = listOf<String>()
     /** Current user hex pubkey (p-tag); used to filter kind-7 so we only show reactions to our notes. */
@@ -165,14 +179,23 @@ object NotificationsRepository {
         subscriptionRelayUrls = relayUrls
         myPubkeyHex = pubkey
         val since = (System.currentTimeMillis() / 1000) - ONE_WEEK_SEC
+        // Primary filter: high-volume kinds (text, reaction, repost, zap, topic reply)
         val filter = Filter(
-            kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
+            kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
             tags = mapOf("p" to listOf(pubkey)),
             since = since,
             limit = 500
         )
         val stateMachine = RelayConnectionStateMachine.getInstance()
         notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.NORMAL) { event -> handleEvent(event) }
+        // Secondary filter: lower-volume kinds (reports, highlights)
+        val filter2 = Filter(
+            kinds = listOf(NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT),
+            tags = mapOf("p" to listOf(pubkey)),
+            since = since,
+            limit = 100
+        )
+        notificationsHandle2 = stateMachine.requestTemporarySubscription(relayUrls, filter2, priority = SubscriptionPriority.LOW) { event -> handleEvent(event) }
         Log.d(TAG, "Notifications subscription started for ${pubkey.take(8)}... on ${relayUrls.size} relays")
 
         // Second subscription: fetch user's kind-11 topic IDs, then subscribe for kind-1111 replies
@@ -197,19 +220,22 @@ object NotificationsRepository {
     }
 
     fun stopSubscription() {
-        try {
-            notificationsHandle?.cancel()
-            notificationsHandle = null
-        } catch (_: Exception) { }
-        try {
-            threadRepliesHandle?.cancel()
-            threadRepliesHandle = null
-        } catch (_: Exception) { }
+        try { notificationsHandle?.cancel(); notificationsHandle = null } catch (_: Exception) { }
+        try { notificationsHandle2?.cancel(); notificationsHandle2 = null } catch (_: Exception) { }
+        try { threadRepliesHandle?.cancel(); threadRepliesHandle = null } catch (_: Exception) { }
         Log.d(TAG, "Notifications subscription stopped")
     }
 
+    private val ACCEPTED_KINDS = setOf(
+        NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST,
+        NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY,
+        NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT
+    )
+
     private fun handleEvent(event: Event) {
-        if (event.kind !in listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY)) return
+        if (event.kind !in ACCEPTED_KINDS) return
+        // Skip notifications from muted/blocked users
+        if (MuteListRepository.isHidden(event.pubKey)) return
         val author = profileCache.resolveAuthor(event.pubKey)
         if (profileCache.getAuthor(event.pubKey) == null && cacheRelayUrls.isNotEmpty()) {
             scope.launch { profileCache.requestProfiles(listOf(event.pubKey), cacheRelayUrls) }
@@ -219,8 +245,10 @@ object NotificationsRepository {
             NOTIFICATION_KIND_REACTION -> handleLike(event, author, ts)
             NOTIFICATION_KIND_TEXT -> handleReply(event, author, ts)
             NOTIFICATION_KIND_TOPIC_REPLY -> handleTopicReply(event, author, ts)
-            NOTIFICATION_KIND_REPOST -> handleRepost(event, author, ts)
+            NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST -> handleRepost(event, author, ts)
             NOTIFICATION_KIND_ZAP -> handleZap(event, author, ts)
+            NOTIFICATION_KIND_HIGHLIGHT -> handleHighlight(event, author, ts)
+            NOTIFICATION_KIND_REPORT -> handleReport(event, author, ts)
             else -> { }
         }
     }
@@ -266,18 +294,17 @@ object NotificationsRepository {
         notificationsById[data.id] = data
         emitSorted()
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
+        updateTodaySummary(NotificationType.LIKE, ts, 0L)
     }
 
     private fun handleReply(event: Event, author: Author, ts: Long) {
         // Don't show notifications for our own replies
         if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
-        // Must have a root note to classify as a reply; standalone mentions (kind-1 with just a p-tag) are less useful
         val rootId = getReplyRootNoteId(event)
-        // Determine if the user is tagged as a reply target (p-tag) or just mentioned in passing
-        val pTags = event.tags.filter { it.size >= 2 && it[0] == "p" }.map { it[1].lowercase() }
-        val isDirectlyTagged = myPubkeyHex != null && myPubkeyHex!!.lowercase() in pTags
-        // Skip if no root note AND not directly tagged (random mention, not a reply to us)
-        if (rootId == null && !isDirectlyTagged) return
+        // Check if user is directly cited in content (nostr:npub1... / nostr:nprofile1...)
+        val isDirectlyCitedInContent = myPubkeyHex != null && isUserCitedInContent(event.content, myPubkeyHex!!)
+        // No root and not cited in content → not useful
+        if (rootId == null && !isDirectlyCitedInContent) return
         val note = eventToNote(event)
         val replyId = event.id
         val isMention = rootId == null
@@ -297,12 +324,36 @@ object NotificationsRepository {
         notificationsById[event.id] = data
         emitSorted()
         if (rootId != null) {
-            // Fetch the direct parent (reply-to) as the target preview so the notification
-            // shows what was actually replied to, not the distant thread root.
-            // Fall back to rootId for direct replies (where parent == root).
+            // Fetch the direct parent to verify the reply is TO one of our notes.
+            // If the parent note author isn't us AND we're not cited in content,
+            // the notification will be removed in flushTargetFetchBatch.
             val parentId = getReplyToNoteId(event) ?: rootId
             scope.launch { fetchAndSetTargetNote(parentId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         }
+        // Update today's summary
+        updateTodaySummary(if (isMention) NotificationType.MENTION else NotificationType.REPLY, ts, 0L)
+    }
+
+    /** Check if the user's pubkey is directly cited in content via nostr:npub1 or nostr:nprofile1 references. */
+    private fun isUserCitedInContent(content: String, myPubkey: String): Boolean {
+        if (content.isBlank()) return false
+        val npubRegex = Regex("nostr:(npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)", RegexOption.IGNORE_CASE)
+        val nprofileRegex = Regex("nostr:(nprofile1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)", RegexOption.IGNORE_CASE)
+        for (match in npubRegex.findAll(content)) {
+            try {
+                val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
+                val hex = (parsed?.entity as? com.example.cybin.nip19.NPub)?.hex
+                if (hex != null && normalizeAuthorIdForCache(hex) == myPubkey) return true
+            } catch (_: Exception) { }
+        }
+        for (match in nprofileRegex.findAll(content)) {
+            try {
+                val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
+                val hex = (parsed?.entity as? com.example.cybin.nip19.NProfile)?.hex
+                if (hex != null && normalizeAuthorIdForCache(hex) == myPubkey) return true
+            } catch (_: Exception) { }
+        }
+        return false
     }
 
     /** NIP-22: root note id from uppercase "E" tag or ["e", id, ..., "root"] for kind-1111. */
@@ -341,6 +392,57 @@ object NotificationsRepository {
         notificationsById[event.id] = data
         emitSorted()
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
+        updateTodaySummary(NotificationType.REPLY, ts, 0L)
+    }
+
+    private fun handleHighlight(event: Event, author: Author, ts: Long) {
+        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
+        val highlightedContent = event.content.take(200)
+        val data = NotificationData(
+            id = event.id,
+            type = NotificationType.HIGHLIGHT,
+            text = "${author.displayName} highlighted your content",
+            note = eventToNote(event),
+            author = author,
+            sortTimestamp = ts
+        )
+        notificationsById[event.id] = data
+        emitSorted()
+    }
+
+    private fun handleReport(event: Event, author: Author, ts: Long) {
+        // Reports are informational — show them so the user is aware
+        val reportType = event.tags.firstOrNull { it.size >= 3 && it[0] == "report" }?.get(2)
+            ?: event.tags.firstOrNull { it.size >= 3 && it[0] == "p" }?.getOrNull(2)
+            ?: "unknown"
+        val data = NotificationData(
+            id = event.id,
+            type = NotificationType.REPORT,
+            text = "${author.displayName} reported you ($reportType)",
+            note = eventToNote(event),
+            author = author,
+            sortTimestamp = ts
+        )
+        notificationsById[event.id] = data
+        emitSorted()
+    }
+
+    /** Update today's summary counters for the notification summary bar. */
+    private fun updateTodaySummary(type: NotificationType, ts: Long, zapSats: Long) {
+        val todayStart = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        if (ts < todayStart) return
+        when (type) {
+            NotificationType.REPLY, NotificationType.MENTION -> _todayReplies.value++
+            NotificationType.REPOST -> _todayBoosts.value++
+            NotificationType.LIKE -> _todayReactions.value++
+            NotificationType.ZAP -> _todayZapSats.value += zapSats
+            else -> { }
+        }
     }
 
     /** NIP-10: root note id from "e" tag with "root" marker, or first "e" tag. */
@@ -412,6 +514,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
+        updateTodaySummary(NotificationType.REPOST, ts, 0L)
     }
 
     private fun parseRepostedNoteIdFromContent(content: String): String? {
@@ -472,6 +575,7 @@ object NotificationsRepository {
         notificationsById[data.id] = data
         emitSorted()
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
+        updateTodaySummary(NotificationType.ZAP, ts, amountSats)
     }
 
     /** Parse the real zapper's pubkey from the kind-9734 zap request embedded in the "description" tag. */
@@ -610,15 +714,30 @@ object NotificationsRepository {
         delay(5000)
         handle.cancel()
 
-        // Apply fetched notes to their notifications
+        // Apply fetched notes to their notifications; verify replies are actually TO us
+        var removedCount = 0
         for ((noteId, pending) in batch) {
             val note = fetched[noteId] ?: continue
             val current = notificationsById[pending.notificationId] ?: continue
+            val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
+            val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
+
             // Kind-7 (like): only show if target note author is the current user
-            if (current.type == NotificationType.LIKE && myPubkeyHex != null) {
-                val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
-                if (targetAuthorHex != myPubkeyHex) {
+            if (current.type == NotificationType.LIKE && !isOurNote) {
+                notificationsById.remove(pending.notificationId)
+                removedCount++
+                continue
+            }
+            // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
+            // This is the Amethyst-style tagsAnEventByUser check — being p-tagged alone is NOT
+            // sufficient; the reply must be TO one of our notes or directly cite us.
+            if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
+                val isCitedInContent = myPubkeyHex != null && current.note != null &&
+                    isUserCitedInContent(current.note.content, myPubkeyHex!!)
+                if (!isCitedInContent) {
+                    Log.d(TAG, "Removing false-positive reply ${pending.notificationId.take(8)}: parent author ${targetAuthorHex.take(8)} != us")
                     notificationsById.remove(pending.notificationId)
+                    removedCount++
                     continue
                 }
             }
@@ -631,6 +750,7 @@ object NotificationsRepository {
             }
             notificationsById[pending.notificationId] = updated
         }
+        if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
         emitSorted()
     }
 

@@ -102,3 +102,21 @@ blazecn/
 
 # External submodules (removed)
 external/
+
+# Debug/dev artifacts
+*.txt
+BATTLE_PLAN.md
+*.gif
+
+# Old release APKs
+releases/
+
+# Dev notes
+dev_notes/
+
+# AI tool configs
+.claude/
+.cursor/
+
+# Benchmark module (unused)
+benchmark/

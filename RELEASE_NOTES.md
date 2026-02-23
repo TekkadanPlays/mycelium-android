@@ -1,45 +1,54 @@
-# Mycelium v0.3.0-beta Release Notes
+# Mycelium v0.4.0-beta Release Notes
 
-## Feed & Performance
-- **Infinite scroll fix**: Home feed now properly loads older notes when scrolling to the bottom — fixed stale closure in pagination detection
-- **Re-subscription loop eliminated**: Feed no longer redundantly re-subscribes when follow list hasn't changed (idempotency guard)
-- **Removed hard timeout on sign-in relay queries**: Relay data loads directly from persisted storage instead of polling
+## Relay Management
+- **Outbox tab redesigned** with three clear sections: Both (read/write), Outbox (write-only), and Inbox (read-only)
+- **Designation picker** when adding a relay — choose exactly how it should be used
+- **Relay selection screen** for publishing — pick which relays to send notes, replies, and topics to, with per-section toggle-all
+- **Publish failure reporting** — snackbar alerts when publishes fail, with detailed per-relay results on the Relay Health screen
+- **Relay health overhaul** — live slot utilization bars, color-coded latency, network overview card with health score ring
+- **Sidebar relay badge** — red dot on the health icon when relays need attention
 
-## Note Menu Overhaul
-- **Multi-tiered 3-dot menu** with organized sub-menus:
-  - **Follow / Unfollow** author directly from any note
-  - **Message** author (placeholder for upcoming DM support)
-  - **Copy →** sub-menu: Copy text, Copy author npub, Copy nevent
-  - **Bookmarks →** sub-menu: Add to public, Add to private
-  - **Share**: Generates proper `njump.me/nevent1...` links with relay hints
-  - **Translate** / Show original
-  - **Filters & Blocks →** sub-menu: Block, Mute
-  - **Report**
+## Subscription Engine
+- **Subscription multiplexer** — filter merging, ref-counting, and bounded dedup for efficient relay communication
+- **Relay slot optimization** — reduced from 10+ competing subscriptions to 3-4 active slots per relay
+- **One-shot subscriptions** — auto-close after EOSE for transient queries (bookmarks, mute lists, relay lists)
+- **Outbox feed manager** — fetches notes from followed users' preferred write relays (NIP-65)
 
-## Sensitive Content (NIP-36)
-- Notes with `content-warning` tags or `#nsfw` hashtags are hidden behind a blur overlay
-- Tap to reveal individual notes
-- Global toggle in Settings → Filters & Blocks → "Show sensitive content"
+## Thread View
+- **Long-press to collapse** now works on the entire reply card, not just the header
+- **Live reply awareness** — new replies appear as tappable badges instead of interrupting your reading
+- **Pull-to-refresh** on thread views
+- **Sort order toggle** — newest or oldest first
+- **Expanded relay fetch** — walks relay hints, author outbox relays, and indexers to find notes
 
-## Action Row Refactor
-- Bookmark and Share buttons moved from action row into the 3-dot menu
-- All action buttons right-aligned with consistent 40dp/20dp sizing
-- Thread reply controls reordered: Lightning → Likes → Reply → Caret
+## Notifications
+- **Threads tab** — groups replies to your topics into condensed per-thread summaries with overlapping avatars
+- **Per-tab mark-as-read** — clear notifications for just one tab at a time
+- **Overlay thread navigation** — open threads directly from notification cards without leaving the screen
+- **Improved filtering** — mention-only replies reclassified correctly, false-positive boosts removed
 
-## NIP-19 Encoding
-- Added `toNote()`, `toNpub()`, and `encodeNevent()` helpers to cybin library
-- Share links now use proper `nevent1` bech32 encoding with relay hints and author pubkey
+## Direct Messages
+- **Redesigned chat screen** — modern bubble shapes with adaptive corner radii, date separators, message grouping, NIP-17 encryption label
+- Material3 theming consistent with the rest of the app
 
-## UI & Branding
-- New purple mushroom vector asset on splash screen and feed loading overlay
-- CoinOS wallet tab shows "Coming soon.." placeholder with lightning icon
-- Notifications tab: Unseen tab removed (was experimental)
-- Settings restructured: Your Experience, Account, App, Support sections
-- New settings screens: Zaps, Notifications, Filters & Blocks, Data & Storage
-- Confirmation dialogs before clearing cached data
+## Profile
+- **Media tab** — square two-column grid view; tap opens the thread, not fullscreen
+- **Replies tab** — now accessible and functional
+- **Fullscreen icon** on images — magnifying glass overlay for opening the image viewer
+- **Thread overlay** — open threads from profile notes without navigating away
+
+## Publishing
+- **Dedicated relay selection** for all compose screens (notes, topics, replies, comments)
+- **Target author inbox relays** shown when replying (NIP-65 lookup)
+- **"Note seen on" relays** as an additional section for maximum reach
+
+## UI Polish
+- **App icon** updated with properly sized adaptive foreground
+- **Snackbar theming** — matches Material3 surface colors
+- **Profile tab indicator** — clean dot instead of underline
+- **Sidebar** — merged outbox/inbox relay sections with read/write tags
 
 ## Known Limitations
-- Gift-wrapped DMs (NIP-17) not yet implemented
 - Zapraisers not yet supported
-- Block/Mute publish to relays not yet wired (placeholder toasts)
-- Bookmarks publish not yet wired (placeholder)
+- Block/Mute publish to relays not yet wired
+- Bookmarks publish not yet wired

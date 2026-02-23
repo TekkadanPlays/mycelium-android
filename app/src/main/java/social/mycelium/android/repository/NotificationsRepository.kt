@@ -711,14 +711,27 @@ object NotificationsRepository {
                 fetched[ev.id] = eventToNote(ev)
             }
         }
-        delay(5000)
+        delay(2500)
         handle.cancel()
 
         // Apply fetched notes to their notifications; verify replies are actually TO us
         var removedCount = 0
         for ((noteId, pending) in batch) {
-            val note = fetched[noteId] ?: continue
             val current = notificationsById[pending.notificationId] ?: continue
+            val note = fetched[noteId]
+            // If parent note wasn't fetched, remove REPLY notifications (can't verify it's to us)
+            if (note == null) {
+                if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT) {
+                    val isCited = myPubkeyHex != null && current.note != null &&
+                        isUserCitedInContent(current.note.content, myPubkeyHex!!)
+                    if (!isCited) {
+                        Log.d(TAG, "Removing unverifiable reply ${pending.notificationId.take(8)}: parent note not fetched")
+                        notificationsById.remove(pending.notificationId)
+                        removedCount++
+                    }
+                }
+                continue
+            }
             val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
             val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
 

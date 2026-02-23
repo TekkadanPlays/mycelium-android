@@ -143,7 +143,7 @@ fun NotificationsScreen(
     modifier: Modifier = Modifier
 ) {
     // Per-tab scroll states so each tab remembers its own position
-    val tabListStates = remember { List(11) { LazyListState() } }
+    val tabListStates = remember { List(10) { LazyListState() } }
     val currentListState = tabListStates.getOrElse(selectedTabIndex) { tabListStates[0] }
     val coroutineScope = rememberCoroutineScope()
     val allNotifications by NotificationsRepository.notifications.collectAsState()
@@ -165,11 +165,10 @@ fun NotificationsScreen(
         if (authorIds.isNotEmpty()) profileCache.requestProfiles(authorIds, cacheRelayUrls)
     }
 
-    // Tab definitions — keyed on seenIds so the Unseen filter closure stays current
-    val tabs = remember(seenIds) {
+    // Tab definitions
+    val tabs = remember {
         listOf(
             NotifTab("All", { Icon(Icons.Default.Notifications, null, modifier = Modifier.size(18.dp)) }) { true },
-            NotifTab("Unseen", { Icon(Icons.Outlined.FiberNew, null, modifier = Modifier.size(18.dp)) }) { it.id !in seenIds },
             NotifTab("Replies", { Icon(Icons.AutoMirrored.Outlined.Reply, null, modifier = Modifier.size(18.dp)) }) {
                 it.type == NotificationType.REPLY && (it.replyKind == null || it.replyKind == 1)
             },
@@ -266,26 +265,6 @@ fun NotificationsScreen(
                         navigationIconContentColor = MaterialTheme.colorScheme.onSurface
                     )
                 )
-
-                // Today's summary bar
-                val todayReplies by NotificationsRepository.todayReplies.collectAsState()
-                val todayBoosts by NotificationsRepository.todayBoosts.collectAsState()
-                val todayReactions by NotificationsRepository.todayReactions.collectAsState()
-                val todayZapSats by NotificationsRepository.todayZapSats.collectAsState()
-                if (todayReplies > 0 || todayBoosts > 0 || todayReactions > 0 || todayZapSats > 0L) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (todayReplies > 0) SummaryChip(Icons.AutoMirrored.Outlined.Reply, "$todayReplies", MaterialTheme.colorScheme.primary)
-                        if (todayBoosts > 0) SummaryChip(Icons.Default.Repeat, "$todayBoosts", MaterialTheme.colorScheme.tertiary)
-                        if (todayReactions > 0) SummaryChip(Icons.Default.Favorite, "$todayReactions", MaterialTheme.colorScheme.error)
-                        if (todayZapSats > 0L) SummaryChip(Icons.Default.Bolt, formatSummaryZap(todayZapSats), Color(0xFFFF9800))
-                    }
-                }
 
                 // Scrollable tab row
                 @Suppress("DEPRECATION")

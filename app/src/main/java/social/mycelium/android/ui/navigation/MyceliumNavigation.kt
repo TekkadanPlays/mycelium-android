@@ -163,7 +163,7 @@ fun MyceliumNavigation(
     val dashboardListState = rememberLazyListState()
     val topicsListState = rememberLazyListState()
     val notificationsListState = rememberLazyListState()
-    var notificationsSelectedTab by remember { mutableIntStateOf(0) }
+    var notificationsSelectedTab by remember { mutableIntStateOf(1) }
     val coroutineScope = rememberCoroutineScope()
 
     // Observe async toast messages (e.g. reaction failures)

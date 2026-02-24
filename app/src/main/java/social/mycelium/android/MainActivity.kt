@@ -198,6 +198,12 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         social.mycelium.android.ui.settings.MediaPreferences.init(applicationContext)
         social.mycelium.android.ui.settings.NotificationPreferences.init(applicationContext)
 
+        // Create all notification channels (relay service, social, DMs) — idempotent
+        social.mycelium.android.services.NotificationChannelManager.createChannels(applicationContext)
+
+        // Initialize NotificationsRepository with context for Android push notifications
+        social.mycelium.android.repository.NotificationsRepository.init(applicationContext)
+
         setContent {
             MyceliumTheme {
                 Surface(
@@ -288,6 +294,10 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         shouldRunRelayService = enabled
         if (!enabled) {
             stopRelayForegroundService()
+            return
+        }
+        // Respect user preference — don't start service if background mode is disabled
+        if (!social.mycelium.android.ui.settings.NotificationPreferences.backgroundServiceEnabled.value) {
             return
         }
         if (isInForeground) {

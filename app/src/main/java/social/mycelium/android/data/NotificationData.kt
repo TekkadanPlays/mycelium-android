@@ -42,9 +42,11 @@ data class NotificationData(
 enum class NotificationType {
     LIKE,
     REPLY,
+    COMMENT,
     MENTION,
     REPOST,
     ZAP,
+    DM,
     HIGHLIGHT,
     REPORT
 }

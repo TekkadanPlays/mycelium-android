@@ -1,3 +1,35 @@
+# Mycelium v0.4.1-beta Release Notes
+
+## Hotfix: Notifications & Background Service
+
+### Android Notification Channels
+- **8 independent notification channels** — each configurable in Android system settings:
+  - **Relay connection** (low, ongoing) — foreground service keepalive
+  - **Replies** (high) — kind-1 replies to your notes
+  - **Comments** (high) — kind-1111 thread comments
+  - **Mentions** (default) — when someone mentions you
+  - **Reactions** (low) — likes and emoji reactions
+  - **Zaps** (high) — lightning zaps
+  - **Reposts** (low) — when someone reposts your note
+  - **Direct Messages** (high) — NIP-17 DMs
+- Old monolithic "Mycelium relay connection" channel is automatically deleted on upgrade
+
+### Real-time Push Notifications
+- **Android notifications now fire** for replies, comments, mentions, reactions, zaps, and reposts
+- 10-second suppression window after subscription start prevents old event replay from spamming
+- Each notification type respects its own user toggle in Settings → Notifications
+
+### Background Service Controls
+- **New "Keep relay connections alive" toggle** — disable to stop the foreground service entirely
+- Global filter mode warning when background service is enabled (bandwidth/battery advisory)
+- Service stops itself immediately when user disables at runtime
+
+### Feed Loading Overlay Fix
+- Loading overlay no longer sticks after backgrounding/foregrounding the app
+- Overlay suppressed when feed session is Live or Refreshing (notes in memory)
+
+---
+
 # Mycelium v0.4.0-beta Release Notes
 
 ## Relay Management

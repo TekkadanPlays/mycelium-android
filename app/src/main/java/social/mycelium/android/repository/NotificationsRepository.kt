@@ -86,6 +86,9 @@ object NotificationsRepository {
     private val myTopicIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     private var prefs: SharedPreferences? = null
+    @Volatile private var appContext: Context? = null
+    /** Suppress Android notifications during initial subscription replay (old events). */
+    @Volatile private var suppressAndroidNotifications = true
 
     // ── Batched target note fetch ──────────────────────────────────────────────
     /** Pending target note fetch entry. */
@@ -103,8 +106,39 @@ object NotificationsRepository {
 
     /** Call once from Application or Activity to enable persistent seen IDs. */
     fun init(context: Context) {
+        appContext = context.applicationContext
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         loadSeenIds()
+    }
+
+    /** Allow Android notifications after initial event replay is complete. */
+    fun enableAndroidNotifications() {
+        suppressAndroidNotifications = false
+    }
+
+    /**
+     * Post an Android notification for a social event, respecting user preferences.
+     * Each notification type maps to a specific Android notification channel so the user
+     * can independently configure sounds, vibration, and visibility in system settings.
+     */
+    private fun fireAndroidNotification(type: NotificationType, title: String, body: String, notifIdSuffix: String) {
+        if (suppressAndroidNotifications) return
+        val ctx = appContext ?: return
+        val prefs = social.mycelium.android.ui.settings.NotificationPreferences
+        if (!prefs.pushEnabled.value) return
+        val (channelId, allowed) = when (type) {
+            NotificationType.REPLY -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPLIES to prefs.notifyReplies.value
+            NotificationType.COMMENT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_COMMENTS to prefs.notifyReplies.value
+            NotificationType.LIKE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS to prefs.notifyReactions.value
+            NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS to prefs.notifyZaps.value
+            NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS to prefs.notifyReposts.value
+            NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
+            NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS to prefs.notifyDMs.value
+            else -> return
+        }
+        if (!allowed) return
+        val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+        social.mycelium.android.services.NotificationChannelManager.postSocialNotification(ctx, channelId, notifId, title, body)
     }
 
     private fun loadSeenIds() {
@@ -304,6 +338,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
+        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
     }
@@ -335,6 +370,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
+        fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id)
         if (rootId != null) {
             // Fetch the direct parent to verify the reply is TO one of our notes.
             // If the parent note author isn't us AND we're not cited in content,
@@ -408,6 +444,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
+        fireAndroidNotification(NotificationType.COMMENT, author.displayName ?: "Someone", text, event.id)
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         updateTodaySummary(NotificationType.REPLY, ts, 0L)
     }
@@ -531,6 +568,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
+        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id)
         // Always fetch the reposted note so flushTargetFetchBatch can verify authorship
         // (even if we parsed it from content — content parsing doesn't verify it's OUR note)
         scope.launch { fetchAndSetTargetNote(repostedNoteId, data.id) { d -> { n -> d.copy(targetNote = n) } } }
@@ -594,6 +632,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
+        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
     }

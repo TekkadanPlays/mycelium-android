@@ -311,10 +311,13 @@ private fun FeedOverlay(
     }
     val noRelaysAtAll = !hasOutboxRelays && !hasAnyConfiguredRelays && perRelayState.isEmpty()
     val showOnboarding = feedIsEmpty && noRelaysAtAll && onboardingComplete && feedSession != FeedSessionState.Loading
-    val showLoading = feedIsEmpty && !showOnboarding
+    // Never show loading overlay when feed is Live or Refreshing — notes may be briefly empty
+    // during recomposition on resume but the subscription is active and will deliver notes.
+    val showLoading = feedIsEmpty && !showOnboarding &&
+        feedSession != FeedSessionState.Live && feedSession != FeedSessionState.Refreshing
 
     val overlayAlpha by animateFloatAsState(
-        targetValue = if (feedIsEmpty) 1f else 0f,
+        targetValue = if (showLoading || showOnboarding) 1f else 0f,
         animationSpec = tween(350, easing = FastOutSlowInEasing),
         label = "overlay_alpha"
     )

@@ -445,6 +445,13 @@ fun MyceliumNavigation(
             NotificationsRepository.setCacheRelayUrls(indexerUrls)
             NotificationsRepository.startSubscription(pubkey, allUserRelayUrls)
             Log.d("MyceliumNav", "Notif subscription started with ${allUserRelayUrls.size} relays")
+            // Enable Android push notifications after initial event replay settles (10s)
+            // so old events from relay reconnect don't spam the notification shade
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                kotlinx.coroutines.delay(10_000L)
+                NotificationsRepository.enableAndroidNotifications()
+                Log.d("MyceliumNav", "Android push notifications enabled (initial replay settled)")
+            }
             // Fetch mute list (NIP-51 kind 10000) and bookmarks (kind 10003)
             social.mycelium.android.repository.MuteListRepository.fetchMuteList(pubkey, allUserRelayUrls)
             social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(pubkey, allUserRelayUrls)

@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 object NotificationPreferences {
     private const val PREFS_NAME = "Mycelium_notification_prefs"
     private const val KEY_PUSH_ENABLED = "push_enabled"
+    private const val KEY_BACKGROUND_SERVICE = "background_service_enabled"
     private const val KEY_NOTIFY_REACTIONS = "notify_reactions"
     private const val KEY_NOTIFY_ZAPS = "notify_zaps"
     private const val KEY_NOTIFY_REPOSTS = "notify_reposts"
@@ -25,6 +26,9 @@ object NotificationPreferences {
 
     private val _pushEnabled = MutableStateFlow(true)
     val pushEnabled: StateFlow<Boolean> = _pushEnabled.asStateFlow()
+
+    private val _backgroundServiceEnabled = MutableStateFlow(true)
+    val backgroundServiceEnabled: StateFlow<Boolean> = _backgroundServiceEnabled.asStateFlow()
 
     private val _notifyReactions = MutableStateFlow(true)
     val notifyReactions: StateFlow<Boolean> = _notifyReactions.asStateFlow()
@@ -50,6 +54,7 @@ object NotificationPreferences {
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, true)
+        _backgroundServiceEnabled.value = prefs.getBoolean(KEY_BACKGROUND_SERVICE, true)
         _notifyReactions.value = prefs.getBoolean(KEY_NOTIFY_REACTIONS, true)
         _notifyZaps.value = prefs.getBoolean(KEY_NOTIFY_ZAPS, true)
         _notifyReposts.value = prefs.getBoolean(KEY_NOTIFY_REPOSTS, true)
@@ -62,6 +67,11 @@ object NotificationPreferences {
     fun setPushEnabled(enabled: Boolean) {
         _pushEnabled.value = enabled
         prefs.edit().putBoolean(KEY_PUSH_ENABLED, enabled).apply()
+    }
+
+    fun setBackgroundServiceEnabled(enabled: Boolean) {
+        _backgroundServiceEnabled.value = enabled
+        prefs.edit().putBoolean(KEY_BACKGROUND_SERVICE, enabled).apply()
     }
 
     fun setNotifyReactions(enabled: Boolean) {

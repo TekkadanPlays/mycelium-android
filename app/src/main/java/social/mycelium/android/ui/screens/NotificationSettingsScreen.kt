@@ -10,6 +10,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -18,6 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import social.mycelium.android.ui.settings.NotificationPreferences
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -35,6 +37,8 @@ fun NotificationSettingsScreen(
     val notifyReplies by NotificationPreferences.notifyReplies.collectAsState()
     val notifyDMs by NotificationPreferences.notifyDMs.collectAsState()
     val muteStrangers by NotificationPreferences.muteStrangers.collectAsState()
+
+    val backgroundServiceEnabled by NotificationPreferences.backgroundServiceEnabled.collectAsState()
 
     Scaffold(
         topBar = {
@@ -87,7 +91,7 @@ fun NotificationSettingsScreen(
                         fontWeight = FontWeight.Medium
                     )
                     Text(
-                        "Manage channels, sounds, and badges",
+                        "Manage per-channel sounds, vibration, and badges",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -102,12 +106,49 @@ fun NotificationSettingsScreen(
 
             HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
 
+            // ── Background Service ──
+            SectionHeader("Background Service")
+
+            SettingsToggleRow(
+                title = "Keep relay connections alive",
+                description = "Maintains WebSocket connections when the app is backgrounded so you receive notifications in real time",
+                checked = backgroundServiceEnabled,
+                onCheckedChange = { NotificationPreferences.setBackgroundServiceEnabled(it) }
+            )
+
+            if (backgroundServiceEnabled) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        Icons.Outlined.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Uses a foreground service to keep connections open. " +
+                            "Global feed mode may consume significant bandwidth and battery.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
             // ── Push Notifications ──
             SectionHeader("Push Notifications")
 
             SettingsToggleRow(
                 title = "Enable push notifications",
-                description = "Receive notifications when the app is in the background",
+                description = "Show Android notifications for social events (replies, zaps, mentions)",
                 checked = pushEnabled,
                 onCheckedChange = { NotificationPreferences.setPushEnabled(it) }
             )
@@ -118,45 +159,51 @@ fun NotificationSettingsScreen(
             SectionHeader("Notification Types")
 
             SettingsToggleRow(
-                title = "Reactions",
-                description = "When someone reacts to your notes",
-                checked = notifyReactions,
-                onCheckedChange = { NotificationPreferences.setNotifyReactions(it) }
+                title = "Replies",
+                description = "When someone replies to your notes",
+                checked = notifyReplies,
+                onCheckedChange = { NotificationPreferences.setNotifyReplies(it) },
+                enabled = pushEnabled
             )
 
             SettingsToggleRow(
                 title = "Zaps",
                 description = "When someone zaps your notes",
                 checked = notifyZaps,
-                onCheckedChange = { NotificationPreferences.setNotifyZaps(it) }
-            )
-
-            SettingsToggleRow(
-                title = "Reposts",
-                description = "When someone reposts your notes",
-                checked = notifyReposts,
-                onCheckedChange = { NotificationPreferences.setNotifyReposts(it) }
+                onCheckedChange = { NotificationPreferences.setNotifyZaps(it) },
+                enabled = pushEnabled
             )
 
             SettingsToggleRow(
                 title = "Mentions",
                 description = "When someone mentions you in a note",
                 checked = notifyMentions,
-                onCheckedChange = { NotificationPreferences.setNotifyMentions(it) }
+                onCheckedChange = { NotificationPreferences.setNotifyMentions(it) },
+                enabled = pushEnabled
             )
 
             SettingsToggleRow(
-                title = "Replies",
-                description = "When someone replies to your notes",
-                checked = notifyReplies,
-                onCheckedChange = { NotificationPreferences.setNotifyReplies(it) }
+                title = "Reactions",
+                description = "When someone reacts to your notes",
+                checked = notifyReactions,
+                onCheckedChange = { NotificationPreferences.setNotifyReactions(it) },
+                enabled = pushEnabled
+            )
+
+            SettingsToggleRow(
+                title = "Reposts",
+                description = "When someone reposts your notes",
+                checked = notifyReposts,
+                onCheckedChange = { NotificationPreferences.setNotifyReposts(it) },
+                enabled = pushEnabled
             )
 
             SettingsToggleRow(
                 title = "Direct messages",
                 description = "When you receive a direct message",
                 checked = notifyDMs,
-                onCheckedChange = { NotificationPreferences.setNotifyDMs(it) }
+                onCheckedChange = { NotificationPreferences.setNotifyDMs(it) },
+                enabled = pushEnabled
             )
 
             HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
@@ -192,8 +239,10 @@ private fun SettingsToggleRow(
     title: String,
     description: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true
 ) {
+    val alpha = if (enabled) 1f else 0.4f
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -201,14 +250,18 @@ private fun SettingsToggleRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = alpha)
+            )
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha)
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }

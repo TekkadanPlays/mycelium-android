@@ -2,7 +2,17 @@ package social.mycelium.android.data
 
 import androidx.compose.runtime.Immutable
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.Transient
 import java.util.Date
+
+/**
+ * Per-note publish lifecycle. Drives the thin progress line on NoteCard.
+ * Sending = signed, being sent to relays.
+ * Confirmed = at least one relay accepted (OK true).
+ * Failed = all relays rejected or timed out.
+ * null = normal note from subscription (no publish state).
+ */
+enum class PublishState { Sending, Confirmed, Failed }
 
 @Immutable
 @Serializable
@@ -46,7 +56,9 @@ data class Note(
     /** Authors who reposted this note (kind-6); when non-empty, NoteCard shows repost label. */
     val repostedByAuthors: List<Author> = emptyList(),
     /** Timestamp (ms) of the latest repost event (kind-6 created_at); null for non-reposts. */
-    val repostTimestamp: Long? = null
+    val repostTimestamp: Long? = null,
+    /** Publish progress for locally-published notes; null for notes from subscriptions. Not serialized. */
+    @Transient val publishState: PublishState? = null
 ) {
     /** First (most recent) reposter, or null if not a repost. Convenience for UI. */
     val repostedBy: Author? get() = repostedByAuthors.firstOrNull()

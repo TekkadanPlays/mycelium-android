@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.Author
+import social.mycelium.android.data.PublishState
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.cache.ThreadReplyCache
 import social.mycelium.android.utils.Nip10ReplyDetector
@@ -207,6 +208,18 @@ class NotesRepository private constructor() {
                 // Skip if repost already exists
                 val repostId = "repost:${event.id}"
                 if (currentIds.containsKey(repostId) || pendingIds.contains(repostId)) continue
+
+                // Locally-published event echo: already in feed via injectOwnNote/injectOwnRepost.
+                // Just merge relay URL from the relay that echoed it back.
+                if (locallyPublishedIds.contains(note.id)) {
+                    val existingLocal = currentIds[note.id]
+                    if (existingLocal != null) {
+                        val existingUrls = existingLocal.relayUrls.ifEmpty { listOfNotNull(existingLocal.relayUrl) }
+                        val newRelayUrls = (existingUrls + listOfNotNull(note.relayUrl)).distinct().filter { it.isNotBlank() }
+                        if (newRelayUrls != existingUrls) relayUpdates[note.id] = newRelayUrls
+                    }
+                    continue
+                }
 
                 // Dedup: if already in feed, just merge relay URLs
                 val existing = currentIds[note.id]
@@ -425,6 +438,11 @@ class NotesRepository private constructor() {
     private val pendingNotesLock = Any()
     private val _newNotesCounts = MutableStateFlow(NewNotesCounts(0, 0))
     val newNotesCounts: StateFlow<NewNotesCounts> = _newNotesCounts.asStateFlow()
+
+    /** Event IDs of notes published locally by the user. Used to:
+     *  1. Skip the pending queue when the relay echo arrives (reconcile instead).
+     *  2. Prevent the "X new notes" counter from counting our own events. */
+    private val locallyPublishedIds = Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     /** Feed session state for UI and to avoid redundant load on tab return (Idle -> Loading -> Live; Refreshing during applyPendingNotes/refresh). */
     private val _feedSessionState = MutableStateFlow(FeedSessionState.Idle)
@@ -1185,6 +1203,11 @@ class NotesRepository private constructor() {
      */
     private suspend fun handleKind6Repost(event: Event, relayUrl: String) {
         try {
+            // Skip relay echo of our own repost — already in feed via injectOwnRepost
+            if (locallyPublishedIds.contains(event.id)) {
+                Log.d(TAG, "Skipping kind-6 echo of locally-published repost ${event.id.take(8)}")
+                return
+            }
             val reposterPubkey = event.pubKey
             val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
             val profileRelayUrls = getProfileRelayUrls()
@@ -1382,12 +1405,127 @@ class NotesRepository private constructor() {
         }
     }
 
+    // ── Optimistic local rendering ────────────────────────────────────────────
+
+    /**
+     * Inject the user's own kind-1 note directly into the displayed feed with [PublishState.Sending].
+     * Bypasses the pending queue and feedCutoffTimestampMs entirely — the user's own note always
+     * appears at the top of the feed immediately after signing.
+     *
+     * @param note A Note built from the signed event (id = event.id, author = current user, etc.)
+     * @return true if injected, false if duplicate
+     */
+    fun injectOwnNote(note: Note): Boolean {
+        val currentNotes = _notes.value
+        if (currentNotes.any { it.id == note.id }) return false
+        locallyPublishedIds.add(note.id)
+        val withState = note.copy(publishState = PublishState.Sending)
+        _notes.value = (listOf(withState) + currentNotes).take(MAX_NOTES_IN_MEMORY)
+        scheduleDisplayUpdate()
+        Log.d(TAG, "Injected own note ${note.id.take(8)} (publishState=Sending)")
+        return true
+    }
+
+    /**
+     * Inject the user's own repost directly into the displayed feed with [PublishState.Sending].
+     * Same as [injectOwnNote] but builds the repost composite note from the original.
+     */
+    fun injectOwnRepost(originalNote: Note, reposterPubkey: String, repostEventId: String) {
+        scope.launch {
+            try {
+                val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
+                val repostTimestampMs = System.currentTimeMillis()
+                val compositeId = "repost:${originalNote.id}"
+
+                val currentNotes = _notes.value
+                if (currentNotes.any { it.id == compositeId }) return@launch
+
+                locallyPublishedIds.add(repostEventId)
+                locallyPublishedIds.add(compositeId)
+
+                // Remove the original kind-1 from feed if present (repost supersedes it)
+                var notesAfterRemoval = currentNotes
+                val origIndex = currentNotes.indexOfFirst { it.id == originalNote.id }
+                if (origIndex >= 0) {
+                    notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }
+                }
+                synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == originalNote.id } }
+
+                val note = originalNote.copy(
+                    id = compositeId,
+                    originalNoteId = originalNote.id,
+                    repostedByAuthors = listOf(reposterAuthor),
+                    repostTimestamp = repostTimestampMs,
+                    publishState = PublishState.Sending
+                )
+                _notes.value = (listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY)
+                scheduleDisplayUpdate()
+                Log.d(TAG, "Injected own repost ${compositeId.take(16)} (publishState=Sending)")
+            } catch (e: Throwable) {
+                Log.e(TAG, "injectOwnRepost failed: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Update the publish state of a locally-published note (e.g. Sending → Confirmed or Failed).
+     * Called by the publisher after relay OK responses arrive.
+     */
+    fun updatePublishState(eventId: String, state: PublishState) {
+        val currentNotes = _notes.value
+        val index = currentNotes.indexOfFirst { it.id == eventId || it.id == "repost:$eventId" || it.originalNoteId?.let { oid -> "repost:$oid" == it.id && eventId == it.id } == true }
+        if (index < 0) {
+            // Try matching by the actual event id for reposts
+            val repostIndex = currentNotes.indexOfFirst { it.id.startsWith("repost:") && locallyPublishedIds.contains(eventId) && it.publishState != null }
+            if (repostIndex >= 0) {
+                val updated = currentNotes.toMutableList()
+                updated[repostIndex] = updated[repostIndex].copy(publishState = state)
+                _notes.value = updated
+                scheduleDisplayUpdate()
+            }
+            return
+        }
+        val updated = currentNotes.toMutableList()
+        updated[index] = updated[index].copy(publishState = state)
+        _notes.value = updated
+        scheduleDisplayUpdate()
+        Log.d(TAG, "Updated publishState for ${eventId.take(8)} → $state")
+
+        // Auto-clear Confirmed state after a short delay so the progress line fades out
+        if (state == PublishState.Confirmed) {
+            scope.launch {
+                delay(3000L)
+                clearPublishState(eventId)
+            }
+        }
+    }
+
+    /** Clear publish state (note becomes a normal subscription note). */
+    private fun clearPublishState(eventId: String) {
+        val currentNotes = _notes.value
+        val index = currentNotes.indexOfFirst { it.id == eventId || it.id == "repost:$eventId" }
+        if (index >= 0 && currentNotes[index].publishState != null) {
+            val updated = currentNotes.toMutableList()
+            updated[index] = updated[index].copy(publishState = null)
+            _notes.value = updated
+            scheduleDisplayUpdate()
+        }
+    }
+
+    /**
+     * Check if an incoming event from a subscription is one we published locally.
+     * If so, reconcile (update relay URLs, clear from pending) instead of adding to pending queue.
+     * @return true if reconciled (caller should skip normal processing), false otherwise.
+     */
+    fun isLocallyPublished(eventId: String): Boolean = locallyPublishedIds.contains(eventId)
+
     /**
      * Inject a local repost into the feed immediately after the user publishes a boost.
      * This makes the boost appear instantly without waiting for the relay echo.
      * @param originalNote The note being boosted
      * @param reposterPubkey The current user's pubkey
      */
+    @Deprecated("Use injectOwnRepost() for optimistic rendering with publish progress", ReplaceWith("injectOwnRepost(originalNote, reposterPubkey, \"\")"))
     fun injectLocalRepost(originalNote: Note, reposterPubkey: String) {
         scope.launch {
             try {

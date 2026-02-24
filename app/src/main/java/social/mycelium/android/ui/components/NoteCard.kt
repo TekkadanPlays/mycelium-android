@@ -1,7 +1,14 @@
 package social.mycelium.android.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -69,6 +76,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.Note
+import social.mycelium.android.data.PublishState
 import social.mycelium.android.data.QuotedNoteMeta
 import social.mycelium.android.repository.ZapType
 import social.mycelium.android.data.SampleData
@@ -1468,6 +1476,69 @@ private fun authorDisplayLabel(author: social.mycelium.android.data.Author): Str
 }
 
 
+/**
+ * Thin animated progress line at the top of a NoteCard showing publish lifecycle.
+ * - Sending: animated indeterminate shimmer (primary color)
+ * - Confirmed: full-width green line that fades out
+ * - Failed: full-width red line
+ */
+@Composable
+private fun PublishProgressLine(state: PublishState) {
+    val height = 3.dp
+    when (state) {
+        PublishState.Sending -> {
+            val infiniteTransition = rememberInfiniteTransition(label = "publish_shimmer")
+            val offset by infiniteTransition.animateFloat(
+                initialValue = -0.3f,
+                targetValue = 1.3f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1200, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "shimmer_offset"
+            )
+            val color = MaterialTheme.colorScheme.primary
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(height)
+                    .background(
+                        brush = androidx.compose.ui.graphics.Brush.horizontalGradient(
+                            colors = listOf(
+                                color.copy(alpha = 0f),
+                                color.copy(alpha = 0.8f),
+                                color.copy(alpha = 0f)
+                            ),
+                            startX = offset * 1000f,
+                            endX = (offset + 0.3f) * 1000f
+                        )
+                    )
+            )
+        }
+        PublishState.Confirmed -> {
+            val alpha by animateFloatAsState(
+                targetValue = 0f,
+                animationSpec = tween(2000),
+                label = "confirmed_fade"
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(height)
+                    .background(Color(0xFF4CAF50).copy(alpha = 0.7f + alpha * 0.3f))
+            )
+        }
+        PublishState.Failed -> {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(height)
+                    .background(MaterialTheme.colorScheme.error.copy(alpha = 0.8f))
+            )
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, FlowPreview::class)
 @Composable
 fun NoteCard(
@@ -1608,6 +1679,10 @@ fun NoteCard(
         )
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
+            // ── Publish progress line ──────────────────────────────────────
+            if (note.publishState != null) {
+                PublishProgressLine(state = note.publishState)
+            }
             // Author info
             Row(
                 modifier = Modifier

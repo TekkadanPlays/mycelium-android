@@ -65,7 +65,6 @@ fun ComposeTopicScreen(
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(context, "Topic published", Toast.LENGTH_SHORT).show()
                     onBack()
                 }
             },
@@ -96,7 +95,7 @@ fun ComposeTopicScreen(
             modifier = modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
+                .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
             OutlinedTextField(
@@ -114,11 +113,9 @@ fun ComposeTopicScreen(
                 label = { Text("Content") },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 160.dp)
+                    .weight(1f)
                     .padding(vertical = 12.dp),
                 placeholder = { Text("What's this topic about?") },
-                minLines = 4,
-                maxLines = 20
             )
             OutlinedTextField(
                 value = hashtags,
@@ -128,10 +125,12 @@ fun ComposeTopicScreen(
                 placeholder = { Text("e.g. nostr, relay") },
                 singleLine = true
             )
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(12.dp))
             Button(
                 onClick = { showRelayPicker = true },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
                 enabled = title.isNotBlank()
             ) {
                 Text("Publish")

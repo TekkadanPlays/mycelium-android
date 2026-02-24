@@ -73,7 +73,6 @@ fun ReplyComposeScreen(
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(context, "Reply sent", Toast.LENGTH_SHORT).show()
                     onBack()
                 }
             },
@@ -104,7 +103,7 @@ fun ReplyComposeScreen(
             modifier = modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
+                .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
             if (replyToNote != null) {
@@ -137,15 +136,15 @@ fun ReplyComposeScreen(
                 label = { Text("Your reply") },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 160.dp)
+                    .weight(1f)
                     .padding(vertical = 12.dp),
                 placeholder = { Text("Write your reply...") },
-                minLines = 4,
-                maxLines = 20
             )
             Button(
                 onClick = { showRelayPicker = true },
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
                 enabled = content.isNotBlank()
             ) {
                 Text("Publish")

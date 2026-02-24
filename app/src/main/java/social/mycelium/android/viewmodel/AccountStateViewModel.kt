@@ -807,14 +807,37 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Publish a Kind 1 text note. Signs with Amber and sends to the given relay URLs.
      * Returns null on success, or an error message for synchronous failures.
      * Async failures are emitted via [toastMessage].
+     *
+     * The note is injected optimistically into the feed with [PublishState.Sending] immediately
+     * after signing, so it appears at the top of the feed before relay confirmation.
      */
     fun publishKind1(content: String, relayUrls: Set<String>): String? {
         if (content.isBlank()) return "Note is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val pubkey = currentAccount.value?.toHexKey()
         viewModelScope.launch {
             when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1, content = content)) {
-                is PublishResult.Success -> _toastMessage.value = "Note published"
-                is PublishResult.Error -> _toastMessage.value = "Publish failed: ${result.message}"
+                is PublishResult.Success -> {
+                    // Build a Note from the signed event and inject into feed optimistically
+                    val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                        ?: social.mycelium.android.data.Author(id = result.event.pubKey, username = "", displayName = "You")
+                    val note = social.mycelium.android.data.Note(
+                        id = result.event.id,
+                        author = author,
+                        content = content,
+                        timestamp = result.event.createdAt * 1000L,
+                        kind = 1,
+                        mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(content).filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }.distinct(),
+                        hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] },
+                        relayUrls = relayUrls.toList()
+                    )
+                    NotesRepository.getInstance().injectOwnNote(note)
+                    // Mark as confirmed — progress line turns green then fades
+                    NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
+                }
+                is PublishResult.Error -> {
+                    _toastMessage.value = "Publish failed: ${result.message}"
+                }
             }
         }
         return null
@@ -963,10 +986,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
             when (result) {
                 is PublishResult.Success -> {
-                    _toastMessage.value = "Boosted"
-                    // Inject repost locally so it appears instantly in the feed
+                    // Inject repost locally with publish progress — line turns green then fades
                     if (originalNote != null && pubkey != null) {
-                        NotesRepository.getInstance().injectLocalRepost(originalNote, pubkey)
+                        NotesRepository.getInstance().injectOwnRepost(originalNote, pubkey, result.event.id)
+                        NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
                     }
                 }
                 is PublishResult.Error -> _toastMessage.value = "Boost failed: ${result.message}"
@@ -1143,9 +1166,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                                 _zappedAmountByNoteId.value = _zappedAmountByNoteId.value + (noteId to amountSats)
                                 ZapStatePersistence.saveZappedIds(getApplication(), accountNpub, _zappedNoteIds.value)
                                 ZapStatePersistence.saveZappedAmounts(getApplication(), accountNpub, _zappedAmountByNoteId.value)
-                                viewModelScope.launch(Dispatchers.Main.immediate) {
-                                    _toastMessage.value = "Zap sent!"
-                                }
+                                // Zap confirmed — bolt icon already turned yellow as feedback
                             }
                             is social.mycelium.android.services.ZapProgress.Failed -> {
                                 viewModelScope.launch(Dispatchers.Main.immediate) {

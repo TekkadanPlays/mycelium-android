@@ -90,6 +90,7 @@ fun ComposeNoteScreen(
             modifier = modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
             OutlinedTextField(
@@ -97,15 +98,14 @@ fun ComposeNoteScreen(
                 onValueChange = { content = it },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 200.dp)
+                    .weight(1f)
                     .padding(vertical = 16.dp),
                 placeholder = { Text("What's on your mind?") },
-                minLines = 6,
-                maxLines = 20
             )
             Button(
                 onClick = { showRelayPicker = true },
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier
+                    .padding(top = 8.dp, bottom = 16.dp),
                 enabled = content.isNotBlank()
             ) {
                 Text("Publish")

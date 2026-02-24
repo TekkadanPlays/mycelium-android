@@ -143,7 +143,7 @@ fun ComposeTopicReplyScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .verticalScroll(scrollState)
+                .imePadding()
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -232,7 +232,7 @@ fun ComposeTopicReplyScreen(
                 onValueChange = { content = it },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 200.dp),
+                    .weight(1f),
                 placeholder = {
                     Text("Share your thoughts...")
                 },
@@ -240,10 +240,7 @@ fun ComposeTopicReplyScreen(
                     focusedContainerColor = MaterialTheme.colorScheme.surface,
                     unfocusedContainerColor = MaterialTheme.colorScheme.surface
                 ),
-                maxLines = 20
             )
-
-            Spacer(modifier = Modifier.weight(1f))
         }
     }
 }

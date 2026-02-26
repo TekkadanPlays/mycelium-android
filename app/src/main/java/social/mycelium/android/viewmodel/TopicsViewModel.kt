@@ -159,6 +159,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
 
         if (currentRelays == newRelays && currentRelays.isNotEmpty() && (hasData || !stuckLoading) && allUserRelayUrls.isNotEmpty()) {
             Log.d(TAG, "Topics relays unchanged and have data or not loading, skipping")
+            _uiState.update { it.copy(isLoading = false) }  // Always clear loading on skip
             return
         }
 

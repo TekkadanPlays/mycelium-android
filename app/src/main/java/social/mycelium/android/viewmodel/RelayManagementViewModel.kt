@@ -28,7 +28,10 @@ data class RelayManagementUiState(
     val relayProfiles: List<RelayProfile> = listOf(DefaultRelayProfiles.getDefaultProfile()),
     val outboxRelays: List<UserRelay> = emptyList(),
     val inboxRelays: List<UserRelay> = emptyList(),
-    val indexerRelays: List<UserRelay> = emptyList()
+    val indexerRelays: List<UserRelay> = emptyList(),
+    val announcementRelays: List<UserRelay> = emptyList(),
+    val draftsRelays: List<UserRelay> = emptyList(),
+    val otherSystemRelays: List<UserRelay> = emptyList()
 )
 
 class RelayManagementViewModel(
@@ -85,7 +88,10 @@ class RelayManagementViewModel(
                     relayProfiles = emptyList(),
                     outboxRelays = emptyList(),
                     inboxRelays = emptyList(),
-                    indexerRelays = emptyList()
+                    indexerRelays = emptyList(),
+                    announcementRelays = emptyList(),
+                    draftsRelays = emptyList(),
+                    otherSystemRelays = emptyList()
                 )
             }
         }
@@ -101,6 +107,11 @@ class RelayManagementViewModel(
             val inbox = storageManager.loadInboxRelays(pubkey)
             val cache = storageManager.loadIndexerRelays(pubkey)
 
+            // Load system relays
+            val announcements = storageManager.loadAnnouncementRelays(pubkey)
+            val drafts = storageManager.loadDraftsRelays(pubkey)
+            val otherSystem = storageManager.loadOtherSystemRelays(pubkey)
+
             // For same-user reload (e.g. returning from onboarding), only update if
             // the data actually changed — avoids triggering downstream recomposition
             // that causes feed flicker.
@@ -110,15 +121,19 @@ class RelayManagementViewModel(
                 current.relayProfiles == profiles &&
                 current.outboxRelays == outbox &&
                 current.inboxRelays == inbox &&
-                current.indexerRelays == cache
+                current.indexerRelays == cache &&
+                current.announcementRelays == announcements &&
+                current.draftsRelays == drafts &&
+                current.otherSystemRelays == otherSystem
             ) return@launch
 
-            _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache) }
+            _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, otherSystemRelays = otherSystem) }
 
             // Fetch NIP-11 info in background for all relays (personal + category)
             val allCategoryUrls = categories.flatMap { it.relays }.map { it.url }
             val allPersonalUrls = (outbox + inbox + cache).map { it.url }
-            val allUrls = (allCategoryUrls + allPersonalUrls).distinct()
+            val allSystemUrls = (announcements + drafts + otherSystem).map { it.url }
+            val allUrls = (allCategoryUrls + allPersonalUrls + allSystemUrls).distinct()
             allUrls.forEach { url ->
                 launch(Dispatchers.IO) {
                     try {
@@ -131,7 +146,10 @@ class RelayManagementViewModel(
                                     },
                                     outboxRelays = state.outboxRelays.updateRelayInfo(url, freshInfo),
                                     inboxRelays = state.inboxRelays.updateRelayInfo(url, freshInfo),
-                                    indexerRelays = state.indexerRelays.updateRelayInfo(url, freshInfo)
+                                    indexerRelays = state.indexerRelays.updateRelayInfo(url, freshInfo),
+                                    announcementRelays = state.announcementRelays.updateRelayInfo(url, freshInfo),
+                                    draftsRelays = state.draftsRelays.updateRelayInfo(url, freshInfo),
+                                    otherSystemRelays = state.otherSystemRelays.updateRelayInfo(url, freshInfo)
                                 )
                             }
                             saveToStorage()
@@ -160,6 +178,9 @@ class RelayManagementViewModel(
             storageManager.saveOutboxRelays(pubkey, _uiState.value.outboxRelays)
             storageManager.saveInboxRelays(pubkey, _uiState.value.inboxRelays)
             storageManager.saveIndexerRelays(pubkey, _uiState.value.indexerRelays)
+            storageManager.saveAnnouncementRelays(pubkey, _uiState.value.announcementRelays)
+            storageManager.saveDraftsRelays(pubkey, _uiState.value.draftsRelays)
+            storageManager.saveOtherSystemRelays(pubkey, _uiState.value.otherSystemRelays)
         }
     }
 
@@ -173,14 +194,15 @@ class RelayManagementViewModel(
      * the subscription with the updated relay set.
      */
     private fun refreshActiveSubscription() {
-        val categories = _uiState.value.relayCategories
-        val subscribedRelayUrls = categories
+        val state = _uiState.value
+        val subscribedRelayUrls = state.relayCategories
             .filter { it.isSubscribed }
             .flatMap { it.relays }
             .map { it.url }
-            .distinct()
-        if (subscribedRelayUrls.isEmpty()) return
-        val relayUrls = subscribedRelayUrls
+        // Merge outbox relays so adding a relay to a category doesn't drop outbox notes
+        val outboxUrls = state.outboxRelays.map { it.url }
+        val relayUrls = (subscribedRelayUrls + outboxUrls).distinct()
+        if (relayUrls.isEmpty()) return
         Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays")
         // Invalidate the idempotency guard so the feed re-subscribes with the new relay set
         social.mycelium.android.repository.NotesRepository.getInstance().invalidateSubscriptionGuard()
@@ -358,6 +380,37 @@ class RelayManagementViewModel(
 
     fun removeIndexerRelay(url: String) {
         _uiState.update { it.copy(indexerRelays = it.indexerRelays.filter { r -> r.url != url }) }
+        saveToStorage()
+    }
+
+    // System relay management methods
+    fun addAnnouncementRelay(relay: UserRelay) {
+        _uiState.update { it.copy(announcementRelays = it.announcementRelays + relay) }
+        saveToStorage()
+    }
+
+    fun removeAnnouncementRelay(url: String) {
+        _uiState.update { it.copy(announcementRelays = it.announcementRelays.filter { r -> r.url != url }) }
+        saveToStorage()
+    }
+
+    fun addDraftsRelay(relay: UserRelay) {
+        _uiState.update { it.copy(draftsRelays = it.draftsRelays + relay) }
+        saveToStorage()
+    }
+
+    fun removeDraftsRelay(url: String) {
+        _uiState.update { it.copy(draftsRelays = it.draftsRelays.filter { r -> r.url != url }) }
+        saveToStorage()
+    }
+
+    fun addOtherSystemRelay(relay: UserRelay) {
+        _uiState.update { it.copy(otherSystemRelays = it.otherSystemRelays + relay) }
+        saveToStorage()
+    }
+
+    fun removeOtherSystemRelay(url: String) {
+        _uiState.update { it.copy(otherSystemRelays = it.otherSystemRelays.filter { r -> r.url != url }) }
         saveToStorage()
     }
 

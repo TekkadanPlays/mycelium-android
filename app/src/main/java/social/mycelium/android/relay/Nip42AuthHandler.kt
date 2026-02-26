@@ -1,6 +1,7 @@
 package social.mycelium.android.relay
 
 import android.util.Log
+import com.example.cybin.core.Event
 import com.example.cybin.core.eventTemplate
 import com.example.cybin.core.nowUnixSeconds
 import com.example.cybin.relay.NostrProtocol
@@ -55,6 +56,14 @@ class Nip42AuthHandler(
     /** Track event IDs we sent for auth so we can match OK responses. */
     private val pendingAuthEventIds = mutableSetOf<String>()
 
+    /** Events awaiting auth retry, keyed by relay URL. */
+    private val pendingReplayEvents = mutableMapOf<String, MutableList<Event>>()
+
+    /** Recent events for lookup by event ID (30s TTL). */
+    private val recentEvents = mutableMapOf<String, Pair<Event, Long>>()
+
+    private val RECENT_EVENT_TTL_MS = 30_000L
+
     private data class ChallengeKey(val relayUrl: String, val challenge: String)
 
     private val listener = object : RelayConnectionListener {
@@ -98,6 +107,10 @@ class Nip42AuthHandler(
     private val lastNoSignerLogMs = mutableMapOf<String, Long>()
     private val NO_SIGNER_LOG_INTERVAL_MS = 30_000L
 
+    /** Per-relay cooldown after a failed AUTH attempt to avoid spamming Amber. */
+    private val authFailCooldownMs = mutableMapOf<String, Long>()
+    private val AUTH_FAIL_COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
+
     private fun handleAuthChallenge(url: String, challenge: String) {
         // Dedup FIRST — prevents processing the same challenge regardless of signer state
         val key = ChallengeKey(url, challenge)
@@ -118,6 +131,14 @@ class Nip42AuthHandler(
             return
         }
 
+        // Per-relay cooldown: don't retry AUTH if we recently failed for this relay
+        val now = System.currentTimeMillis()
+        val cooldownUntil = authFailCooldownMs[url] ?: 0L
+        if (now < cooldownUntil) {
+            Log.d(TAG, "AUTH cooldown active for $url (${(cooldownUntil - now) / 1000}s remaining)")
+            return
+        }
+
         Log.d(TAG, "AUTH challenge from $url: ${challenge.take(16)}…")
         updateStatus(url, AuthStatus.CHALLENGED)
 
@@ -130,15 +151,27 @@ class Nip42AuthHandler(
                     add(arrayOf("relay", url))
                     add(arrayOf("challenge", challenge))
                 }
-                val signed = currentSigner.sign(template)
+                // Use background-only signing to avoid launching Amber's UI.
+                // AUTH is automatic — if background signing is unavailable, we
+                // silently skip rather than popping up Amber for user approval.
+                val signed = currentSigner.signBackgroundOnly(template)
+                if (signed == null) {
+                    Log.w(TAG, "Background signing unavailable for AUTH to $url — skipping (no Amber UI popup)")
+                    updateStatus(url, AuthStatus.FAILED)
+                    authFailCooldownMs[url] = System.currentTimeMillis() + AUTH_FAIL_COOLDOWN_MS
+                    return@launch
+                }
                 val authMsg = NostrProtocol.buildAuth(signed)
 
                 pendingAuthEventIds.add(signed.id)
                 stateMachine.relayPool.sendToRelay(url, authMsg)
+                // Clear cooldown on successful send
+                authFailCooldownMs.remove(url)
                 Log.d(TAG, "AUTH response sent to $url (event ${signed.id.take(8)}…)")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to sign/send AUTH for $url: ${e.message}", e)
                 updateStatus(url, AuthStatus.FAILED)
+                authFailCooldownMs[url] = System.currentTimeMillis() + AUTH_FAIL_COOLDOWN_MS
                 respondedChallenges.remove(key)
             }
         }
@@ -154,10 +187,40 @@ class Nip42AuthHandler(
             updateStatus(url, AuthStatus.AUTHENTICATED)
             // Renew filters so subscriptions resume after auth
             stateMachine.relayPool.renewFilters(url)
+            // Replay any events that failed due to auth-required on this relay
+            val eventsToReplay = pendingReplayEvents.remove(url)
+            if (!eventsToReplay.isNullOrEmpty()) {
+                Log.d(TAG, "Replaying ${eventsToReplay.size} event(s) to $url after auth")
+                for (event in eventsToReplay) {
+                    stateMachine.relayPool.send(event, setOf(url))
+                }
+            }
         } else {
             Log.w(TAG, "AUTH rejected by $url: $message")
             updateStatus(url, AuthStatus.FAILED)
+            pendingReplayEvents.remove(url)
         }
+    }
+
+    /**
+     * Track a recently published event so it can be replayed if a relay
+     * rejects it with auth-required.
+     */
+    fun trackPublishedEvent(event: Event, relayUrls: Set<String>) {
+        val now = System.currentTimeMillis()
+        recentEvents[event.id] = event to now
+        // Prune expired entries
+        recentEvents.entries.removeAll { now - it.value.second > RECENT_EVENT_TTL_MS }
+    }
+
+    /**
+     * Called when a relay responds with OK false + "auth-required" for a published event.
+     * Queues the event for replay after successful authentication.
+     */
+    fun onAuthRequiredPublishFailure(relayUrl: String, eventId: String) {
+        val (event, _) = recentEvents[eventId] ?: return
+        pendingReplayEvents.getOrPut(relayUrl) { mutableListOf() }.add(event)
+        Log.d(TAG, "Queued event ${eventId.take(8)}… for replay on $relayUrl after auth")
     }
 
     private fun updateStatus(relayUrl: String, status: AuthStatus) {

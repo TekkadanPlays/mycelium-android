@@ -221,21 +221,22 @@ fun TopicsScreen(
     }
     val hasSavedRelayConfig = savedRelayUrls.isNotEmpty()
 
-    // Track if we've already loaded relays on this mount — reset on account change
-    var hasLoadedRelays by remember { mutableStateOf(false) }
-    LaunchedEffect(currentAccount) { hasLoadedRelays = false }
-
     // Auto-load topics: use ViewModel relay categories when available, fall back to sync storage URLs.
     // This ensures topics load immediately even before the async ViewModel finishes.
-    LaunchedEffect(relayCategories, savedRelayUrls, currentAccount, topicsFeedState.isGlobal, topicsFeedState.selectedCategoryId, topicsFeedState.selectedRelayUrl, onboardingComplete) {
+    // No one-shot guard — relay-change-driven with debounce (same pattern as DashboardScreen).
+    LaunchedEffect(relayCategories, savedRelayUrls, currentAccount, topicsFeedState.isGlobal, topicsFeedState.selectedCategoryId, topicsFeedState.selectedRelayUrl, onboardingComplete, relayUiState.outboxRelays, relayUiState.inboxRelays) {
         if (!onboardingComplete) return@LaunchedEffect
-        if (hasLoadedRelays) return@LaunchedEffect
+
+        // Debounce: keys settle in rapid succession; wait briefly so we only fire once.
+        delay(150)
 
         // Prefer ViewModel categories (has sidebar selection info), fall back to sync storage
-        val allUserRelayUrls = if (relayCategories.isNotEmpty()) {
-            relayCategories.flatMap { it.relays }.map { it.url }.distinct()
-        } else {
-            savedRelayUrls
+        val allUserRelayUrls = run {
+            val categoryUrls = relayCategories.flatMap { it.relays }.map { it.url }
+            val outboxUrls = relayUiState.outboxRelays.map { it.url }
+            val inboxUrls = relayUiState.inboxRelays.map { it.url }
+            val combined = (categoryUrls + outboxUrls + inboxUrls).distinct()
+            combined.ifEmpty { savedRelayUrls }
         }
         if (allUserRelayUrls.isEmpty()) return@LaunchedEffect
 
@@ -247,7 +248,6 @@ fun TopicsScreen(
             else -> allUserRelayUrls
         }
         topicsViewModel.loadTopicsFromRelays(allUserRelayUrls, displayUrls)
-        hasLoadedRelays = true
     }
 
     // Fetch user's NIP-65 relay list when account changes
@@ -510,6 +510,9 @@ fun TopicsScreen(
                         onSettingsClick = {
                             // Navigate to settings
                             onNavigateTo("settings")
+                        },
+                        onRelaysClick = {
+                            onNavigateTo("relays")
                         },
                         isGuest = authState.isGuest,
                         userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,

@@ -252,6 +252,7 @@ class TopicsRepository private constructor(context: Context) {
         val current = relayStateMachine.currentSubscription.value
         val sameRelays = current.relayUrls.sorted() == allUserRelayUrls.sorted()
         subscriptionRelays = allUserRelayUrls
+        hasReceivedFirstEvent = false  // Reset so loading clears on first event from new relays
         if (sameRelays) {
             Log.d(TAG, "Topics: subscription already active for ${allUserRelayUrls.size} relays (no feed change)")
             return
@@ -402,14 +403,13 @@ class TopicsRepository private constructor(context: Context) {
     fun injectLocalTopic(event: Event, relayUrl: String = "") {
         val topic = convertEventToTopicNote(event, relayUrl)
         topicsCache.put(topic.id, topic)
-        // Route to pending so the user sees "x new topics" banner
-        synchronized(pendingTopicsLock) {
-            if (_pendingNewTopics.none { it.id == topic.id } && !_topics.value.containsKey(topic.id)) {
-                _pendingNewTopics.add(topic)
-                _newTopicsCount.value = _pendingNewTopics.size
-            }
+        val current = _topics.value.toMutableMap()
+        if (!current.containsKey(topic.id)) {
+            current[topic.id] = topic
+            _topics.value = current
+            computeHashtagStatistics()
         }
-        Log.d(TAG, "📌 Local topic → pending: ${topic.title} (${topic.id.take(8)})")
+        Log.d(TAG, "Injected local topic: ${topic.title} (${topic.id.take(8)})")
     }
 
     /**

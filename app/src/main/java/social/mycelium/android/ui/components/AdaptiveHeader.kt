@@ -30,6 +30,9 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.offset
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.request.CachePolicy
+import androidx.compose.ui.platform.LocalContext
 import social.mycelium.android.viewmodel.HomeSortOrder
 import social.mycelium.android.viewmodel.TopicsSortOrder
 
@@ -52,6 +55,7 @@ fun AdaptiveHeader(
     onAccountsClick: () -> Unit = {},
     onQrCodeClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {},
+    onRelaysClick: () -> Unit = {},
     isGuest: Boolean = true,
     userDisplayName: String? = null,
     userAvatarUrl: String? = null,
@@ -203,6 +207,7 @@ fun AdaptiveHeader(
                                 )
                             }
                             // Adaptive logo dropdown menu
+                            val isMessagesScreen = title == "messages" || title == "requests"
                             DropdownMenu(
                                 expanded = logoMenuExpanded,
                                 onDismissRequest = { logoMenuExpanded = false },
@@ -210,7 +215,6 @@ fun AdaptiveHeader(
                             ) {
                                 if (onTopicsFollowingFilterChange != null) {
                                     // ── Topics screen menu ──
-                                    // Home navigation
                                     if (onNavigateToHome != null) {
                                         DropdownMenuItem(
                                             text = { Text("Home") },
@@ -221,7 +225,6 @@ fun AdaptiveHeader(
                                             leadingIcon = { Icon(Icons.Outlined.Home, contentDescription = null) }
                                         )
                                     }
-                                    // Live broadcast explorer
                                     if (onNavigateToLive != null) {
                                         val liveTint = if (hasFollowedLiveActivity) Color.Red else LocalContentColor.current
                                         DropdownMenuItem(
@@ -236,7 +239,6 @@ fun AdaptiveHeader(
                                     if (onNavigateToHome != null || onNavigateToLive != null) {
                                         HorizontalDivider()
                                     }
-                                    // Topics: All / Following
                                     DropdownMenuItem(
                                         text = {
                                             Text("All", color = if (!isTopicsFollowingFilter) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
@@ -257,9 +259,18 @@ fun AdaptiveHeader(
                                         },
                                         leadingIcon = { Icon(Icons.Outlined.People, contentDescription = null, tint = if (isTopicsFollowingFilter) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                                     )
-                                } else {
-                                    // ── Dashboard / Home screen menu ──
-                                    // Topics navigation
+                                } else if (isMessagesScreen) {
+                                    // ── Messages screen menu ──
+                                    if (onNavigateToHome != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("Home") },
+                                            onClick = {
+                                                logoMenuExpanded = false
+                                                onNavigateToHome()
+                                            },
+                                            leadingIcon = { Icon(Icons.Outlined.Home, contentDescription = null) }
+                                        )
+                                    }
                                     if (onNavigateToTopics != null) {
                                         DropdownMenuItem(
                                             text = { Text("Topics") },
@@ -270,7 +281,47 @@ fun AdaptiveHeader(
                                             leadingIcon = { Icon(Icons.Default.Tag, contentDescription = null) }
                                         )
                                     }
-                                    // Live broadcast explorer
+                                    if (onNavigateToLive != null) {
+                                        val liveTint = if (hasFollowedLiveActivity) Color.Red else LocalContentColor.current
+                                        DropdownMenuItem(
+                                            text = { Text("Live", color = if (hasFollowedLiveActivity) Color.Red else Color.Unspecified) },
+                                            onClick = {
+                                                logoMenuExpanded = false
+                                                onNavigateToLive()
+                                            },
+                                            leadingIcon = { Icon(Icons.Filled.Videocam, contentDescription = null, tint = liveTint) }
+                                        )
+                                    }
+                                    if (onNavigateToHome != null || onNavigateToTopics != null || onNavigateToLive != null) {
+                                        HorizontalDivider()
+                                    }
+                                    // Single toggle between conversations and requests
+                                    val showingRequests = title == "requests"
+                                    DropdownMenuItem(
+                                        text = { Text(if (showingRequests) "Conversations" else "Requests") },
+                                        onClick = {
+                                            logoMenuExpanded = false
+                                            onMoreOptionClick(if (showingRequests) "conversations" else "requests")
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                if (showingRequests) Icons.Outlined.Email else Icons.Outlined.MarkEmailUnread,
+                                                contentDescription = null
+                                            )
+                                        }
+                                    )
+                                } else {
+                                    // ── Dashboard / Home screen menu ──
+                                    if (onNavigateToTopics != null) {
+                                        DropdownMenuItem(
+                                            text = { Text("Topics") },
+                                            onClick = {
+                                                logoMenuExpanded = false
+                                                onNavigateToTopics()
+                                            },
+                                            leadingIcon = { Icon(Icons.Default.Tag, contentDescription = null) }
+                                        )
+                                    }
                                     if (onNavigateToLive != null) {
                                         val liveTint = if (hasFollowedLiveActivity) Color.Red else LocalContentColor.current
                                         DropdownMenuItem(
@@ -285,7 +336,6 @@ fun AdaptiveHeader(
                                     if (onNavigateToTopics != null || onNavigateToLive != null) {
                                         HorizontalDivider()
                                     }
-                                    // Home: Global / Following
                                     if (onFollowingFilterChange != null) {
                                         DropdownMenuItem(
                                             text = {
@@ -506,6 +556,11 @@ fun AdaptiveHeader(
                     } else {
                         // Signed in - show user avatar with dropdown menu
                         var showMenu by remember { mutableStateOf(false) }
+                        // Cache the avatar bitmap across recompositions so it never flashes
+                        // back to the placeholder when navigating between pages.
+                        val avatarModel = remember(userAvatarUrl) {
+                            userAvatarUrl?.takeIf { it.isNotBlank() }
+                        }
 
                         Box {
                             IconButton(onClick = { showMenu = true }) {
@@ -518,9 +573,15 @@ fun AdaptiveHeader(
                                         ),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    if (!userAvatarUrl.isNullOrBlank()) {
+                                    if (avatarModel != null) {
+                                        val context = LocalContext.current
                                         AsyncImage(
-                                            model = userAvatarUrl,
+                                            model = ImageRequest.Builder(context)
+                                                .data(avatarModel)
+                                                .memoryCachePolicy(CachePolicy.ENABLED)
+                                                .diskCachePolicy(CachePolicy.ENABLED)
+                                                .crossfade(false)
+                                                .build(),
                                             contentDescription = "Profile",
                                             modifier = Modifier
                                                 .fillMaxSize()
@@ -572,6 +633,19 @@ fun AdaptiveHeader(
                                     }
                                 )
                                 HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("Relays") },
+                                    onClick = {
+                                        showMenu = false
+                                        onRelaysClick()
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Hub,
+                                            contentDescription = null
+                                        )
+                                    }
+                                )
                                 DropdownMenuItem(
                                     text = { Text("Settings") },
                                     onClick = {

@@ -36,7 +36,6 @@ class AmberSignerManager(private val context: Context) {
     val state: StateFlow<AmberState> = _state.asStateFlow()
 
     private var currentSigner: NostrSignerExternal? = null
-    private var activityContext: Context? = null
 
     // SharedPreferences for persisting auth state
     private val prefs: SharedPreferences = context.getSharedPreferences("amber_auth", Context.MODE_PRIVATE)
@@ -122,28 +121,28 @@ class AmberSignerManager(private val context: Context) {
     }
 
     init {
-        // Store activity context if the provided context is an Activity
-        if (context is android.app.Activity) {
-            activityContext = context
-        }
         checkAmberInstallation()
     }
 
     /**
-     * Set the current activity context for signing operations
-     * Call this from MainActivity when it becomes active
+     * @deprecated No-op — applicationContext is always used now.
      */
-    fun setActivityContext(activity: android.app.Activity) {
-        activityContext = activity
-        Log.d("AmberSignerManager", "🔐 Activity context set for signing")
-    }
+    fun setActivityContext(activity: android.app.Activity) { /* no-op */ }
+
+    /** @deprecated No-op — applicationContext is always used now. */
+    fun clearActivityContext() { /* no-op */ }
 
     /**
-     * Clear the activity context when activity is destroyed
+     * Re-validate signer state. Call on app resume to recover from transient failures.
+     * If state is not LoggedIn but saved credentials exist, attempts restoration.
      */
-    fun clearActivityContext() {
-        activityContext = null
-        Log.d("AmberSignerManager", "🔐 Activity context cleared")
+    fun revalidate() {
+        if (_state.value is AmberState.LoggedIn) return
+        val isLoggedIn = prefs.getBoolean(PREF_IS_LOGGED_IN, false)
+        if (isLoggedIn) {
+            Log.d("AmberSignerManager", "Revalidating signer (current state: ${_state.value})")
+            checkAmberInstallation()
+        }
     }
 
     private fun checkAmberInstallation() {
@@ -184,7 +183,7 @@ class AmberSignerManager(private val context: Context) {
                 val signer = NostrSignerExternal(
                     pubKey = hexPubkey,
                     packageName = savedPackageName ?: AMBER_PACKAGE_NAME,
-                    contentResolver = context.contentResolver
+                    contentResolver = context.applicationContext.contentResolver
                 )
 
                 currentSigner = signer
@@ -265,7 +264,7 @@ class AmberSignerManager(private val context: Context) {
                     val signer = NostrSignerExternal(
                         pubKey = hexPubkey,
                         packageName = packageName,
-                        contentResolver = context.contentResolver
+                        contentResolver = context.applicationContext.contentResolver
                     )
 
                     currentSigner = signer
@@ -303,46 +302,54 @@ class AmberSignerManager(private val context: Context) {
     }
 
     fun getCurrentSigner(): NostrSigner? {
-        return when (val currentState = _state.value) {
-            is AmberState.LoggedIn -> {
-                Log.d("AmberSignerManager", "🔐 Using logged-in signer")
-                currentState.signer
-            }
-            is AmberState.NotLoggedIn -> {
-                // Create on-demand signer - Amber will handle permissions when needed
-                Log.d("AmberSignerManager", "🔐 Creating on-demand Amber signer")
+        val currentState = _state.value
+        if (currentState is AmberState.LoggedIn) {
+            return currentState.signer
+        }
 
-                // Use activity context if available, otherwise fall back to app context
-                val signerContext = activityContext ?: context
-                Log.d("AmberSignerManager", "🔐 Activity context available: ${activityContext != null}")
-                Log.d("AmberSignerManager", "🔐 Using context for signer: ${signerContext.javaClass.simpleName}")
-
-                try {
-                    // Check if we have Activity context available
-                    if (activityContext != null) {
-                        Log.d("AmberSignerManager", "🎯 Creating signer with Activity context")
-                        NostrSignerExternal(
-                            pubKey = "", // Will be determined by Amber when signing
-                            packageName = AMBER_PACKAGE_NAME,
-                            contentResolver = activityContext!!.contentResolver
-                        )
-                    } else {
-                        Log.w("AmberSignerManager", "⚠️ No Activity context - signer may not work for signing")
-                        NostrSignerExternal(
-                            pubKey = "", // Will be determined by Amber when signing
-                            packageName = AMBER_PACKAGE_NAME,
-                            contentResolver = context.contentResolver
-                        )
-                    }
-                } catch (e: Exception) {
-                    Log.w("AmberSignerManager", "Failed to create on-demand signer: ${e.message}")
-                    null
+        // State is NOT LoggedIn — attempt recovery if we have saved credentials.
+        // This handles: session restoration failure at init, transient Error states,
+        // Amber becoming available after initial check, or state degradation.
+        val isLoggedIn = prefs.getBoolean(PREF_IS_LOGGED_IN, false)
+        val savedPubkey = prefs.getString(PREF_USER_PUBKEY, null)
+        if (isLoggedIn && !savedPubkey.isNullOrEmpty()) {
+            Log.w("AmberSignerManager", "Signer state is $currentState but saved credentials exist — attempting recovery")
+            try {
+                val hexPubkey = if (savedPubkey.startsWith("npub")) {
+                    val nip19 = com.example.cybin.nip19.Nip19Parser.uriToRoute(savedPubkey)
+                    (nip19?.entity as? com.example.cybin.nip19.NPub)?.hex ?: savedPubkey
+                } else {
+                    savedPubkey
                 }
-            }
-            else -> {
-                Log.w("AmberSignerManager", "⚠️ Amber not available - state: $currentState")
-                null
+                val savedPackageName = prefs.getString(PREF_PACKAGE_NAME, AMBER_PACKAGE_NAME)
+                val signer = NostrSignerExternal(
+                    pubKey = hexPubkey,
+                    packageName = savedPackageName ?: AMBER_PACKAGE_NAME,
+                    contentResolver = context.applicationContext.contentResolver
+                )
+                currentSigner = signer
+                _state.value = AmberState.LoggedIn(hexPubkey, signer)
+                Log.d("AmberSignerManager", "Signer recovery successful — restored LoggedIn state")
+                return signer
+            } catch (e: Exception) {
+                Log.e("AmberSignerManager", "Signer recovery failed: ${e.message}")
             }
         }
+
+        // Fallback: on-demand signer for NotLoggedIn state (signing without being logged in)
+        if (currentState is AmberState.NotLoggedIn) {
+            try {
+                return NostrSignerExternal(
+                    pubKey = "",
+                    packageName = AMBER_PACKAGE_NAME,
+                    contentResolver = context.applicationContext.contentResolver
+                )
+            } catch (e: Exception) {
+                Log.w("AmberSignerManager", "Failed to create on-demand signer: ${e.message}")
+            }
+        }
+
+        Log.w("AmberSignerManager", "Amber not available - state: $currentState, no saved credentials")
+        return null
     }
 }

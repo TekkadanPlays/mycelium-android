@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.CleaningServices
+import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -52,6 +53,8 @@ import androidx.compose.ui.unit.dp
 fun HomeFab(
     onScrollToTop: () -> Unit,
     onCompose: () -> Unit,
+    onDrafts: () -> Unit = {},
+    draftCount: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -100,6 +103,20 @@ fun HomeFab(
                         onCompose()
                     }
                 )
+
+                // Drafts
+                if (draftCount > 0) {
+                    HomeFabItem(
+                        label = "Drafts ($draftCount)",
+                        icon = Icons.Outlined.Description,
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        onClick = {
+                            expanded = false
+                            onDrafts()
+                        }
+                    )
+                }
             }
         }
 

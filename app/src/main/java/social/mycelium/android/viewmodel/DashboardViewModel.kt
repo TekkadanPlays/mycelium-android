@@ -90,7 +90,17 @@ class DashboardViewModel : ViewModel() {
         // connectWebSocket()
         observeNotesFromRepository()
         observeRelayConnectionState()
+        observeFollowListUpdates()
         // Profile→notes updates are coalesced and applied in NotesRepository (profile update coalescer)
+    }
+
+    /** Reactively update followList in uiState when ContactListRepository cache changes (follow/unfollow). */
+    private fun observeFollowListUpdates() {
+        viewModelScope.launch {
+            ContactListRepository.followListUpdates.collect { updated ->
+                _uiState.update { it.copy(followList = updated) }
+            }
+        }
     }
 
     private fun observeRelayConnectionState() {
@@ -159,11 +169,13 @@ class DashboardViewModel : ViewModel() {
 
     /**
      * Set follow filter on notes: when enabled, only notes from followList authors are shown.
-     * When Following is selected but followList is still empty (loading), pass null so repo shows all until loaded.
+     * When Following is selected but followList is still empty (loading), pass the empty set —
+     * the repository drops all notes and uses lastAppliedKind1Filter for the subscription,
+     * preventing global bleed. Never pass null when enabled=true.
      */
     fun setFollowFilter(enabled: Boolean) {
         val list = _uiState.value.followList
-        val toPass = if (enabled) { if (list.isEmpty()) null else list } else null
+        val toPass = if (enabled) list else null
         notesRepository.setFollowFilter(toPass, enabled)
     }
 

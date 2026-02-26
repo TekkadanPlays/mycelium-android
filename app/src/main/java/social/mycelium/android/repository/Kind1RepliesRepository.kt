@@ -41,6 +41,19 @@ class Kind1RepliesRepository {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
+    init {
+        // Observe locally-published replies from ThreadReplyCache and inject them into the
+        // live _replies state so the UI updates immediately without waiting for relay echo.
+        scope.launch {
+            ThreadReplyCache.localReplyAdded.collect { (rootId, note) ->
+                // Only inject if this thread is currently active
+                if (_replies.value.containsKey(rootId)) {
+                    injectLocalReply(rootId, note)
+                }
+            }
+        }
+    }
+
     // Replies for a specific note ID
     private val _replies = MutableStateFlow<Map<String, List<Note>>>(emptyMap())
     val replies: StateFlow<Map<String, List<Note>>> = _replies.asStateFlow()
@@ -135,6 +148,22 @@ class Kind1RepliesRepository {
         connectedRelays = emptyList()
         deepFetchedIds.clear()
         _replies.value = emptyMap()
+    }
+
+    /**
+     * Inject a locally-published reply into the live replies state.
+     * Called after successfully publishing a kind-1 reply so the UI updates immediately
+     * without waiting for the relay echo.
+     */
+    fun injectLocalReply(rootId: String, reply: Note) {
+        val current = _replies.value[rootId] ?: emptyList()
+        if (current.any { it.id == reply.id }) return
+        val updated = (current + reply).sortedBy { it.timestamp }
+        _replies.value = _replies.value + (rootId to updated)
+        // Also update internal cache for tree building
+        val cacheMap = threadReplyCache.getOrPut(rootId) { mutableMapOf() }
+        cacheMap[reply.id] = reply
+        Log.d(TAG, "Injected local reply ${reply.id.take(8)} into thread ${rootId.take(8)} (now ${updated.size} replies)")
     }
 
     /**

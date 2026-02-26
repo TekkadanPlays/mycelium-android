@@ -31,6 +31,11 @@ class LiveChatRepository private constructor() {
     private val seenIds = mutableSetOf<String>()
     private var subscriptionHandle: TemporarySubscriptionHandle? = null
     private var currentActivityAddress: String? = null
+    private var cacheRelayUrls: List<String> = emptyList()
+
+    fun setCacheRelayUrls(urls: List<String>) {
+        cacheRelayUrls = urls
+    }
 
     /**
      * Subscribe to chat messages for a live activity.
@@ -86,7 +91,7 @@ class LiveChatRepository private constructor() {
         if (profileCache.getAuthor(event.pubKey) == null) {
             scope.launch {
                 try {
-                    profileCache.requestProfiles(listOf(event.pubKey), emptyList())
+                    profileCache.requestProfiles(listOf(event.pubKey), cacheRelayUrls)
                 } catch (_: Exception) {}
             }
         }

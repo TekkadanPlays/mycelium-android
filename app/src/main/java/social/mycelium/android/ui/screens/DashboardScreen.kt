@@ -9,6 +9,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -48,6 +49,8 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import kotlinx.coroutines.delay
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Note
 import social.mycelium.android.ui.components.AdaptiveHeader
@@ -414,6 +417,7 @@ private fun DashboardFeedContent(
     onboardingComplete: Boolean,
     feedSession: FeedSessionState,
     perRelayState: Map<String, social.mycelium.android.relay.RelayEndpointStatus>,
+    failedUserRelayCount: Int,
     viewModel: DashboardViewModel,
     accountStateViewModel: social.mycelium.android.viewmodel.AccountStateViewModel,
     onThreadClick: (Note, List<String>?) -> Unit,
@@ -520,6 +524,7 @@ private fun DashboardFeedContent(
         // user is still at the bottom, the next page triggers immediately.
         val notesRepo = remember { social.mycelium.android.repository.NotesRepository.getInstance() }
         val isLoadingOlder by notesRepo.isLoadingOlder.collectAsState()
+        val paginationExhausted by notesRepo.paginationExhausted.collectAsState()
         LaunchedEffect(listState, isLoadingOlder) {
             snapshotFlow {
                 val layoutInfo = listState.layoutInfo
@@ -527,7 +532,9 @@ private fun DashboardFeedContent(
                 val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                 lastVisible to totalItems
             }.collect { (lastVisible, totalItems) ->
-                if (totalItems > 5 && lastVisible >= totalItems - 500 && !isLoadingOlder) {
+                // Only load older notes when the user has actually scrolled near the bottom.
+                // paginationExhausted stops the loop when notes keep inserting above outliers.
+                if (totalItems > 5 && lastVisible >= totalItems - 5 && !isLoadingOlder && !paginationExhausted) {
                     notesRepo.loadOlderNotes()
                 }
             }
@@ -542,7 +549,6 @@ private fun DashboardFeedContent(
             run {
                 val isFollowing = homeFeedState.isFollowing
                 val newCount = if (isFollowing) uiState.newNotesCountFollowing else uiState.newNotesCountAll
-                val otherCount = if (isFollowing) uiState.newNotesCountAll else uiState.newNotesCountFollowing
                 if (newCount > 0) {
                     item(key = "new_notes_counter") {
                         Surface(
@@ -569,14 +575,6 @@ private fun DashboardFeedContent(
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.primary
                                 )
-                                if (otherCount > 0) {
-                                    Spacer(Modifier.width(6.dp))
-                                    Text(
-                                        text = "($otherCount in ${if (isFollowing) "All" else "Following"})",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                                    )
-                                }
                             }
                         }
                     }
@@ -730,6 +728,54 @@ private fun DashboardFeedContent(
             perRelayState = perRelayState,
             onNavigateTo = onNavigateTo,
         )
+
+        // ═══ BANNER: Relay failure warning ═══
+        AnimatedVisibility(
+            visible = failedUserRelayCount > 0 && sortedNotes.isNotEmpty(),
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 80.dp)
+                .zIndex(3f)
+        ) {
+            Surface(
+                modifier = Modifier
+                    .padding(horizontal = 16.dp)
+                    .fillMaxWidth()
+                    .clickable { onNavigateTo("relay_connection_status") },
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.errorContainer,
+                tonalElevation = 2.dp,
+                shadowElevation = 4.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Text(
+                        text = if (failedUserRelayCount == 1) "1 relay unreachable"
+                               else "$failedUserRelayCount relays unreachable",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "View",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -848,6 +894,12 @@ fun DashboardScreen(
                 url.trim().removeSuffix("/").lowercase() in userRelayUrls
         }
     }
+    val failedUserRelayCount = remember(perRelayState, userRelayUrls) {
+        perRelayState.count { (url, status) ->
+            status == social.mycelium.android.relay.RelayEndpointStatus.Failed &&
+                url.trim().removeSuffix("/").lowercase() in userRelayUrls
+        }
+    }
     val subscribedRelayCount = userRelayUrls.size
 
     // Indexer relay count for sidebar badge
@@ -940,18 +992,12 @@ fun DashboardScreen(
         // Debounce: keys settle in rapid succession (visibility, categories, outbox);
         // wait briefly so we only fire the subscription once.
         kotlinx.coroutines.delay(150)
-        val allUserRelayUrls = allCategoryRelayUrls
         val pubkey = currentAccount?.toHexKey()
-        // If categories have no relays, fall back to outbox relays only.
+        // Merge category relays + outbox relays so adding a relay to a category
+        // doesn't drop notes from outbox relays that the user was already reading.
         // Indexer relays are NOT included — they are only for NIP-65 lookups.
-        val relayUrlsToUse = if (allUserRelayUrls.isNotEmpty()) {
-            allUserRelayUrls
-        } else if (pubkey != null) {
-            val outboxUrls = relayUiState.outboxRelays.map { it.url }
-            outboxUrls.distinct()
-        } else {
-            emptyList()
-        }
+        val outboxUrls = if (pubkey != null) relayUiState.outboxRelays.map { it.url } else emptyList()
+        val relayUrlsToUse = (allCategoryRelayUrls + outboxUrls).distinct()
         val displayUrls = when {
             homeFeedState.isGlobal -> relayUrlsToUse
             homeFeedState.selectedCategoryId != null -> relayCategories
@@ -966,6 +1012,11 @@ fun DashboardScreen(
             // When notes are already present, ensureSubscriptionToNotes only re-applies subscription and does not clear the feed.
             viewModel.loadNotesFromFavoriteCategory(relayUrlsToUse, displayUrls)
             social.mycelium.android.repository.QuotedNoteCache.setRelayUrls(relayUrlsToUse)
+            currentAccount?.toHexKey()?.let { pk ->
+                social.mycelium.android.repository.QuotedNoteCache.setIndexerRelayUrls(
+                    storageManager.loadIndexerRelays(pk).map { it.url }
+                )
+            }
         }
     }
 
@@ -1003,11 +1054,11 @@ fun DashboardScreen(
     }
 
     // Apply follow filter when Following/Global or follow list changes.
-    // Guard: when isFollowing=true but followList is empty (still loading), skip the call
-    // to avoid replacing a working Following subscription with a global one that produces
-    // no new events (the "1 of 1 loading..." hang).
+    // Always call setFollowFilter — the repository handles the empty-list case safely
+    // (drops all notes + uses lastAppliedKind1Filter for subscription). Skipping the call
+    // when followList is empty was causing the filter to never be applied on cold start,
+    // allowing global notes to bleed into the Following feed.
     LaunchedEffect(homeFeedState.isFollowing, uiState.followList) {
-        if (homeFeedState.isFollowing && uiState.followList.isEmpty()) return@LaunchedEffect
         viewModel.setFollowFilter(homeFeedState.isFollowing)
     }
 
@@ -1047,6 +1098,14 @@ fun DashboardScreen(
             )
             feedStateViewModel.updateHomeFeedState { copy(scrollPosition = ScrollPosition(0, 0)) }
         }
+    }
+
+    // On fresh mount (app restart), ensure feed starts at the top
+    LaunchedEffect(Unit) {
+        snapshotFlow { uiState.notes.isNotEmpty() }
+            .filter { it }
+            .first()
+        listState.scrollToItem(0)
     }
 
     // Notes are always at index 0 in the LazyColumn (loading indicator is an overlay).
@@ -1430,6 +1489,9 @@ fun DashboardScreen(
                             // Navigate to settings
                             onNavigateTo("settings")
                         },
+                        onRelaysClick = {
+                            onNavigateTo("relays")
+                        },
                         isGuest = authState.isGuest,
                         userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,
                         userAvatarUrl = authState.userProfile?.picture,
@@ -1467,11 +1529,14 @@ fun DashboardScreen(
                     enter = scaleIn() + fadeIn(),
                     exit = scaleOut() + fadeOut()
                 ) {
+                    val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
                     social.mycelium.android.ui.components.HomeFab(
                         onScrollToTop = {
                             scope.launch { listState.scrollToItem(0) }
                         },
                         onCompose = { onNavigateTo("compose") },
+                        onDrafts = { onNavigateTo("drafts") },
+                        draftCount = draftsList.size,
                         modifier = Modifier.padding(bottom = 80.dp)
                     )
                 }
@@ -1485,6 +1550,15 @@ fun DashboardScreen(
                         isRefreshing = true
                         kotlinx.coroutines.delay(300)
                         viewModel.applyPendingNotes()
+                        // Force-refresh follow list so unfollows from other apps take effect
+                        currentAccount?.toHexKey()?.let { pubkey ->
+                            val cacheUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
+                            val outboxUrls = relayUiState.outboxRelays.map { it.url }
+                            val followRelayUrls = (cacheUrls + outboxUrls).distinct()
+                            if (followRelayUrls.isNotEmpty()) {
+                                viewModel.loadFollowList(pubkey, followRelayUrls, forceRefresh = true)
+                            }
+                        }
                         social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().requestRetry()
                         isRefreshing = false
                     }
@@ -1507,6 +1581,7 @@ fun DashboardScreen(
                 onboardingComplete = onboardingComplete,
                 feedSession = feedSession,
                 perRelayState = perRelayState,
+                failedUserRelayCount = failedUserRelayCount,
                 viewModel = viewModel,
                 accountStateViewModel = accountStateViewModel,
                 onThreadClick = onThreadClick,

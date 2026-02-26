@@ -190,9 +190,9 @@ class NotesRepository private constructor() {
                         if (!isOwnEvent && authorKey !in ff) continue
                     } else {
                         // Follow filter is enabled but list is null/empty (still loading).
-                        // Drop ALL notes to prevent global bleed into Following feed.
-                        // The follow list will load shortly and subscription will re-apply.
-                        continue
+                        // During Loading state, let notes through so feed isn't blank.
+                        // Once Live, drop to prevent global bleed into Following feed.
+                        if (_feedSessionState.value == FeedSessionState.Live) continue
                     }
                 }
 
@@ -359,6 +359,9 @@ class NotesRepository private constructor() {
 
     private val _isLoadingOlder = MutableStateFlow(false)
     val isLoadingOlder: StateFlow<Boolean> = _isLoadingOlder.asStateFlow()
+    /** True when pagination produced too few new notes — stops further loadOlderNotes calls until feed resets. */
+    private val _paginationExhausted = MutableStateFlow(false)
+    val paginationExhausted: StateFlow<Boolean> = _paginationExhausted.asStateFlow()
     /** Handle for the active "load older" subscription; cancelled when a new one starts or feed resets. */
     @Volatile private var olderNotesHandle: social.mycelium.android.relay.TemporarySubscriptionHandle? = null
 
@@ -593,6 +596,14 @@ class NotesRepository private constructor() {
         // When Following is on but follow list is empty (loading), use lastAppliedKind1Filter
         // to avoid sending a global subscription to relays.
         val effectiveFilter = filter ?: if (followFilterEnabled) lastAppliedKind1Filter else null
+        // SAFETY NET: Never send a global (null filter) subscription when user expects Following mode.
+        // If followFilterEnabled=true but we have no filter at all (cold start, no lastApplied),
+        // skip the subscription entirely — the ingestion filter will drop everything anyway,
+        // and the subscription will be re-applied once the follow list loads.
+        if (effectiveFilter == null && followFilterEnabled && !isGlobalMode) {
+            Log.w(TAG, "BLOCKED global subscription while in Following mode — waiting for follow list to load")
+            return
+        }
         relayStateMachine.requestFeedChange(relayUrls, effectiveFilter)
     }
 
@@ -648,11 +659,19 @@ class NotesRepository private constructor() {
      */
     fun setFollowFilter(followList: Set<String>?, enabled: Boolean) {
         val wasGlobal = isGlobalMode
-        // When Following is on but list is null or empty, treat as no filter (show all) so we never show zero notes
+        // Normalize to lowercase; treat empty set as null (still loading).
+        // When effective is null and enabled=true, ingestion filter drops ALL notes (no global bleed).
         val effective = followList?.map { it.lowercase() }?.toSet()?.takeIf { it.isNotEmpty() }
         // Idempotency: skip if nothing actually changed (prevents re-subscription loop
         // when DashboardScreen's LaunchedEffect re-fires with identical follow list content)
         if (enabled == followFilterEnabled && effective == followFilter) return
+        // SAFETY: never null out a populated follow filter — transient empty follow list
+        // (e.g. from ContactListRepository re-fetch or LaunchedEffect re-fire) would blank the feed.
+        // Keep the existing filter; it will be overwritten once the real follow list arrives.
+        if (effective == null && enabled && followFilter != null && !wasGlobal) {
+            Log.w(TAG, "setFollowFilter: ignoring null effective — keeping existing ${followFilter!!.size}-author filter")
+            return
+        }
         followFilter = effective
         followFilterEnabled = enabled
         profileCache.setPinnedPubkeys(if (enabled && !followFilter.isNullOrEmpty()) followFilter else null)
@@ -667,6 +686,8 @@ class NotesRepository private constructor() {
                 followingNotesSnapshot = currentNotes
                 Log.d(TAG, "Saved ${currentNotes.size} following notes to memory snapshot")
             }
+            // Stop outbox subscriptions so they don't inject followed-only notes into the global feed
+            outboxFeedManager.stop()
             // Entering Global/All: clear feed, mark global, start fresh live subscription
             isGlobalMode = true
             kind1FlushJob?.cancel()
@@ -679,8 +700,9 @@ class NotesRepository private constructor() {
             firstNoteDisplayedAtMs = 0L
             paginationCursorMs = 0L
             paginationExtraCap = 0
+            _paginationExhausted.value = false
             feedCutoffTimestampMs = System.currentTimeMillis()
-            Log.d(TAG, "Entering Global mode — feed cleared, live-only")
+            Log.d(TAG, "Entering Global mode — feed cleared, outbox stopped, live-only")
         } else if (leavingGlobal) {
             // Leaving Global/All: destroy global notes, restore following feed from memory snapshot
             isGlobalMode = false
@@ -707,12 +729,14 @@ class NotesRepository private constructor() {
                 initialLoadComplete = false
                 paginationCursorMs = 0L
                 paginationExtraCap = 0
+                _paginationExhausted.value = false
                 feedCutoffTimestampMs = System.currentTimeMillis()
                 scope.launch { loadFeedCacheFromDisk() }
                 Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from disk cache")
             }
         } else {
-            isGlobalMode = !enabled
+            // Not entering or leaving global — just updating follow list within same mode.
+            // Do NOT touch isGlobalMode here; it was already set correctly on mode entry/exit.
         }
 
         updateDisplayedNotes()
@@ -737,18 +761,30 @@ class NotesRepository private constructor() {
                 val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
                 urls.isEmpty() || urls.any { it in connectedSet }
             }
-            var filtered = if (connectedRelays.isEmpty()) _notes.value else _notes.value.filter(relayMatch)
+            val allNotes = _notes.value
+            var filtered = if (connectedRelays.isEmpty()) allNotes else allNotes.filter(relayMatch)
+            val afterRelay = filtered.size
             val currentFollowFilter = followFilter
             val followEnabled = followFilterEnabled
             if (followEnabled) {
                 if (currentFollowFilter != null && currentFollowFilter.isNotEmpty()) {
                     filtered = filtered.filter { note -> normalizeAuthorIdForCache(note.author.id) in currentFollowFilter }
+                } else if (_displayedNotes.value.isNotEmpty()) {
+                    // Follow filter temporarily null but feed was populated — keep previous notes
+                    // (ingestion filter already prevents non-followed notes in Following mode)
+                    Log.w(TAG, "Follow filter temporarily empty, keeping ${_displayedNotes.value.size} displayed notes")
+                    _displayedNotes.value = _displayedNotes.value // no-op assignment to avoid blanking
+                    return
                 } else {
-                    // Follow filter enabled but list not yet loaded — show nothing to prevent global bleed
+                    // First load, no follow filter yet — blank to prevent global bleed
                     filtered = emptyList()
                 }
             }
+            val afterFollow = filtered.size
             filtered = filtered.filter { note -> !note.isReply }
+            if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
+                Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")
+            }
             _displayedNotes.value = filtered.toList()
             updateDisplayedNewNotesCount()
             // Debounce counts subscription so we don't re-subscribe on every note; cap at 150 note IDs
@@ -864,16 +900,18 @@ class NotesRepository private constructor() {
         // Idempotency guard: skip only if we're already subscribed to the same relay set,
         // notes are loaded, AND the feed is Live (not still Loading from a previous call).
         val relaySet = allUserRelayUrls.toSet()
-        if (relaySet == lastEnsuredRelaySet && _notes.value.isNotEmpty() && _feedSessionState.value == FeedSessionState.Live) {
+        if (relaySet == lastEnsuredRelaySet && _notes.value.isNotEmpty() && _feedSessionState.value == FeedSessionState.Live && RelayConnectionStateMachine.getInstance().isSubscriptionActive()) {
             Log.d(TAG, "ensureSubscriptionToNotes: already active for ${relaySet.size} relays, skipping")
             return
         }
         lastEnsuredRelaySet = relaySet
         setSubscriptionRelays(allUserRelayUrls)
         if (_notes.value.isNotEmpty()) {
-            // Resume: keep existing feed; set new cutoff so notes arriving after resume go to pending (not into feed) until user refreshes.
+            // Resume: keep existing feed; only set cutoff if not already set (avoid blocking all notes on re-subscribe).
             Log.d(TAG, "Restoring subscription for ${allUserRelayUrls.size} relays (keeping ${_notes.value.size} notes)")
-            feedCutoffTimestampMs = System.currentTimeMillis()
+            if (feedCutoffTimestampMs == 0L) {
+                feedCutoffTimestampMs = System.currentTimeMillis()
+            }
             applySubscriptionToStateMachine(allUserRelayUrls)
             // Mark feed as Live so UI scroll-to-top and other session-aware logic fires
             if (_feedSessionState.value != FeedSessionState.Live) {
@@ -993,6 +1031,7 @@ class NotesRepository private constructor() {
      */
     fun loadOlderNotes() {
         if (_isLoadingOlder.value) return
+        if (_paginationExhausted.value) return
         val currentNotes = _notes.value
         if (currentNotes.isEmpty()) return
 
@@ -1050,9 +1089,17 @@ class NotesRepository private constructor() {
             }
             olderNotesHandle?.cancel()
             olderNotesHandle = null
-            _isLoadingOlder.value = false
             val newSize = _notes.value.size
-            Log.d(TAG, "Older notes loaded: feed now has $newSize notes (was $beforeCount, +${newSize - beforeCount}, received=${eventCount.get()})")
+            val added = newSize - beforeCount
+            // If pagination produced very few new notes (< 10), the feed has reached
+            // the gap between the main feed and outlier notes. Stop paginating to avoid
+            // an infinite loop where notes keep inserting above outliers.
+            if (added < 10) {
+                _paginationExhausted.value = true
+                Log.d(TAG, "Older notes: pagination exhausted (only $added new notes from ${eventCount.get()} received)")
+            }
+            _isLoadingOlder.value = false
+            Log.d(TAG, "Older notes loaded: feed now has $newSize notes (was $beforeCount, +$added, received=${eventCount.get()})")
         }
     }
 
@@ -1419,7 +1466,11 @@ class NotesRepository private constructor() {
         val currentNotes = _notes.value
         if (currentNotes.any { it.id == note.id }) return false
         locallyPublishedIds.add(note.id)
-        val withState = note.copy(publishState = PublishState.Sending)
+        // Clear relayUrls so the note passes the relay display filter in updateDisplayedNotes().
+        // The publish relay URLs (outbox) may not overlap with subscription relays (inbox),
+        // which would cause the note to be filtered out. The relay will echo it back with
+        // proper URLs once it's accepted.
+        val withState = note.copy(publishState = PublishState.Sending, relayUrls = emptyList(), relayUrl = null)
         _notes.value = (listOf(withState) + currentNotes).take(MAX_NOTES_IN_MEMORY)
         scheduleDisplayUpdate()
         Log.d(TAG, "Injected own note ${note.id.take(8)} (publishState=Sending)")
@@ -1430,40 +1481,38 @@ class NotesRepository private constructor() {
      * Inject the user's own repost directly into the displayed feed with [PublishState.Sending].
      * Same as [injectOwnNote] but builds the repost composite note from the original.
      */
-    fun injectOwnRepost(originalNote: Note, reposterPubkey: String, repostEventId: String) {
-        scope.launch {
-            try {
-                val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
-                val repostTimestampMs = System.currentTimeMillis()
-                val compositeId = "repost:${originalNote.id}"
+    suspend fun injectOwnRepost(originalNote: Note, reposterPubkey: String, repostEventId: String) {
+        try {
+            val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
+            val repostTimestampMs = System.currentTimeMillis()
+            val compositeId = "repost:${originalNote.id}"
 
-                val currentNotes = _notes.value
-                if (currentNotes.any { it.id == compositeId }) return@launch
+            val currentNotes = _notes.value
+            if (currentNotes.any { it.id == compositeId }) return
 
-                locallyPublishedIds.add(repostEventId)
-                locallyPublishedIds.add(compositeId)
+            locallyPublishedIds.add(repostEventId)
+            locallyPublishedIds.add(compositeId)
 
-                // Remove the original kind-1 from feed if present (repost supersedes it)
-                var notesAfterRemoval = currentNotes
-                val origIndex = currentNotes.indexOfFirst { it.id == originalNote.id }
-                if (origIndex >= 0) {
-                    notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }
-                }
-                synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == originalNote.id } }
-
-                val note = originalNote.copy(
-                    id = compositeId,
-                    originalNoteId = originalNote.id,
-                    repostedByAuthors = listOf(reposterAuthor),
-                    repostTimestamp = repostTimestampMs,
-                    publishState = PublishState.Sending
-                )
-                _notes.value = (listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY)
-                scheduleDisplayUpdate()
-                Log.d(TAG, "Injected own repost ${compositeId.take(16)} (publishState=Sending)")
-            } catch (e: Throwable) {
-                Log.e(TAG, "injectOwnRepost failed: ${e.message}", e)
+            // Remove the original kind-1 from feed if present (repost supersedes it)
+            var notesAfterRemoval = currentNotes
+            val origIndex = currentNotes.indexOfFirst { it.id == originalNote.id }
+            if (origIndex >= 0) {
+                notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }
             }
+            synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == originalNote.id } }
+
+            val note = originalNote.copy(
+                id = compositeId,
+                originalNoteId = originalNote.id,
+                repostedByAuthors = listOf(reposterAuthor),
+                repostTimestamp = repostTimestampMs,
+                publishState = PublishState.Sending
+            )
+            _notes.value = (listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY)
+            scheduleDisplayUpdate()
+            Log.d(TAG, "Injected own repost ${compositeId.take(16)} (publishState=Sending)")
+        } catch (e: Throwable) {
+            Log.e(TAG, "injectOwnRepost failed: ${e.message}", e)
         }
     }
 
@@ -1767,6 +1816,7 @@ class NotesRepository private constructor() {
         firstNoteDisplayedAtMs = 0L
         paginationCursorMs = 0L
         paginationExtraCap = 0
+        _paginationExhausted.value = false
         _feedSessionState.value = FeedSessionState.Idle
         // Also clear on-disk feed cache so old account's notes don't leak on next cold start
         appContext?.let { ctx ->

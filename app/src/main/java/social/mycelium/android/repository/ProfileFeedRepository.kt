@@ -77,12 +77,11 @@ class ProfileFeedRepository(
         _notes.value = emptyList()
         seenIds.clear()
 
-        val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
         val filter = Filter(
             kinds = listOf(1),
             authors = listOf(authorPubkey),
-            limit = INITIAL_LOAD_SIZE,
-            since = sevenDaysAgo
+            limit = INITIAL_LOAD_SIZE
+            // No 'since' — let the relay return the most recent N notes regardless of age
         )
 
         Log.d(TAG, "Starting profile feed for ${authorPubkey.take(8)}… on ${relayUrls.size} relays")

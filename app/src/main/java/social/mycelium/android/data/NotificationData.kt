@@ -48,5 +48,6 @@ enum class NotificationType {
     ZAP,
     DM,
     HIGHLIGHT,
-    REPORT
+    REPORT,
+    QUOTE
 }

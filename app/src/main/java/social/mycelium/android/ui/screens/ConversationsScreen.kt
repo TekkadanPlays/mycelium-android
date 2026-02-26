@@ -1,26 +1,36 @@
 package social.mycelium.android.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.MarkEmailUnread
+import androidx.compose.material.icons.outlined.SortByAlpha
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -29,26 +39,46 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
+import social.mycelium.android.BuildConfig
 import social.mycelium.android.data.Conversation
 import social.mycelium.android.repository.DirectMessageRepository
+import social.mycelium.android.ui.components.AdaptiveHeader
 
 /**
  * Main messages screen — bottom nav destination.
  *
- * Two tabs:
- * - **Conversations**: Ongoing threads with people you follow or have exchanged 2+ messages with.
- * - **Requests**: One-time / first-contact messages from unknown senders (message requests).
+ * Drop-down menu toggles between Conversations and Requests views.
+ * Expanding FAB provides sort, navigation, and mark-all-read actions.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationsScreen(
     onConversationClick: (String) -> Unit,
     onNewMessage: () -> Unit,
+    // AdaptiveHeader callbacks
+    onMenuClick: () -> Unit = {},
+    isGuest: Boolean = true,
+    userDisplayName: String? = null,
+    userAvatarUrl: String? = null,
+    onUserProfileClick: () -> Unit = {},
+    onAccountsClick: () -> Unit = {},
+    onSettingsClick: () -> Unit = {},
+    onRelaysClick: () -> Unit = {},
+    onLoginClick: (() -> Unit)? = null,
+    onNavigateToTopics: (() -> Unit)? = null,
+    onNavigateToHome: (() -> Unit)? = null,
+    onNavigateToLive: (() -> Unit)? = null,
+    hasFollowedLiveActivity: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val conversations by DirectMessageRepository.conversations.collectAsState()
-    val pagerState = rememberPagerState(initialPage = 0) { 2 }
+    val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+
+    // Drop-down toggle: conversations vs requests
+    var showRequests by remember { mutableStateOf(false) }
+    // Sort order: newest first (default) or oldest first
+    var sortNewest by remember { mutableStateOf(true) }
 
     // Split: conversations with 2+ messages are "known", single inbound = "requests"
     val knownConversations = remember(conversations) {
@@ -58,210 +88,247 @@ fun ConversationsScreen(
         conversations.filter { it.messageCount == 1 && it.lastMessage?.isOutgoing == false }
     }
 
+    val activeList = if (showRequests) requestConversations else knownConversations
+    val sortedList = remember(activeList, sortNewest) {
+        if (sortNewest) activeList
+        else activeList.sortedBy { it.lastMessage?.createdAt ?: 0L }
+    }
+
+    val topAppBarState = rememberTopAppBarState()
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
+
     Scaffold(
         topBar = {
-            Column(
-                Modifier
-                    .background(MaterialTheme.colorScheme.surface)
-                    .statusBarsPadding()
-            ) {
-                // Title row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Default.Lock,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Messages",
-                            style = MaterialTheme.typography.headlineSmall.copy(
-                                fontWeight = FontWeight.Bold
-                            )
-                        )
-                    }
-                    FilledTonalIconButton(
-                        onClick = onNewMessage,
-                        modifier = Modifier.size(40.dp),
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                        )
-                    ) {
-                        Icon(
-                            Icons.Default.Edit,
-                            contentDescription = "New message",
-                            modifier = Modifier.size(18.dp)
-                        )
+            AdaptiveHeader(
+                title = if (showRequests) "requests" else "messages",
+                onMenuClick = onMenuClick,
+                isGuest = isGuest,
+                userDisplayName = userDisplayName,
+                userAvatarUrl = userAvatarUrl,
+                onProfileClick = onUserProfileClick,
+                onAccountsClick = onAccountsClick,
+                onSettingsClick = onSettingsClick,
+                onRelaysClick = onRelaysClick,
+                onLoginClick = onLoginClick,
+                scrollBehavior = scrollBehavior,
+                onNavigateToTopics = onNavigateToTopics,
+                onNavigateToHome = onNavigateToHome,
+                onNavigateToLive = onNavigateToLive,
+                hasFollowedLiveActivity = hasFollowedLiveActivity,
+                onMoreOptionClick = { option ->
+                    when (option) {
+                        "requests" -> showRequests = true
+                        "conversations" -> showRequests = false
                     }
                 }
-
-                // Custom pill-shaped tab row
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                        .padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    DmTabPill(
-                        label = "Conversations",
-                        count = knownConversations.size,
-                        icon = Icons.Outlined.Email,
-                        selected = pagerState.currentPage == 0,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(0) } },
-                        modifier = Modifier.weight(1f)
-                    )
-                    DmTabPill(
-                        label = "Requests",
-                        count = requestConversations.size,
-                        icon = Icons.Outlined.MarkEmailUnread,
-                        selected = pagerState.currentPage == 1,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(1) } },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
+            )
+        },
+        floatingActionButton = {
+            DmFab(
+                sortNewest = sortNewest,
+                onToggleSort = { sortNewest = !sortNewest },
+                onScrollUp = {
+                    scope.launch {
+                        val target = (listState.firstVisibleItemIndex - 10).coerceAtLeast(0)
+                        listState.animateScrollToItem(target)
+                    }
+                },
+                onScrollDown = {
+                    scope.launch {
+                        val target = (listState.firstVisibleItemIndex + 10).coerceAtMost(
+                            (sortedList.size - 1).coerceAtLeast(0)
+                        )
+                        listState.animateScrollToItem(target)
+                    }
+                },
+                onMarkAllRead = { DirectMessageRepository.markAllAsRead() },
+                modifier = Modifier.padding(bottom = 80.dp)
+            )
         },
         modifier = modifier
     ) { paddingValues ->
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) { page ->
-            val list = if (page == 0) knownConversations else requestConversations
-            val isRequestTab = page == 1
+        if (sortedList.isEmpty()) {
+            EmptyMessagesState(isRequests = showRequests)
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues),
+                contentPadding = PaddingValues(bottom = 80.dp)
+            ) {
+                if (!showRequests) {
+                    item(key = "nip17_banner") {
+                        Nip17Banner()
+                    }
+                }
 
-            if (list.isEmpty()) {
-                EmptyMessagesState(isRequests = isRequestTab)
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 80.dp)
-                ) {
-                    // Encryption banner — only on first tab, only once
-                    if (page == 0) {
-                        item(key = "nip17_banner") {
-                            Nip17Banner()
+                if (showRequests) {
+                    item(key = "requests_info") {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.25f)
+                        ) {
+                            Text(
+                                "Messages from people you haven't replied to yet",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(12.dp)
+                            )
                         }
                     }
+                }
 
-                    if (isRequestTab) {
-                        item(key = "requests_info") {
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                                shape = RoundedCornerShape(12.dp),
-                                color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.25f)
-                            ) {
-                                Text(
-                                    "Messages from people you haven't replied to yet",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(12.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    items(list, key = { it.peerPubkey }) { conversation ->
-                        ConversationRow(
-                            conversation = conversation,
-                            isRequest = isRequestTab,
-                            onClick = { onConversationClick(conversation.peerPubkey) }
-                        )
-                    }
+                items(sortedList, key = { it.peerPubkey }) { conversation ->
+                    ConversationRow(
+                        conversation = conversation,
+                        isRequest = showRequests,
+                        onClick = { onConversationClick(conversation.peerPubkey) }
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(start = 80.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    )
                 }
             }
         }
     }
 }
 
+/**
+ * Expanding FAB for the DMs screen.
+ *
+ * Actions: Sort toggle (Newest/Oldest), Page Up/Down, Mark all as read.
+ */
 @Composable
-private fun DmTabPill(
-    label: String,
-    count: Int,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    selected: Boolean,
-    onClick: () -> Unit,
+private fun DmFab(
+    sortNewest: Boolean,
+    onToggleSort: () -> Unit,
+    onScrollUp: () -> Unit,
+    onScrollDown: () -> Unit,
+    onMarkAllRead: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val bgColor by animateColorAsState(
-        targetValue = if (selected)
-            MaterialTheme.colorScheme.primaryContainer
-        else
-            MaterialTheme.colorScheme.surfaceContainerHigh,
+    var expanded by remember { mutableStateOf(false) }
+    val rotation by animateFloatAsState(
+        targetValue = if (expanded) 45f else 0f,
         animationSpec = tween(200),
-        label = "tab_bg"
-    )
-    val contentColor by animateColorAsState(
-        targetValue = if (selected)
-            MaterialTheme.colorScheme.onPrimaryContainer
-        else
-            MaterialTheme.colorScheme.onSurfaceVariant,
-        animationSpec = tween(200),
-        label = "tab_content"
+        label = "dm_fab_rotation"
     )
 
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
-        color = bgColor,
-        onClick = onClick
+    Column(
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = modifier
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.Center
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(tween(150)),
+            exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut(tween(100))
+        ) {
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Mark all as read
+                DmFabItem(
+                    label = "Read all",
+                    icon = Icons.Outlined.DoneAll,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    onClick = {
+                        expanded = false
+                        onMarkAllRead()
+                    }
+                )
+                // Sort toggle
+                DmFabItem(
+                    label = if (sortNewest) "Oldest" else "Newest",
+                    icon = Icons.Outlined.SortByAlpha,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    onClick = {
+                        expanded = false
+                        onToggleSort()
+                    }
+                )
+                // Page up
+                DmFabItem(
+                    label = "Up",
+                    icon = Icons.Default.KeyboardArrowUp,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    onClick = {
+                        expanded = false
+                        onScrollUp()
+                    }
+                )
+                // Page down
+                DmFabItem(
+                    label = "Down",
+                    icon = Icons.Default.KeyboardArrowDown,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    onClick = {
+                        expanded = false
+                        onScrollDown()
+                    }
+                )
+            }
+        }
+
+        // Main FAB
+        FloatingActionButton(
+            onClick = { expanded = !expanded },
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary
         ) {
             Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = contentColor
+                imageVector = Icons.Default.Add,
+                contentDescription = if (expanded) "Close menu" else "Open menu",
+                modifier = Modifier.rotate(rotation)
             )
-            Spacer(Modifier.width(6.dp))
+        }
+    }
+}
+
+@Composable
+private fun DmFabItem(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    containerColor: androidx.compose.ui.graphics.Color,
+    contentColor: androidx.compose.ui.graphics.Color,
+    onClick: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            shape = MaterialTheme.shapes.small,
+            shadowElevation = 2.dp,
+        ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = contentColor
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
             )
-            if (count > 0) {
-                Spacer(Modifier.width(6.dp))
-                Surface(
-                    shape = CircleShape,
-                    color = if (selected)
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                    else
-                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.12f),
-                    modifier = Modifier.defaultMinSize(minWidth = 20.dp, minHeight = 20.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)) {
-                        Text(
-                            text = if (count > 99) "99+" else "$count",
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = contentColor
-                        )
-                    }
-                }
-            }
+        }
+        Spacer(Modifier.width(8.dp))
+        SmallFloatingActionButton(
+            onClick = onClick,
+            containerColor = containerColor,
+            contentColor = contentColor,
+        ) {
+            Icon(icon, contentDescription = label, modifier = Modifier.size(20.dp))
         }
     }
 }
 
 @Composable
 private fun EmptyMessagesState(isRequests: Boolean) {
-    val debugStatus by DirectMessageRepository.debugStatus.collectAsState()
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -300,14 +367,16 @@ private fun EmptyMessagesState(isRequests: Boolean) {
                 lineHeight = 18.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
-            // Debug status
-            Spacer(Modifier.height(16.dp))
-            Text(
-                debugStatus,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
+            if (BuildConfig.DEBUG) {
+                val debugStatus by DirectMessageRepository.debugStatus.collectAsState()
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    debugStatus,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
         }
     }
 }

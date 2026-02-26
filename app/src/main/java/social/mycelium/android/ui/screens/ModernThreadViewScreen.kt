@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Comment
@@ -326,16 +327,15 @@ fun ModernThreadViewScreen(
     }
 
     LaunchedEffect(note.id, relayUrlsKey, replyKind) {
-        // Skip when relay URLs haven't resolved yet — effect will re-fire when they arrive
-        if (relayUrls.isEmpty()) {
-            android.util.Log.d("ThreadView", "note=${note.id.take(8)} waiting for relay URLs... relayUrlsKey='$relayUrlsKey'")
-            return@LaunchedEffect
-        }
+        // Suspend until relay URLs are available (rather than skip + re-fire on recomposition)
+        val resolvedUrls = snapshotFlow { relayUrls }
+            .first { it.isNotEmpty() }
+
         val alreadyLoaded = when (replyKind) {
             1 -> kind1RepliesViewModel.uiState.value.note?.id == note.id && kind1RepliesViewModel.uiState.value.replies.isNotEmpty()
             else -> threadRepliesViewModel.uiState.value.note?.id == note.id && threadRepliesViewModel.uiState.value.replies.isNotEmpty()
         }
-        android.util.Log.d("ThreadView", "note=${note.id.take(8)} replyKind=$replyKind relays=${relayUrls.size} alreadyLoaded=$alreadyLoaded relayUrls=${relayUrls.take(3)}")
+        android.util.Log.d("ThreadView", "note=${note.id.take(8)} replyKind=$replyKind relays=${resolvedUrls.size} alreadyLoaded=$alreadyLoaded relayUrls=${resolvedUrls.take(3)}")
         if (!alreadyLoaded) {
             // Clear the other kind's VM so stale replies from a previous thread don't linger
             when (replyKind) {
@@ -344,8 +344,8 @@ fun ModernThreadViewScreen(
             }
             android.util.Log.d("ThreadView", "LOADING replies: note=${note.id.take(8)} replyKind=$replyKind via ${if (replyKind == 1) "kind1RepliesVM" else "threadRepliesVM"}")
             when (replyKind) {
-                1 -> kind1RepliesViewModel.loadRepliesForNote(note, relayUrls)
-                else -> threadRepliesViewModel.loadRepliesForNote(note, relayUrls)
+                1 -> kind1RepliesViewModel.loadRepliesForNote(note, resolvedUrls)
+                else -> threadRepliesViewModel.loadRepliesForNote(note, resolvedUrls)
             }
         }
     }
@@ -394,7 +394,7 @@ fun ModernThreadViewScreen(
     // Kind-1111 reply dialog (topic thread reply)
     var showReplyDialog by remember { mutableStateOf(false) }
     var parentReplyId by remember { mutableStateOf<String?>(null) }
-    val effectiveOnComment: (String) -> Unit = if (replyKind == 1111 && (onOpenReplyCompose != null || onPublishThreadReply != null)) {
+    val effectiveOnComment: (String) -> Unit = if (onOpenReplyCompose != null || onPublishThreadReply != null) {
         { id ->
             if (id == note.id) {
                 if (onOpenReplyCompose != null) {
@@ -408,7 +408,7 @@ fun ModernThreadViewScreen(
     } else {
         onComment
     }
-    val effectiveOnCommentReply: (String) -> Unit = if (replyKind == 1111 && (onOpenReplyCompose != null || onPublishThreadReply != null)) {
+    val effectiveOnCommentReply: (String) -> Unit = if (onOpenReplyCompose != null || onPublishThreadReply != null) {
         { replyId ->
             if (onOpenReplyCompose != null) {
                 val parent = repliesState.replies.find { it.id == replyId }

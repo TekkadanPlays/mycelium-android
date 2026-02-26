@@ -1,6 +1,9 @@
 package social.mycelium.android.cache
 
 import social.mycelium.android.data.Note
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import java.util.LinkedHashMap
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
@@ -29,6 +32,10 @@ object ThreadReplyCache {
     }
     private val lock = ReentrantReadWriteLock()
 
+    /** Emits (rootId, note) when a locally-published reply is added. */
+    private val _localReplyAdded = MutableSharedFlow<Pair<String, Note>>(extraBufferCapacity = 8)
+    val localReplyAdded: SharedFlow<Pair<String, Note>> = _localReplyAdded.asSharedFlow()
+
     fun addReply(rootId: String, note: Note) {
         lock.write {
             val list = cache.getOrPut(rootId) { mutableListOf() }
@@ -37,6 +44,12 @@ object ThreadReplyCache {
                 list.sortBy { it.timestamp }
             }
         }
+    }
+
+    /** Add a locally-published reply and notify observers (Kind1RepliesRepository). */
+    fun addLocalReply(rootId: String, note: Note) {
+        addReply(rootId, note)
+        _localReplyAdded.tryEmit(rootId to note)
     }
 
     fun getReplies(rootId: String): List<Note> =

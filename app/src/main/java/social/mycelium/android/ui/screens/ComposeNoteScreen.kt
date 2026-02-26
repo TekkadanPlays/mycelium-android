@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.viewmodel.AccountStateViewModel
 
@@ -26,12 +27,27 @@ fun ComposeNoteScreen(
     onBack: () -> Unit,
     accountStateViewModel: AccountStateViewModel,
     relayCategories: List<RelayCategory>? = null,
+    relayProfiles: List<RelayProfile> = emptyList(),
     initialContent: String = "",
+    draftId: String? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
-    var content by remember { mutableStateOf(initialContent) }
+    val loadedDraft = remember(draftId) { draftId?.let { social.mycelium.android.repository.DraftsRepository.getDraft(it) } }
+    var content by remember { mutableStateOf(loadedDraft?.content ?: initialContent) }
+    val onBackWithDraft = {
+        if (content.isNotBlank() && content != initialContent) {
+            social.mycelium.android.repository.DraftsRepository.saveDraft(
+                social.mycelium.android.data.Draft(
+                    id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
+                    type = social.mycelium.android.data.DraftType.NOTE,
+                    content = content
+                )
+            )
+        }
+        onBack()
+    }
     var showRelayPicker by remember { mutableStateOf(false) }
     val outboxRelays = remember(currentAccount?.npub) {
         accountStateViewModel.getOutboxRelaysForPublish()
@@ -42,11 +58,12 @@ fun ComposeNoteScreen(
     val myAuthor = remember(myPubkeyHex) {
         myPubkeyHex?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
     }
-    val sections = remember(myAuthor, outboxRelays, relayCategories) {
+    val sections = remember(myAuthor, outboxRelays, relayCategories, relayProfiles) {
         buildRelaySections(
             myAuthor = myAuthor,
             myOutboxRelays = outboxRelays,
-            relayCategories = relayCategories ?: emptyList()
+            relayCategories = relayCategories ?: emptyList(),
+            relayProfiles = relayProfiles
         )
     }
 
@@ -60,6 +77,7 @@ fun ComposeNoteScreen(
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
+                    loadedDraft?.let { social.mycelium.android.repository.DraftsRepository.deleteDraft(it.id) }
                     onBack()
                 }
             },
@@ -74,7 +92,7 @@ fun ComposeNoteScreen(
                 TopAppBar(
                     title = { Text("New note") },
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = onBackWithDraft) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back"

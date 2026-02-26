@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.ui.components.ProfilePicture
 
@@ -463,6 +464,7 @@ fun buildRelaySections(
     myAuthor: Author? = null,
     myOutboxRelays: List<UserRelay> = emptyList(),
     relayCategories: List<RelayCategory> = emptyList(),
+    relayProfiles: List<RelayProfile> = emptyList(),
     noteRelayUrls: List<String> = emptyList()
 ): List<RelaySection> {
     val sections = mutableListOf<RelaySection>()
@@ -562,6 +564,35 @@ fun buildRelaySections(
                         initiallyAllSelected = false
                     )
                 )
+                allUsedUrls.addAll(uniqueRelays.map { it.url })
+            }
+        }
+    }
+
+    // Relay profiles: each profile's categories rendered as sections (deduplicated)
+    relayProfiles.forEach { profile ->
+        profile.categories.forEach { category ->
+            if (category.relays.isNotEmpty()) {
+                val uniqueRelays = category.relays.filter { it.url !in allUsedUrls }
+                if (uniqueRelays.isNotEmpty()) {
+                    sections.add(
+                        RelaySection(
+                            id = "profile_${profile.id}_${category.id}",
+                            title = "${profile.name} — ${category.name}",
+                            icon = Icons.Outlined.Router,
+                            relays = uniqueRelays.map { relay ->
+                                RelayEntry(
+                                    url = relay.url,
+                                    displayName = relay.displayName,
+                                    description = relay.description
+                                )
+                            },
+                            initiallyExpanded = false,
+                            initiallyAllSelected = false
+                        )
+                    )
+                    allUsedUrls.addAll(uniqueRelays.map { it.url })
+                }
             }
         }
     }

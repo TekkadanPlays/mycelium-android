@@ -183,6 +183,9 @@ class RelayConnectionStateMachine {
 
             override fun onOk(url: String, eventId: String, success: Boolean, message: String) {
                 RelayHealthTracker.recordPublishOk(url, eventId, success, message)
+                if (!success && message.contains("auth-required", ignoreCase = true)) {
+                    nip42AuthHandler.onAuthRequiredPublishFailure(url, eventId)
+                }
             }
         })
     }
@@ -415,12 +418,20 @@ class RelayConnectionStateMachine {
                 mainFeedSubscription?.close()
                 mainFeedSubscription = null
                 val effectiveRelayUrls = RelayHealthTracker.filterBlocked(relayUrls)
-                if (effectiveRelayUrls.isEmpty()) { android.os.Trace.endSection(); return@launch }
+                if (effectiveRelayUrls.isEmpty() && relayUrls.isEmpty()) { android.os.Trace.endSection(); return@launch }
                 // Preserve existing relay states (Connected/Failed); only set NEW relays to Connecting.
                 // This avoids flashing all orbs back to "connecting" when adding a single relay.
+                // Auto-blocked relays stay in perRelayState as Failed so the UI can show a banner.
                 val existing = _perRelayState.value
+                val blockedUrls = relayUrls.filter { it !in effectiveRelayUrls }
                 _perRelayState.value = effectiveRelayUrls.associateWith { url ->
                     existing[url] ?: RelayEndpointStatus.Connecting
+                } + blockedUrls.associateWith { RelayEndpointStatus.Failed }
+                if (effectiveRelayUrls.isEmpty()) {
+                    // All relays blocked — state updated above for banner, but nothing to subscribe to
+                    Log.w(TAG, "All ${relayUrls.size} relays are blocked, no subscription possible")
+                    android.os.Trace.endSection()
+                    return@launch
                 }
                 if (customFilter != null && customOnEvent != null) {
                     val onEvent = customOnEvent
@@ -626,6 +637,12 @@ class RelayConnectionStateMachine {
         }
     }
 
+    /** True when the state machine is in a state where subscriptions are active (Connected or Subscribed). */
+    fun isSubscriptionActive(): Boolean {
+        val state = _state.value
+        return state is RelayState.Connected || state is RelayState.Subscribed
+    }
+
     /** Request connection to relays (moves to Connecting then Connected). */
     fun requestConnect(relayUrls: List<String>) {
         stateMachine.transition(RelayEvent.ConnectRequested(relayUrls))
@@ -646,8 +663,8 @@ class RelayConnectionStateMachine {
         if (relayUrls.isEmpty()) return
         val cur = currentSubscriptionRelayUrls
         val counts = countsNoteIds?.toSet() ?: emptySet()
-        if (cur.sorted() == relayUrls.sorted() && kind1FiltersEqual(kind1Filter, currentKind1Filter) && currentCountsNoteIds == counts) {
-            Log.d(TAG, "Subscription unchanged (${relayUrls.size} relays), skipping")
+        if (cur.sorted() == relayUrls.sorted() && kind1FiltersEqual(kind1Filter, currentKind1Filter) && currentCountsNoteIds == counts && isSubscriptionActive()) {
+            Log.d(TAG, "Subscription unchanged (${relayUrls.size} relays) and active, skipping")
             return
         }
         stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter, counts.takeIf { it.isNotEmpty() }))

@@ -225,7 +225,8 @@ fun ChatScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues),
+                .padding(paddingValues)
+                .imePadding(),
             state = listState,
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
         ) {
@@ -314,7 +315,7 @@ private fun MessageBubble(
         contentAlignment = alignment
     ) {
         Surface(
-            modifier = Modifier.widthIn(max = 280.dp),
+            modifier = Modifier.fillMaxWidth(0.78f),
             shape = bubbleShape,
             color = bubbleColor
         ) {
@@ -339,10 +340,14 @@ private fun MessageBubble(
     }
 }
 
+private val messageTimeFmt by lazy { java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()) }
+
 private fun formatMessageTime(epochSeconds: Long): String {
-    val sdf = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
-    return sdf.format(java.util.Date(epochSeconds * 1000))
+    return messageTimeFmt.format(java.util.Date(epochSeconds * 1000))
 }
+
+private val dayOfWeekFmt by lazy { java.text.SimpleDateFormat("EEEE", java.util.Locale.getDefault()) }
+private val dateSeparatorFmt by lazy { java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault()) }
 
 private fun formatDateSeparator(epochSeconds: Long): String {
     val now = System.currentTimeMillis()
@@ -351,13 +356,7 @@ private fun formatDateSeparator(epochSeconds: Long): String {
     return when {
         diffDays == 0 -> "Today"
         diffDays == 1 -> "Yesterday"
-        diffDays < 7 -> {
-            val sdf = java.text.SimpleDateFormat("EEEE", java.util.Locale.getDefault())
-            sdf.format(java.util.Date(msgMs))
-        }
-        else -> {
-            val sdf = java.text.SimpleDateFormat("MMM d, yyyy", java.util.Locale.getDefault())
-            sdf.format(java.util.Date(msgMs))
-        }
+        diffDays < 7 -> dayOfWeekFmt.format(java.util.Date(msgMs))
+        else -> dateSeparatorFmt.format(java.util.Date(msgMs))
     }
 }

@@ -185,6 +185,7 @@ fun NotificationsScreen(
             NotifTab("Zaps", { Icon(Icons.Default.Bolt, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.ZAP },
             NotifTab("Reposts", { Icon(Icons.Default.Repeat, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPOST },
             NotifTab("Mentions", { Icon(Icons.Outlined.AlternateEmail, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.MENTION },
+            NotifTab("Quotes", { Icon(Icons.Default.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.QUOTE },
             NotifTab("Highlights", { Icon(Icons.Outlined.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.HIGHLIGHT },
             NotifTab("Reports", { Icon(Icons.Outlined.Flag, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPORT }
         )
@@ -468,9 +469,11 @@ fun NotificationsScreen(
                                     onProfileClick = onProfileClick,
                                     onClick = {
                                         NotificationsRepository.markAsSeen(notification.id)
-                                        when {
-                                            notification.targetNote != null -> onNoteClick(notification.targetNote!!)
-                                            notification.note != null -> onNoteClick(notification.note!!)
+                                        val target = notification.targetNote ?: notification.note
+                                        if (target != null && target.rootNoteId != null) {
+                                            onOpenThreadForRootId(target.rootNoteId!!, 1, null, target)
+                                        } else if (target != null) {
+                                            onNoteClick(target)
                                         }
                                     }
                                 )

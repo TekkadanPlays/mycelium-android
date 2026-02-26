@@ -40,6 +40,7 @@ import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.utils.ClientTagManager
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -88,6 +89,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun setAmberActivityContext(activity: Activity) {
         amberSignerManager.setActivityContext(activity)
+        // Re-validate signer on resume — recovers from transient failures
+        // (e.g. Amber became available after initial check, or state degraded)
+        amberSignerManager.revalidate()
     }
 
     /**
@@ -682,7 +686,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val account = _currentAccount.value ?: return null
         val accountHex = account.toHexKey() ?: return null
         return when {
-            account.isExternalSigner -> (amberSignerManager.state.value as? AmberState.LoggedIn)?.signer
+            account.isExternalSigner -> amberSignerManager.getCurrentSigner()
             account.hasPrivateKey -> {
                 val privKeyBytes = nsecPrivKeyByHex[accountHex]
                 if (privKeyBytes != null) NostrSignerInternal(KeyPair(privKey = privKeyBytes)) else null
@@ -700,7 +704,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val account = _currentAccount.value ?: return "Sign in to react"
         val accountHex = account.toHexKey() ?: return "Invalid account key"
         val signer = when {
-            account.isExternalSigner -> (amberSignerManager.state.value as? AmberState.LoggedIn)?.signer
+            account.isExternalSigner -> amberSignerManager.getCurrentSigner()
             account.hasPrivateKey -> {
                 val privKeyBytes = nsecPrivKeyByHex[accountHex]
                 if (privKeyBytes != null) NostrSignerInternal(KeyPair(privKey = privKeyBytes)) else null
@@ -963,7 +967,26 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
             when (result) {
-                is PublishResult.Success -> Log.d("AccountStateViewModel", "Kind-1 reply published: ${result.eventId.take(8)}")
+                is PublishResult.Success -> {
+                    Log.d("AccountStateViewModel", "Kind-1 reply published: ${result.eventId.take(8)}")
+                    // Inject into ThreadReplyCache for instant display in thread view
+                    val pubkey = currentAccount.value?.toHexKey()
+                    val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                        ?: social.mycelium.android.data.Author(id = result.event.pubKey, username = "", displayName = "You")
+                    val replyNote = social.mycelium.android.data.Note(
+                        id = result.event.id,
+                        author = author,
+                        content = content,
+                        timestamp = result.event.createdAt * 1000L,
+                        kind = 1,
+                        isReply = true,
+                        rootNoteId = rootId,
+                        replyToId = parentId ?: rootId,
+                        mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(content).filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }.distinct(),
+                        hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] }
+                    )
+                    social.mycelium.android.cache.ThreadReplyCache.addLocalReply(rootId, replyNote)
+                }
                 is PublishResult.Error -> _toastMessage.value = "Reply failed: ${result.message}"
             }
         }
@@ -989,6 +1012,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     // Inject repost locally with publish progress — line turns green then fades
                     if (originalNote != null && pubkey != null) {
                         NotesRepository.getInstance().injectOwnRepost(originalNote, pubkey, result.event.id)
+                        delay(400) // Minimum shimmer display before green confirmation
                         NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
                     }
                 }
@@ -1059,8 +1083,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun followUser(targetPubkey: String): String? {
         val account = _currentAccount.value ?: return "Sign in to follow"
-        val amber = amberSignerManager.state.value
-        val signer = (amber as? AmberState.LoggedIn)?.signer ?: return "Amber signer not available"
+        val signer = amberSignerManager.getCurrentSigner() ?: return "Amber signer not available"
         val accountHex = account.toHexKey() ?: return "Invalid account key"
 
         val outboxRelays = relayStorageManager.loadOutboxRelays(accountHex)
@@ -1093,8 +1116,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun unfollowUser(targetPubkey: String): String? {
         val account = _currentAccount.value ?: return "Sign in to unfollow"
-        val amber = amberSignerManager.state.value
-        val signer = (amber as? AmberState.LoggedIn)?.signer ?: return "Amber signer not available"
+        val signer = amberSignerManager.getCurrentSigner() ?: return "Amber signer not available"
         val accountHex = account.toHexKey() ?: return "Invalid account key"
 
         val outboxRelays = relayStorageManager.loadOutboxRelays(accountHex)
@@ -1132,8 +1154,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         message: String = ""
     ): String? {
         val account = _currentAccount.value ?: return "Sign in to zap"
-        val amber = amberSignerManager.state.value
-        val signer = (amber as? AmberState.LoggedIn)?.signer ?: return "Amber signer not available"
+        val signer = amberSignerManager.getCurrentSigner() ?: return "Amber signer not available"
         val accountHex = account.toHexKey() ?: return "Invalid account key"
         if (!social.mycelium.android.services.NwcPaymentManager.isConfigured(getApplication())) {
             return "Please connect NWC"

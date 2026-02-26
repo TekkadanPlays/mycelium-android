@@ -327,6 +327,14 @@ object DirectMessageRepository {
         _activeMessages.value = messages
     }
 
+    /** Clear the visual unread state on all conversations. */
+    fun markAllAsRead() {
+        val current = _conversations.value
+        if (current.any { it.unreadCount > 0 }) {
+            _conversations.value = current.map { it.copy(unreadCount = 0) }
+        }
+    }
+
     fun clearAll() {
         stopSubscription()
         messagesById.clear()

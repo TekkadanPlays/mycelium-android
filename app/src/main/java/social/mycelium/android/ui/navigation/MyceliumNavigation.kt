@@ -74,6 +74,8 @@ import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
 import social.mycelium.android.ui.components.ThreadSlideBackBox
 import social.mycelium.android.ui.screens.AboutScreen
+import social.mycelium.android.ui.screens.AnnouncementsFeedScreen
+import social.mycelium.android.ui.screens.DraftsScreen
 import social.mycelium.android.ui.screens.GeneralSettingsScreen
 import social.mycelium.android.ui.screens.AccountPreferencesScreen
 import social.mycelium.android.ui.screens.AppearanceSettingsScreen
@@ -107,6 +109,7 @@ import social.mycelium.android.ui.components.PipStreamManager
 import social.mycelium.android.ui.components.PipStreamOverlay
 import social.mycelium.android.ui.screens.QrCodeScreen
 import social.mycelium.android.ui.screens.ReplyComposeScreen
+import social.mycelium.android.viewmodel.AnnouncementsViewModel
 import social.mycelium.android.viewmodel.AppViewModel
 import social.mycelium.android.viewmodel.rememberThreadStateHolder
 import social.mycelium.android.viewmodel.DashboardViewModel
@@ -288,7 +291,7 @@ fun MyceliumNavigation(
     // Clear overlays when navigating away from their host screen.
     // Preserve overlay when navigating to screens that should return to the thread on back
     // (profile, image/video viewer, thread, reply compose, QR).
-    val overlayPreserveRoutes = setOf("dashboard", "image_viewer", "video_viewer", "user_qr", "reply_compose")
+    val overlayPreserveRoutes = setOf("dashboard", "image_viewer", "video_viewer", "user_qr")
     LaunchedEffect(currentRoute) {
         val route = currentRoute ?: return@LaunchedEffect
         val preserveDashboardOverlay = route in overlayPreserveRoutes
@@ -298,6 +301,7 @@ fun MyceliumNavigation(
                 || route.startsWith("relay_log/")
                 || route.startsWith("reactions/")
                 || route.startsWith("zap_settings")
+                || route.startsWith("reply_compose")
         if (!preserveDashboardOverlay) {
             overlayThreadStack.clear()
         }
@@ -308,6 +312,7 @@ fun MyceliumNavigation(
                 || route.startsWith("relay_log/")
                 || route.startsWith("reactions/")
                 || route.startsWith("zap_settings")
+                || route.startsWith("reply_compose")
         if (!preserveTopicOverlay) {
             overlayTopicThreadStack.clear()
         }
@@ -318,6 +323,7 @@ fun MyceliumNavigation(
                 || route.startsWith("relay_log/")
                 || route.startsWith("reactions/")
                 || route.startsWith("zap_settings")
+                || route.startsWith("reply_compose")
         if (!preserveProfileOverlay) {
             overlayProfileThreadStack.clear()
         }
@@ -328,6 +334,7 @@ fun MyceliumNavigation(
                 || route.startsWith("relay_log/")
                 || route.startsWith("reactions/")
                 || route.startsWith("zap_settings")
+                || route.startsWith("reply_compose")
         if (!preserveNotifOverlay) {
             overlayNotifThreadStack.clear()
             overlayNotifReplyKinds.clear()
@@ -335,22 +342,23 @@ fun MyceliumNavigation(
     }
 
     // Main screens that should show the bottom navigation
-    val mainScreenRoutes = setOf("dashboard", "notifications", "relays?tab={tab}&prefill={prefill}&outbox={outbox}&inbox={inbox}", "messages", "wallet", "profile/{authorId}", "user_profile", "topics")
+    val mainScreenRoutes = setOf("dashboard", "notifications", "relays?tab={tab}&prefill={prefill}&outbox={outbox}&inbox={inbox}", "announcements", "messages", "wallet", "profile/{authorId}", "user_profile", "topics")
     // Check if a route is a main screen (handles parameterized routes like relays?tab=...)
     fun isMainScreen(route: String?): Boolean {
         if (route == null) return false
-        return route in mainScreenRoutes || route.startsWith("relays") || route.startsWith("profile") || route == "user_profile"
+        return route in mainScreenRoutes || route.startsWith("relays") || route.startsWith("announcements") || route.startsWith("profile") || route == "user_profile"
     }
 
     // Tab index for direction-aware transitions between bottom nav destinations.
     // Order matches the visual left-to-right bottom nav layout:
-    // HOME(0) | MESSAGES(1) | WALLET(2) | RELAYS(3) | NOTIFICATIONS(4)
+    // HOME(0) | MESSAGES(1) | WALLET(2) | ANNOUNCEMENTS(3) | NOTIFICATIONS(4)
     // Topics (5) and Profile (6) are accessed via menus, not bottom nav.
     fun routeToTabIndex(route: String?): Int = when {
         route == "dashboard" -> 0
         route == "messages" -> 1
         route == "wallet" -> 2
-        route?.startsWith("relays") == true -> 3
+        route?.startsWith("announcements") == true -> 3
+        route?.startsWith("relays") == true -> 3 // Relay Manager also maps to same tab index
         route == "notifications" -> 4
         route == "topics" -> 5
         route?.startsWith("profile") == true || route == "user_profile" -> 6
@@ -389,7 +397,8 @@ fun MyceliumNavigation(
                 currentRoute == "dashboard" -> "home"
                 currentRoute == "topics" -> "topics"
                 currentRoute == "notifications" -> "notifications"
-                currentRoute?.startsWith("relays") == true -> "relays"
+                currentRoute?.startsWith("announcements") == true -> "announcements"
+                currentRoute?.startsWith("relays") == true -> "announcements"
                 currentRoute?.startsWith("profile") == true -> "profile"
                 isMainScreen(currentRoute) -> currentRoute ?: "home"
                 else -> "home"
@@ -404,7 +413,16 @@ fun MyceliumNavigation(
     val noteCountsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
 
     // Initialize notifications persistence (SharedPreferences for seen IDs)
-    LaunchedEffect(Unit) { NotificationsRepository.init(context) }
+    LaunchedEffect(Unit) {
+        NotificationsRepository.init(context)
+        social.mycelium.android.repository.DraftsRepository.init(context)
+    }
+    // Load drafts when account is available
+    LaunchedEffect(currentAccount) {
+        currentAccount?.toHexKey()?.let { pubkey ->
+            social.mycelium.android.repository.DraftsRepository.loadDrafts(pubkey)
+        }
+    }
 
     // Start notifications subscription and load anchor subscriptions when we have account + relays.
     // Gated behind onboardingComplete to prevent premature relay connections during onboarding.
@@ -653,6 +671,7 @@ fun MyceliumNavigation(
                                         navController.navigateToProfile(it)
                                     }
                                     screen == "compose" || screen.startsWith("compose?") -> navController.navigate(screen) { launchSingleTop = true }
+                                    screen == "drafts" -> navController.navigate("drafts") { launchSingleTop = true }
                                     screen == "topics" -> navController.navigate("topics") {
                                         popUpTo("dashboard") { inclusive = false }
                                         launchSingleTop = true
@@ -872,7 +891,7 @@ fun MyceliumNavigation(
                                         onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
                                             appViewModel.setReplyToNote(replyToNote)
                                             val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                            navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}")
+                                            navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=1")
                                         },
                                         currentUserAuthor = remember(currentAccount) {
                                             currentAccount?.toHexKey()?.let { hex ->
@@ -1254,7 +1273,7 @@ fun MyceliumNavigation(
                                 // Open reply compose for the tapped note
                                 appViewModel.setReplyToNote(null)
                                 val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                navController.navigate("reply_compose?rootId=${enc(resolvedNote.id)}&rootPubkey=${enc(resolvedNote.author.id)}")
+                                navController.navigate("reply_compose?rootId=${enc(resolvedNote.id)}&rootPubkey=${enc(resolvedNote.author.id)}&replyKind=1")
                             },
                             onProfileClick = { authorId ->
                                 navController.navigateToProfile(authorId)
@@ -1310,7 +1329,7 @@ fun MyceliumNavigation(
                             onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
                                 appViewModel.setReplyToNote(replyToNote)
                                 val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}")
+                                navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=$replyKind")
                             },
                             onLoginClick = {
                                 val loginIntent = accountStateViewModel.loginWithAmber()
@@ -1561,10 +1580,11 @@ fun MyceliumNavigation(
                     val profileRelayUrls = remember(currentAccount) {
                         currentAccount?.toHexKey()?.let { pubkey ->
                             val categories = storageManager.loadCategories(pubkey)
-                            categories.filter { it.isSubscribed }
+                            val categoryUrls = categories.filter { it.isSubscribed }
                                 .flatMap { it.relays }
                                 .map { it.url }
-                                .distinct()
+                            val indexerUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
+                            (categoryUrls + indexerUrls).distinct()
                         } ?: emptyList()
                     }
                     val profileFeedRepo = remember(cacheKey, profileRelayUrls) {
@@ -1768,7 +1788,7 @@ fun MyceliumNavigation(
                                     onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
                                         appViewModel.setReplyToNote(replyToNote)
                                         val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                        navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}")
+                                        navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=1")
                                     },
                                     onLoginClick = {
                                         val loginIntent = accountStateViewModel.loginWithAmber()
@@ -1860,9 +1880,49 @@ fun MyceliumNavigation(
                             .collect { ProfileMetadataCache.getInstance().getAuthor(userCacheKey)?.let { a -> author = a } }
                     }
 
-                    val userNotes = emptyList<social.mycelium.android.data.Note>()
+                    // Dedicated profile feed subscription for user's own profile
+                    val userProfileRelayUrls = remember(currentAccount) {
+                        currentAccount?.toHexKey()?.let { pubkey ->
+                            val categories = navStorageManager.loadCategories(pubkey)
+                            val categoryUrls = categories.filter { it.isSubscribed }
+                                .flatMap { it.relays }
+                                .map { it.url }
+                            val indexerUrls = navStorageManager.loadIndexerRelays(pubkey).map { it.url }
+                            (categoryUrls + indexerUrls).distinct()
+                        } ?: emptyList()
+                    }
+                    val userProfileFeedRepo = remember(userCacheKey, userProfileRelayUrls) {
+                        if (userCacheKey != null) {
+                            social.mycelium.android.repository.ProfileFeedRepository(
+                                authorPubkey = userCacheKey,
+                                relayUrls = userProfileRelayUrls
+                            )
+                        } else null
+                    }
+                    val userProfileFeedNotes by (userProfileFeedRepo?.notes ?: kotlinx.coroutines.flow.MutableStateFlow(emptyList())).collectAsState()
+                    val userProfileIsLoading by (userProfileFeedRepo?.isLoading ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+                    val userProfileIsLoadingMore by (userProfileFeedRepo?.isLoadingMore ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+                    val userProfileHasMore by (userProfileFeedRepo?.hasMore ?: kotlinx.coroutines.flow.MutableStateFlow(false)).collectAsState()
+                    // Start subscription and dispose on exit
+                    DisposableEffect(userProfileFeedRepo) {
+                        userProfileFeedRepo?.start()
+                        onDispose { userProfileFeedRepo?.dispose() }
+                    }
+                    // Merge: profile feed notes + dashboard notes for this author
+                    val dashboardVm: DashboardViewModel = viewModel()
+                    val dashState by dashboardVm.uiState.collectAsState()
+                    val userIdLower = remember(userCacheKey) { userCacheKey?.lowercase() }
+                    val dashboardUserNotes = remember(dashState.notes, userIdLower) {
+                        if (userIdLower != null) dashState.notes.filter { it.author.id.lowercase() == userIdLower }
+                        else emptyList()
+                    }
+                    val userNotes = remember(userProfileFeedNotes, dashboardUserNotes) {
+                        (userProfileFeedNotes + dashboardUserNotes)
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.timestamp }
+                    }
+
                     val userProfileListState = rememberLazyListState()
-                    // Relay orb tap navigates to relay_log page via onRelayClick callback
                     val userZapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
                     val userZappedIds by accountStateViewModel.zappedNoteIds.collectAsState()
                     val userZappedAmountByNoteId by accountStateViewModel.zappedAmountByNoteId.collectAsState()
@@ -1870,6 +1930,10 @@ fun MyceliumNavigation(
                     ProfileScreen(
                             author = author,
                             authorNotes = userNotes,
+                            isProfileLoading = userProfileIsLoading,
+                            isLoadingMore = userProfileIsLoadingMore,
+                            hasMore = userProfileHasMore,
+                            onLoadMore = { userProfileFeedRepo?.loadMore() },
                             listState = userProfileListState,
                             onBackClick = { navController.popBackStack() },
                             onNoteClick = { note ->
@@ -1927,7 +1991,6 @@ fun MyceliumNavigation(
                                 navController.navigate("reactions/${note.id}") { launchSingleTop = true }
                             }
                     )
-                    // Relay orb tap now navigates to relay_log page via onRelayClick callback
                 }
 
                 // Settings — feed and relay connections persist; no disconnect when visiting settings.
@@ -1946,7 +2009,7 @@ fun MyceliumNavigation(
                                     "data_storage" -> navController.navigate("settings/data_storage") { launchSingleTop = true }
                                     "zap_settings" -> navController.navigate("zap_settings") { launchSingleTop = true }
                                     "about" -> navController.navigate("settings/about") { launchSingleTop = true }
-                                    "relay_health" -> navController.navigate("settings/relay_health") { launchSingleTop = true }
+                                    "relays" -> navController.navigate("relays") { launchSingleTop = true }
                                     "direct_messages" -> navController.navigate("settings/direct_messages") { launchSingleTop = true }
                                 }
                             },
@@ -2011,6 +2074,36 @@ fun MyceliumNavigation(
                             navController.navigate("new_dm") {
                                 launchSingleTop = true
                             }
+                        },
+                        isGuest = authState.isGuest,
+                        userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,
+                        userAvatarUrl = authState.userProfile?.picture,
+                        onUserProfileClick = {
+                            authState.userProfile?.pubkey?.let { navController.navigateToProfile(it) }
+                        },
+                        onSettingsClick = {
+                            navController.navigate("settings") { launchSingleTop = true }
+                        },
+                        onRelaysClick = {
+                            navController.navigate("relays") { launchSingleTop = true }
+                        },
+                        onLoginClick = {
+                            navController.navigate("login") { launchSingleTop = true }
+                        },
+                        onNavigateToTopics = {
+                            navController.navigate("topics") {
+                                popUpTo("messages") { inclusive = false }
+                                launchSingleTop = true
+                            }
+                        },
+                        onNavigateToHome = {
+                            navController.navigate("dashboard") {
+                                popUpTo("messages") { inclusive = false }
+                                launchSingleTop = true
+                            }
+                        },
+                        onNavigateToLive = {
+                            navController.navigate("live_explorer") { launchSingleTop = true }
                         }
                     )
                 }
@@ -2212,6 +2305,78 @@ fun MyceliumNavigation(
                     DebugFollowListScreen(
                         currentAccountPubkey = pubkey,
                         onBackClick = { navController.popBackStack() }
+                    )
+                }
+
+                // Announcements Feed — bottom nav "News" tab
+                composable("announcements") {
+                    val announcementsViewModel: AnnouncementsViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
+                    val announcementsUiState by announcementsViewModel.uiState.collectAsState()
+                    val currentAccount by accountStateViewModel.currentAccount.collectAsState()
+
+                    LaunchedEffect(currentAccount) {
+                        currentAccount?.toHexKey()?.let { pubkey ->
+                            announcementsViewModel.subscribe(pubkey)
+                        }
+                    }
+
+                    val announcementsDraftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
+
+                    AnnouncementsFeedScreen(
+                        uiState = announcementsUiState,
+                        onRefresh = {
+                            currentAccount?.toHexKey()?.let { announcementsViewModel.refresh(it) }
+                        },
+                        onNoteClick = { note ->
+                            appViewModel.updateSelectedNote(note)
+                            navController.navigate("thread/${note.id}") { launchSingleTop = true }
+                        },
+                        onProfileClick = { authorId ->
+                            navController.navigateToProfile(authorId)
+                        },
+                        onConfigureRelays = {
+                            navController.navigate("relays?tab=system") { launchSingleTop = true }
+                        },
+                        topAppBarState = topAppBarState,
+                        onMenuClick = { /* no drawer on announcements */ },
+                        isGuest = authState.isGuest,
+                        userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,
+                        userAvatarUrl = authState.userProfile?.picture,
+                        onUserProfileClick = {
+                            authState.userProfile?.pubkey?.let { navController.navigateToProfile(it) }
+                        },
+                        onAccountsClick = { /* account switcher not wired on this tab */ },
+                        onSettingsClick = {
+                            navController.navigate("settings") { launchSingleTop = true }
+                        },
+                        onRelaysClick = {
+                            navController.navigate("relays") { launchSingleTop = true }
+                        },
+                        onLoginClick = {
+                            navController.navigate("login") { launchSingleTop = true }
+                        },
+                        onNavigateToTopics = {
+                            navController.navigate("topics") {
+                                popUpTo("announcements") { inclusive = false }
+                                launchSingleTop = true
+                            }
+                        },
+                        onNavigateToHome = {
+                            navController.navigate("dashboard") {
+                                popUpTo("announcements") { inclusive = false }
+                                launchSingleTop = true
+                            }
+                        },
+                        onNavigateToLive = {
+                            navController.navigate("live_explorer") { launchSingleTop = true }
+                        },
+                        onCompose = {
+                            navController.navigate("compose") { launchSingleTop = true }
+                        },
+                        draftCount = announcementsDraftsList.size,
+                        onDrafts = {
+                            navController.navigate("drafts") { launchSingleTop = true }
+                        }
                     )
                 }
 
@@ -2418,6 +2583,21 @@ fun MyceliumNavigation(
                         }
                     }
 
+                    // Relay URLs for notification thread overlays — computed BEFORE callbacks that use them
+                    val notifFallbackRelayUrls = remember(currentAccount) {
+                        val userRelays = currentAccount?.toHexKey()?.let { pubkey ->
+                            val categories = storageManager.loadCategories(pubkey)
+                            categories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url }.distinct()
+                        } ?: emptyList()
+                        (userRelays + NotesRepository.getInstance().INDEXER_RELAYS).distinct()
+                    }
+                    val notifCacheRelayUrls = remember(currentAccount) {
+                        currentAccount?.toHexKey()?.let { pubkey ->
+                            val categories = storageManager.loadCategories(pubkey)
+                            categories.flatMap { it.relays }.map { it.url }.distinct()
+                        } ?: emptyList()
+                    }
+
                     val notifCoroutineScope = rememberCoroutineScope()
                     NotificationsScreen(
                             listState = notificationsListState,
@@ -2445,7 +2625,8 @@ fun MyceliumNavigation(
                                             content = "",
                                             timestamp = 0L,
                                             likes = 0, shares = 0, comments = 0, isLiked = false,
-                                            hashtags = emptyList(), mediaUrls = emptyList()
+                                            hashtags = emptyList(), mediaUrls = emptyList(),
+                                            relayUrls = notifFallbackRelayUrls
                                         )
                                 overlayNotifThreadStack.clear()
                                 overlayNotifReplyKinds.clear()
@@ -2457,10 +2638,8 @@ fun MyceliumNavigation(
                                     if (note == null) {
                                         val pubkey = currentAccount?.toHexKey() ?: return@launch
                                         val categories = storageManager.loadCategories(pubkey)
-                                        val relayUrls = categories.flatMap { it.relays }.map { it.url }.distinct()
-                                        if (relayUrls.isNotEmpty()) {
-                                            note = NotesRepository.getInstance().fetchNoteById(rootNoteId, relayUrls)
-                                        }
+                                        val relayUrls = (categories.flatMap { it.relays }.map { it.url } + NotesRepository.getInstance().INDEXER_RELAYS).distinct()
+                                        note = NotesRepository.getInstance().fetchNoteById(rootNoteId, relayUrls)
                                     }
                                     if (note != null) {
                                         withContext(Dispatchers.Main.immediate) {
@@ -2486,19 +2665,6 @@ fun MyceliumNavigation(
                     )
 
                     // ── Notifications thread overlay (stack-based) ──────────────────────
-                    val notifFallbackRelayUrls = remember(currentAccount) {
-                        currentAccount?.toHexKey()?.let { pubkey ->
-                            val categories = storageManager.loadCategories(pubkey)
-                            val subscribedRelays = categories.filter { it.isSubscribed }
-                            subscribedRelays.flatMap { it.relays }.map { it.url }.distinct()
-                        } ?: emptyList()
-                    }
-                    val notifCacheRelayUrls = remember(currentAccount) {
-                        currentAccount?.toHexKey()?.let { pubkey ->
-                            val categories = storageManager.loadCategories(pubkey)
-                            categories.flatMap { it.relays }.map { it.url }.distinct()
-                        } ?: emptyList()
-                    }
                     BackHandler(enabled = overlayNotifThreadStack.isNotEmpty()) {
                         overlayNotifThreadStack.removeLastOrNull()
                         overlayNotifReplyKinds.removeLastOrNull()
@@ -2583,12 +2749,19 @@ fun MyceliumNavigation(
                                     zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
                                     zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
                                     myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
-                                    onPublishThreadReply = if (notifReplyKind == 1111) { rootId, rootPubkey, parentId, parentPubkey, content ->
-                                        accountStateViewModel.publishThreadReply(rootId, rootPubkey, parentId, parentPubkey, content)
-                                    } else null,
+                                    onPublishThreadReply = when (notifReplyKind) {
+                                        1111 -> { { rootId, rootPubkey, parentId, parentPubkey, content ->
+                                            accountStateViewModel.publishThreadReply(rootId, rootPubkey, parentId, parentPubkey, content)
+                                        } }
+                                        1 -> { { rootId, rootPubkey, parentId, parentPubkey, content ->
+                                            accountStateViewModel.publishKind1Reply(rootId, rootPubkey, parentId, parentPubkey, content)
+                                        } }
+                                        else -> null
+                                    },
                                     onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
-                                        val route = "reply_compose/${android.net.Uri.encode(rootId)}/${android.net.Uri.encode(rootPubkey)}/${android.net.Uri.encode(parentId)}/${android.net.Uri.encode(parentPubkey)}?replyKind=$notifReplyKind"
-                                        navController.navigate(route) { launchSingleTop = true }
+                                        appViewModel.setReplyToNote(replyToNote)
+                                        val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
+                                        navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=$notifReplyKind") { launchSingleTop = true }
                                     },
                                     currentUserAuthor = remember(currentAccount) {
                                         currentAccount?.toHexKey()?.let { hex ->
@@ -2827,7 +3000,7 @@ fun MyceliumNavigation(
                                         onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
                                             appViewModel.setReplyToNote(replyToNote)
                                             val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                            navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}")
+                                            navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=1111")
                                         },
                                         currentUserAuthor = remember(currentAccount) {
                                             currentAccount?.toHexKey()?.let { hex ->
@@ -2886,7 +3059,7 @@ fun MyceliumNavigation(
                                 // Navigate to kind:1111 reply (existing reply compose)
                                 val rootId = topicId
                                 val rootPubkey = topic.author.id
-                                navController.navigate("reply_compose?rootId=$rootId&rootPubkey=$rootPubkey") { launchSingleTop = true }
+                                navController.navigate("reply_compose?rootId=$rootId&rootPubkey=$rootPubkey&replyKind=1111") { launchSingleTop = true }
                             },
                             onReplyKind1Click = {
                                 // Navigate to kind:1 reply with I tags
@@ -2922,13 +3095,15 @@ fun MyceliumNavigation(
                 }
 
                 composable(
-                    route = "compose?initialContent={initialContent}",
+                    route = "compose?initialContent={initialContent}&draftId={draftId}",
                     arguments = listOf(
-                        navArgument("initialContent") { type = NavType.StringType; defaultValue = "" }
+                        navArgument("initialContent") { type = NavType.StringType; defaultValue = "" },
+                        navArgument("draftId") { type = NavType.StringType; defaultValue = "" }
                     )
                 ) { backStackEntry ->
                     val initialContent = backStackEntry.arguments?.getString("initialContent").orEmpty()
                         .let { android.net.Uri.decode(it) }
+                    val draftId = backStackEntry.arguments?.getString("draftId")?.takeIf { it.isNotBlank() }
                     val composeContext = LocalContext.current
                     val composeStorageManager = remember(composeContext) { RelayStorageManager(composeContext) }
                     val currentAccountForCompose by accountStateViewModel.currentAccount.collectAsState()
@@ -2937,22 +3112,64 @@ fun MyceliumNavigation(
                             composeStorageManager.loadCategories(pubkey)
                         } ?: DefaultRelayCategories.getAllDefaultCategories()
                     }
+                    val relayProfilesForCompose = remember(currentAccountForCompose) {
+                        currentAccountForCompose?.toHexKey()?.let { pubkey ->
+                            composeStorageManager.loadProfiles(pubkey)
+                        } ?: emptyList()
+                    }
                     ComposeNoteScreen(
                         onBack = { navController.popBackStack() },
                         accountStateViewModel = accountStateViewModel,
                         relayCategories = relayCategoriesForCompose,
-                        initialContent = initialContent
+                        relayProfiles = relayProfilesForCompose,
+                        initialContent = initialContent,
+                        draftId = draftId
+                    )
+                }
+
+                // Drafts Screen
+                composable("drafts") {
+                    val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
+                    DraftsScreen(
+                        drafts = draftsList,
+                        onBackClick = { navController.popBackStack() },
+                        onDraftClick = { draft ->
+                            when (draft.type) {
+                                social.mycelium.android.data.DraftType.NOTE -> {
+                                    navController.navigate("compose?initialContent=${android.net.Uri.encode(draft.content)}&draftId=${draft.id}") {
+                                        launchSingleTop = true
+                                    }
+                                }
+                                social.mycelium.android.data.DraftType.TOPIC -> {
+                                    // Navigate to compose topic with draft pre-filled
+                                    navController.navigate("compose_topic?draftId=${draft.id}") {
+                                        launchSingleTop = true
+                                    }
+                                }
+                                else -> {
+                                    // For reply drafts, open the compose note screen with draft content
+                                    navController.navigate("compose?initialContent=${android.net.Uri.encode(draft.content)}&draftId=${draft.id}") {
+                                        launchSingleTop = true
+                                    }
+                                }
+                            }
+                        },
+                        onDeleteDraft = { draftId ->
+                            social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId)
+                        }
                     )
                 }
 
                 composable(
-                    route = "compose_topic?hashtag={hashtag}",
+                    route = "compose_topic?hashtag={hashtag}&draftId={draftId}",
                     arguments = listOf(
-                        navArgument("hashtag") { type = NavType.StringType; defaultValue = "" }
+                        navArgument("hashtag") { type = NavType.StringType; defaultValue = "" },
+                        navArgument("draftId") { type = NavType.StringType; defaultValue = "" }
                     )
                 ) { backStackEntry ->
                     val hashtagArg = backStackEntry.arguments?.getString("hashtag").orEmpty()
                     val initialHashtag = hashtagArg.takeIf { it.isNotEmpty() }
+                    val topicDraftId = backStackEntry.arguments?.getString("draftId")?.takeIf { it.isNotBlank() }
                     val topicComposeContext = LocalContext.current
                     val topicStorageManager = remember(topicComposeContext) { RelayStorageManager(topicComposeContext) }
                     val currentAccountForTopic by accountStateViewModel.currentAccount.collectAsState()
@@ -2960,6 +3177,11 @@ fun MyceliumNavigation(
                         currentAccountForTopic?.toHexKey()?.let { pubkey ->
                             topicStorageManager.loadCategories(pubkey)
                         } ?: DefaultRelayCategories.getAllDefaultCategories()
+                    }
+                    val topicRelayProfiles = remember(currentAccountForTopic) {
+                        currentAccountForTopic?.toHexKey()?.let { pubkey ->
+                            topicStorageManager.loadProfiles(pubkey)
+                        } ?: emptyList()
                     }
                     val outboxRelays = remember(currentAccountForTopic?.npub) {
                         accountStateViewModel.getOutboxRelaysForPublish()
@@ -2972,11 +3194,13 @@ fun MyceliumNavigation(
                         initialHashtag = initialHashtag,
                         outboxRelays = outboxRelays,
                         relayCategories = topicRelayCategories,
+                        relayProfiles = topicRelayProfiles,
                         myAuthor = topicMyAuthor,
                         onPublish = { title, content, tags, relayUrls ->
                             accountStateViewModel.publishTopic(title, content, tags, relayUrls)
                         },
-                        onBack = { navController.popBackStack() }
+                        onBack = { navController.popBackStack() },
+                        draftId = topicDraftId
                     )
                 }
 
@@ -3001,6 +3225,11 @@ fun MyceliumNavigation(
                                 replyStorageManager.loadCategories(pubkey)
                             } ?: DefaultRelayCategories.getAllDefaultCategories()
                         }
+                        val replyRelayProfiles = remember(currentAccountForReply) {
+                            currentAccountForReply?.toHexKey()?.let { pubkey ->
+                                replyStorageManager.loadProfiles(pubkey)
+                            } ?: emptyList()
+                        }
                         val replyOutboxRelays = remember(currentAccountForReply?.npub) {
                             accountStateViewModel.getOutboxRelaysForPublish()
                         }
@@ -3014,7 +3243,8 @@ fun MyceliumNavigation(
                             accountStateViewModel = accountStateViewModel,
                             myAuthor = replyMyAuthor,
                             myOutboxRelays = replyOutboxRelays,
-                            relayCategories = replyRelayCategories
+                            relayCategories = replyRelayCategories,
+                            relayProfiles = replyRelayProfiles
                         )
                     } else {
                         Box(
@@ -3027,12 +3257,13 @@ fun MyceliumNavigation(
                 }
 
                 composable(
-                    route = "reply_compose?rootId={rootId}&rootPubkey={rootPubkey}&parentId={parentId}&parentPubkey={parentPubkey}",
+                    route = "reply_compose?rootId={rootId}&rootPubkey={rootPubkey}&parentId={parentId}&parentPubkey={parentPubkey}&replyKind={replyKind}",
                     arguments = listOf(
                         navArgument("rootId") { type = NavType.StringType },
                         navArgument("rootPubkey") { type = NavType.StringType },
                         navArgument("parentId") { type = NavType.StringType; defaultValue = "" },
-                        navArgument("parentPubkey") { type = NavType.StringType; defaultValue = "" }
+                        navArgument("parentPubkey") { type = NavType.StringType; defaultValue = "" },
+                        navArgument("replyKind") { type = NavType.IntType; defaultValue = 1111 }
                     ),
                     popExitTransition = { ExitTransition.None },
                     popEnterTransition = { EnterTransition.None }
@@ -3042,6 +3273,7 @@ fun MyceliumNavigation(
                     val rootPubkey = backStackEntry.arguments?.getString("rootPubkey") ?: return@composable
                     val parentId = backStackEntry.arguments?.getString("parentId").orEmpty().takeIf { it.isNotEmpty() }
                     val parentPubkey = backStackEntry.arguments?.getString("parentPubkey").orEmpty().takeIf { it.isNotEmpty() }
+                    val composeReplyKind = backStackEntry.arguments?.getInt("replyKind") ?: 1111
                     val threadReplyContext = LocalContext.current
                     val threadReplyStorageManager = remember(threadReplyContext) { RelayStorageManager(threadReplyContext) }
                     val currentAccountForThreadReply by accountStateViewModel.currentAccount.collectAsState()
@@ -3049,6 +3281,11 @@ fun MyceliumNavigation(
                         currentAccountForThreadReply?.toHexKey()?.let { pubkey ->
                             threadReplyStorageManager.loadCategories(pubkey)
                         } ?: DefaultRelayCategories.getAllDefaultCategories()
+                    }
+                    val threadReplyProfiles = remember(currentAccountForThreadReply) {
+                        currentAccountForThreadReply?.toHexKey()?.let { pubkey ->
+                            threadReplyStorageManager.loadProfiles(pubkey)
+                        } ?: emptyList()
                     }
                     val threadReplyOutbox = remember(currentAccountForThreadReply?.npub) {
                         accountStateViewModel.getOutboxRelaysForPublish()
@@ -3064,7 +3301,11 @@ fun MyceliumNavigation(
                         parentId = parentId,
                         parentPubkey = parentPubkey,
                         onPublish = { rId, rPk, pId, pPk, content, relayUrls ->
-                            accountStateViewModel.publishThreadReply(rId, rPk, pId, pPk, content, relayUrls)
+                            if (composeReplyKind == 1) {
+                                accountStateViewModel.publishKind1Reply(rId, rPk, pId, pPk, content, relayUrls)
+                            } else {
+                                accountStateViewModel.publishThreadReply(rId, rPk, pId, pPk, content, relayUrls)
+                            }
                         },
                         onBack = {
                             appViewModel.setReplyToNote(null)
@@ -3072,7 +3313,8 @@ fun MyceliumNavigation(
                         },
                         myAuthor = threadReplyMyAuthor,
                         myOutboxRelays = threadReplyOutbox,
-                        relayCategories = threadReplyCategories
+                        relayCategories = threadReplyCategories,
+                        relayProfiles = threadReplyProfiles
                     )
                 }
             }
@@ -3117,8 +3359,8 @@ fun MyceliumNavigation(
                                     popUpTo("dashboard") { inclusive = false }
                                     launchSingleTop = true
                                 }
-                            "relays" ->
-                                navController.navigate("relays") {
+                            "announcements" ->
+                                navController.navigate("announcements") {
                                     popUpTo("dashboard") { inclusive = false }
                                     launchSingleTop = true
                                 }

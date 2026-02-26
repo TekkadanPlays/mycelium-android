@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.repository.Nip65RelayListRepository
 import android.widget.Toast
@@ -37,28 +38,69 @@ fun ReplyComposeScreen(
     myAuthor: Author? = null,
     myOutboxRelays: List<UserRelay> = emptyList(),
     relayCategories: List<RelayCategory>? = null,
+    relayProfiles: List<RelayProfile> = emptyList(),
+    draftId: String? = null,
     modifier: Modifier = Modifier
 ) {
-    var content by remember { mutableStateOf("") }
+    val loadedDraft = remember(draftId) { draftId?.let { social.mycelium.android.repository.DraftsRepository.getDraft(it) } }
+    var content by remember { mutableStateOf(loadedDraft?.content ?: "") }
+    val onBackWithDraft = {
+        if (content.isNotBlank()) {
+            social.mycelium.android.repository.DraftsRepository.saveDraft(
+                social.mycelium.android.data.Draft(
+                    id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
+                    type = social.mycelium.android.data.DraftType.REPLY_KIND1,
+                    content = content,
+                    rootId = rootId,
+                    rootPubkey = rootPubkey,
+                    parentId = parentId,
+                    parentPubkey = parentPubkey
+                )
+            )
+        }
+        onBack()
+    }
     var showRelayPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    // Resolve target user's inbox relays from NIP-65 cache
+    // Resolve target user's inbox relays from NIP-65 cache (updated reactively after fetch)
     val targetPubkey = parentPubkey ?: rootPubkey
     val targetAuthor = replyToNote?.author
-    val targetInboxRelays = remember(targetPubkey) {
-        val authorRelays = Nip65RelayListRepository.getCachedAuthorRelays(targetPubkey)
-        authorRelays?.readRelays ?: emptyList()
+    var targetInboxRelays by remember(targetPubkey) {
+        mutableStateOf(
+            Nip65RelayListRepository.getCachedAuthorRelays(targetPubkey)?.readRelays ?: emptyList()
+        )
+    }
+
+    // Fetch NIP-65 relay list for target if not cached
+    LaunchedEffect(targetPubkey) {
+        if (targetInboxRelays.isEmpty() && targetPubkey.isNotBlank()) {
+            val discoveryRelays = listOf("wss://purplepag.es", "wss://user.kindpag.es") +
+                (Nip65RelayListRepository.readRelays.value.takeIf { it.isNotEmpty() } ?: emptyList())
+            Nip65RelayListRepository.batchFetchRelayLists(listOf(targetPubkey), discoveryRelays)
+            // Poll for cache population (batchFetchRelayLists is async)
+            kotlinx.coroutines.withTimeoutOrNull(5000) {
+                while (true) {
+                    kotlinx.coroutines.delay(300)
+                    val cached = Nip65RelayListRepository.getCachedAuthorRelays(targetPubkey)
+                    if (cached != null && cached.readRelays.isNotEmpty()) {
+                        targetInboxRelays = cached.readRelays
+                        break
+                    }
+                }
+            }
+        }
     }
 
     // Build relay sections with target user + our profile
-    val sections = remember(targetAuthor, targetInboxRelays, myAuthor, myOutboxRelays, relayCategories, replyToNote) {
+    val sections = remember(targetAuthor, targetInboxRelays, myAuthor, myOutboxRelays, relayCategories, relayProfiles, replyToNote) {
         buildRelaySections(
             targetAuthor = targetAuthor,
             targetInboxRelays = targetInboxRelays,
             myAuthor = myAuthor,
             myOutboxRelays = myOutboxRelays,
             relayCategories = relayCategories ?: emptyList(),
+            relayProfiles = relayProfiles,
             noteRelayUrls = replyToNote?.relayUrls ?: emptyList()
         )
     }
@@ -73,6 +115,7 @@ fun ReplyComposeScreen(
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
+                    loadedDraft?.let { social.mycelium.android.repository.DraftsRepository.deleteDraft(it.id) }
                     onBack()
                 }
             },
@@ -87,7 +130,7 @@ fun ReplyComposeScreen(
                 TopAppBar(
                     title = { Text(if (replyToNote != null) "Reply" else "Reply to thread") },
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = onBackWithDraft) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back"

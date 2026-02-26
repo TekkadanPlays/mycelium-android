@@ -83,7 +83,7 @@ fun SettingsScreen(
             // ── Account ──
             SettingsSectionHeader("Account")
             SettingsItem(icon = Icons.Outlined.Person, title = "Account Preferences", onClick = { onNavigateTo("account_preferences") })
-            SettingsItem(icon = Icons.Outlined.Public, title = "Relays", onClick = { onNavigateTo("relay_health") })
+            SettingsItem(icon = Icons.Outlined.Public, title = "Relays", onClick = { onNavigateTo("relays") })
             SettingsItem(icon = Icons.Outlined.Lock, title = "Filters & Blocks", onClick = { onNavigateTo("filters_blocks") })
             SettingsItem(icon = Icons.Outlined.Email, title = "Direct Messages", onClick = { onNavigateTo("direct_messages") })
 

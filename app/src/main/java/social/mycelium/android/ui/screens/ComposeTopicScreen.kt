@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 
 /**
@@ -28,13 +29,29 @@ fun ComposeTopicScreen(
     initialHashtag: String? = null,
     outboxRelays: List<UserRelay> = emptyList(),
     relayCategories: List<RelayCategory>? = null,
+    relayProfiles: List<RelayProfile> = emptyList(),
     myAuthor: Author? = null,
     onPublish: (title: String, content: String, hashtags: List<String>, relayUrls: Set<String>) -> String?,
     onBack: () -> Unit,
+    draftId: String? = null,
     modifier: Modifier = Modifier
 ) {
-    var title by remember { mutableStateOf("") }
-    var content by remember { mutableStateOf("") }
+    val loadedDraft = remember(draftId) { draftId?.let { social.mycelium.android.repository.DraftsRepository.getDraft(it) } }
+    var title by remember { mutableStateOf(loadedDraft?.title ?: "") }
+    var content by remember { mutableStateOf(loadedDraft?.content ?: "") }
+    val onBackWithDraft = {
+        if (title.isNotBlank() || content.isNotBlank()) {
+            social.mycelium.android.repository.DraftsRepository.saveDraft(
+                social.mycelium.android.data.Draft(
+                    id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
+                    type = social.mycelium.android.data.DraftType.TOPIC,
+                    content = content,
+                    title = title
+                )
+            )
+        }
+        onBack()
+    }
     var hashtags by remember { mutableStateOf(initialHashtag ?: "") }
     var showRelayPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -46,11 +63,12 @@ fun ComposeTopicScreen(
     }
 
     // Build relay sections for the selection screen
-    val sections = remember(myAuthor, outboxRelays, relayCategories) {
+    val sections = remember(myAuthor, outboxRelays, relayCategories, relayProfiles) {
         buildRelaySections(
             myAuthor = myAuthor,
             myOutboxRelays = outboxRelays,
-            relayCategories = relayCategories ?: emptyList()
+            relayCategories = relayCategories ?: emptyList(),
+            relayProfiles = relayProfiles
         )
     }
 
@@ -65,6 +83,7 @@ fun ComposeTopicScreen(
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
+                    loadedDraft?.let { social.mycelium.android.repository.DraftsRepository.deleteDraft(it.id) }
                     onBack()
                 }
             },
@@ -79,7 +98,7 @@ fun ComposeTopicScreen(
                 TopAppBar(
                     title = { Text("Create topic") },
                     navigationIcon = {
-                        IconButton(onClick = onBack) {
+                        IconButton(onClick = onBackWithDraft) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = "Back"

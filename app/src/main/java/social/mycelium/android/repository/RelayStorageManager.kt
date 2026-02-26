@@ -37,6 +37,9 @@ class RelayStorageManager(val context: Context) {
         private const val KEY_PERSONAL_INBOX = "relay_personal_inbox"
         private const val KEY_PERSONAL_CACHE = "relay_personal_cache"
         private const val KEY_PROFILES = "relay_profiles"
+        private const val KEY_SYSTEM_ANNOUNCEMENTS = "relay_system_announcements"
+        private const val KEY_SYSTEM_DRAFTS = "relay_system_drafts"
+        private const val KEY_SYSTEM_OTHER = "relay_system_other"
         private const val KEY_ONBOARDING_PHASE = "onboarding_phase"
         private const val KEY_ONBOARDING_INDEXERS = "onboarding_indexers"
 
@@ -198,6 +201,66 @@ class RelayStorageManager(val context: Context) {
         }
     }
 
+    // ====== System Tab - Announcement Relays ======
+
+    fun saveAnnouncementRelays(pubkey: String, relays: List<UserRelay>) {
+        val key = "${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}"
+        val wrapper = UserRelayListWrapper(normalizeRelays(relays))
+        val jsonString = json.encodeToString(wrapper)
+        prefs.edit().putString(key, jsonString).apply()
+    }
+
+    fun loadAnnouncementRelays(pubkey: String): List<UserRelay> {
+        val key = "${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}"
+        val jsonString = prefs.getString(key, null) ?: return emptyList()
+        return try {
+            val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
+            normalizeRelays(wrapper.relays)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // ====== System Tab - Drafts Relays ======
+
+    fun saveDraftsRelays(pubkey: String, relays: List<UserRelay>) {
+        val key = "${KEY_SYSTEM_DRAFTS}_${pubkey}"
+        val wrapper = UserRelayListWrapper(normalizeRelays(relays))
+        val jsonString = json.encodeToString(wrapper)
+        prefs.edit().putString(key, jsonString).apply()
+    }
+
+    fun loadDraftsRelays(pubkey: String): List<UserRelay> {
+        val key = "${KEY_SYSTEM_DRAFTS}_${pubkey}"
+        val jsonString = prefs.getString(key, null) ?: return emptyList()
+        return try {
+            val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
+            normalizeRelays(wrapper.relays)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // ====== System Tab - Other System Relays ======
+
+    fun saveOtherSystemRelays(pubkey: String, relays: List<UserRelay>) {
+        val key = "${KEY_SYSTEM_OTHER}_${pubkey}"
+        val wrapper = UserRelayListWrapper(normalizeRelays(relays))
+        val jsonString = json.encodeToString(wrapper)
+        prefs.edit().putString(key, jsonString).apply()
+    }
+
+    fun loadOtherSystemRelays(pubkey: String): List<UserRelay> {
+        val key = "${KEY_SYSTEM_OTHER}_${pubkey}"
+        val jsonString = prefs.getString(key, null) ?: return emptyList()
+        return try {
+            val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
+            normalizeRelays(wrapper.relays)
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
     // ====== Utility Methods ======
 
     /**
@@ -237,6 +300,9 @@ class RelayStorageManager(val context: Context) {
             .remove("${KEY_PERSONAL_OUTBOX}_${pubkey}")
             .remove("${KEY_PERSONAL_INBOX}_${pubkey}")
             .remove("${KEY_PERSONAL_CACHE}_${pubkey}")
+            .remove("${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}")
+            .remove("${KEY_SYSTEM_DRAFTS}_${pubkey}")
+            .remove("${KEY_SYSTEM_OTHER}_${pubkey}")
             .apply()
     }
 
@@ -248,7 +314,10 @@ class RelayStorageManager(val context: Context) {
                prefs.contains("${KEY_PROFILES}_${pubkey}") ||
                prefs.contains("${KEY_PERSONAL_OUTBOX}_${pubkey}") ||
                prefs.contains("${KEY_PERSONAL_INBOX}_${pubkey}") ||
-               prefs.contains("${KEY_PERSONAL_CACHE}_${pubkey}")
+               prefs.contains("${KEY_PERSONAL_CACHE}_${pubkey}") ||
+               prefs.contains("${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}") ||
+               prefs.contains("${KEY_SYSTEM_DRAFTS}_${pubkey}") ||
+               prefs.contains("${KEY_SYSTEM_OTHER}_${pubkey}")
     }
 
     // ====== Onboarding State Persistence ======

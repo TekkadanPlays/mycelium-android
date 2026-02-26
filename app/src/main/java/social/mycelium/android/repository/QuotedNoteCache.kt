@@ -45,9 +45,18 @@ object QuotedNoteCache {
     @Volatile
     private var userRelayUrls: List<String> = emptyList()
 
+    /** Indexer relays for broader quoted note coverage. */
+    @Volatile
+    private var indexerRelayUrls: List<String> = emptyList()
+
     /** Set the user's subscription relay URLs so quoted note fetches use real note relays. */
     fun setRelayUrls(urls: List<String>) {
         userRelayUrls = urls
+    }
+
+    /** Set indexer relay URLs for fallback quoted note fetches. */
+    fun setIndexerRelayUrls(urls: List<String>) {
+        indexerRelayUrls = urls
     }
 
     /**
@@ -67,7 +76,7 @@ object QuotedNoteCache {
 
     private suspend fun fetchAndCache(eventId: String): QuotedNoteMeta? {
         return try {
-            val relays = (userRelayUrls + fallbackRelays).distinct().filter { it.isNotBlank() }.take(8)
+            val relays = (userRelayUrls + indexerRelayUrls + fallbackRelays).distinct().filter { it.isNotBlank() }.take(8)
             if (relays.isEmpty()) {
                 Log.w(TAG, "No relays available to fetch quoted note ${eventId.take(8)}")
                 return null

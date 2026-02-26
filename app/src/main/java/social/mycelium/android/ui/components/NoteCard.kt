@@ -3,6 +3,7 @@ package social.mycelium.android.ui.components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -120,8 +121,10 @@ object QuotedNoteExpandedState {
  * - [KIND1111_REPLY]: Upvote | Downvote | Lightning | Likes | Reply | ReactionsCaret
  */
 enum class ActionRowSchema {
-    /** Kind-1 home feed & kind-1 thread root note. */
+    /** Kind-1 home feed (no reply button). */
     KIND1_FEED,
+    /** Kind-1 thread root note (shows reply button). */
+    KIND1_REPLY,
     /** Kind-11 topics feed, kind-11 thread root. */
     KIND11_FEED,
     /** Kind-1111 replies to kind-11 threads. */
@@ -1320,9 +1323,9 @@ private fun NoteActionRow(
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val showVoting = actionRowSchema != ActionRowSchema.KIND1_FEED
+        val showVoting = actionRowSchema != ActionRowSchema.KIND1_FEED && actionRowSchema != ActionRowSchema.KIND1_REPLY
         val showBoost = actionRowSchema != ActionRowSchema.KIND1111_REPLY
-        val showReply = actionRowSchema == ActionRowSchema.KIND1111_REPLY
+        val showReply = actionRowSchema == ActionRowSchema.KIND1111_REPLY || actionRowSchema == ActionRowSchema.KIND1_REPLY
 
         // Upvote / Downvote — kind-11 feed + kind-1111 replies
         if (showVoting) {
@@ -1516,17 +1519,25 @@ private fun PublishProgressLine(state: PublishState) {
             )
         }
         PublishState.Confirmed -> {
-            val alpha by animateFloatAsState(
+            // Green line expands from center to edges, then fades
+            val expandFraction by animateFloatAsState(
+                targetValue = 1f,
+                animationSpec = tween(400, easing = FastOutSlowInEasing),
+                label = "confirmed_expand"
+            )
+            val fadeAlpha by animateFloatAsState(
                 targetValue = 0f,
-                animationSpec = tween(2000),
+                animationSpec = tween(1500, delayMillis = 600),
                 label = "confirmed_fade"
             )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(height)
-                    .background(Color(0xFF4CAF50).copy(alpha = 0.7f + alpha * 0.3f))
-            )
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction = expandFraction)
+                        .height(height)
+                        .background(Color(0xFF4CAF50).copy(alpha = 0.7f * (1f - fadeAlpha * 0.7f)))
+                )
+            }
         }
         PublishState.Failed -> {
             Box(

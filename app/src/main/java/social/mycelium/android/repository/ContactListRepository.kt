@@ -9,6 +9,9 @@ import com.example.cybin.core.nowUnixSeconds
 import com.example.cybin.core.eventTemplate
 import com.example.cybin.signer.NostrSigner
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -30,6 +33,10 @@ object ContactListRepository {
     private val KIND3_PRIORITY_RELAYS = emptyList<String>()
     /** Cache TTL: 2 min so we don't rely on stale follow lists; forceRefresh on Following pull. */
     private const val CACHE_TTL_MS = 2 * 60 * 1000L
+
+    /** Emits updated follow list whenever the cache changes (follow/unfollow/fetch). */
+    private val _followListUpdates = MutableSharedFlow<Set<String>>(replay = 1, extraBufferCapacity = 1)
+    val followListUpdates: SharedFlow<Set<String>> = _followListUpdates.asSharedFlow()
 
     private data class CacheEntry(val pubkey: String, val followSet: Set<String>, val timestampMs: Long)
     @Volatile
@@ -123,7 +130,8 @@ object ContactListRepository {
                 }
                 .toSet()
             cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
-            Log.d(TAG, "Kind-3 parsed ${pubkeys.size} follows for ${pubkey.take(8)}...")
+            _followListUpdates.tryEmit(pubkeys)
+            Log.d(TAG, "Kind-3 parsed ${pubkeys.size} follows for ${pubkey.take(8)}..., contains cff1720e77bb: ${pubkeys.any { it.startsWith("cff1720e77bb") }}")
             deferred.complete(pubkeys)
             pubkeys
         } catch (e: Exception) {
@@ -176,6 +184,7 @@ object ContactListRepository {
             val currentFollows = cacheEntry?.followSet?.toMutableSet() ?: mutableSetOf()
             currentFollows.add(targetPubkey.lowercase())
             cacheEntry = CacheEntry(myPubkey, currentFollows, System.currentTimeMillis())
+            _followListUpdates.tryEmit(currentFollows.toSet())
             Log.d(TAG, "Followed ${targetPubkey.take(8)}... — now following ${currentFollows.size}")
             null
         } catch (e: Exception) {
@@ -222,6 +231,7 @@ object ContactListRepository {
             val currentFollows = cacheEntry?.followSet?.toMutableSet() ?: mutableSetOf()
             currentFollows.remove(targetPubkey.lowercase())
             cacheEntry = CacheEntry(myPubkey, currentFollows, System.currentTimeMillis())
+            _followListUpdates.tryEmit(currentFollows.toSet())
             Log.d(TAG, "Unfollowed ${targetPubkey.take(8)}... — now following ${currentFollows.size}")
             null
         } catch (e: Exception) {

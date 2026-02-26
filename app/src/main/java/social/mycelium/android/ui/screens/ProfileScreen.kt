@@ -11,8 +11,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -22,7 +20,6 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -44,7 +41,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.cybin.nip19.toNpub
-import kotlinx.coroutines.launch
 import social.mycelium.android.R
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
@@ -112,17 +108,9 @@ fun ProfileScreen(
     androidx.activity.compose.BackHandler { onBackClick() }
 
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
-    val coroutineScope = rememberCoroutineScope()
 
     // Tab state
     var selectedTab by remember { mutableIntStateOf(0) }
-    val pagerState = rememberPagerState(initialPage = 0) { profileTabs.size }
-    LaunchedEffect(selectedTab) {
-        if (pagerState.currentPage != selectedTab) pagerState.animateScrollToPage(selectedTab)
-    }
-    LaunchedEffect(pagerState.currentPage) {
-        if (pagerState.currentPage != selectedTab) selectedTab = pagerState.currentPage
-    }
 
     // Per-tab filtered notes
     val notesOnly = remember(authorNotes) { authorNotes.filter { !it.isReply } }
@@ -230,7 +218,7 @@ fun ProfileScreen(
                             }
                             Tab(
                                 selected = selectedTab == index,
-                                onClick = { coroutineScope.launch { pagerState.animateScrollToPage(index) } },
+                                onClick = { selectedTab = index },
                                 text = {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,

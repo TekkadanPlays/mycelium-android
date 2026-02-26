@@ -93,6 +93,7 @@ private fun createRelayWithNip11Info(
 }
 
 private enum class RelayTab(val label: String) {
+    SYSTEM("System"),
     INDEXER("Indexers"),
     OUTBOX("Outbox")
 }
@@ -179,6 +180,9 @@ fun RelayManagementScreen(
     val outboxRelays by remember { derivedStateOf { uiState.outboxRelays } }
     val inboxRelays by remember { derivedStateOf { uiState.inboxRelays } }
     val indexerRelays by remember { derivedStateOf { uiState.indexerRelays } }
+    val announcementRelays by remember { derivedStateOf { uiState.announcementRelays } }
+    val draftsRelays by remember { derivedStateOf { uiState.draftsRelays } }
+    val otherSystemRelays by remember { derivedStateOf { uiState.otherSystemRelays } }
 
     // Live connection state
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
@@ -252,6 +256,7 @@ fun RelayManagementScreen(
     }
     val initialPage = remember(initialTab) {
         when (initialTab.lowercase()) {
+            "system" -> RelayTab.SYSTEM.ordinal
             "indexer" -> RelayTab.INDEXER.ordinal
             "outbox", "inbox" -> RelayTab.OUTBOX.ordinal
             else -> RelayTab.OUTBOX.ordinal
@@ -454,6 +459,7 @@ fun RelayManagementScreen(
                     // Fixed tabs
                     fixedTabs.forEachIndexed { index, tab ->
                         val count = when (tab) {
+                            RelayTab.SYSTEM -> announcementRelays.size + draftsRelays.size + otherSystemRelays.size
                             RelayTab.INDEXER -> indexerRelays.size
                             RelayTab.OUTBOX -> outboxRelays.size + inboxRelays.size
                         }
@@ -515,6 +521,26 @@ fun RelayManagementScreen(
             ) { page ->
                 if (page < fixedTabs.size) {
                     when (fixedTabs[page]) {
+                        RelayTab.SYSTEM -> SystemTabContent(
+                            announcementRelays = announcementRelays,
+                            draftsRelays = draftsRelays,
+                            otherSystemRelays = otherSystemRelays,
+                            perRelayState = perRelayState,
+                            onAddAnnouncementRelay = { url ->
+                                addRelayTo(url, announcementRelays) { viewModel.addAnnouncementRelay(it) }
+                            },
+                            onRemoveAnnouncementRelay = { viewModel.removeAnnouncementRelay(it) },
+                            onAddDraftsRelay = { url ->
+                                addRelayTo(url, draftsRelays) { viewModel.addDraftsRelay(it) }
+                            },
+                            onRemoveDraftsRelay = { viewModel.removeDraftsRelay(it) },
+                            onAddOtherRelay = { url ->
+                                addRelayTo(url, otherSystemRelays) { viewModel.addOtherSystemRelay(it) }
+                            },
+                            onRemoveOtherRelay = { viewModel.removeOtherSystemRelay(it) },
+                            onOpenRelayLog = onOpenRelayLog,
+                            modifier = Modifier.fillMaxSize()
+                        )
                         RelayTab.INDEXER -> RelayListTab(
                             relays = indexerRelays, perRelayState = perRelayState,
                             showInput = showInputByTab[page] == true,
@@ -592,6 +618,8 @@ fun RelayManagementScreen(
                     val profileIdx = page - fixedTabs.size
                     val profile = relayProfiles.getOrNull(profileIdx)
                     if (profile != null) {
+                        val nip65OutboxUrlSet = remember(outboxRelays) { outboxRelays.map { it.url.trimEnd('/').lowercase() }.toSet() }
+                        val nip65InboxUrlSet = remember(inboxRelays) { inboxRelays.map { it.url.trimEnd('/').lowercase() }.toSet() }
                         CategoriesTab(
                             profileName = profile.name,
                             profileId = profile.id,
@@ -623,6 +651,8 @@ fun RelayManagementScreen(
                                 showEditRelayDialog = true
                             },
                             onOpenRelayLog = onOpenRelayLog,
+                            nip65OutboxUrls = nip65OutboxUrlSet,
+                            nip65InboxUrls = nip65InboxUrlSet,
                             modifier = Modifier.fillMaxSize())
                     }
                 }
@@ -1217,7 +1247,258 @@ private fun FabMenuItem(label: String, icon: ImageVector, onClick: () -> Unit) {
     }
 }
 
-//  Relay List Tab (Outbox / Inbox / Indexer) 
+//  System Tab (Announcements / Drafts / Other)
+
+@Composable
+private fun SystemTabContent(
+    announcementRelays: List<UserRelay>,
+    draftsRelays: List<UserRelay>,
+    otherSystemRelays: List<UserRelay>,
+    perRelayState: Map<String, RelayEndpointStatus>,
+    onAddAnnouncementRelay: (String) -> Unit,
+    onRemoveAnnouncementRelay: (String) -> Unit,
+    onAddDraftsRelay: (String) -> Unit,
+    onRemoveDraftsRelay: (String) -> Unit,
+    onAddOtherRelay: (String) -> Unit,
+    onRemoveOtherRelay: (String) -> Unit,
+    onOpenRelayLog: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var announcementsExpanded by remember { mutableStateOf(true) }
+    var draftsExpanded by remember { mutableStateOf(true) }
+    var otherExpanded by remember { mutableStateOf(true) }
+    var announcementInput by remember { mutableStateOf("") }
+    var draftsInput by remember { mutableStateOf("") }
+    var otherInput by remember { mutableStateOf("") }
+
+    LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+        // ── Announcements Section ──
+        item(key = "announcements_header") {
+            SystemSectionHeader(
+                title = "Announcements",
+                icon = Icons.Outlined.Campaign,
+                count = announcementRelays.size,
+                expanded = announcementsExpanded,
+                onToggle = { announcementsExpanded = !announcementsExpanded }
+            )
+        }
+        if (announcementsExpanded) {
+            item(key = "announcements_input") {
+                RelayUrlInput(
+                    value = announcementInput,
+                    onValueChange = { announcementInput = it },
+                    onAdd = {
+                        if (announcementInput.isNotBlank()) {
+                            onAddAnnouncementRelay(announcementInput)
+                            announcementInput = ""
+                        }
+                    }
+                )
+            }
+            if (announcementRelays.isEmpty()) {
+                item(key = "announcements_empty") {
+                    Text(
+                        "Relays for project announcements and news feeds.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                }
+            }
+            announcementRelays.forEachIndexed { idx, relay ->
+                item(key = "ann_${relay.url}") {
+                    SystemRelayItem(
+                        relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onRemove = { onRemoveAnnouncementRelay(relay.url) },
+                        showDivider = idx < announcementRelays.size - 1
+                    )
+                }
+            }
+        }
+
+        // ── Drafts Section ──
+        item(key = "drafts_header") {
+            SystemSectionHeader(
+                title = "Drafts",
+                icon = Icons.Outlined.Description,
+                count = draftsRelays.size,
+                expanded = draftsExpanded,
+                onToggle = { draftsExpanded = !draftsExpanded }
+            )
+        }
+        if (draftsExpanded) {
+            item(key = "drafts_input") {
+                RelayUrlInput(
+                    value = draftsInput,
+                    onValueChange = { draftsInput = it },
+                    onAdd = {
+                        if (draftsInput.isNotBlank()) {
+                            onAddDraftsRelay(draftsInput)
+                            draftsInput = ""
+                        }
+                    }
+                )
+            }
+            if (draftsRelays.isEmpty()) {
+                item(key = "drafts_empty") {
+                    Text(
+                        "Relays for NIP-37 draft storage and sync.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                }
+            }
+            draftsRelays.forEachIndexed { idx, relay ->
+                item(key = "draft_${relay.url}") {
+                    SystemRelayItem(
+                        relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onRemove = { onRemoveDraftsRelay(relay.url) },
+                        showDivider = idx < draftsRelays.size - 1
+                    )
+                }
+            }
+        }
+
+        // ── Other Section ──
+        item(key = "other_header") {
+            SystemSectionHeader(
+                title = "Other",
+                icon = Icons.Outlined.SettingsEthernet,
+                count = otherSystemRelays.size,
+                expanded = otherExpanded,
+                onToggle = { otherExpanded = !otherExpanded }
+            )
+        }
+        if (otherExpanded) {
+            item(key = "other_input") {
+                RelayUrlInput(
+                    value = otherInput,
+                    onValueChange = { otherInput = it },
+                    onAdd = {
+                        if (otherInput.isNotBlank()) {
+                            onAddOtherRelay(otherInput)
+                            otherInput = ""
+                        }
+                    }
+                )
+            }
+            if (otherSystemRelays.isEmpty()) {
+                item(key = "other_empty") {
+                    Text(
+                        "Additional system relays for specialized uses.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                }
+            }
+            otherSystemRelays.forEachIndexed { idx, relay ->
+                item(key = "other_${relay.url}") {
+                    SystemRelayItem(
+                        relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onRemove = { onRemoveOtherRelay(relay.url) },
+                        showDivider = idx < otherSystemRelays.size - 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SystemSectionHeader(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    count: Int,
+    expanded: Boolean,
+    onToggle: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(12.dp))
+        Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+        if (count > 0) {
+            Text("$count", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(8.dp))
+        }
+        Icon(
+            if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+            contentDescription = if (expanded) "Collapse" else "Expand",
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+    HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+}
+
+@Composable
+private fun SystemRelayItem(
+    relay: UserRelay,
+    connectionStatus: RelayEndpointStatus?,
+    onOpenRelayLog: (String) -> Unit,
+    onRemove: () -> Unit,
+    showDivider: Boolean = true
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpenRelayLog(relay.url) }
+            .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val dotColor = when (connectionStatus) {
+            RelayEndpointStatus.Connected -> MaterialTheme.colorScheme.primary
+            RelayEndpointStatus.Connecting -> MaterialTheme.colorScheme.tertiary
+            RelayEndpointStatus.Failed -> MaterialTheme.colorScheme.error
+            else -> MaterialTheme.colorScheme.outlineVariant
+        }
+        Box(Modifier.size(8.dp).clip(CircleShape).background(dotColor))
+        Spacer(Modifier.width(12.dp))
+        Icon(Icons.Outlined.Router, null, Modifier.size(24.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+            )
+            if (relay.info?.name != null) {
+                Text(relay.info!!.name!!, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        IconButton(onClick = onRemove) {
+            Icon(Icons.Outlined.RemoveCircleOutline, contentDescription = "Remove",
+                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f))
+        }
+    }
+    if (showDivider) {
+        HorizontalDivider(
+            modifier = Modifier.padding(start = 52.dp),
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+        )
+    }
+}
+
+//  Relay List Tab (Outbox / Inbox / Indexer)
 
 @Composable
 private fun RelayListTab(
@@ -1277,6 +1558,8 @@ private fun CategoriesTab(
     onEditCategory: (RelayCategory) -> Unit,
     onEditRelay: (String, UserRelay) -> Unit,
     onOpenRelayLog: (String) -> Unit,
+    nip65OutboxUrls: Set<String> = emptySet(),
+    nip65InboxUrls: Set<String> = emptySet(),
     modifier: Modifier = Modifier
 ) {
     val totalRelays = categories.sumOf { it.relays.size }
@@ -1350,7 +1633,9 @@ private fun CategoriesTab(
                     onAddRelay = { url -> onAddRelay(category.id, url) },
                     onEditRelay = { relay -> onEditRelay(category.id, relay) },
                     onOpenRelayLog = onOpenRelayLog,
-                    perRelayState = perRelayState
+                    perRelayState = perRelayState,
+                    nip65OutboxUrls = nip65OutboxUrls,
+                    nip65InboxUrls = nip65InboxUrls
                 )
             }
         }
@@ -1521,7 +1806,9 @@ private fun FeedCategorySection(
     onAddRelay: (String) -> Unit,
     onEditRelay: (UserRelay) -> Unit,
     onOpenRelayLog: (String) -> Unit,
-    perRelayState: Map<String, RelayEndpointStatus>
+    perRelayState: Map<String, RelayEndpointStatus>,
+    nip65OutboxUrls: Set<String> = emptySet(),
+    nip65InboxUrls: Set<String> = emptySet()
 ) {
     val chevronRotation by animateFloatAsState(
         targetValue = if (isExpanded) 0f else -90f,
@@ -1584,10 +1871,15 @@ private fun FeedCategorySection(
             Column {
                 // Relay list
                 category.relays.forEachIndexed { idx, relay ->
-                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                    val normalizedUrl = relay.url.trimEnd('/').lowercase()
+                    val inOutbox = normalizedUrl in nip65OutboxUrls
+                    val inInbox = normalizedUrl in nip65InboxUrls
+                    val enrichedRelay = if (inOutbox || inInbox) relay.copy(read = inInbox, write = inOutbox) else relay
+                    RelayItem(relay = enrichedRelay, connectionStatus = perRelayState[relay.url],
                         onOpenRelayLog = onOpenRelayLog,
                         onEdit = { onEditRelay(relay) },
-                        showDivider = true)
+                        showDivider = true,
+                        showRwTag = inOutbox || inInbox)
                 }
                 // Add relay row — always at the bottom, styled like a relay
                 AddRelayRow(

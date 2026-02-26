@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
+import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.repository.Nip65RelayListRepository
 import social.mycelium.android.repository.ProfileMetadataCache
@@ -42,9 +43,26 @@ fun ComposeTopicReplyScreen(
     myAuthor: Author? = null,
     myOutboxRelays: List<UserRelay> = emptyList(),
     relayCategories: List<RelayCategory>? = null,
+    relayProfiles: List<RelayProfile> = emptyList(),
+    draftId: String? = null,
     modifier: Modifier = Modifier
 ) {
-    var content by remember { mutableStateOf("") }
+    val loadedDraft = remember(draftId) { draftId?.let { social.mycelium.android.repository.DraftsRepository.getDraft(it) } }
+    var content by remember { mutableStateOf(loadedDraft?.content ?: "") }
+    val onBackWithDraft = {
+        if (content.isNotBlank()) {
+            social.mycelium.android.repository.DraftsRepository.saveDraft(
+                social.mycelium.android.data.Draft(
+                    id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
+                    type = social.mycelium.android.data.DraftType.TOPIC_REPLY,
+                    content = content,
+                    rootId = topic.id,
+                    rootPubkey = topic.author.id
+                )
+            )
+        }
+        onBack()
+    }
     var isPublishing by remember { mutableStateOf(false) }
     var showRelayPicker by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()
@@ -56,13 +74,14 @@ fun ComposeTopicReplyScreen(
     }
 
     // Build relay sections with target user + our profile
-    val sections = remember(topic, myAuthor, myOutboxRelays, relayCategories, targetInboxRelays) {
+    val sections = remember(topic, myAuthor, myOutboxRelays, relayCategories, relayProfiles, targetInboxRelays) {
         buildRelaySections(
             targetAuthor = topic.author,
             targetInboxRelays = targetInboxRelays,
             myAuthor = myAuthor,
             myOutboxRelays = myOutboxRelays,
             relayCategories = relayCategories ?: emptyList(),
+            relayProfiles = relayProfiles,
             noteRelayUrls = topic.relayUrls
         )
     }
@@ -81,6 +100,7 @@ fun ComposeTopicReplyScreen(
                     hashtags = topic.hashtags,
                     relayUrls = selectedUrls
                 )
+                loadedDraft?.let { social.mycelium.android.repository.DraftsRepository.deleteDraft(it.id) }
                 onBack()
             },
             onBack = { showRelayPicker = false }
@@ -100,7 +120,7 @@ fun ComposeTopicReplyScreen(
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onBackWithDraft) {
                         Icon(
                             imageVector = Icons.Default.ArrowBack,
                             contentDescription = "Back"

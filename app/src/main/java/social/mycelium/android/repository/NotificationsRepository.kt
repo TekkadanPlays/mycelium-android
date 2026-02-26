@@ -84,6 +84,8 @@ object NotificationsRepository {
     private var myPubkeyHex: String? = null
     /** Our kind-11 topic IDs — replies to these are "Thread replies" (replyKind=11), not "Comments" (1111). */
     private val myTopicIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    /** Our kind-1 note IDs — used to detect quotes (q-tag references to our notes). */
+    private val myNoteIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     private var prefs: SharedPreferences? = null
     @Volatile private var appContext: Context? = null
@@ -215,6 +217,8 @@ object NotificationsRepository {
             likeEmojiByTargetId.clear()
             repostByTargetId.clear()
             zapByTargetId.clear()
+            myTopicIds.clear()
+            myNoteIds.clear()
             _notifications.value = emptyList()
         }
         subscriptionRelayUrls = relayUrls
@@ -240,26 +244,42 @@ object NotificationsRepository {
         notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filters, priority = SubscriptionPriority.LOW) { event -> handleEvent(event) }
         Log.d(TAG, "Notifications subscription started for ${pubkey.take(8)}... on ${relayUrls.size} relays (${filters.size} filters, 1 slot)")
 
-        // Fetch user's kind-11 topic IDs, then add thread replies filter to the same subscription
+        // Fetch user's kind-11 topic IDs and kind-1 note IDs, then add thread replies + quotes filters
         scope.launch {
             val topicIds = fetchUserTopicIds(pubkey, relayUrls, since)
             myTopicIds.addAll(topicIds)
+            val noteIds = fetchUserNoteIds(pubkey, relayUrls, since)
+            myNoteIds.addAll(noteIds)
+            val extraFilters = mutableListOf<Filter>()
             if (topicIds.isNotEmpty()) {
-                Log.d(TAG, "Found ${topicIds.size} user topics, re-subscribing with thread replies filter")
-                // Re-create subscription with the additional thread replies filter
-                notificationsHandle?.cancel()
-                val allFilters = filters + Filter(
+                Log.d(TAG, "Found ${topicIds.size} user topics, adding thread replies filter")
+                extraFilters.add(Filter(
                     kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
                     tags = mapOf("E" to topicIds),
                     since = since,
                     limit = 200
-                )
+                ))
+            } else {
+                Log.d(TAG, "No user topics found, skipping thread replies filter")
+            }
+            if (noteIds.isNotEmpty()) {
+                Log.d(TAG, "Found ${noteIds.size} user notes, adding quotes filter")
+                extraFilters.add(Filter(
+                    kinds = listOf(NOTIFICATION_KIND_TEXT),
+                    tags = mapOf("q" to noteIds),
+                    since = since,
+                    limit = 200
+                ))
+            } else {
+                Log.d(TAG, "No user notes found, skipping quotes filter")
+            }
+            if (extraFilters.isNotEmpty()) {
+                notificationsHandle?.cancel()
+                val allFilters = filters + extraFilters
                 notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, allFilters, priority = SubscriptionPriority.LOW) { event ->
                     handleEvent(event)
                 }
                 Log.d(TAG, "Notifications re-subscribed with ${allFilters.size} filters (still 1 slot)")
-            } else {
-                Log.d(TAG, "No user topics found, skipping thread replies filter")
             }
         }
     }
@@ -288,7 +308,15 @@ object NotificationsRepository {
         val ts = event.createdAt * 1000L
         when (event.kind) {
             NOTIFICATION_KIND_REACTION -> handleLike(event, author, ts)
-            NOTIFICATION_KIND_TEXT -> handleReply(event, author, ts)
+            NOTIFICATION_KIND_TEXT -> {
+                // Check if this is a quote (has q-tag referencing one of our notes)
+                val quotedId = event.tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
+                if (quotedId != null) {
+                    handleQuote(event, author, ts, quotedId)
+                } else {
+                    handleReply(event, author, ts)
+                }
+            }
             NOTIFICATION_KIND_TOPIC_REPLY -> handleTopicReply(event, author, ts)
             NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST -> handleRepost(event, author, ts)
             NOTIFICATION_KIND_ZAP -> handleZap(event, author, ts)
@@ -380,6 +408,27 @@ object NotificationsRepository {
         }
         // Update today's summary
         updateTodaySummary(if (isMention) NotificationType.MENTION else NotificationType.REPLY, ts, 0L)
+    }
+
+    /** Handle a kind-1 event that quotes one of our notes (q-tag). */
+    private fun handleQuote(event: Event, author: Author, ts: Long, quotedNoteId: String) {
+        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
+        val note = eventToNote(event)
+        val text = "${author.displayName} quoted your note"
+        val data = NotificationData(
+            id = event.id,
+            type = NotificationType.QUOTE,
+            text = text,
+            note = note,
+            author = author,
+            targetNoteId = quotedNoteId,
+            sortTimestamp = ts
+        )
+        notificationsById[event.id] = data
+        emitSorted()
+        fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id)
+        // Fetch the quoted note for display
+        scope.launch { fetchAndSetTargetNote(quotedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
     }
 
     /** Check if the user's pubkey is directly cited in content via nostr:npub1 or nostr:nprofile1 references. */
@@ -720,6 +769,36 @@ object NotificationsRepository {
         return topicIds.distinct()
     }
 
+    /** Fetch user's kind-1 note IDs for quote detection (q-tag subscriptions). */
+    private suspend fun fetchUserNoteIds(pubkey: String, relayUrls: List<String>, since: Long): List<String> {
+        val noteIds = mutableListOf<String>()
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        // Use indexer relays for broader coverage of the user's notes
+        val indexerRelays = listOf(
+            "wss://relay.nostr.band",
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.primal.net"
+        )
+        val allRelays = (relayUrls + indexerRelays).distinct()
+        val filter = Filter(
+            kinds = listOf(1),
+            authors = listOf(pubkey),
+            since = since,
+            limit = 500
+        )
+        val handle = stateMachine.requestOneShotSubscription(allRelays, filter,
+            priority = SubscriptionPriority.BACKGROUND, settleMs = 300L, maxWaitMs = 5_000L,
+        ) { ev ->
+            if (ev.kind == 1) {
+                synchronized(noteIds) { noteIds.add(ev.id) }
+            }
+        }
+        delay(5_500L)
+        Log.d(TAG, "fetchUserNoteIds: found ${noteIds.size} notes for ${pubkey.take(8)}...")
+        return noteIds.distinct()
+    }
+
     /** Build human-readable actor text like "Alice liked your post" or "Alice, Bob, and 3 others liked your post". */
     private fun buildActorText(actorPubkeys: List<String>, action: String): String {
         val names = actorPubkeys.take(2).map { pk ->
@@ -844,6 +923,10 @@ object NotificationsRepository {
             .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
             .distinct()
         val quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(event.content)
+        // Parse NIP-10 reply context so tapping notifications can open the full thread
+        val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
+        val replyToId = social.mycelium.android.utils.Nip10ReplyDetector.getReplyToId(event)
+        val isReply = social.mycelium.android.utils.Nip10ReplyDetector.isReply(event)
         return Note(
             id = event.id,
             author = author,
@@ -856,7 +939,9 @@ object NotificationsRepository {
             hashtags = hashtags,
             mediaUrls = mediaUrls,
             quotedEventIds = quotedEventIds,
-            isReply = false,
+            isReply = isReply,
+            rootNoteId = rootId,
+            replyToId = replyToId,
             kind = event.kind
         )
     }

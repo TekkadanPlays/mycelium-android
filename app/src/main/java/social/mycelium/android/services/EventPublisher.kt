@@ -87,6 +87,8 @@ object EventPublisher {
 
             // Send
             RelayConnectionStateMachine.getInstance().send(signed, normalized)
+            RelayConnectionStateMachine.getInstance().nip42AuthHandler
+                .trackPublishedEvent(signed, normalized)
             Log.d(TAG, "Kind-$kind published: ${signed.id.take(8)} → ${normalized.size} relays")
             _publishedEvents.tryEmit(signed)
 
@@ -131,6 +133,8 @@ object EventPublisher {
             }
 
             RelayConnectionStateMachine.getInstance().send(signed, normalized)
+            RelayConnectionStateMachine.getInstance().nip42AuthHandler
+                .trackPublishedEvent(signed, normalized)
             Log.d(TAG, "Kind-${template.kind} published: ${signed.id.take(8)} → ${normalized.size} relays")
             _publishedEvents.tryEmit(signed)
 

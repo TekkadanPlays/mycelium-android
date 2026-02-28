@@ -39,7 +39,7 @@ object UrlDetector {
         val urls = mutableListOf<String>()
         
         while (matcher.find()) {
-            val url = matcher.group()
+            val url = cleanTrailingParens(matcher.group())
             if (isValidUrl(url)) {
                 urls.add(url)
             }
@@ -57,9 +57,12 @@ object UrlDetector {
         val matcher = URL_PATTERN.matcher(text)
         val result = mutableListOf<Pair<IntRange, String>>()
         while (matcher.find()) {
-            val url = matcher.group()
+            val raw = matcher.group()
+            val url = cleanTrailingParens(raw)
             if (isValidUrl(url)) {
-                result.add(IntRange(matcher.start(), matcher.end() - 1) to url)
+                // Adjust end position if trailing chars were stripped
+                val stripped = raw.length - url.length
+                result.add(IntRange(matcher.start(), matcher.end() - 1 - stripped) to url)
             }
         }
         return result
@@ -106,6 +109,23 @@ object UrlDetector {
         return restoredText
     }
     
+    /**
+     * Strip unmatched trailing parentheses from a URL.
+     * Markdown-style links like `[text](url)` cause the regex to capture a trailing `)`.
+     * We only strip trailing `)` when there's no matching `(` in the URL path.
+     */
+    private fun cleanTrailingParens(url: String): String {
+        var cleaned = url
+        while (cleaned.endsWith(')')) {
+            val openCount = cleaned.count { it == '(' }
+            val closeCount = cleaned.count { it == ')' }
+            if (closeCount > openCount) {
+                cleaned = cleaned.dropLast(1)
+            } else break
+        }
+        return cleaned
+    }
+
     /**
      * Validate if a string is a proper URL
      */

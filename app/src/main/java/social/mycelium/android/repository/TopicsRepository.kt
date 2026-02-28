@@ -161,6 +161,9 @@ class TopicsRepository private constructor(context: Context) {
     private val _newTopicsCount = MutableStateFlow(0)
     val newTopicsCount: StateFlow<Int> = _newTopicsCount.asStateFlow()
 
+    /** Dirty flag: set when topics change, cleared after save. Prevents pointless periodic saves. */
+    @Volatile private var cacheDirty = false
+
     companion object {
         private const val TAG = "TopicsRepository"
         private const val TOPIC_FETCH_TIMEOUT_MS = 2000L // Clear loading after 2s if no events
@@ -220,6 +223,7 @@ class TopicsRepository private constructor(context: Context) {
         }
         if (changed) {
             _topics.value = updated
+            cacheDirty = true
             computeHashtagStatistics()
         }
     }
@@ -363,6 +367,7 @@ class TopicsRepository private constructor(context: Context) {
                             relayUrl = updatedUrls.firstOrNull() ?: existing.relayUrl
                         )
                         _topics.value = currentTopics
+                        cacheDirty = true
                     }
                     return
                 }
@@ -378,6 +383,7 @@ class TopicsRepository private constructor(context: Context) {
                 } else {
                     currentTopics[topic.id] = topic
                     _topics.value = currentTopics
+                    cacheDirty = true
                     computeHashtagStatistics()
                     Log.d(TAG, "✅ Added topic from relay: ${topic.title} (Total: ${currentTopics.size})")
                 }
@@ -407,6 +413,7 @@ class TopicsRepository private constructor(context: Context) {
         if (!current.containsKey(topic.id)) {
             current[topic.id] = topic
             _topics.value = current
+            cacheDirty = true
             computeHashtagStatistics()
         }
         Log.d(TAG, "Injected local topic: ${topic.title} (${topic.id.take(8)})")
@@ -424,6 +431,7 @@ class TopicsRepository private constructor(context: Context) {
         val current = _topics.value.toMutableMap()
         toMerge.forEach { t -> if (!current.containsKey(t.id)) current[t.id] = t }
         _topics.value = current
+        cacheDirty = true
         computeHashtagStatistics()
         Log.d(TAG, "Applied ${toMerge.size} pending topics")
     }
@@ -722,10 +730,12 @@ class TopicsRepository private constructor(context: Context) {
         scope.launch {
             while (true) {
                 delay(CACHE_SAVE_INTERVAL)
+                if (!cacheDirty) continue
                 try {
                     saveCacheToStorage()
+                    cacheDirty = false
                 } catch (e: Exception) {
-                    Log.e(TAG, "❌ Periodic cache save failed: ${e.message}", e)
+                    Log.e(TAG, "\u274C Periodic cache save failed: ${e.message}", e)
                 }
             }
         }

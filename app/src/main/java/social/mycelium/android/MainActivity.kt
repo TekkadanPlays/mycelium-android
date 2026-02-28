@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     } else {
                         add(GifDecoder.Factory())
                     }
+                    add(coil.decode.VideoFrameDecoder.Factory())
                 }
                 .crossfade(100)
                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
@@ -134,6 +135,9 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
 
         // Initialize relay health tracker (loads persisted blocklist before any connections)
         social.mycelium.android.relay.RelayHealthTracker.init(applicationContext)
+
+        // Initialize relay delivery tracker (loads persisted Thompson Sampling stats for outbox selection)
+        social.mycelium.android.relay.RelayDeliveryTracker.init(applicationContext)
 
         // Persist profile cache so avatars/display names survive process death; restore before feed
         ProfileMetadataCache.getInstance().init(applicationContext)

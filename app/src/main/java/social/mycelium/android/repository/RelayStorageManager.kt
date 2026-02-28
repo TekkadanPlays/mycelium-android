@@ -43,14 +43,19 @@ class RelayStorageManager(val context: Context) {
         private const val KEY_ONBOARDING_PHASE = "onboarding_phase"
         private const val KEY_ONBOARDING_INDEXERS = "onboarding_indexers"
 
-        /** Strip trailing slash from relay URLs so display/storage is consistent across the app. */
-        fun normalizeRelayUrl(url: String): String = url.trim().removeSuffix("/")
+        /** Normalize relay URL using the shared utility (lowercase, trim, strip slash/ports, ensure wss://). */
+        fun normalizeRelayUrl(url: String): String = social.mycelium.android.utils.normalizeRelayUrl(url)
     }
 
     private fun normalizeRelay(relay: UserRelay): UserRelay = relay.copy(url = normalizeRelayUrl(relay.url))
     private fun normalizeRelays(relays: List<UserRelay>): List<UserRelay> = relays.map { normalizeRelay(it) }
+    /** Deduplicate relays by normalized URL (keeps first occurrence). Catches historical duplicates. */
+    private fun deduplicateRelays(relays: List<UserRelay>): List<UserRelay> {
+        val seen = mutableSetOf<String>()
+        return relays.filter { seen.add(normalizeRelayUrl(it.url)) }
+    }
     private fun normalizeCategories(categories: List<RelayCategory>): List<RelayCategory> =
-        categories.map { it.copy(relays = normalizeRelays(it.relays)) }
+        categories.map { it.copy(relays = deduplicateRelays(normalizeRelays(it.relays))) }
     private fun normalizeProfiles(profiles: List<RelayProfile>): List<RelayProfile> =
         profiles.map { it.copy(categories = normalizeCategories(it.categories)) }
 
@@ -133,7 +138,7 @@ class RelayStorageManager(val context: Context) {
         return if (jsonString != null) {
             try {
                 val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
-                normalizeRelays(wrapper.relays)
+                deduplicateRelays(normalizeRelays(wrapper.relays))
             } catch (e: Exception) {
                 emptyList()
             }
@@ -164,7 +169,7 @@ class RelayStorageManager(val context: Context) {
         return if (jsonString != null) {
             try {
                 val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
-                normalizeRelays(wrapper.relays)
+                deduplicateRelays(normalizeRelays(wrapper.relays))
             } catch (e: Exception) {
                 emptyList()
             }
@@ -195,7 +200,7 @@ class RelayStorageManager(val context: Context) {
 
         return try {
             val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
-            normalizeRelays(wrapper.relays)
+            deduplicateRelays(normalizeRelays(wrapper.relays))
         } catch (e: Exception) {
             emptyList()
         }

@@ -120,26 +120,19 @@ object Nip65RelayListRepository {
     private var multiSourceHandles: List<TemporarySubscriptionHandle> = emptyList()
 
     /**
-     * Get the best indexer relay URLs from NIP-66 discovery (Search relays sorted by RTT).
+     * Get the best indexer relay URLs from NIP-66 discovery.
+     * Uses trust signals + geo affinity (NOT monitor RTT, which is misleading).
      * Returns empty list if NIP-66 hasn't loaded yet — callers should wait for NIP-66 data.
      */
     fun getIndexerRelayUrls(limit: Int = 5): List<String> {
-        val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
-        if (discovered.isNotEmpty()) {
-            val flagged = RelayHealthTracker.flaggedRelays.value
-            val blocked = RelayHealthTracker.blockedRelays.value
-            val allSearch = discovered.values
-                .filter { social.mycelium.android.data.RelayType.SEARCH in it.types }
-                .filter { it.url !in flagged && it.url !in blocked }
-            val withRtt = allSearch.count { it.bestRtt != null }
-            val indexers = allSearch
-                .sortedBy { it.bestRtt ?: Int.MAX_VALUE }
-                .take(limit)
-            Log.d("Nip65Repo", "getIndexerRelayUrls: ${allSearch.size} SEARCH relays, $withRtt with RTT data, returning ${indexers.size}:")
-            indexers.forEach { r ->
-                Log.d("Nip65Repo", "  → ${r.url} bestRtt=${r.bestRtt} (read=${r.avgRttRead} open=${r.avgRttOpen})")
+        val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
+        val ranked = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry, limit)
+        if (ranked.isNotEmpty()) {
+            Log.d("Nip65Repo", "getIndexerRelayUrls: returning ${ranked.size} ranked indexers (trust+geo):")
+            ranked.forEach { r ->
+                Log.d("Nip65Repo", "  → ${r.url} country=${r.countryCode} monitors=${r.monitorCount}")
             }
-            return indexers.map { it.url }
+            return ranked.map { it.url }
         }
         Log.d("Nip65Repo", "getIndexerRelayUrls: no discovered relays yet")
         return emptyList()
@@ -274,7 +267,7 @@ object Nip65RelayListRepository {
     fun fetchRelayListMultiSource(
         pubkeyHex: String,
         indexerUrls: List<String>,
-        timeoutMs: Long = 10_000L
+        timeoutMs: Long = 6_000L
     ) {
         if (indexerUrls.isEmpty()) {
             Log.w(TAG, "No indexers for multi-source NIP-65 search")
@@ -406,9 +399,27 @@ object Nip65RelayListRepository {
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.SUCCESS, result = result)
                 Log.d(TAG, "  $indexerUrl: ${result.writeRelays.size}w/${result.readRelays.size}r, created=${result.createdAt} (${elapsed}ms)")
             } else {
-                RelayHealthTracker.recordConnectionFailure(indexerUrl, "No data returned")
-                updateIndexerStatus(indexerUrl, IndexerQueryStatus.NO_DATA)
-                Log.d(TAG, "  $indexerUrl: no data (${elapsed}ms)")
+                // Check if the relay actually connected or had a connection error.
+                // RelayHealthTracker records failures with the actual error message.
+                val health = RelayHealthTracker.getHealth(indexerUrl)
+                val lastError = health?.lastError
+                val failedDuringQuery = health != null && health.lastFailedAt >= startTime
+                if (failedDuringQuery && lastError != null) {
+                    // Relay had a connection error — report it as FAILED with the real reason
+                    val shortError = lastError.take(80)
+                    RelayHealthTracker.recordConnectionFailure(indexerUrl, shortError)
+                    updateIndexerStatus(indexerUrl, IndexerQueryStatus.FAILED, errorMessage = shortError)
+                    Log.d(TAG, "  $indexerUrl: connect failed: $shortError (${elapsed}ms)")
+                } else if (elapsed >= timeoutMs - 500) {
+                    // Timed out without connecting or receiving data
+                    RelayHealthTracker.recordConnectionFailure(indexerUrl, "Timeout")
+                    updateIndexerStatus(indexerUrl, IndexerQueryStatus.TIMEOUT)
+                    Log.d(TAG, "  $indexerUrl: timeout (${elapsed}ms)")
+                } else {
+                    // Relay connected but genuinely has no kind-10002 for this pubkey
+                    updateIndexerStatus(indexerUrl, IndexerQueryStatus.NO_DATA)
+                    Log.d(TAG, "  $indexerUrl: no data (${elapsed}ms)")
+                }
             }
         } catch (e: Exception) {
             val isCancellation = e is kotlinx.coroutines.CancellationException
@@ -614,6 +625,9 @@ object Nip65RelayListRepository {
 
     /** Get cached full relay list for an author, or null if not yet fetched. */
     fun getCachedAuthorRelays(pubkeyHex: String): AuthorRelayList? = authorRelayCache[pubkeyHex]
+
+    /** Get cached inbox (read) relays for an author, or null if not yet fetched. */
+    fun getCachedInboxRelays(pubkeyHex: String): List<String>? = authorRelayCache[pubkeyHex]?.readRelays
 
     /** Get all cached author relay lists (snapshot). */
     fun getAllCachedAuthorRelays(): Map<String, AuthorRelayList> = authorRelayCache.toMap()

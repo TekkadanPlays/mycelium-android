@@ -2,15 +2,21 @@ package social.mycelium.android.ui.screens
 
 import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -20,23 +26,32 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -46,11 +61,16 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.SampleData
 import social.mycelium.android.ui.components.ModernSearchBar
+import social.mycelium.android.repository.ProfileFeedRepository
 import social.mycelium.android.repository.ZapType
 import social.mycelium.android.ui.components.NoteCard
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.layout.layout
+import kotlin.math.roundToInt
 
 // ─── Profile tab definitions ────────────────────────────────────────────────
 
@@ -72,7 +92,7 @@ fun ProfileScreen(
     isProfileLoading: Boolean = false,
     isLoadingMore: Boolean = false,
     hasMore: Boolean = true,
-    onLoadMore: () -> Unit = {},
+    onLoadMore: (Int) -> Unit = {},
     followingCount: Int? = null,
     followerCount: Int? = null,
     isLoadingCounts: Boolean = false,
@@ -99,30 +119,113 @@ fun ProfileScreen(
     onFollowClick: () -> Unit = {},
     onMessageClick: () -> Unit = {},
     accountNpub: String? = null,
-    listState: LazyListState = rememberLazyListState(),
     topAppBarState: TopAppBarState = rememberTopAppBarState(),
     onLoginClick: (() -> Unit)? = null,
+    parentNoteForReply: (String) -> Note? = { null },
+    timeGapIndex: Int? = null,
+    perTabHasMore: Map<Int, Boolean> = emptyMap(),
     onSeeAllReactions: (Note) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     androidx.activity.compose.BackHandler { onBackClick() }
 
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(topAppBarState)
 
-    // Tab state
-    var selectedTab by remember { mutableIntStateOf(0) }
+    // Tab state + pager
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    val pagerState = rememberPagerState(initialPage = 0) { profileTabs.size }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Two-way sync: tab click → pager
+    LaunchedEffect(selectedTab) {
+        if (pagerState.currentPage != selectedTab) pagerState.animateScrollToPage(selectedTab)
+    }
+    // Two-way sync: pager swipe → tab
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            if (page != selectedTab) selectedTab = page
+        }
+    }
+
+    // Per-tab list states (preserve scroll per tab)
+    val notesListState = rememberLazyListState()
+    val repliesListState = rememberLazyListState()
 
     // Per-tab filtered notes
     val notesOnly = remember(authorNotes) { authorNotes.filter { !it.isReply } }
     val repliesOnly = remember(authorNotes) { authorNotes.filter { it.isReply } }
     val mediaOnly = remember(authorNotes) { authorNotes.filter { it.mediaUrls.isNotEmpty() } }
 
+    // Per-tab hasMore (fallback to global hasMore)
+    val notesHasMore = perTabHasMore[ProfileFeedRepository.TAB_NOTES] ?: hasMore
+    val repliesHasMore = perTabHasMore[ProfileFeedRepository.TAB_REPLIES] ?: hasMore
+    val mediaHasMore = perTabHasMore[ProfileFeedRepository.TAB_MEDIA] ?: hasMore
+
     // Bio expanded state
-    var bioExpanded by remember { mutableStateOf(false) }
+    var bioExpanded by rememberSaveable { mutableStateOf(false) }
+
+    // ── Collapsing header state ──
+    val density = LocalDensity.current
+    // Natural heights measured once via onGloballyPositioned
+    var headerHeightPx by rememberSaveable { mutableFloatStateOf(0f) }
+    var tabHeightPx by rememberSaveable { mutableFloatStateOf(0f) }
+    // How far the header has been scrolled off screen: 0 = fully visible, -headerHeightPx = fully collapsed
+    val headerOffsetPx = rememberSaveable { mutableFloatStateOf(0f) }
+
+    // Custom NestedScrollConnection: collapses header before inner list scrolls
+    val collapsingConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                // Scrolling up (finger moves up → negative y): collapse header first
+                if (available.y < 0f && headerHeightPx > 0f) {
+                    val currentOffset = headerOffsetPx.floatValue
+                    val minOffset = -headerHeightPx
+                    if (currentOffset > minOffset) {
+                        val consumed = available.y.coerceAtLeast(minOffset - currentOffset)
+                        headerOffsetPx.floatValue = (currentOffset + consumed).coerceIn(minOffset, 0f)
+                        return Offset(0f, consumed)
+                    }
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                // Scrolling down (finger moves down → positive y): expand header with leftover
+                if (available.y > 0f && headerHeightPx > 0f) {
+                    val currentOffset = headerOffsetPx.floatValue
+                    if (currentOffset < 0f) {
+                        val take = available.y.coerceAtMost(-currentOffset)
+                        headerOffsetPx.floatValue = (currentOffset + take).coerceIn(-headerHeightPx, 0f)
+                        return Offset(0f, take)
+                    }
+                }
+                return Offset.Zero
+            }
+
+            override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
+                if (headerHeightPx <= 0f) return Velocity.Zero
+                val current = headerOffsetPx.floatValue
+                val mid = -headerHeightPx / 2f
+                val target = if (current < mid) -headerHeightPx else 0f
+                if (current != target) {
+                    val anim = Animatable(current)
+                    anim.animateTo(target, tween(200)) {
+                        headerOffsetPx.floatValue = value
+                    }
+                }
+                return Velocity.Zero
+            }
+        }
+    }
 
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
+            .nestedScroll(collapsingConnection)
             .nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
@@ -156,50 +259,194 @@ fun ProfileScreen(
             }
         }
     ) { paddingValues ->
-        LazyColumn(
-            state = listState,
+        // Box layout: header+tabs are drawn on top, pager sits below with dynamic top padding
+        Box(
             modifier = modifier
                 .fillMaxSize()
-                .padding(paddingValues),
-            contentPadding = PaddingValues(bottom = 80.dp)
+                .padding(paddingValues)
+                .clipToBounds()
         ) {
-            // ═══ Banner + Avatar ═══
-            item(key = "profile_banner") {
-                ProfileBanner(
-                    author = author,
-                    onBannerClick = { url ->
-                        if (url != null) onOpenImageViewer(listOf(url), 0)
+            // ═══ Pager: fills area below header+tabs, adjusts as header collapses ═══
+            val topOffsetPx = headerHeightPx + tabHeightPx + headerOffsetPx.floatValue
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .layout { measurable, constraints ->
+                        val topPx = topOffsetPx.roundToInt().coerceAtLeast(0)
+                        val availableHeight = (constraints.maxHeight - topPx).coerceAtLeast(0)
+                        val adjustedConstraints = constraints.copy(
+                            minHeight = availableHeight,
+                            maxHeight = availableHeight
+                        )
+                        val placeable = measurable.measure(adjustedConstraints)
+                        layout(placeable.width, constraints.maxHeight) {
+                            placeable.place(0, topPx)
+                        }
                     },
-                    onAvatarClick = { url ->
-                        if (url != null) onOpenImageViewer(listOf(url), 0)
+                beyondViewportPageCount = 1,
+                key = { it }
+            ) { page ->
+                val isPageVisible = pagerState.currentPage == page
+                when (page) {
+                    // ── Notes tab ──
+                    0 -> {
+                        if (notesOnly.isEmpty() && !isProfileLoading) {
+                            EmptyTabPlaceholder(tabIndex = 0)
+                        } else {
+                            val notesGapIndex = remember(timeGapIndex, notesOnly) {
+                                if (timeGapIndex == null) null
+                                else detectTimeGapIndex(notesOnly)
+                            }
+                            var showOlderNotes by remember { mutableStateOf(false) }
+                            val visibleNotes = remember(notesOnly, notesGapIndex, showOlderNotes) {
+                                if (notesGapIndex != null && !showOlderNotes) notesOnly.take(notesGapIndex)
+                                else notesOnly
+                            }
+                            LazyColumn(
+                                state = notesListState,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(bottom = 80.dp)
+                            ) {
+                                items(visibleNotes, key = { "notes_${it.id}" }) { note ->
+                                    ProfileNoteCard(
+                                        note = note,
+                                        onLike = onLike, onShare = onShare, onComment = onComment,
+                                        onReact = onReact, onProfileClick = onProfileClick,
+                                        onNoteClick = onNoteClick, onImageTap = onImageTap,
+                                        onOpenImageViewer = onOpenImageViewer, onVideoClick = onVideoClick,
+                                        onCustomZapSend = onCustomZapSend, onZap = onZap,
+                                        isZapInProgress = isZapInProgress, isZapped = isZapped,
+                                        myZappedAmountForNote = myZappedAmountForNote,
+                                        overrideReplyCountForNote = overrideReplyCountForNote,
+                                        countsForNote = countsForNote,
+                                        onRelayClick = onRelayClick, accountNpub = accountNpub,
+                                        onSeeAllReactions = onSeeAllReactions,
+                                        isVisible = isPageVisible
+                                    )
+                                }
+                                if (notesGapIndex != null && !showOlderNotes) {
+                                    item(key = "time_gap_divider_notes") {
+                                        TimeGapDivider(
+                                            onShowOlder = { showOlderNotes = true },
+                                            onLoadMore = { onLoadMore(ProfileFeedRepository.TAB_NOTES) }
+                                        )
+                                    }
+                                } else {
+                                    profileFeedFooter(visibleNotes, notesHasMore, isLoadingMore, isProfileLoading) {
+                                        onLoadMore(ProfileFeedRepository.TAB_NOTES)
+                                    }
+                                }
+                            }
+                        }
                     }
-                )
+                    // ── Replies tab ──
+                    1 -> {
+                        if (repliesOnly.isEmpty() && !isProfileLoading) {
+                            EmptyTabPlaceholder(tabIndex = 1)
+                        } else {
+                            LazyColumn(
+                                state = repliesListState,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(bottom = 80.dp)
+                            ) {
+                                items(repliesOnly, key = { "replies_${it.id}" }) { note ->
+                                    ReplyWithParentContext(
+                                        note = note,
+                                        parentNote = note.replyToId?.let { parentNoteForReply(it) },
+                                        onNoteClick = onNoteClick,
+                                        onProfileClick = onProfileClick
+                                    )
+                                    ProfileNoteCard(
+                                        note = note,
+                                        onLike = onLike, onShare = onShare, onComment = onComment,
+                                        onReact = onReact, onProfileClick = onProfileClick,
+                                        onNoteClick = onNoteClick, onImageTap = onImageTap,
+                                        onOpenImageViewer = onOpenImageViewer, onVideoClick = onVideoClick,
+                                        onCustomZapSend = onCustomZapSend, onZap = onZap,
+                                        isZapInProgress = isZapInProgress, isZapped = isZapped,
+                                        myZappedAmountForNote = myZappedAmountForNote,
+                                        overrideReplyCountForNote = overrideReplyCountForNote,
+                                        countsForNote = countsForNote,
+                                        onRelayClick = onRelayClick, accountNpub = accountNpub,
+                                        onSeeAllReactions = onSeeAllReactions,
+                                        isVisible = isPageVisible
+                                    )
+                                }
+                                profileFeedFooter(repliesOnly, repliesHasMore, isLoadingMore, isProfileLoading) {
+                                    onLoadMore(ProfileFeedRepository.TAB_REPLIES)
+                                }
+                            }
+                        }
+                    }
+                    // ── Media tab ──
+                    2 -> {
+                        if (mediaOnly.isEmpty() && !isProfileLoading) {
+                            EmptyTabPlaceholder(tabIndex = 2)
+                        } else {
+                            LazyMediaGrid(
+                                notes = mediaOnly,
+                                hasMore = mediaHasMore,
+                                isLoadingMore = isLoadingMore,
+                                isProfileLoading = isProfileLoading,
+                                onLoadMore = { onLoadMore(ProfileFeedRepository.TAB_MEDIA) },
+                                onNoteClick = onNoteClick,
+                                onOpenImageViewer = onOpenImageViewer,
+                                onVideoClick = onVideoClick
+                            )
+                        }
+                    }
+                }
             }
 
-            // ═══ Identity + Actions ═══
-            item(key = "profile_identity") {
-                ProfileIdentity(
-                    author = author,
-                    notesCount = authorNotes.size,
-                    followingCount = followingCount,
-                    followerCount = followerCount,
-                    isLoadingCounts = isLoadingCounts,
-                    isFollowing = isFollowing,
-                    onFollowClick = onFollowClick,
-                    onMessageClick = onMessageClick,
-                    bioExpanded = bioExpanded,
-                    onBioToggle = { bioExpanded = !bioExpanded }
-                )
-            }
+            // ═══ Header + Tabs: drawn on top, slide upward via offset ═══
+            Column(
+                modifier = Modifier
+                    .offset { IntOffset(0, headerOffsetPx.floatValue.roundToInt()) }
+            ) {
+                // Banner + Identity — draggable so touches on the header collapse it
+                Column(
+                    modifier = Modifier
+                        .onGloballyPositioned { coords ->
+                            headerHeightPx = coords.size.height.toFloat()
+                        }
+                        .nestedScroll(collapsingConnection)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    ProfileBanner(
+                        author = author,
+                        onBannerClick = { url ->
+                            if (url != null) onOpenImageViewer(listOf(url), 0)
+                        },
+                        onAvatarClick = { url ->
+                            if (url != null) onOpenImageViewer(listOf(url), 0)
+                        }
+                    )
+                    ProfileIdentity(
+                        author = author,
+                        notesCount = authorNotes.size,
+                        followingCount = followingCount,
+                        followerCount = followerCount,
+                        isLoadingCounts = isLoadingCounts,
+                        isFollowing = isFollowing,
+                        onFollowClick = onFollowClick,
+                        onMessageClick = onMessageClick,
+                        bioExpanded = bioExpanded,
+                        onBioToggle = { bioExpanded = !bioExpanded }
+                    )
+                }
 
-            // ═══ Tab bar (sticky) ═══
-            stickyHeader(key = "profile_tabs") {
+                // Tab bar
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onGloballyPositioned { coords ->
+                            tabHeightPx = coords.size.height.toFloat()
+                        }
                 ) {
                     TabRow(
-                        selectedTabIndex = selectedTab,
+                        selectedTabIndex = pagerState.currentPage,
                         containerColor = MaterialTheme.colorScheme.surface,
                         contentColor = MaterialTheme.colorScheme.onSurface,
                         divider = {
@@ -217,8 +464,8 @@ fun ProfileScreen(
                                 else -> 0
                             }
                             Tab(
-                                selected = selectedTab == index,
-                                onClick = { selectedTab = index },
+                                selected = pagerState.currentPage == index,
+                                onClick = { coroutineScope.launch { pagerState.animateScrollToPage(index) } },
                                 text = {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
@@ -233,133 +480,271 @@ fun ProfileScreen(
                     }
                 }
             }
+        }
+    }
+}
 
-            // ═══ Tab content ═══
-            val tabNotes = when (selectedTab) {
-                0 -> notesOnly
-                1 -> repliesOnly
-                2 -> mediaOnly
-                else -> notesOnly
+// ─── Time-gap detection ──────────────────────────────────────────────────────
+
+/** Detect the first index where a large time gap (>7 days) exists between consecutive notes. */
+internal fun detectTimeGapIndex(
+    sortedNotes: List<Note>,
+    thresholdMs: Long = 7L * 24 * 3600 * 1000
+): Int? {
+    for (i in 0 until sortedNotes.size - 1) {
+        if (sortedNotes[i].timestamp - sortedNotes[i + 1].timestamp > thresholdMs) return i + 1
+    }
+    return null
+}
+
+/** Divider shown at a temporal discontinuity in the feed. */
+@Composable
+private fun TimeGapDivider(
+    onShowOlder: () -> Unit,
+    onLoadMore: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        HorizontalDivider(
+            modifier = Modifier.padding(horizontal = 32.dp),
+            thickness = 0.5.dp,
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Older notes",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(
+            onClick = {
+                onLoadMore()
+                onShowOlder()
+            },
+            shape = RoundedCornerShape(20.dp),
+            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 8.dp)
+        ) {
+            Icon(
+                Icons.Outlined.ExpandMore,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(Modifier.width(4.dp))
+            Text("Load more", style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+/** Shared NoteCard rendering for profile tabs — avoids duplicating all the callback wiring. */
+@Composable
+private fun ProfileNoteCard(
+    note: Note,
+    onLike: (String) -> Unit,
+    onShare: (String) -> Unit,
+    onComment: (String) -> Unit,
+    onReact: (Note, String) -> Unit,
+    onProfileClick: (String) -> Unit,
+    onNoteClick: (Note) -> Unit,
+    onImageTap: (Note, List<String>, Int) -> Unit,
+    onOpenImageViewer: (List<String>, Int) -> Unit,
+    onVideoClick: (List<String>, Int) -> Unit,
+    onCustomZapSend: ((Note, Long, ZapType, String) -> Unit)?,
+    onZap: (String, Long) -> Unit,
+    isZapInProgress: (String) -> Boolean,
+    isZapped: (String) -> Boolean,
+    myZappedAmountForNote: (String) -> Long?,
+    overrideReplyCountForNote: (String) -> Int?,
+    countsForNote: (String) -> social.mycelium.android.repository.NoteCounts?,
+    onRelayClick: (String) -> Unit,
+    accountNpub: String?,
+    onSeeAllReactions: (Note) -> Unit,
+    isVisible: Boolean = true,
+) {
+    val counts = countsForNote(note.id)
+    NoteCard(
+        isVisible = isVisible,
+        note = note,
+        onLike = onLike,
+        onShare = onShare,
+        onComment = onComment,
+        onReact = onReact,
+        onProfileClick = onProfileClick,
+        onNoteClick = onNoteClick,
+        onImageTap = onImageTap,
+        onOpenImageViewer = onOpenImageViewer,
+        onVideoClick = onVideoClick,
+        onCustomZapSend = onCustomZapSend,
+        onZap = onZap,
+        isZapInProgress = isZapInProgress(note.id),
+        isZapped = isZapped(note.id),
+        myZappedAmount = myZappedAmountForNote(note.id),
+        overrideReplyCount = overrideReplyCountForNote(note.id),
+        overrideZapCount = counts?.zapCount,
+        overrideZapTotalSats = counts?.zapTotalSats,
+        overrideReactions = counts?.reactions,
+        overrideReactionAuthors = counts?.reactionAuthors,
+        overrideZapAuthors = counts?.zapAuthors,
+        overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
+        overrideCustomEmojiUrls = counts?.customEmojiUrls,
+        onRelayClick = onRelayClick,
+        accountNpub = accountNpub,
+        onSeeAllReactions = { onSeeAllReactions(note) },
+        modifier = Modifier.fillMaxWidth()
+    )
+}
+
+/** Footer items for profile feed lists: load-more trigger, loading spinner, end-of-feed. */
+private fun LazyListScope.profileFeedFooter(
+    tabNotes: List<Note>,
+    hasMore: Boolean,
+    isLoadingMore: Boolean,
+    isProfileLoading: Boolean,
+    onLoadMore: () -> Unit
+) {
+    if (tabNotes.isNotEmpty() && hasMore && !isLoadingMore) {
+        item(key = "load_more_trigger") {
+            LaunchedEffect(Unit) { onLoadMore() }
+        }
+    }
+    if (isProfileLoading || isLoadingMore) {
+        item(key = "loading_indicator") {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(24.dp),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
             }
-
-            if (tabNotes.isEmpty()) {
-                item(key = "empty_tab") {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 48.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                when (selectedTab) {
-                                    1 -> Icons.Outlined.Forum
-                                    2 -> Icons.Outlined.Image
-                                    else -> Icons.AutoMirrored.Outlined.Article
-                                },
-                                contentDescription = null,
-                                modifier = Modifier.size(40.dp),
-                                tint = MaterialTheme.colorScheme.outline
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "No ${profileTabs[selectedTab].label.lowercase()} yet",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
+        }
+    }
+    if (!hasMore && tabNotes.isNotEmpty()) {
+        item(key = "end_of_feed") {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "End of feed",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                )
             }
+        }
+    }
+}
 
-            // ── Media tab: 2-column square grid ──
-            if (selectedTab == 2 && mediaOnly.isNotEmpty()) {
-                item(key = "media_grid") {
-                    MediaGrid(
-                        notes = mediaOnly,
-                        onNoteClick = onNoteClick,
-                        onOpenImageViewer = onOpenImageViewer
+/** Empty tab placeholder with icon + message. */
+@Composable
+private fun EmptyTabPlaceholder(tabIndex: Int) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(vertical = 48.dp),
+        contentAlignment = Alignment.TopCenter
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(
+                when (tabIndex) {
+                    1 -> Icons.Outlined.Forum
+                    2 -> Icons.Outlined.Image
+                    else -> Icons.AutoMirrored.Outlined.Article
+                },
+                contentDescription = null,
+                modifier = Modifier.size(40.dp),
+                tint = MaterialTheme.colorScheme.outline
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "No ${profileTabs[tabIndex].label.lowercase()} yet",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+/** Compact parent context shown above a reply in the Replies tab. */
+@Composable
+private fun ReplyWithParentContext(
+    note: Note,
+    parentNote: Note?,
+    onNoteClick: (Note) -> Unit,
+    onProfileClick: (String) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (parentNote != null) {
+            // Parent preview card
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onNoteClick(parentNote) }
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.Top
+            ) {
+                // Thread connector line
+                Box(
+                    modifier = Modifier
+                        .width(2.dp)
+                        .height(40.dp)
+                        .background(
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                            RoundedCornerShape(1.dp)
+                        )
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Replying to @${parentNote.author.displayName}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = parentNote.content,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
-
-            // ── Notes and Replies tabs: standard NoteCard list ──
-            if (selectedTab != 2) {
-                items(tabNotes, key = { "tab${selectedTab}_${it.id}" }) { note ->
-                    val counts = countsForNote(note.id)
-                    NoteCard(
-                        note = note,
-                        onLike = onLike,
-                        onShare = onShare,
-                        onComment = onComment,
-                        onReact = onReact,
-                        onProfileClick = onProfileClick,
-                        onNoteClick = onNoteClick,
-                        onImageTap = onImageTap,
-                        onOpenImageViewer = onOpenImageViewer,
-                        onVideoClick = onVideoClick,
-                        onCustomZapSend = onCustomZapSend,
-                        onZap = onZap,
-                        isZapInProgress = isZapInProgress(note.id),
-                        isZapped = isZapped(note.id),
-                        myZappedAmount = myZappedAmountForNote(note.id),
-                        overrideReplyCount = overrideReplyCountForNote(note.id),
-                        overrideZapCount = counts?.zapCount,
-                        overrideZapTotalSats = counts?.zapTotalSats,
-                        overrideReactions = counts?.reactions,
-                        overrideReactionAuthors = counts?.reactionAuthors,
-                        overrideZapAuthors = counts?.zapAuthors,
-                        overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
-                        overrideCustomEmojiUrls = counts?.customEmojiUrls,
-                        onRelayClick = onRelayClick,
-                        accountNpub = accountNpub,
-                        onSeeAllReactions = { onSeeAllReactions(note) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-
-            // Load more trigger
-            if (tabNotes.isNotEmpty() && hasMore && !isLoadingMore) {
-                item(key = "load_more_trigger") {
-                    LaunchedEffect(Unit) { onLoadMore() }
-                }
-            }
-
-            // Loading indicator
-            if (isProfileLoading || isLoadingMore) {
-                item(key = "loading_indicator") {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+        } else if (note.replyToId != null) {
+            // Placeholder when parent hasn't loaded yet
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .width(2.dp)
+                        .height(20.dp)
+                        .background(
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                            RoundedCornerShape(1.dp)
                         )
-                    }
-                }
-            }
-
-            // End of feed
-            if (!hasMore && tabNotes.isNotEmpty()) {
-                item(key = "end_of_feed") {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 24.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "End of feed",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                        )
-                    }
-                }
+                )
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "Replying to\u2026",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
             }
         }
     }
@@ -691,100 +1076,130 @@ private fun ProfileIdentity(
     }
 }
 
-// ─── Media Grid (2-column square thumbnails) ────────────────────────────────
+// ─── Media Grid (lazy 2-column square thumbnails) ────────────────────────────
 
 @Composable
-private fun MediaGrid(
+private fun LazyMediaGrid(
     notes: List<Note>,
+    hasMore: Boolean = true,
+    isLoadingMore: Boolean = false,
+    isProfileLoading: Boolean = false,
+    onLoadMore: () -> Unit = {},
     onNoteClick: (Note) -> Unit,
-    onOpenImageViewer: (List<String>, Int) -> Unit
+    onOpenImageViewer: (List<String>, Int) -> Unit,
+    onVideoClick: (List<String>, Int) -> Unit = { _, _ -> }
 ) {
-    // Flatten notes into (url, note) pairs for grid cells
     val mediaEntries = remember(notes) {
         notes.flatMap { note ->
             note.mediaUrls.map { url -> url to note }
         }
     }
-    val columns = 2
-    val rows = (mediaEntries.size + columns - 1) / columns
+    val context = LocalContext.current
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        repeat(rows) { rowIdx ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
+    LazyVerticalGrid(
+        columns = GridCells.Fixed(2),
+        modifier = Modifier.fillMaxSize(),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        contentPadding = PaddingValues(bottom = 80.dp)
+    ) {
+        gridItems(mediaEntries, key = { (url, note) -> "media_${note.id}_$url" }) { (url, note) ->
+            val isVideo = url.contains(".mp4", true) || url.contains(".webm", true) ||
+                url.contains(".mov", true) || url.contains(".m3u8", true)
+            Box(
+                modifier = Modifier
+                    .aspectRatio(1f)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .clickable { onNoteClick(note) },
+                contentAlignment = Alignment.Center
             ) {
-                repeat(columns) { colIdx ->
-                    val idx = rowIdx * columns + colIdx
-                    if (idx < mediaEntries.size) {
-                        val (url, note) = mediaEntries[idx]
-                        val isVideo = url.contains(".mp4", true) || url.contains(".webm", true) ||
-                            url.contains(".mov", true) || url.contains(".m3u8", true)
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .aspectRatio(1f)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                                .clickable { onNoteClick(note) },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            AsyncImage(
-                                model = url,
-                                contentDescription = null,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                            // Video badge
-                            if (isVideo) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(6.dp)
-                                        .size(24.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.Black.copy(alpha = 0.5f)),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        Icons.Filled.PlayArrow,
-                                        contentDescription = "Video",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = Color.White
-                                    )
-                                }
-                            }
-                            // Fullscreen magnifier icon — bottom-end
-                            Box(
-                                modifier = Modifier
-                                    .align(Alignment.BottomEnd)
-                                    .padding(6.dp)
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .background(Color.Black.copy(alpha = 0.4f))
-                                    .clickable(
-                                        indication = null,
-                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                                    ) {
-                                        val allUrls = notes.flatMap { it.mediaUrls }
-                                        onOpenImageViewer(allUrls, allUrls.indexOf(url).coerceAtLeast(0))
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Icon(
-                                    Icons.Outlined.Fullscreen,
-                                    contentDescription = "View fullscreen",
-                                    modifier = Modifier.size(18.dp),
-                                    tint = Color.White
-                                )
-                            }
-                        }
-                    } else {
-                        Spacer(modifier = Modifier.weight(1f))
+                AsyncImage(
+                    model = if (isVideo) {
+                        coil.request.ImageRequest.Builder(context)
+                            .data(url)
+                            .decoderFactory(coil.decode.VideoFrameDecoder.Factory())
+                            .setParameter("videoFrameMillis", 1000L)
+                            .crossfade(true)
+                            .build()
+                    } else url,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+                if (isVideo) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.5f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Filled.PlayArrow,
+                            contentDescription = "Video",
+                            modifier = Modifier.size(16.dp),
+                            tint = Color.White
+                        )
                     }
                 }
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(6.dp)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.4f))
+                        .clickable(
+                            indication = null,
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                        ) {
+                            if (isVideo) {
+                                onVideoClick(listOf(url), 0)
+                            } else {
+                                // Open just this note's media, starting at the tapped image
+                                val noteImages = note.mediaUrls.filter { u ->
+                                    !u.contains(".mp4", true) && !u.contains(".webm", true) &&
+                                    !u.contains(".mov", true) && !u.contains(".m3u8", true)
+                                }
+                                val idx = noteImages.indexOf(url).coerceAtLeast(0)
+                                onOpenImageViewer(noteImages.ifEmpty { listOf(url) }, idx)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Outlined.Fullscreen,
+                        contentDescription = "View fullscreen",
+                        modifier = Modifier.size(18.dp),
+                        tint = Color.White
+                    )
+                }
             }
-            if (rowIdx < rows - 1) Spacer(Modifier.height(2.dp))
+        }
+        // Load-more trigger for media grid
+        if (mediaEntries.isNotEmpty() && hasMore && !isLoadingMore) {
+            item(key = "media_load_more") {
+                LaunchedEffect(Unit) { onLoadMore() }
+            }
+        }
+        if (isProfileLoading || isLoadingMore) {
+            item(key = "media_loading") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                    )
+                }
+            }
         }
     }
 }

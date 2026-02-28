@@ -198,9 +198,9 @@ class RelayManagementViewModel(
         val subscribedRelayUrls = state.relayCategories
             .filter { it.isSubscribed }
             .flatMap { it.relays }
-            .map { it.url }
+            .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
         // Merge outbox relays so adding a relay to a category doesn't drop outbox notes
-        val outboxUrls = state.outboxRelays.map { it.url }
+        val outboxUrls = state.outboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
         val relayUrls = (subscribedRelayUrls + outboxUrls).distinct()
         if (relayUrls.isEmpty()) return
         Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays")
@@ -442,7 +442,7 @@ class RelayManagementViewModel(
     fun getSubscribedRelayUrls(): List<String> {
         return getSubscribedCategories()
             .flatMap { it.relays }
-            .map { it.url }
+            .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
             .distinct()
     }
 

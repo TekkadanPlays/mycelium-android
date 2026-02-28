@@ -118,12 +118,26 @@ class ThreadRepliesRepository {
         noteId: String,
         relayUrls: List<String>? = null,
         limit: Int = 100,
-        rootKind: Int = 1111
+        rootKind: Int = 1111,
+        authorPubkey: String? = null
     ) {
-        val targetRelays = relayUrls ?: connectedRelays
-        if (targetRelays.isEmpty()) {
+        val baseRelays = relayUrls ?: connectedRelays
+        if (baseRelays.isEmpty()) {
             Log.w(TAG, "No relays available to fetch replies")
             return
+        }
+        // Enrich with author's outbox + inbox relays if available (NIP-65 kind-10002)
+        val authorOutbox = authorPubkey?.let {
+            Nip65RelayListRepository.getCachedOutboxRelays(it)
+        }?.takeIf { it.isNotEmpty() } ?: emptyList()
+        val authorInbox = authorPubkey?.let {
+            Nip65RelayListRepository.getCachedInboxRelays(it)
+        }?.takeIf { it.isNotEmpty() } ?: emptyList()
+        val targetRelays = social.mycelium.android.relay.RelayHealthTracker.filterBlocked(
+            (baseRelays + authorOutbox + authorInbox).distinct()
+        )
+        if (authorOutbox.isNotEmpty() || authorInbox.isNotEmpty()) {
+            Log.d(TAG, "Enriched relays: ${baseRelays.size} base + ${authorOutbox.size} outbox + ${authorInbox.size} inbox = ${targetRelays.size} total")
         }
 
         // Cancel ALL active subscriptions first to stop stale events from arriving

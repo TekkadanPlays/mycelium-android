@@ -163,7 +163,8 @@ class ThreadRepliesViewModel : ViewModel() {
                     noteId = note.id,
                     relayUrls = relayUrls,
                     limit = 200,
-                    rootKind = note.kind
+                    rootKind = note.kind,
+                    authorPubkey = note.author.id
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Error loading replies: ${e.message}", e)

@@ -302,16 +302,10 @@ class RelayRepository(private val context: Context) {
     }
 
     /**
-     * Normalize relay URL
+     * Normalize relay URL — delegates to shared utility.
      */
-    private fun normalizeRelayUrl(url: String): String {
-        return when {
-            url.startsWith("wss://") || url.startsWith("ws://") -> url
-            url.startsWith("https://") -> url.replace("https://", "wss://")
-            url.startsWith("http://") -> url.replace("http://", "ws://")
-            else -> "wss://$url"
-        }
-    }
+    private fun normalizeRelayUrl(url: String): String =
+        social.mycelium.android.utils.normalizeRelayUrl(url)
 
     /**
      * Update connection status for a relay

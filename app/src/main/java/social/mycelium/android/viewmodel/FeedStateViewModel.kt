@@ -12,6 +12,11 @@ import kotlinx.coroutines.flow.update
  */
 class FeedStateViewModel : ViewModel() {
 
+    /** True once the initial scroll-to-top has fired for the home feed.
+     *  Survives LaunchedEffect lifecycle restarts (ViewModel > composable lifecycle).
+     *  Prevents scroll-to-0 from re-firing when returning from image_viewer/video_viewer. */
+    @Volatile var hasInitializedHomeScroll = false
+
     // Home feed state
     private val _homeFeedState = MutableStateFlow(FeedState())
     val homeFeedState: StateFlow<FeedState> = _homeFeedState.asStateFlow()
@@ -117,6 +122,18 @@ class FeedStateViewModel : ViewModel() {
      */
     fun clearTopicsSelectedHashtag() {
         _topicsFeedState.update { it.copy(selectedHashtag = null, isViewingHashtagFeed = false) }
+    }
+
+    /**
+     * Initialize expanded categories so all sections start open on first load.
+     * Only applies when expandedCategories is still empty (user hasn't toggled anything yet).
+     */
+    fun initializeExpandedCategories(categoryIds: List<String>) {
+        _homeFeedState.update { state ->
+            if (state.expandedCategories.isEmpty()) {
+                state.copy(expandedCategories = (categoryIds + "outbox").toSet())
+            } else state
+        }
     }
 
     /**

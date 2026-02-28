@@ -56,21 +56,12 @@ import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.repository.RelayRepository
 import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.utils.normalizeRelayUrl
 import social.mycelium.android.viewmodel.RelayManagementViewModel
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import kotlinx.coroutines.launch
 
 // ── Helpers ──
-
-private fun normalizeRelayUrl(url: String): String {
-    val trimmed = url.trim().removeSuffix("/")
-    return when {
-        trimmed.startsWith("wss://") || trimmed.startsWith("ws://") -> trimmed
-        trimmed.startsWith("https://") -> trimmed.replace("https://", "wss://")
-        trimmed.startsWith("http://") -> trimmed.replace("http://", "ws://")
-        else -> "wss://$trimmed"
-    }
-}
 
 private fun isDuplicateRelay(url: String, existingRelays: List<UserRelay>): Boolean {
     val normalizedUrl = normalizeRelayUrl(url)

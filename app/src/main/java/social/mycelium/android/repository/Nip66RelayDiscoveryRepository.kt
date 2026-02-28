@@ -39,6 +39,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.content.TextContent
 import io.ktor.http.isSuccess
 import social.mycelium.android.network.MyceliumHttpClient
+import social.mycelium.android.relay.RelayHealthTracker
 
 /**
  * NIP-66 Relay Discovery and Liveness Monitoring.
@@ -133,6 +134,123 @@ object Nip66RelayDiscoveryRepository {
      */
     fun getRelaysByType(type: RelayType): List<DiscoveredRelay> {
         return _discoveredRelays.value.values.filter { type in it.types }
+    }
+
+    /**
+     * Get search/indexer relays ranked by trust and geographic affinity.
+     *
+     * Unlike RTT-based sorting (which reflects monitor→relay latency, NOT user→relay),
+     * this method uses signals we can actually trust:
+     * - **Liveness**: relay must have been seen recently by monitors
+     * - **Capabilities**: must support NIP-50 (search), no auth/payment gates
+     * - **Observation count**: more monitors seeing it = higher confidence
+     * - **Geo affinity**: prefer relays in the user's region (device locale)
+     *
+     * @param userCountryCode ISO-3166-1 alpha-2 from device locale (e.g. "US", "BR", "DE")
+     * @param limit Max relays to return
+     */
+    fun getRankedIndexers(userCountryCode: String?, limit: Int = 30): List<DiscoveredRelay> {
+        val discovered = _discoveredRelays.value
+        if (discovered.isEmpty()) return emptyList()
+
+        val flagged = RelayHealthTracker.flaggedRelays.value
+        val blocked = RelayHealthTracker.blockedRelays.value
+        val now = System.currentTimeMillis() / 1000
+        val livenessThreshold = now - (7 * 24 * 3600) // seen within 7 days
+
+        val candidates = discovered.values
+            .filter { relay ->
+                relay.isSearch &&
+                    relay.url !in flagged &&
+                    relay.url !in blocked &&
+                    !relay.authRequired &&
+                    !relay.paymentRequired &&
+                    (relay.lastSeen == 0L || relay.lastSeen > livenessThreshold)
+            }
+
+        if (candidates.isEmpty()) {
+            // Fallback: return any search relays without strict filtering
+            return discovered.values
+                .filter { it.isSearch && it.url !in blocked }
+                .sortedByDescending { it.monitorCount }
+                .take(limit)
+        }
+
+        val userRegion = userCountryCode?.let { regionForCountry(it) }
+
+        // Score each candidate: higher = better
+        val scored = candidates.map { relay ->
+            var score = 0
+
+            // Observation count: more monitors = more trustworthy (0-30 pts)
+            score += (relay.monitorCount.coerceAtMost(30))
+
+            // Geo affinity: same region = +20, same country = +40
+            val relayRegion = relay.countryCode?.let { regionForCountry(it) }
+            if (userCountryCode != null && relay.countryCode != null) {
+                if (relay.countryCode.equals(userCountryCode, ignoreCase = true)) {
+                    score += 40 // same country
+                } else if (userRegion != null && relayRegion == userRegion) {
+                    score += 20 // same region/continent
+                }
+            }
+
+            // Has NIP-11 info: +5 (well-configured relay)
+            if (relay.hasNip11) score += 5
+
+            // Known software: +3 (vs unknown)
+            if (relay.software != null) score += 3
+
+            relay to score
+        }
+
+        val ranked = scored.sortedByDescending { it.second }.map { it.first }.take(limit)
+
+        Log.d(TAG, "getRankedIndexers: ${candidates.size} candidates, userCountry=$userCountryCode " +
+            "(region=$userRegion), returning ${ranked.size}. Top 5:")
+        ranked.take(5).forEachIndexed { i, r ->
+            val s = scored.first { it.first.url == r.url }.second
+            Log.d(TAG, "  #${i+1}: ${r.url} score=$s country=${r.countryCode} monitors=${r.monitorCount}")
+        }
+
+        return ranked
+    }
+
+    // ── Geographic region mapping ──
+
+    /** Broad geographic regions for geo-affinity scoring. */
+    private enum class GeoRegion {
+        NORTH_AMERICA, SOUTH_AMERICA, EUROPE, ASIA_PACIFIC, AFRICA, MIDDLE_EAST
+    }
+
+    /** Map ISO-3166-1 alpha-2 country codes to broad regions. */
+    private fun regionForCountry(code: String): GeoRegion? = when (code.uppercase()) {
+        // North America
+        "US", "CA", "MX" -> GeoRegion.NORTH_AMERICA
+        // Central America + Caribbean (closer to NA infra)
+        "GT", "BZ", "HN", "SV", "NI", "CR", "PA",
+        "CU", "JM", "HT", "DO", "PR", "TT", "BB", "BS" -> GeoRegion.NORTH_AMERICA
+        // South America
+        "BR", "AR", "CL", "CO", "PE", "VE", "EC", "BO", "PY", "UY",
+        "GY", "SR", "GF" -> GeoRegion.SOUTH_AMERICA
+        // Europe
+        "GB", "DE", "FR", "IT", "ES", "PT", "NL", "BE", "AT", "CH",
+        "SE", "NO", "DK", "FI", "IE", "PL", "CZ", "SK", "HU", "RO",
+        "BG", "HR", "SI", "RS", "BA", "ME", "MK", "AL", "GR", "CY",
+        "LT", "LV", "EE", "UA", "MD", "BY", "RU", "IS", "LU", "MT",
+        "LI", "MC", "AD", "SM", "VA" -> GeoRegion.EUROPE
+        // Asia-Pacific
+        "JP", "KR", "CN", "TW", "HK", "SG", "MY", "TH", "VN", "PH",
+        "ID", "IN", "PK", "BD", "LK", "NP", "AU", "NZ", "KH", "MM",
+        "LA", "MN", "KZ", "UZ", "KG", "TJ", "TM" -> GeoRegion.ASIA_PACIFIC
+        // Middle East
+        "TR", "IL", "AE", "SA", "QA", "BH", "KW", "OM", "JO", "LB",
+        "IQ", "IR", "SY", "YE", "EG" -> GeoRegion.MIDDLE_EAST
+        // Africa
+        "ZA", "NG", "KE", "GH", "ET", "TZ", "UG", "RW", "SN", "CI",
+        "CM", "MA", "TN", "DZ", "LY", "MU", "MG", "BW", "NA", "MZ",
+        "ZW", "ZM", "MW", "AO", "CD", "CG" -> GeoRegion.AFRICA
+        else -> null
     }
 
     // ── REST API (primary path) ──

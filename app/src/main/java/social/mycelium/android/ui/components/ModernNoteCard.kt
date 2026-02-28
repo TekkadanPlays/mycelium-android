@@ -618,21 +618,19 @@ private fun NoteCardContent(
                     pageCount = { mediaList.size },
                     initialPage = 0
                 )
-                // Stable container ratio: use the tallest (smallest ratio) across ALL
-                // media so the container never resizes when swiping between pages.
-                var mediaContainerRatio by remember(mediaList) {
+                // Stable container ratio: LOCKED after first composition to prevent layout shift.
+                // Uses cached aspect ratios if available; otherwise commits to 16:9 default.
+                // The real ratio is still written to MediaAspectRatioCache on load so NEXT
+                // time this card appears it uses the correct size from the start.
+                val mediaContainerRatio = remember(mediaList) {
                     val ratios = mediaList.map { url ->
                         social.mycelium.android.utils.MediaAspectRatioCache.get(url)
                             ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
                     }
                     val known = ratios.filterNotNull()
-                    mutableStateOf(if (known.isNotEmpty()) known.min() else null)
+                    if (known.isNotEmpty()) known.min() else (16f / 9f)
                 }
-                val mediaContainerModifier = if (mediaContainerRatio != null) {
-                    Modifier.fillMaxWidth().aspectRatio(mediaContainerRatio!!.coerceIn(0.3f, 3.0f))
-                } else {
-                    Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 480.dp)
-                }
+                val mediaContainerModifier = Modifier.fillMaxWidth().aspectRatio(mediaContainerRatio.coerceIn(0.3f, 3.0f))
                 Box(modifier = mediaContainerModifier) {
                     HorizontalPager(
                         state = pagerState,
@@ -673,13 +671,10 @@ private fun NoteCardContent(
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier.fillMaxSize(),
                                     onSuccess = { state ->
+                                        // Cache the real ratio for future renders — does NOT
+                                        // resize the current container (ratio is locked).
                                         val drawable = state.result.drawable
                                         social.mycelium.android.utils.MediaAspectRatioCache.add(url, drawable.intrinsicWidth, drawable.intrinsicHeight)
-                                        val newRatio = drawable.intrinsicWidth.toFloat() / drawable.intrinsicHeight.toFloat()
-                                        val current = mediaContainerRatio
-                                        if (current == null || newRatio < current) {
-                                            mediaContainerRatio = newRatio
-                                        }
                                     }
                                 )
                             }

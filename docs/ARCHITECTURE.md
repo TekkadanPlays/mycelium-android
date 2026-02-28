@@ -1,398 +1,458 @@
-# Mycelium Android — Architecture & State Flow Documentation
+﻿# Mycelium Android — Architecture Reference
+
+> Canonical architecture reference for the Mycelium Android Nostr client.
+> Designed for AI consumption (Claude Opus 4.6 + Excalidraw) and developer onboarding.
 
 ## Overview
 
-Mycelium is a Nostr client for Android built with Jetpack Compose, Kotlin Coroutines/Flows, and direct WebSocket connections to Nostr relays. The app follows an MVVM architecture with repository-backed data layers and a single-Activity Compose Navigation host.
+Mycelium is a native Android Nostr protocol client. Connects to relays via persistent WebSocket, renders feeds of text notes (kind-1), forum topics (kind-11/1111), live activities (NIP-53), and encrypted DMs (NIP-17). Handles 20+ event kinds with NIP-65 outbox relay discovery, NIP-42 auth, NIP-57 zaps, NIP-55 Amber signing.
+
+**Stack:** Kotlin · Jetpack Compose · MD3 · Ktor 3.0 WebSocket · Coil 2.5 · Media3 1.3 · secp256k1-kmp · Tinder StateMachine
+**Pattern:** Single-activity MVVM, Jetpack Navigation Compose. One `MainActivity` → `NavHost` in `MyceliumNavigation.kt` (3500 lines).
 
 ---
 
-## 1. Navigation Architecture
+## 1. Layer Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  UI LAYER (ui/)                                                 │
+│  44 Screens · 42 Components · MD3 Theme · MyceliumNavigation    │
+├─────────────────────────────────────────────────────────────────┤
+│  VIEWMODEL LAYER (viewmodel/)                                   │
+│  3 Activity-scoped (App, Account, FeedState)                    │
+│  8 Screen-scoped (Dashboard, Kind1Replies, ThreadReplies, etc.) │
+├─────────────────────────────────────────────────────────────────┤
+│  REPOSITORY LAYER (repository/)                                 │
+│  33 repositories (Notes, Notifications, Topics, Profiles, etc.) │
+├─────────────────────────────────────────────────────────────────┤
+│  RELAY LAYER (relay/)                                           │
+│  RelayConnectionStateMachine · SubscriptionMultiplexer          │
+│  RelayHealthTracker · Nip42AuthHandler · NetworkConnectivityMon │
+├─────────────────────────────────────────────────────────────────┤
+│  CYBIN LIBRARY (cybin/)                                         │
+│  CybinRelayPool · CybinRelayClient (Ktor WS)                   │
+│  Event · Filter · NostrSigner · NIP implementations             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2. Cybin Library (cybin/)
+
+In-repo Nostr protocol library (`com.example.cybin`). Included via `includeBuild("cybin")` with Gradle dependency substitution.
+
+### Modules
+- **core/**: `Event` (NIP-01 signed event with JSON ser/de), `EventTemplate` (unsigned), `Filter` (NIP-01 REQ), `TagArrayBuilder` DSL, `Types` (HexKey, Kind, TagArray)
+- **crypto/**: `KeyPair` (secp256k1 via secp256k1-kmp), NIP-01 event hashing, NIP-04 encryption
+- **nip19/**: Bech32 encoding/decoding, TLV parsing, npub/nsec/note/nevent/nprofile entities
+- **nip25/**: Reaction event builder (kind-7)
+- **nip47/**: Wallet Connect (NWC) payment request/response
+- **nip55/**: External signer (Amber) — `NostrSignerExternal`, `AmberDetector`, `ExternalSignerLogin`, `Permission`, `CommandType`
+- **nip57/**: Zap request events (kind-9734)
+- **signer/**: `NostrSigner` (abstract), `NostrSignerInternal` (local nsec Schnorr signing)
+
+### CybinRelayPool (relay/CybinRelayClient.kt, 881 lines)
+Multi-relay WebSocket pool with priority-based subscription scheduling.
+
+```
+Per-relay: RelayConnection (Ktor WebSocket session)
+           RelaySchedulerState (activeSubs, queuedReqs, effectiveLimit, eoseReceived)
+
+Priority levels: CRITICAL(4) > HIGH(3) > NORMAL(2) > LOW(1) > BACKGROUND(0)
+Per-relay cap: MAX_SUBS_PER_RELAY = 12
+Preemption: Higher-priority sub evicts lowest-priority EOSE'd sub
+Adaptive limits: NOTICE/CLOSED rate-limit → effectiveLimit reduced (min 3)
+EOSE reaping: STALE_EOSE_MS = 2s — evicts EOSE'd subs when queue waiting
+Reconnect: exponential backoff 2s→30s, 6 attempts
+Scoped disconnect: disconnectIdleRelays(candidateUrls) prevents killing outbox connections
+```
+
+### RelayConnectionListener interface
+`onConnecting`, `onConnected`, `onDisconnected`, `onError`, `onAuth`, `onOk`, `onEose`
+
+---
+
+## 3. Relay Layer (relay/)
+
+### Relay Stack (bottom → top)
+```
+CybinRelayClient (Ktor WebSocket per relay URL)
+    ↓
+CybinRelayPool (priority scheduler, per-relay slots, reconnect)
+    ↓
+SubscriptionMultiplexer (filter merge, ref-count, dedup)
+    ↓
+RelayConnectionStateMachine (Tinder FSM, main feed owner)
+    ↓
+Repositories / ViewModels
+```
+
+### RelayConnectionStateMachine (singleton, 983 lines)
+Owns one `CybinRelayPool`. Tinder StateMachine pattern.
+
+**States:** Disconnected → Connecting → Connected → Subscribed → ConnectFailed
+**Events:** ConnectRequested, Connected, ConnectFailed, RetryRequested, FeedChangeRequested, DisconnectRequested
+**Side Effects:** ConnectRelays, OnConnected, ScheduleRetry, UpdateSubscription, DisconnectClient
+
+**Main feed subscription:** One combined REQ across all user relays:
+- kind-1 (notes), kind-6 (reposts), kind-11 (topics), kind-1011 (moderation), kind-30311 (live activities)
+- Optional kind-7 + kind-9735 count filters for visible notes
+
+**Kind routing via registered handlers:**
+- `onKind1WithRelay` → NotesRepository
+- `onKind6WithRelay` → NotesRepository (reposts)
+- `onKind11` → TopicsRepository
+- `onKind1011` → ScopedModerationRepository
+- `onKind30311` → LiveActivityRepository
+- kind-7/9735 → NoteCountsRepository.onCountsEvent
+
+**Idempotent feed change:** Skips transition if relayUrls + kind1Filter + countsNoteIds unchanged.
+**resumeSubscriptionProvider:** Lambda from NotesRepository ensures app-resume re-applies Following filter.
+**Keepalive:** 2-min check, 5-min stale threshold → forced reconnect.
+**Retry:** 3 attempts, 2s/5s backoff.
+
+### Subscription Types
+1. **requestFeedChange()** — Main feed (owned by NotesRepository). Replaces existing subscription.
+2. **requestTemporarySubscription()** — Auxiliary subs (thread replies, notifications). Overloads: single/multi-filter, with-relay-URL, per-relay filter maps.
+3. **requestOneShotSubscription()** — EOSE-based auto-close. Collects events → auto-CLOSEs after all relays EOSE + settle. Hard timeout fallback. Used for bookmarks, mute list, anchor subs.
+4. **requestTemporarySubscriptionPerRelay()** — Outbox model: each relay gets its own filter set.
+
+### SubscriptionMultiplexer (423 lines)
+Flow-based multiplexer on top of CybinRelayPool.
+- **Filter merging:** Identical filters share one relay sub via FilterKey
+- **Ref-counting:** Relay sub CLOSEd only when last consumer unsubscribes
+- **50ms debounced REQ flush**
+- **EOSE tracking:** Per-merged-sub, per-relay
+- **Bounded LRU dedup:** 10K event IDs
+- **Priority upgrade:** New consumer with higher priority upgrades merged sub
+
+### RelayHealthTracker (singleton, 567 lines)
+Per-relay health metrics: connectionAttempts, failures, consecutiveFailures, eventsReceived, avgLatencyMs, lastError.
+- **Flagging:** 5 consecutive failures → flagged (UI warning)
+- **Auto-blocking:** 5 consecutive failures → 6-hour cooldown
+- **Manual blocking:** Persisted in SharedPreferences
+- **filterBlocked():** Called before every subscription
+- **Publish tracking:** registerPendingPublish → recordPublishOk (per-relay OK) → finalizePendingPublish (10s timeout). `publishReports` StateFlow (last 50), `publishFailure` SharedFlow for snackbar.
+
+### Nip42AuthHandler (236 lines)
+Intercepts AUTH challenges → signs kind-22242 via Amber (background, no UI) → tracks per-relay status (NONE → CHALLENGED → AUTHENTICATING → AUTHENTICATED/FAILED) → on success renews filters.
+
+### NetworkConnectivityMonitor (98 lines)
+Android ConnectivityManager.NetworkCallback. On network regained → `requestReconnectOnResume()` with 3s debounce.
+
+### Slot Optimization (typical home feed: ~3-4 slots)
+1. Main feed (HIGH) — 1 permanent
+2. Notifications (LOW) — 1 permanent (merged from 3)
+3. NoteCountsRepository (LOW) — 1 (replaces on phase change)
+4. OutboxFeedManager (LOW) — 1
+5. Transient one-shots auto-close via EOSE
+
+---
+
+## 4. Data Flow Pipelines
+
+### Home Feed Pipeline
+```
+WebSocket Event → CybinRelayPool → RelayConnectionStateMachine (kind routing)
+  → onKind1WithRelay → NotesRepository.pendingKind1Events (ConcurrentLinkedQueue)
+  → scheduleKind1Flush() (120ms debounce)
+  → flushKind1Events() (batch merge into _notes StateFlow under processEventMutex)
+  → DashboardViewModel observes notesRepository.notes
+  → DashboardScreen LazyColumn
+```
+
+### Outbox Feed (NIP-65)
+```
+Follow list loads → DashboardViewModel.loadFollowList() → startOutboxFeed()
+  → OutboxFeedManager.start()
+  → Phase 1: batch-fetch NIP-65 (kind-10002) for all followed users via indexer relays
+  → Phase 2: build relay→authors map, cap at 30 outbox relays ranked by author count
+  → requestTemporarySubscriptionPerRelay() (each relay gets only its relevant authors)
+  → Events → NotesRepository.pendingKind1Events (same pipeline, dedup by note ID)
+```
+
+### Repost Pipeline (Kind-6)
+```
+Kind-6 event → NotesRepository.handleKind6Repost()
+  → Content-embedded: parse inner event JSON
+  → Tag-only: pendingRepostBuffer → 500ms debounce → flushRepostBatch() (ONE batched sub)
+  → Both: parse NIP-10 e-tags for rootNoteId/replyToId/isReply
+  → Merge into feed as composite "repost:eventId" note
+```
+
+### Thread Reply Pipeline (two parallel systems)
+**Kind-1 replies** (Kind1RepliesRepository): Direct OkHttp WebSocket (bypasses relay pool) + ThreadReplyCache for instant display. Batched parent resolution (300ms debounce, recursive).
+**Kind-1111 replies** (ThreadRepliesRepository): Relay pool requestTemporarySubscription (CRITICAL priority). Pending/displayed split with 1.5s cutoff for live reply awareness. New replies → "(y new)" badges.
+
+### Notification Pipeline
+```
+Kind-1/7/6/9735/1111 → NotificationsRepository.handleEvent()
+  → Dedup via seenEventIds → route by kind
+  → Consolidation: multiple likes/zaps on same note → single row
+  → Target enrichment: pendingTargetFetches → 500ms debounce → flushTargetFetchBatch()
+  → Android push: fireAndroidNotification() → 8 channels
+```
+
+### Counts Pipeline (Two-Phase)
+```
+Phase 1: kind-1 reply counts loaded with main feed (NoteCountsRepository.onLiveEvent)
+Phase 2: kind-7 + kind-9735 after 600ms delay (requestFeedChangeWithCounts)
+  → Per-relay fan-out: filters sent to relays where each note was seen
+```
+
+### Profile Metadata Pipeline
+```
+ProfileMetadataCache (singleton, persisted to SharedPreferences)
+  → fetchProfileBatch(): batched kind-0 requests
+  → profileUpdated: SharedFlow<String> — NoteCard observes per relevantPubkeys set
+  → resolveAuthor(pubkey): returns Author from cache or fetches
+```
+
+### Publishing Pipeline
+```
+AccountStateViewModel.publishKind1(content, relayUrls)
+  → EventPublisher.publish(context, signer, relayUrls, kind, content, tags)
+  → Sign with NostrSigner → send via RelayConnectionStateMachine.send()
+  → Track via RelayHealthTracker (10s OK timeout per relay)
+  → publishedEvents SharedFlow → live awareness (thread replies, topics)
+  → NotesRepository.injectOwnNote() → immediate display (optimistic)
+  → updatePublishState(Confirmed) → green progress line → auto-clear 3s
+  → Relay echoes: locallyPublishedIds check → skip pending, merge relay URLs
+```
+
+### Zap Pipeline
+```
+SemiCircleZapMenu (amount) → ZapRequestBuilder (kind-9734, NIP-57)
+  → LightningAddressResolver (LUD-16) → LnurlResolver (bolt11 invoice)
+  → NwcPaymentManager (NIP-47) OR external wallet intent
+  → ZapStatePersistence.markZapped()
+```
+
+---
+
+## 5. Repository Layer (33 repositories)
+
+### Core Feed
+| Repository | Size | Pattern | Purpose |
+|-----------|------|---------|---------|
+| NotesRepository | 105KB | Singleton | Main feed owner, pending/displayed, feed cache, pagination, optimistic rendering |
+| TopicsRepository | 31KB | Singleton | Kind-11 topics, pending/displayed split, topic injection |
+| OutboxFeedManager | 13KB | Singleton | NIP-65 outbox-aware feed discovery |
+
+### Thread/Reply
+| Repository | Size | Purpose |
+|-----------|------|---------|
+| Kind1RepliesRepository | 36KB | Kind-1 replies via direct WebSocket, ThreadReplyCache, batched parent resolution |
+| ThreadRepliesRepository | 21KB | Kind-1111 replies via relay pool, live reply awareness |
+| TopicRepliesRepository | 7KB | Topic reply counts |
+| ReplyCountCache | 2KB | In-memory reply count cache |
+
+### Social Graph
+| Repository | Size | Purpose |
+|-----------|------|---------|
+| ContactListRepository | 12KB | Kind-3 follow list (5min TTL), follow/unfollow publish |
+| ProfileMetadataCache | 28KB | Kind-0 profiles, batch fetching, SharedPreferences persistence |
+| ProfileCountsRepository | 12KB | Following/follower counts via indexer relays |
+| ProfileFeedRepository | 15KB | Author-specific note feed with relay-side pagination |
+| ReactionsRepository | 3KB | Optimistic reaction state |
+
+### Relay Management
+| Repository | Size | Purpose |
+|-----------|------|---------|
+| RelayStorageManager | 14KB | Profiles/categories persistence, CRUD |
+| RelayRepository | 17KB | NIP-65 kind-10002 for current user |
+| Nip65RelayListRepository | 42KB | NIP-65 for ANY user, batch fetch, outbox resolution |
+| Nip66RelayDiscoveryRepository | 42KB | NIP-66 relay discovery, disk-cached |
+
+### Notifications & Social
+| Repository | Size | Purpose |
+|-----------|------|---------|
+| NotificationsRepository | 50KB | All notification types, consolidation, target enrichment, Android push |
+| NoteCountsRepository | 25KB | Reaction/zap counts, two-phase loading, per-relay fan-out |
+| BookmarkRepository | 6KB | Kind-10003, EOSE-based one-shot |
+| MuteListRepository | 7KB | Kind-10000, EOSE-based one-shot |
+| ScopedModerationRepository | 10KB | Kind-1011 NIP-22 |
+
+### Messaging & Media
+| Repository | Size | Purpose |
+|-----------|------|---------|
+| DirectMessageRepository | 15KB | NIP-17 gift-wrapped DMs, NIP-04/NIP-44 decryption |
+| LiveActivityRepository | 12KB | NIP-53 kind-30311 |
+| LiveChatRepository | 4KB | Kind-1311 live chat |
+| TranslationService | 7KB | ML Kit language detection + translation |
+
+### Payments & Other
+| Repository | Purpose |
+|-----------|---------|
+| CoinosRepository (14KB) | CoinOS wallet integration |
+| NwcConfigRepository (2KB) | NIP-47 config |
+| ZapStatePersistence (2KB) | Persisted zap button state |
+| AnchorSubscriptionRepository (5KB) | Kind-30073 anchor events |
+| DraftsRepository (3KB) | Local draft persistence |
+| QuotedNoteCache (5KB) | Quoted note metadata |
+| Nip86RelayManagementClient (11KB) | NIP-86 relay management API |
+
+---
+
+## 6. ViewModel Layer
+
+### Activity-Scoped (global, survive navigation)
+
+**AppViewModel** — Cross-screen state: `notesById` map for thread navigation, `selectedNote` (legacy fallback), image/video viewer URLs, `mediaPageByNoteId` (album swipe), `hiddenNoteIds` (Clear Read), `pendingReactionsData`.
+
+**AccountStateViewModel** (64KB) — Multi-account management, login/logout, all publish methods (`publishKind1`, `publishRepost`, `publishTopic`, `publishThreadReply`, `publishKind1Reply`, `publishTopicReply`, `sendZap`, `followUser`, `unfollowUser`, `reactToNote`, `deleteEvent`). Amber signer management. Onboarding state gates relay connections.
+
+**FeedStateViewModel** — Feed filter: All vs Following toggle, sort order, home scroll position save/restore.
+
+### Screen-Scoped (per NavBackStackEntry)
+
+**DashboardViewModel** — Feed observation, relay state, follow list loading, URL preview enrichment (viewport-aware prefetch: PREFETCH_AHEAD=15, 400ms debounce).
+
+**Kind1RepliesViewModel** — Kind-1 reply loading/sorting. Overlay threads share dashboard's instance; nav-based threads get fresh instance.
+
+**ThreadRepliesViewModel** — Kind-1111 replies, live reply awareness (`newReplyCount`, `newRepliesByParent`). Observes `EventPublisher.publishedEvents` for local injection.
+
+**TopicsViewModel** — Topic list, note counts, pending/displayed management.
+
+**RelayManagementViewModel** (25KB) — Relay profile/category CRUD, relay testing, NIP-65 publishing.
+
+---
+
+## 7. Navigation Architecture
 
 ### Entry Point
-- **`MainActivity`** → single Activity, `configChanges` handles rotation
-- **`MyceliumNavigation.kt`** → `NavHost` with all route composables
+`MainActivity.kt` → single Activity, edge-to-edge. Initializes Coil, RelayHealthTracker, ProfileMetadataCache, feed cache, NetworkConnectivityMonitor, notification channels. Lifecycle: ON_RESUME → relay reconnect; ON_STOP → video pause.
 
-### Navigation Patterns
+`MyceliumNavigation.kt` (3500 lines) — NavHost, all routes, overlay thread infrastructure, bottom nav, snackbar host, sidebar drawer.
 
-| Pattern | Used For | Mechanism |
-|---------|----------|-----------|
-| **Overlay** | Feed → Thread | `overlayThreadNoteId` state var; `AnimatedVisibility` over dashboard |
-| **Nav-based** | Thread → Thread, Notifications → Thread, Profile → Thread | `navController.navigate("thread/{noteId}")` |
-| **Bottom Nav** | Home, DMs, Live, Relays, Alerts | `BottomNavDestinations` enum → route mapping |
+### Three Navigation Patterns
 
-### Thread Navigation Flow
+| Pattern | Mechanism | Used For |
+|---------|-----------|----------|
+| **Overlay stack** | `SnapshotStateList<Note>` + `AnimatedVisibility` | Feed → Thread (chained). 4 stacks: home, topics, profile, notifications |
+| **NavController** | `navController.navigate("route/{id}")` | Settings, compose, relay screens, media viewers |
+| **Bottom nav** | `BottomNavDestinations` enum | Home, Topics, Live, DMs, Notifications |
 
-```
-Feed (dashboard composable)
-  └─ Tap note → overlayThreadNoteId = note.id (overlay thread)
-       └─ Tap quoted note → store both notes in notesById map
-            → navigate("thread/{originalId}") [on backstack]
-            → navigate("thread/{quotedId}") [visible]
-                 └─ Back → pops to original thread (nav-based)
-                      └─ Back → pops to dashboard
-```
+### Overlay Stack Architecture
+Each main screen has its own overlay thread stack:
+- `overlayThreadStack` — home feed
+- `overlayTopicThreadStack` — topics
+- `overlayProfileThreadStack` — profile
+- `overlayNotifThreadStack` + `overlayNotifReplyKinds` — notifications
 
-**Key state:** `AppViewModel.notesById: Map<String, Note>` — stores notes by ID for thread navigation. Each `thread/{noteId}` composable resolves its note from this map, so stacked threads don't interfere with each other.
+Tapping a note inside overlay pushes onto stack (not navigate). BackHandler pops. "Preserve routes" (`note_relays/`, `relay_log/`, `reactions/`, `zap_settings`, `profile/`) don't clear overlay.
 
-**Legacy fallback:** `AppViewModel.selectedNote` — single slot used by older callers (notifications, profile). Thread composable checks `notesById[noteId]` first, then `selectedNote?.takeIf { it.id == noteId }`.
-
-### Route Definitions
-
-| Route | Screen | Key Args |
-|-------|--------|----------|
-| `dashboard` | DashboardScreen (home feed) | — |
-| `topics` | TopicsScreen | — |
-| `thread/{noteId}` | ModernThreadViewScreen | `replyKind` (1=kind-1, 1111=kind-1111), `highlightReplyId` |
-| `profile/{authorId}` | ProfileScreen | `authorId` |
-| `notifications` | NotificationsScreen | — |
-| `relays` | RelayManagementScreen | — |
-| `settings` | SettingsScreen | — |
-| `compose` | ComposeNoteScreen | — |
-| `reply_compose` | ReplyComposeScreen | `rootId`, `rootPubkey`, `parentId`, `parentPubkey` |
-| `image_viewer` | ImageContentViewerScreen | URLs/index via AppViewModel |
-| `video_viewer` | VideoContentViewerScreen | URLs/index via AppViewModel |
-| `live_stream/{id}` | LiveStreamScreen | addressable event ID |
+### Key Routes
+`dashboard`, `topics`, `live_explorer`, `conversations`, `notifications`, `thread/{noteId}`, `profile/{pubkey}`, `compose`, `compose_topic`, `compose_topic_reply/{noteId}`, `reply/{noteId}`, `relay_management`, `relay_discovery`, `relay_health`, `relay_log/{relayUrl}`, `settings/*` (8 sub-screens), `onboarding`, `wallet`, `image_viewer`, `video_viewer`, `live_stream/{id}`, `chat/{id}`
 
 ---
 
-## 2. ViewModel Layer
+## 8. UI Layer
 
-### AppViewModel (global, Activity-scoped)
-- **Purpose:** Cross-screen shared state (selected note, image viewer, media pages)
-- **Key state:**
-  - `selectedNote: Note?` — legacy single-note slot
-  - `notesById: Map<String, Note>` — thread navigation map (supports stacked threads)
-  - `imageViewerUrls/videoViewerUrls` — media viewer state
-  - `mediaPageByNoteId` — persists album swipe position
-  - `replyToNote` — note shown at top of reply compose
-  - `threadRelayUrls` — relay URLs for thread opened from topics feed
+### Screen Composables (44 screens)
+**Feed:** DashboardScreen (79KB), TopicsScreen (61KB), NotificationsScreen (62KB, 10 tabs)
+**Thread:** ModernThreadViewScreen (145KB, unified kind-1/1111), TopicThreadScreen (17KB)
+**Profile:** ProfileScreen (53KB, Notes/Replies/Media tabs)
+**Compose:** ComposeNoteScreen, ComposeTopicScreen, ComposeTopicReplyScreen, ReplyComposeScreen — all use RelaySelectionScreen
+**Relay:** RelayManagementScreen (104KB), RelayDiscoveryScreen (50KB), RelayHealthScreen (61KB), RelayLogScreen (54KB)
+**Media:** LiveStreamScreen (41KB, HLS + PiP), ImageContentViewerScreen, VideoContentViewerScreen
+**DMs:** ConversationsScreen (21KB), ChatScreen (16KB), NewDmScreen
+**Settings:** 10 screens (hub + 9 sub-screens)
+**Other:** OnboardingScreen (90KB), WalletScreen, QrCodeScreen, ReactionsScreen, DraftsScreen
 
-### AccountStateViewModel (global, Activity-scoped)
-- **Purpose:** Authentication, account management, signing operations
-- **Key state:**
-  - `authState` — login status, user profile, guest mode
-  - `currentAccount` — active Nostr keypair (npub/nsec via Amber)
-  - `zapInProgressNoteIds`, `zappedNoteIds`, `zappedAmountByNoteId`
-- **Key operations:** `loginWithAmber()`, `sendReaction()`, `sendZap()`, `publishThreadReply()`
+### Core Components (42 composables)
+- **NoteCard.kt** (134KB) — Primary note display. Action schemas per kind. PublishProgressLine (shimmer/green/red). Relay orbs. Quoted notes.
+- **ModernNoteCard.kt** (50KB) — Thread view variant
+- **GlobalSidebar.kt** (27KB) — Drawer with relay health badge, profile, account switcher
+- **InlineVideoPlayer.kt** (21KB) — Feed video with SharedPlayerPool (LRU, max 3)
+- **SemiCircleZapMenu.kt** (32KB) — Arc zap amount picker
+- **RelayOrbs.kt** (15KB) — Stacked relay indicators (3 max + count)
+- **ThreadSlideBackBox.kt** (5KB) — Swipe-back gesture for overlay threads
+- **ThreadFab.kt** (10KB) — FAB with sort toggle
 
-### DashboardViewModel (scoped to dashboard composable)
-- **Purpose:** Feed note management, relay filtering, display state
-- **Key state:**
-  - `notes: List<Note>` — all fetched notes
-  - `displayedNotes: List<Note>` — filtered/sorted for display
-  - `urlPreviewsByNoteId` — enrichment data
-  - `relayState` — connection status per relay
-- **Delegates to:** `NotesRepository` for data, `ContactListRepository` for follow list
-
-### FeedStateViewModel (global)
-- **Purpose:** Feed filter/sort preferences
-- **Key state:**
-  - `isFollowing: Boolean` — All vs Following filter
-  - `homeSortOrder: HomeSortOrder` — Latest vs Popular
-  - Home scroll position save/restore
-
-### Kind1RepliesViewModel (scoped to NavBackStackEntry)
-- **Purpose:** Kind-1 reply threads for home feed notes
-- **Key state:** `replies: List<Note>`, `threadedReplies: List<ThreadedReply>`, `totalReplyCount`
-- **Delegates to:** `Kind1RepliesRepository`
-- **Important:** Each `thread/{noteId}` composable gets its own instance via NavBackStackEntry scoping. The overlay thread shares the dashboard's instance.
-
-### ThreadRepliesViewModel (scoped to NavBackStackEntry)
-- **Purpose:** Kind-1111 reply threads for topic notes
-- **Same pattern as Kind1RepliesViewModel** but for topic threads
-
-### TopicsViewModel (scoped to topics composable)
-- **Purpose:** Topic feed management (kind-11 anchor events)
+### NoteCard Action Row Schemas
+- **KIND1_FEED:** Lightning | Boost | Likes | Caret (3-dot menu)
+- **KIND11_FEED:** Up | Down | Boost | Lightning | Likes | Caret
+- **KIND1111_REPLY:** Up | Down | Lightning | Likes | Reply | Caret
 
 ---
 
-## 3. Repository Layer
+## 9. Services Layer
 
-### NotesRepository (singleton via DashboardViewModel)
-- **Purpose:** Fetch and manage kind-1 notes from relays
-- **Data flow:**
-  1. WebSocket subscription to relays for kind-1 events
-  2. Parse events → `Note` objects with author, content, media, hashtags
-  3. Emit to `_notes: MutableStateFlow<List<Note>>`
-  4. Profile updates batched via `updateAuthorsInNotesBatch()`
-- **Key optimization:** Two-phase approach — notes arrive first, then profiles fill in via `ProfileMetadataCache.profileUpdated` flow
+### EventPublisher (singleton)
+Central publisher: build EventTemplate → inject client tag → sign → send → track.
+`publishedEvents: SharedFlow<Event>` — event bus for live awareness.
 
-### ContactListRepository
-- **Purpose:** Fetch kind-3 (contact list) events for follow filtering
-- **Key optimization:**
-  - Priority relays: `wss://purplepag.es`, `wss://user.kindpag.es`
-  - In-flight deduplication prevents duplicate kind-3 fetches
-  - 2-minute cache TTL
+### RelayForegroundService
+Android foreground service (specialUse). Keeps WebSocket alive when backgrounded. Respects `NotificationPreferences.backgroundServiceEnabled`.
 
-### NoteCountsRepository (singleton object)
-- **Purpose:** Reply counts, reaction counts, zap totals for notes
-- **Data flow:**
-  1. **Phase 1** (immediate): Subscribe for kind-1 reply counts (`#e` tag filter)
-  2. **Phase 2** (600ms delay): Subscribe for kind-7 reactions + kind-9735 zaps
-  3. Newest-first ordering so top-of-feed notes get counts first
-- **Key state:** `countsByNoteId: StateFlow<Map<String, NoteCounts>>`
-- **Thread awareness:** `setThreadNoteIdsOfInterest()` subscribes counts for root + reply IDs when thread view opens
+### NotificationChannelManager (8 channels)
+Service: RELAY_SERVICE (low). Social: REPLIES (high), COMMENTS (high), MENTIONS (default), REACTIONS (low), ZAPS (high), REPOSTS (low), DMS (high).
 
-### Kind1RepliesRepository
-- **Purpose:** Fetch kind-1 replies to a specific note
-- **Mechanism:** Direct OkHttp WebSocket connections (bypasses Quartz relay pool)
-- **Data flow:**
-  1. Check `ThreadReplyCache` for cached replies (instant emit)
-  2. Open WebSocket to each relay + fallback relays (`relay.damus.io`, `nos.lol`)
-  3. Send REQ filter: `kinds=[1], #e=[noteId]`
-  4. Parse replies, resolve NIP-10 threading (root/reply markers)
-  5. Emit to `_replies: MutableStateFlow<Map<String, List<Note>>>`
-  6. Schedule missing parent fetches for incomplete threads
-
-### ProfileMetadataCache (singleton)
-- **Purpose:** Cache kind-0 profile metadata (display name, avatar, etc.)
-- **Key API:**
-  - `getAuthor(pubkey)` — resolve from cache
-  - `resolveAuthor(pubkey)` — resolve or return placeholder
-  - `requestProfiles(pubkeys, relays)` — fetch uncached profiles
-  - `profileUpdated: SharedFlow<String>` — emits pubkey when profile loads/updates
-- **Consumers:** NoteCard observes `profileUpdated` directly for live profile rendering
-
-### QuotedNoteCache (singleton)
-- **Purpose:** Cache quoted note metadata (content snippet, author) for inline rendering
-- **Key state:** `quotedNoteMetas: StateFlow<Map<String, QuotedNoteMeta>>`
-
-### ReplyCountCache (singleton)
-- **Purpose:** Fast in-memory cache of reply counts per note ID
-- **Used by:** Kind1RepliesViewModel to persist counts across thread opens
+### URL Preview Pipeline
+`DashboardViewModel.updateVisibleRange()` → viewport prefetch (first+15, 400ms debounce) → UrlPreviewManager → HTTP parse → LRU cache.
 
 ---
 
-## 4. UI Component State
+## 10. Authentication
 
-### NoteCard
-- **Profile observation:** Each NoteCard observes `ProfileMetadataCache.profileUpdated` directly via `LaunchedEffect`. When a profile loads, `profileRevision` increments, triggering `remember(note.author.id, profileRevision)` to re-resolve the author.
-- **Quoted note profiles:** Same pattern for quoted note authors (`quotedProfileRevision`)
-- **Reaction/zap dropdowns:** When expanded, fetch uncached profiles via `requestProfiles()` and observe `profileUpdated` for live rendering
+### Two Signing Paths
+1. **Amber (NIP-55):** External signer via Android ContentProvider IPC. `AmberSignerManager` detects, requests permissions per event kind, signs background (no UI for pre-approved kinds). NIP-04/NIP-44 encryption.
+2. **nsec (internal):** `NostrSignerInternal` uses secp256k1 KeyPair. Private key in-memory only.
 
-### AdaptiveHeader
-- **Mycelium logo menu:** Dropdown from title with All/Following, Latest/Popular, Topics navigation
-- **Topics filter row:** Shown only on Topics screen (All/Following + Latest/Popular chips + favorites star)
-- **Engagement filter:** Separate filter icon menu (Most Replies/Likes/Zaps)
-
-### ModernThreadViewScreen
-- **Reply loading:** `LaunchedEffect(note.id, relayUrlsKey, replyKind)` — skips when relayUrls empty (waits for resolution), loads when URLs arrive
-- **ViewModel selection:** `replyKind == 1` → Kind1RepliesViewModel, else → ThreadRepliesViewModel
-- **Sub-thread drill-down:** `rootReplyIdStack` for navigating into nested reply chains
-- **Quoted note navigation:** `onNoteClick` callback navigates to `thread/{clickedNote.id}`
+### Multi-Account
+`AccountStateViewModel` manages multiple `AccountInfo` records (SharedPreferences JSON). Account switching: `disconnectAndClearForAccountSwitch()` clears relay connections, NIP-65 cache, feed notes, notification subs.
 
 ---
 
-## 5. Data Flow Diagrams
+## 11. Nostr Event Kinds
 
-### Feed Loading Priority Chain
-
-```
-1. WebSocket connect to subscribed relays
-2. REQ kind-1 notes (main feed)
-3. Parse notes → emit to _notes StateFlow
-4. Phase 1 counts: REQ kind-1 replies (#e tags) → reply counts
-5. Kind-3 follow list fetch (priority relays, 2min cache)
-6. Apply Following filter → displayedNotes
-7. Phase 2 counts (600ms): REQ kind-7 + kind-9735 → reactions/zaps
-8. Profile fetches (kind-0) for visible note authors
-9. URL preview enrichment (async)
-```
-
-### Profile Update Propagation
-
-```
-ProfileMetadataCache.requestProfiles(pubkeys, relays)
-  → WebSocket REQ kind-0
-  → Parse → store in cache
-  → emit pubkey on profileUpdated SharedFlow
-  → NoteCard LaunchedEffect filters for matching pubkey
-  → profileRevision++ → recomposition with fresh author data
-  
-NotesRepository also observes profileUpdated:
-  → updateAuthorsInNotesBatch() → updates _notes StateFlow
-  → updateDisplayedNotes() → feed recomposes
-```
-
-### Thread Reply Loading
-
-```
-ModernThreadViewScreen opens
-  → LaunchedEffect(note.id, relayUrlsKey, replyKind)
-  → [if relayUrls empty: skip, wait for re-fire]
-  → [if relayUrls present:]
-    → kind1RepliesViewModel.loadRepliesForNote(note, relayUrls)
-      → Kind1RepliesRepository.fetchRepliesForNote()
-        → Check ThreadReplyCache (instant emit if cached)
-        → Open WebSocket to relays + fallback relays
-        → REQ kind-1, #e=[noteId]
-        → Parse replies → emit to _replies StateFlow
-        → Kind1RepliesViewModel.observeRepliesFromRepository()
-          → organizeRepliesIntoThreads() → threadedReplies
-          → UI renders via itemsIndexed(displayList)
-```
+| Kind | Name | Handler |
+|------|------|---------|
+| 0 | Profile metadata | ProfileMetadataCache |
+| 1 | Text note | NotesRepository |
+| 3 | Contact list | ContactListRepository |
+| 6 | Repost | NotesRepository.handleKind6Repost |
+| 7 | Reaction | NoteCountsRepository + ReactionsRepository |
+| 11 | Topic (NIP-22) | TopicsRepository |
+| 1011 | Scoped moderation | ScopedModerationRepository |
+| 1111 | Thread reply (NIP-22) | ThreadRepliesRepository |
+| 1311 | Live chat (NIP-53) | LiveChatRepository |
+| 9734 | Zap request (NIP-57) | ZapRequestBuilder |
+| 9735 | Zap receipt | NoteCountsRepository |
+| 10000 | Mute list | MuteListRepository |
+| 10002 | Relay list (NIP-65) | Nip65RelayListRepository |
+| 10003 | Bookmarks | BookmarkRepository |
+| 14/13/1059 | Gift-wrapped DM (NIP-17) | DirectMessageRepository |
+| 22242 | Relay auth (NIP-42) | Nip42AuthHandler |
+| 30073 | Anchor subscription | AnchorSubscriptionRepository |
+| 30311 | Live activity (NIP-53) | LiveActivityRepository |
 
 ---
 
-## 6. Relay Health Tracking & Blocking
-
-### RelayHealthTracker (`relay/RelayHealthTracker.kt`)
-Singleton that tracks per-relay health metrics across **all** connection paths.
-
-**Metrics tracked per relay:**
-- `connectionAttempts` / `connectionFailures` — total counts
-- `consecutiveFailures` — resets on success, triggers flagging at threshold (5)
-- `eventsReceived` — total events from this relay
-- `avgLatencyMs` — rolling average of last 10 connection latencies
-- `lastConnectedAt` / `lastFailedAt` — timestamps
-- `lastError` — most recent error message
-
-**Flagging:** A relay is automatically flagged when it accumulates 5+ consecutive failures without a successful connection. Flagged relays surface a warning banner in the Relay Management screen.
-
-**Blocking:** Users can block relays from the warning banner. Blocked relays are:
-- Persisted via `SharedPreferences` (`relay_health` prefs)
-- Excluded from all connection paths via `filterBlocked()`
-- Excluded from `RelayConnectionStateMachine.executeUpdateSubscription()`
-- Excluded from `Kind1RepliesRepository` direct WebSocket connections
-
-### Integration Points
-
-```
-RelayConnectionStateMachine (Quartz NostrClient)
-  └─ IRelayClientListener
-       ├─ onConnecting → recordConnectionAttempt()
-       ├─ onConnected  → recordConnectionSuccess()
-       └─ onCannotConnect → recordConnectionFailure()
-
-Kind1RepliesRepository (direct OkHttp WebSocket)
-  └─ WebSocketListener
-       ├─ onOpen    → recordConnectionSuccess()
-       └─ onFailure → recordConnectionFailure()
-
-All connection paths
-  └─ filterBlocked(relayUrls) before opening connections
-```
-
-### UI: Relay Management Warning Banner
-- Appears at top of `RelayManagementScreen` when flagged or blocked relays exist
-- Collapsible card showing each troubled relay with:
-  - Relay URL, consecutive failure count, last error
-  - **Block** button (flagged relays) — adds to persistent blocklist
-  - **Dismiss** button (flagged relays) — resets consecutive failures, removes flag
-  - **Unblock** button (blocked relays) — removes from blocklist
-
-### Initialization
-- `RelayHealthTracker.init(context)` called from `MainActivity.onCreate()` before any relay connections
-- Loads persisted blocklist from SharedPreferences
-
----
-
-## 6b. Outbox Relay Preloading (NIP-65)
-
-### Concept
-When a user opens a thread containing a quoted note, we preload the quoted note author's
-**write (outbox) relays** from their kind-10002 event. When the user then taps the quoted
-note, replies are fetched from the author's outbox relays in addition to the user's own
-relays and fallbacks — significantly improving reply discovery.
-
-### Flow
-
-```
-ModernThreadViewScreen opens
-  → LaunchedEffect(note.id)
-    → For each note.quotedEventIds:
-      → QuotedNoteCache.getCached(quotedId) → get authorId
-      → Nip65RelayListRepository.fetchOutboxRelaysForAuthor(authorId, discoveryRelays)
-        → REQ kind-10002 from purplepag.es + user's cache relays
-        → Parse "r" tags → extract write relays
-        → Cache in authorOutboxCache (LRU, max 100)
-
-User taps quoted note → Kind1RepliesViewModel.loadRepliesForNote()
-  → Kind1RepliesRepository.fetchRepliesForNote(noteId, relayUrls, authorPubkey)
-    → Nip65RelayListRepository.getCachedOutboxRelays(authorPubkey)
-    → Merge: targetRelays + authorOutbox + fallbackRelays
-    → filterBlocked() → open WebSocket to each
-```
-
-### Key Files
-- **`Nip65RelayListRepository.kt`** — `fetchOutboxRelaysForAuthor()`, `getCachedOutboxRelays()`
-- **`Kind1RepliesRepository.kt`** — `fetchRepliesForNote(authorPubkey)` enriches relay list
-- **`ModernThreadViewScreen.kt`** — `LaunchedEffect` triggers preload on thread open
-
----
-
-## 7. Known Patterns & Pitfalls
+## 12. Key Patterns & Pitfalls
 
 ### Relay URL Resolution Timing
-- `fallbackRelayUrls` depends on `currentAccount` which is a `StateFlow`
-- On first composition, `currentAccount` may be null → empty relay list
-- **Fix:** `LaunchedEffect` skips when `relayUrls.isEmpty()`, re-fires when URLs resolve
+`fallbackRelayUrls` depends on `currentAccount` StateFlow. On first composition, may be null → empty relay list. Fix: `LaunchedEffect` skips when `relayUrls.isEmpty()`, re-fires when URLs resolve.
 
 ### ViewModel Scoping
-- `viewModel()` in a `composable()` block scopes to that NavBackStackEntry
-- Overlay threads share the dashboard's NavBackStackEntry → same ViewModel instance
-- Nav-based threads each get their own NavBackStackEntry → fresh ViewModel
-- **Implication:** Opening a second thread from the overlay clears the first thread's replies in the shared ViewModel
-
-### Thread Navigation State
-- `notesById` map in AppViewModel stores notes for all open threads
-- `selectedNote` is legacy single-slot — only used as fallback
-- Overlay → nav transition pushes original thread onto nav backstack before quoted thread
+Overlay threads share dashboard's NavBackStackEntry → same ViewModel. Nav-based threads get fresh ViewModel. Implication: overlay thread ViewModel is shared, nav-based is isolated.
 
 ### Profile Rendering
-- NoteCard observes `profileUpdated` directly (not via NotesRepository)
-- This ensures profiles render immediately when they load, even if NotesRepository batch update hasn't run yet
-- `profileRevision` counter forces recomposition without changing the note object
+NoteCard observes `profileUpdated` directly (not via repo). `profileRevision` counter forces recomposition without changing note object. Filtered by `relevantPubkeys` set + 200ms debounce.
+
+### Subscription Batching
+Multiple individual subs (notifications, reposts) batched into single REQ via debounced buffers (500ms). Prevents 200+ concurrent LOW subs.
+
+### Feed Session State
+`FeedSessionState` enum (Idle → Loading → Live → Refreshing) prevents UI/re-subscribe conflicts. Loading overlay suppressed when feed is Live or Refreshing.
+
+### Infinite Scroll Fix
+`isLoadingOlder` used as `LaunchedEffect` key so the effect restarts when loading completes, triggering next page load from stale-closure bug.
 
 ---
 
-## 7. File Reference
+## 13. NIP Support
 
-### ViewModels (`viewmodel/`)
-| File | Scope | Purpose |
-|------|-------|---------|
-| `AppViewModel.kt` | Activity | Cross-screen state, note storage, media viewer |
-| `AccountStateViewModel.kt` | Activity | Auth, signing, zaps, reactions |
-| `DashboardViewModel.kt` | Dashboard | Feed notes, relay filtering |
-| `FeedStateViewModel.kt` | Activity | Feed filter/sort preferences |
-| `Kind1RepliesViewModel.kt` | NavBackStackEntry | Kind-1 reply threads |
-| `ThreadRepliesViewModel.kt` | NavBackStackEntry | Kind-1111 reply threads |
-| `TopicsViewModel.kt` | Topics | Topic feed management |
-
-### Repositories (`repository/`)
-| File | Type | Purpose |
-|------|------|---------|
-| `NotesRepository.kt` | Instance | Kind-1 note fetching, author updates |
-| `ContactListRepository.kt` | Instance | Kind-3 follow list |
-| `NoteCountsRepository.kt` | Singleton object | Reply/reaction/zap counts |
-| `Kind1RepliesRepository.kt` | Instance | Kind-1 reply fetching (direct WS) |
-| `ThreadRepliesRepository.kt` | Instance | Kind-1111 reply fetching |
-| `ProfileMetadataCache.kt` | Singleton | Kind-0 profile cache + live updates |
-| `QuotedNoteCache.kt` | Singleton | Quoted note metadata cache |
-| `ReplyCountCache.kt` | Singleton | Reply count cache |
-| `RelayRepository.kt` | Instance | Relay connection management |
-| `ReactionsRepository.kt` | Instance | Reaction publishing |
-
-### Navigation (`ui/navigation/`)
-| File | Purpose |
-|------|---------|
-| `MyceliumNavigation.kt` | NavHost, all route composables, thread overlay logic |
-
-### Screens (`ui/screens/`)
-| File | Purpose |
-|------|---------|
-| `DashboardScreen.kt` | Home feed with pull-to-refresh, search, filter |
-| `ModernThreadViewScreen.kt` | Thread view with threaded replies, zaps, reactions |
-| `TopicsScreen.kt` | Topic feed (kind-11 anchors) |
-| `ProfileScreen.kt` | User profile with notes/replies tabs |
-| `NotificationsScreen.kt` | Notification feed |
-
-### Components (`ui/components/`)
-| File | Purpose |
-|------|---------|
-| `NoteCard.kt` | Feed note card with live profile updates |
-| `AdaptiveHeader.kt` | Top app bar with Mycelium logo menu |
-| `BottomNavigation.kt` | Bottom nav destinations enum |
-| `ScrollAwareBottomNavigation.kt` | Bottom nav bar with scroll-aware visibility |
-| `ProfilePicture.kt` | Avatar component |
-| `ZapButtonWithMenu.kt` | Zap amount selector |
+NIP-01, NIP-02, NIP-04, NIP-10, NIP-11, NIP-17, NIP-19, NIP-22, NIP-25, NIP-42, NIP-44, NIP-47, NIP-53, NIP-55, NIP-57, NIP-65, NIP-66, NIP-86, NIP-89

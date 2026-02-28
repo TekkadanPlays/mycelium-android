@@ -42,27 +42,56 @@ enum class RelayEndpointStatus { Connecting, Connected, Failed }
 /**
  * Handle for a one-off subscription created via requestTemporarySubscription.
  * Call cancel() when done (e.g. thread screen closed, timeout) to avoid duplicate connections.
+ * Use pause()/resume() for temporary deactivation without losing subscription config.
  */
 interface TemporarySubscriptionHandle {
     fun cancel()
+    fun pause()
+    fun resume()
+    val isPaused: Boolean
 }
 
 private class CybinSubscriptionHandle(
-    private val subscription: CybinSubscription,
-    private val pool: CybinRelayPool
+    private var subscription: CybinSubscription,
+    private val pool: CybinRelayPool,
+    private val onEvent: (Event) -> Unit
 ) : TemporarySubscriptionHandle {
+    private val savedRelayFilters = subscription.relayFilters
+    private val savedPriority = subscription.priority
+    private var _isPaused = false
+    override val isPaused get() = _isPaused
+
     override fun cancel() {
         val relayUrls = subscription.relayFilters.keys.toSet()
         subscription.close()
+        _isPaused = false
         // Only disconnect relays that belonged to THIS subscription and are now idle.
         // The pool-wide disconnectIdleRelays() would kill outbox relay connections
         // that have their own active subscriptions.
         pool.disconnectIdleRelays(relayUrls)
     }
+
+    override fun pause() {
+        if (!_isPaused) {
+            subscription.close()
+            _isPaused = true
+        }
+    }
+
+    override fun resume() {
+        if (_isPaused) {
+            subscription = pool.subscribe(savedRelayFilters, savedPriority) { event, _ -> onEvent(event) }
+            pool.connect()
+            _isPaused = false
+        }
+    }
 }
 
 private object NoOpTemporaryHandle : TemporarySubscriptionHandle {
     override fun cancel() {}
+    override fun pause() {}
+    override fun resume() {}
+    override val isPaused: Boolean get() = false
 }
 
 /** Current subscription config (relayUrls + kind1Filter + countsNoteIds) for idempotent feed change and UI. */
@@ -759,13 +788,14 @@ class RelayConnectionStateMachine {
         onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty()) return NoOpTemporaryHandle
+        val wrappedOnEvent: (Event) -> Unit = onEvent
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = listOf(filter),
             priority = priority,
-        ) { event, _ -> onEvent(event) }
+        ) { event, _ -> wrappedOnEvent(event) }
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool)
+        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
     }
 
     /**
@@ -779,13 +809,14 @@ class RelayConnectionStateMachine {
         onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
+        val wrappedOnEvent: (Event) -> Unit = onEvent
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = filters,
             priority = priority,
-        ) { event, _ -> onEvent(event) }
+        ) { event, _ -> wrappedOnEvent(event) }
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool)
+        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
     }
 
     /**
@@ -799,13 +830,14 @@ class RelayConnectionStateMachine {
         onEvent: (Event, String) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty()) return NoOpTemporaryHandle
+        val wrappedOnEvent: (Event) -> Unit = { event -> onEvent(event, "") }
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = listOf(filter),
             priority = priority,
         ) { event, relayUrl -> onEvent(event, relayUrl) }
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool)
+        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
     }
 
     /**
@@ -820,12 +852,13 @@ class RelayConnectionStateMachine {
         onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         if (relayFilters.isEmpty()) return NoOpTemporaryHandle
+        val wrappedOnEvent: (Event) -> Unit = onEvent
         val subscription = relayPool.subscribe(
             relayFilters = relayFilters,
             priority = priority,
-        ) { event, _ -> onEvent(event) }
+        ) { event, _ -> wrappedOnEvent(event) }
         relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool)
+        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
     }
 
     /**
@@ -853,7 +886,7 @@ class RelayConnectionStateMachine {
             priority = priority,
         ) { event, _ -> onEvent(event) }
         relayPool.connect()
-        val handle = CybinSubscriptionHandle(subscription, relayPool)
+        val handle = CybinSubscriptionHandle(subscription, relayPool, onEvent)
 
         // Auto-close on EOSE + settle
         val subId = subscription.id
@@ -903,7 +936,7 @@ class RelayConnectionStateMachine {
             priority = priority,
         ) { event, _ -> onEvent(event) }
         relayPool.connect()
-        val handle = CybinSubscriptionHandle(subscription, relayPool)
+        val handle = CybinSubscriptionHandle(subscription, relayPool, onEvent)
 
         val subId = subscription.id
         val eoseRelays = java.util.Collections.synchronizedSet(mutableSetOf<String>())

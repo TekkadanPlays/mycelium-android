@@ -774,12 +774,7 @@ object NotificationsRepository {
         val noteIds = mutableListOf<String>()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         // Use indexer relays for broader coverage of the user's notes
-        val indexerRelays = listOf(
-            "wss://relay.nostr.band",
-            "wss://relay.damus.io",
-            "wss://nos.lol",
-            "wss://relay.primal.net"
-        )
+        val indexerRelays = NotesRepository.getInstance().INDEXER_RELAYS
         val allRelays = (relayUrls + indexerRelays).distinct()
         val filter = Filter(
             kinds = listOf(1),

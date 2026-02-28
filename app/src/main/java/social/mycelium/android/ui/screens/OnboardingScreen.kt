@@ -112,9 +112,9 @@ fun OnboardingScreen(
     }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    // NIP-66 indexer discovery state — all Search-type relays sorted by RTT
+    // NIP-66 indexer discovery state — ranked by trust + geo affinity
     var allIndexers by remember { mutableStateOf<List<DiscoveredRelay>>(emptyList()) }
-    // Which indexer URLs the user has selected (pre-checked: top 5 by RTT).
+    // Which indexer URLs the user has selected (pre-checked: top 5 by trust score).
     // If returnedIndexerUrls is non-empty (user just returned from discovery selection),
     // apply it immediately — no LaunchedEffect race.
     var selectedIndexerUrls by remember {
@@ -207,11 +207,9 @@ fun OnboardingScreen(
             (savedPhase == "SELECT_INDEXERS" && savedIndexers.isNotEmpty())
         if (isReturning) {
             Log.d("OnboardingScreen", "Returning to SELECT_INDEXERS (fromDiscovery=$hasReturnedIndexers, selections=${selectedIndexerUrls.size})")
-            // Populate allIndexers from NIP-66 cache
-            val allDiscovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
-            val indexers = allDiscovered.values
-                .filter { relay -> relay.isSearch }
-                .sortedBy { it.bestRtt ?: Int.MAX_VALUE }
+            // Populate allIndexers from NIP-66 cache — ranked by trust + geo affinity
+            val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
+            val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
             allIndexers = indexers
             // Only merge relay manager URLs when NOT returning from discovery
             // (discovery returns a complete replacement set; merging would undo deselections)
@@ -242,33 +240,41 @@ fun OnboardingScreen(
         showCustomInput = false
         addedCustomRelays = emptyList()
 
-        // NIP-66 is initialized globally in MainActivity — wait for it to finish.
+        // NIP-66 is initialized globally in MainActivity — wait for data but exit
+        // as soon as usable indexers arrive. Max 4s hard cap; most REST fetches
+        // complete in <1s so the user barely sees the spinner.
         withContext(Dispatchers.IO) {
             var waited = 0L
+            val maxWait = 4_000L
             Log.d("OnboardingScreen", "Waiting for NIP-66 data (hasFetched=${Nip66RelayDiscoveryRepository.hasFetched.value}, isLoading=${Nip66RelayDiscoveryRepository.isLoading.value})")
 
-            while (waited < 15_000L &&
-                (!Nip66RelayDiscoveryRepository.hasFetched.value || Nip66RelayDiscoveryRepository.isLoading.value)
-            ) {
-                delay(300)
-                waited += 300
-                if (waited % 3000 == 0L) {
-                    Log.d("OnboardingScreen", "Still waiting... ${waited/1000}s (hasFetched=${Nip66RelayDiscoveryRepository.hasFetched.value}, isLoading=${Nip66RelayDiscoveryRepository.isLoading.value})")
+            while (waited < maxWait) {
+                // Early exit: if we already have search relays, don't wait for the full fetch
+                val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
+                val hasIndexers = discovered.values.any { it.isSearch }
+                if (hasIndexers) {
+                    Log.d("OnboardingScreen", "Early exit: found indexers after ${waited}ms")
+                    break
                 }
+                // Also exit if fetch completed (even with zero results)
+                if (Nip66RelayDiscoveryRepository.hasFetched.value && !Nip66RelayDiscoveryRepository.isLoading.value) {
+                    Log.d("OnboardingScreen", "Fetch done after ${waited}ms")
+                    break
+                }
+                delay(200)
+                waited += 200
             }
 
-            val timedOut = waited >= 15_000L
+            val timedOut = waited >= maxWait
             val allDiscovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
-            Log.d("OnboardingScreen", "NIP-66 wait complete: timedOut=$timedOut, discovered ${allDiscovered.size} total relays")
+            Log.d("OnboardingScreen", "NIP-66 wait complete: timedOut=$timedOut, discovered ${allDiscovered.size} total relays (${waited}ms)")
 
-            // Indexers need to support NIP-65 (kind 10002) for relay lists and kind 0 for profiles.
-            // Look for relays with NIP-65 support or general PUBLIC_OUTBOX relays.
-            val indexers = allDiscovered.values
-                .filter { relay -> relay.isSearch }
-                .sortedBy { it.bestRtt ?: Int.MAX_VALUE }
+            // Rank indexers by trust signals + geo affinity (NOT monitor RTT)
+            val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
+            val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
 
             allIndexers = indexers
-            // Restore saved indexer selections, or pre-select top 5 by RTT
+            // Restore saved indexer selections, or pre-select top 5 by trust score
             if (savedIndexers.isNotEmpty()) {
                 selectedIndexerUrls = savedIndexers
             } else {
@@ -579,10 +585,10 @@ fun OnboardingScreen(
                                     strokeWidth = 2.dp,
                                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
                                 )
-                                // Allow skipping to manual setup after 5 seconds
+                                // Allow skipping to manual setup after 2 seconds
                                 var showSkip by remember { mutableStateOf(false) }
                                 LaunchedEffect(Unit) {
-                                    delay(5000)
+                                    delay(2000)
                                     showSkip = true
                                 }
                                 AnimatedVisibility(visible = showSkip) {
@@ -742,13 +748,13 @@ private fun IndexerSelectionCard(
     // Own selection state — isolated from parent to prevent AnimatedContent recomposition
     var selectedUrls by remember(initialSelectedUrls) { mutableStateOf(initialSelectedUrls) }
 
-    // Top 5 by RTT (always shown regardless of selection state)
-    val rttGroup = remember(allIndexers) { allIndexers.take(5) }
-    val rttUrls = remember(rttGroup) { rttGroup.map { it.url }.toSet() }
+    // Top 5 by trust score (always shown regardless of selection state)
+    val topGroup = remember(allIndexers) { allIndexers.take(5) }
+    val topUrls = remember(topGroup) { topGroup.map { it.url }.toSet() }
 
-    // Your Picks: selected URLs that aren't in the RTT group
-    val userPickUrls = remember(selectedUrls, rttUrls) {
-        selectedUrls.filter { it !in rttUrls }
+    // Your Picks: selected URLs that aren't in the top group
+    val userPickUrls = remember(selectedUrls, topUrls) {
+        selectedUrls.filter { it !in topUrls }
     }
     // Resolve user pick URLs to DiscoveredRelay objects (if available)
     val userPickRelays = remember(userPickUrls, allIndexers) {
@@ -786,14 +792,14 @@ private fun IndexerSelectionCard(
 
                 Spacer(Modifier.height(10.dp))
 
-                // ── Group 1: Fastest by RTT ──
-                Text("fastest by latency",
+                // ── Group 1: Recommended (trust + geo affinity) ──
+                Text("recommended",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 10.sp)
                 Spacer(Modifier.height(4.dp))
 
-                rttGroup.forEach { relay ->
+                topGroup.forEach { relay ->
                     key(relay.url) {
                         IndexerRelayRow(
                             relay = relay,
@@ -976,15 +982,16 @@ private fun IndexerRelayRow(
                 )
             }
         }
-        relay.avgRttRead?.let { rtt ->
+        // Trust badge: observation count from monitors
+        if (relay.monitorCount > 0) {
             Spacer(Modifier.width(6.dp))
-            val rttColor = when {
-                rtt < 200 -> Color(0xFF4CAF50)
-                rtt < 500 -> MaterialTheme.colorScheme.tertiary
-                else -> MaterialTheme.colorScheme.error
+            val trustColor = when {
+                relay.monitorCount >= 10 -> Color(0xFF4CAF50)
+                relay.monitorCount >= 3 -> MaterialTheme.colorScheme.tertiary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             }
-            Text("${rtt}ms", style = MaterialTheme.typography.labelSmall,
-                color = rttColor, fontSize = 10.sp)
+            Text("${relay.monitorCount}✕", style = MaterialTheme.typography.labelSmall,
+                color = trustColor, fontSize = 10.sp)
         }
     }
 }
@@ -1302,7 +1309,18 @@ private fun IndexerStatusRow(
         }
         Nip65RelayListRepository.IndexerQueryStatus.FAILED -> {
             statusColor = MaterialTheme.colorScheme.error
-            statusLabel = "failed"
+            val err = state.errorMessage
+            statusLabel = when {
+                err == null -> "failed"
+                "502" in err -> "502"
+                "401" in err || "403" in err -> "auth req"
+                "402" in err -> "paid"
+                "resolve host" in err.lowercase() || "DNS" in err.uppercase() -> "DNS fail"
+                "refused" in err.lowercase() -> "refused"
+                "CLEARTEXT" in err -> "no TLS"
+                "closed" in err.lowercase() -> "closed"
+                else -> err.take(20)
+            }
         }
         Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT -> {
             statusColor = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
@@ -1432,84 +1450,6 @@ private fun RelayReviewCard(
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
-
-        // ═══ ACTION BUTTONS — always visible at top ═══
-        Button(
-            onClick = { onConfirm(selectedResult) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(Icons.Outlined.CheckCircle, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Confirm Relay Choices")
-        }
-
-        if (canUpdate && pendingOutdated.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-
-            OutlinedButton(
-                onClick = {
-                    if (!isUpdating) {
-                        isUpdating = true
-                        scope.launch(Dispatchers.IO) {
-                            val results = onUpdateOutdated(selectedResult, pendingOutdated)
-                            withContext(Dispatchers.Main) {
-                                updateResults = updateResults + results
-                                isUpdating = false
-                            }
-                        }
-                    }
-                },
-                enabled = !isUpdating,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (isUpdating) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
-                } else {
-                    Icon(Icons.Outlined.Sync, null, Modifier.size(18.dp))
-                }
-                Spacer(Modifier.width(8.dp))
-                Text("Update ${pendingOutdated.size} outdated relays")
-            }
-        }
-
-        // Show update summary if any updates have been attempted
-        val updatedOk = updateResults.count { it.value }
-        val updatedFail = updateResults.count { !it.value }
-        if (updatedOk > 0 || updatedFail > 0) {
-            Spacer(Modifier.height(4.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center
-            ) {
-                if (updatedOk > 0) {
-                    Icon(Icons.Filled.CheckCircle, null, Modifier.size(12.dp), tint = Color(0xFF4CAF50))
-                    Spacer(Modifier.width(4.dp))
-                    Text("$updatedOk updated", style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF4CAF50), fontSize = 10.sp)
-                }
-                if (updatedOk > 0 && updatedFail > 0) Spacer(Modifier.width(12.dp))
-                if (updatedFail > 0) {
-                    Icon(Icons.Filled.Error, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error)
-                    Spacer(Modifier.width(4.dp))
-                    Text("$updatedFail failed", style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error, fontSize = 10.sp)
-                }
-            }
-        }
-
-        Spacer(Modifier.height(8.dp))
-
-        OutlinedButton(
-            onClick = { onEdit(selectedResult) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Edit in Relay Manager")
-        }
-
-        Spacer(Modifier.height(16.dp))
 
         // ═══ EVENT VERSION GROUPS (only if multiple versions) ═══
         if (groupedByTimestamp.size > 1) {
@@ -1793,7 +1733,85 @@ private fun RelayReviewCard(
             }
         }
 
+        // ═══ ACTION BUTTONS — at bottom after reviewing relay list ═══
         Spacer(Modifier.height(16.dp))
+
+        Button(
+            onClick = { onConfirm(selectedResult) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Outlined.CheckCircle, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Confirm Relay Choices")
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        OutlinedButton(
+            onClick = { onEdit(selectedResult) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Edit in Relay Manager")
+        }
+
+        if (canUpdate && pendingOutdated.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = {
+                    if (!isUpdating) {
+                        isUpdating = true
+                        scope.launch(Dispatchers.IO) {
+                            val results = onUpdateOutdated(selectedResult, pendingOutdated)
+                            withContext(Dispatchers.Main) {
+                                updateResults = updateResults + results
+                                isUpdating = false
+                            }
+                        }
+                    }
+                },
+                enabled = !isUpdating,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (isUpdating) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
+                } else {
+                    Icon(Icons.Outlined.Sync, null, Modifier.size(18.dp))
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("Update ${pendingOutdated.size} outdated relays")
+            }
+
+            // Show update summary if any updates have been attempted
+            val updatedOk = updateResults.count { it.value }
+            val updatedFail = updateResults.count { !it.value }
+            if (updatedOk > 0 || updatedFail > 0) {
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    if (updatedOk > 0) {
+                        Icon(Icons.Filled.CheckCircle, null, Modifier.size(12.dp), tint = Color(0xFF4CAF50))
+                        Spacer(Modifier.width(4.dp))
+                        Text("$updatedOk updated", style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF4CAF50), fontSize = 10.sp)
+                    }
+                    if (updatedOk > 0 && updatedFail > 0) Spacer(Modifier.width(12.dp))
+                    if (updatedFail > 0) {
+                        Icon(Icons.Filled.Error, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(4.dp))
+                        Text("$updatedFail failed", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error, fontSize = 10.sp)
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
     }
 }
 

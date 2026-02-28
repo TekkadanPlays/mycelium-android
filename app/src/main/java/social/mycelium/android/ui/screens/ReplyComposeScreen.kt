@@ -75,7 +75,7 @@ fun ReplyComposeScreen(
     // Fetch NIP-65 relay list for target if not cached
     LaunchedEffect(targetPubkey) {
         if (targetInboxRelays.isEmpty() && targetPubkey.isNotBlank()) {
-            val discoveryRelays = listOf("wss://purplepag.es", "wss://user.kindpag.es") +
+            val discoveryRelays = listOf("wss://purplepag.es", "wss://user.kindpag.es", "wss://indexer.coracle.social", "wss://directory.yabu.me") +
                 (Nip65RelayListRepository.readRelays.value.takeIf { it.isNotEmpty() } ?: emptyList())
             Nip65RelayListRepository.batchFetchRelayLists(listOf(targetPubkey), discoveryRelays)
             // Poll for cache population (batchFetchRelayLists is async)

@@ -15,7 +15,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.relay.TemporarySubscriptionHandle
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Outbox-aware feed manager: discovers followed users' outbox (write) relays via
@@ -37,6 +39,12 @@ import social.mycelium.android.relay.TemporarySubscriptionHandle
  * Notes from outbox relays that also arrive from inbox relays are deduplicated by
  * [NotesRepository.flushKind1Events] (existing dedup by note ID). No extra logic needed.
  *
+ * ## NIP-66 pre-filtering
+ * Before ranking, relays are filtered against [Nip66RelayDiscoveryRepository] liveness data.
+ * Relays not seen by any monitor in the last 48 hours are excluded, saving connection
+ * slots for live relays. Auth-required and payment-required relays are also excluded.
+ * If NIP-66 data is not yet available, the filter is skipped gracefully.
+ *
  * ## Connection budget
  * We cap outbox relays at [MAX_OUTBOX_RELAYS] to avoid opening hundreds of WebSockets.
  * Relays are ranked by how many followed authors publish there (most popular first).
@@ -55,6 +63,16 @@ class OutboxFeedManager private constructor() {
 
     /** Discovery job — cancel if we stop before discovery finishes. */
     private var discoveryJob: Job? = null
+
+    /** Delivery measurement job — records outcomes after subscription settles. */
+    private var deliveryMeasurementJob: Job? = null
+
+    /** Tracks which authors delivered events this session (for relay attribution). */
+    private val deliveredAuthors = ConcurrentHashMap.newKeySet<String>()
+
+    /** The relay→authors assignment from the current session (for delivery attribution). */
+    @Volatile
+    private var currentRelayAssignment: Map<String, Set<String>> = emptyMap()
 
     /** Callback to inject events into NotesRepository's ingestion pipeline. */
     @Volatile
@@ -116,6 +134,10 @@ class OutboxFeedManager private constructor() {
         Log.d(TAG, "Starting outbox feed: ${followedPubkeys.size} follows, ${indexerRelayUrls.size} indexers")
         _phase.value = Phase.DISCOVERING
         _outboxNotesReceived.value = 0
+        deliveredAuthors.clear()
+
+        // Decay historical delivery stats so the algorithm adapts to relay changes
+        RelayDeliveryTracker.decayAll()
 
         discoveryJob = scope.launch {
             try {
@@ -137,11 +159,16 @@ class OutboxFeedManager private constructor() {
      * Stop all outbox subscriptions and discovery. Call on feed disconnect or logout.
      */
     fun stop() {
+        // Finalize delivery stats before stopping (if measurement hasn't run yet)
+        finalizeDeliveryMeasurement()
+        deliveryMeasurementJob?.cancel()
+        deliveryMeasurementJob = null
         discoveryJob?.cancel()
         discoveryJob = null
         outboxHandle?.cancel()
         outboxHandle = null
         lastStartedFollowSet = null
+        currentRelayAssignment = emptyMap()
         _phase.value = Phase.STOPPED
         _outboxRelayCount.value = 0
         _discoveredAuthorCount.value = 0
@@ -224,14 +251,86 @@ class OutboxFeedManager private constructor() {
             return
         }
 
-        // Rank by author count (most popular first), cap at MAX_OUTBOX_RELAYS
-        val ranked = relayToAuthors.entries
-            .sortedByDescending { it.value.size }
+        // NIP-66 pre-filter: remove dead/stale relays before ranking
+        val liveRelays = Nip66RelayDiscoveryRepository.discoveredRelays.value
+        val candidateRelays = if (liveRelays.isNotEmpty()) {
+            val now = System.currentTimeMillis() / 1000
+            val staleThreshold = now - LIVENESS_WINDOW_SECS
+            val beforeCount = relayToAuthors.size
+            val filtered = relayToAuthors.filterKeys { url ->
+                val discovered = liveRelays[url]
+                if (discovered == null) {
+                    // Relay not in NIP-66 data — keep it (benefit of the doubt)
+                    true
+                } else {
+                    // Exclude if last seen too long ago, or requires auth/payment
+                    discovered.lastSeen >= staleThreshold &&
+                        !discovered.authRequired &&
+                        !discovered.paymentRequired
+                }
+            }
+            val removedCount = beforeCount - filtered.size
+            if (removedCount > 0) {
+                Log.d(TAG, "NIP-66 pre-filter: removed $removedCount dead/stale/restricted relays " +
+                    "($beforeCount → ${filtered.size})")
+            }
+            filtered
+        } else {
+            Log.d(TAG, "NIP-66 data not available — skipping liveness pre-filter")
+            relayToAuthors
+        }
+
+        if (candidateRelays.isEmpty()) {
+            Log.d(TAG, "All outbox relays filtered out by NIP-66 — falling back to unfiltered")
+            // Fall back to unfiltered to avoid zero coverage
+        }
+        val selectionPool = candidateRelays.ifEmpty { relayToAuthors }
+
+        // Rank by Thompson Sampling score (delivery quality × popularity), cap at MAX_OUTBOX_RELAYS
+        val greedyRanked = selectionPool.entries
+            .sortedByDescending { entry ->
+                RelayDeliveryTracker.sampleScore(entry.key, entry.value.size)
+            }
             .take(MAX_OUTBOX_RELAYS)
 
+        // Phase 3a: Ensure per-author diversity — authors only on niche relays may be
+        // uncovered by the greedy top-N. Add their best relay up to a soft budget.
+        val coveredAuthors = greedyRanked.flatMap { it.value }.toMutableSet()
+        val selectedUrls = greedyRanked.map { it.key }.toMutableSet()
+        val diversityRelays = mutableListOf<Map.Entry<String, MutableSet<String>>>()
+
+        if (coveredAuthors.size < followedPubkeys.size) {
+            val uncovered = followedPubkeys.filter { it !in coveredAuthors }
+            // For each uncovered author, find their best relay (by score) that isn't already selected
+            for (pubkey in uncovered) {
+                if (selectedUrls.size >= MAX_OUTBOX_RELAYS + DIVERSITY_BUDGET) break
+                val bestRelay = selectionPool.entries
+                    .filter { pubkey in it.value && it.key !in selectedUrls }
+                    .maxByOrNull { RelayDeliveryTracker.sampleScore(it.key, it.value.size) }
+                if (bestRelay != null) {
+                    diversityRelays.add(bestRelay)
+                    selectedUrls.add(bestRelay.key)
+                    coveredAuthors.addAll(bestRelay.value)
+                }
+            }
+            if (diversityRelays.isNotEmpty()) {
+                Log.d(TAG, "Diversity pass: added ${diversityRelays.size} relays for ${uncovered.size} uncovered authors")
+            }
+        }
+
+        val ranked = greedyRanked + diversityRelays
         val totalAuthors = ranked.flatMap { it.value }.toSet().size
         Log.d(TAG, "Subscribing to ${ranked.size} outbox relays covering $totalAuthors authors " +
-            "(${relayToAuthors.size} total discovered, capped at $MAX_OUTBOX_RELAYS)")
+            "(${relayToAuthors.size} total discovered, greedy=$MAX_OUTBOX_RELAYS + diversity=${diversityRelays.size})")
+
+        // Phase 5: Self-healing — add indexer fallback for chronically missed authors
+        val missedAuthors = RelayDeliveryTracker.getMissedAuthors()
+            .filter { it in followedPubkeys }.toSet() // only care about current follows
+        val healingRelay = if (missedAuthors.isNotEmpty()) {
+            // Pick the first indexer relay not already in our selection
+            val selectedRelayUrls = ranked.map { it.key }.toSet()
+            NotesRepository.getInstance().INDEXER_RELAYS.firstOrNull { it !in selectedRelayUrls }
+        } else null
 
         // Build per-relay filters: each relay gets a kind-1 filter with only its authors
         val sevenDaysAgo = System.currentTimeMillis() / 1000 - SINCE_WINDOW_SECS
@@ -244,9 +343,32 @@ class OutboxFeedManager private constructor() {
                     limit = OUTBOX_PER_RELAY_LIMIT
                 )
             )
+        }.toMutableMap()
+
+        // Inject healing relay with missed authors' filter
+        if (healingRelay != null && missedAuthors.isNotEmpty()) {
+            relayFilters[healingRelay] = listOf(
+                Filter(
+                    kinds = listOf(1),
+                    authors = missedAuthors.toList(),
+                    since = sevenDaysAgo,
+                    limit = OUTBOX_PER_RELAY_LIMIT
+                )
+            )
+            Log.d(TAG, "Self-healing: added $healingRelay as fallback for ${missedAuthors.size} missed authors")
         }
 
         _outboxRelayCount.value = relayFilters.size
+
+        // Save relay→authors assignment for delivery attribution (include healing relay)
+        val assignmentMap = ranked.associate { (url, authors) -> url to authors.toSet() }.toMutableMap()
+        if (healingRelay != null && missedAuthors.isNotEmpty()) {
+            assignmentMap[healingRelay] = missedAuthors
+        }
+        currentRelayAssignment = assignmentMap
+
+        // Record that we expect delivery from each selected relay (including healing relay)
+        relayFilters.keys.forEach { url -> RelayDeliveryTracker.recordExpected(url) }
 
         // Subscribe using per-relay filter map — each relay only gets its relevant authors
         val callback = onNoteReceived
@@ -262,6 +384,8 @@ class OutboxFeedManager private constructor() {
         ) { event ->
             if (event.kind == 1) {
                 _outboxNotesReceived.value = _outboxNotesReceived.value + 1
+                // Track which authors delivered events (for relay attribution)
+                deliveredAuthors.add(event.pubKey)
                 // Inject into NotesRepository's existing pipeline.
                 // Per-relay subscription doesn't expose source relay URL, so pass empty.
                 // convertEventToNote treats empty relayUrl as null (no relay attribution).
@@ -275,8 +399,63 @@ class OutboxFeedManager private constructor() {
 
         // Log top 5 relays for diagnostics
         ranked.take(5).forEach { (url, authors) ->
-            Log.d(TAG, "  ${url.removePrefix("wss://").removeSuffix("/")}: ${authors.size} authors")
+            val stats = RelayDeliveryTracker.getStats()[url]
+            val statsStr = if (stats != null) " (delivery: ${String.format("%.0f%%", stats.successRate * 100)})" else " (new)"
+            Log.d(TAG, "  ${url.removePrefix("wss://").removeSuffix("/")}: ${authors.size} authors$statsStr")
         }
+
+        // Schedule delivery measurement after events have had time to arrive
+        scheduleDeliveryMeasurement()
+    }
+
+    /**
+     * Schedule delivery measurement after a delay, giving relays time to deliver events.
+     * After the window, we check which relays produced events (via author attribution)
+     * and record success/failure in [RelayDeliveryTracker].
+     */
+    private fun scheduleDeliveryMeasurement() {
+        deliveryMeasurementJob?.cancel()
+        deliveryMeasurementJob = scope.launch {
+            delay(DELIVERY_MEASUREMENT_DELAY_MS)
+            finalizeDeliveryMeasurement()
+        }
+    }
+
+    /**
+     * Attribute delivery outcomes to relays based on which authors delivered events.
+     *
+     * Logic: For each relay in [currentRelayAssignment], if ANY author assigned to that
+     * relay delivered an event, mark the relay as "delivered". This is a conservative
+     * heuristic — we can't know exactly which relay sent which event (the per-relay
+     * subscription callback doesn't expose source URL), but if a relay's assigned authors
+     * produced events, it's likely the relay contributed.
+     */
+    private fun finalizeDeliveryMeasurement() {
+        val assignment = currentRelayAssignment
+        if (assignment.isEmpty() || deliveredAuthors.isEmpty()) return
+
+        var deliveredCount = 0
+        for ((relayUrl, assignedAuthors) in assignment) {
+            val relayDelivered = assignedAuthors.any { it in deliveredAuthors }
+            if (relayDelivered) {
+                RelayDeliveryTracker.recordDelivered(relayUrl)
+                deliveredCount++
+            }
+        }
+
+        Log.d(TAG, "Delivery measurement: $deliveredCount/${assignment.size} relays delivered " +
+            "(${deliveredAuthors.size} unique authors seen)")
+
+        // Record per-author outcomes for self-healing (Phase 5)
+        val allAssignedAuthors = assignment.values.flatten().toSet()
+        RelayDeliveryTracker.recordAuthorOutcomes(allAssignedAuthors, deliveredAuthors.toSet())
+        val missedAuthors = RelayDeliveryTracker.getMissedAuthors()
+        if (missedAuthors.isNotEmpty()) {
+            Log.d(TAG, "Self-healing: ${missedAuthors.size} authors chronically missed (≥${2} sessions)")
+        }
+
+        // Persist stats to survive app restarts
+        RelayDeliveryTracker.saveToDisk()
     }
 
     private fun normalizeUrl(url: String): String {
@@ -294,6 +473,15 @@ class OutboxFeedManager private constructor() {
 
         /** Only fetch notes from the last 7 days. */
         private const val SINCE_WINDOW_SECS = 7 * 24 * 3600L
+
+        /** NIP-66 liveness window: relays not seen in 48 hours are considered dead. */
+        private const val LIVENESS_WINDOW_SECS = 48 * 3600L
+
+        /** Delay before measuring delivery outcomes. Gives relays time to send events. */
+        private const val DELIVERY_MEASUREMENT_DELAY_MS = 30_000L
+
+        /** Extra relay slots beyond MAX_OUTBOX_RELAYS for per-author diversity coverage. */
+        private const val DIVERSITY_BUDGET = 4
 
         @Volatile
         private var instance: OutboxFeedManager? = null

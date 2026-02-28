@@ -64,6 +64,7 @@ import kotlinx.coroutines.delay
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.relay.RelayHealthInfo
+import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.data.RelayType
 import social.mycelium.android.repository.ContactListRepository
@@ -104,6 +105,7 @@ fun RelayHealthScreen(
     onOpenRelayLog: (String) -> Unit = {},
     onOpenRelayUsers: (String) -> Unit = {},
     onOpenNeedsAttention: () -> Unit = {},
+    onOpenPublishResults: () -> Unit = {},
     onProfileClick: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
@@ -259,7 +261,6 @@ fun RelayHealthScreen(
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
     // Section expand state
-    var publishesExpanded by remember { mutableStateOf(true) }
     var myRelaysExpanded by remember { mutableStateOf(true) }
     var followingOutboxExpanded by remember { mutableStateOf(true) }
     var followingInboxExpanded by remember { mutableStateOf(false) }
@@ -345,20 +346,81 @@ fun RelayHealthScreen(
                 }
             }
 
-            // ── Recent Publishes (publish failure reports) ──
+            // ── Publish Results navigation card ──
             if (publishReports.isNotEmpty()) {
-                item(key = "section_publishes") {
-                    SectionHeader(
-                        title = "Recent Publishes",
-                        count = publishReports.size,
-                        icon = Icons.Outlined.Publish,
-                        expanded = publishesExpanded,
-                        onToggle = { publishesExpanded = !publishesExpanded }
-                    )
+                item(key = "publish_nav_card") {
+                    val failedCount = publishReports.count { it.hasFailures }
+                    val latestReport = publishReports.firstOrNull()
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp)
+                            .clickable(onClick = onOpenPublishResults),
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (failedCount > 0)
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
+                        tonalElevation = 0.5.dp
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Outlined.Publish,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp),
+                                tint = if (failedCount > 0) MaterialTheme.colorScheme.error
+                                       else MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = "Publish Results",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = buildString {
+                                        append("${publishReports.size} events")
+                                        if (failedCount > 0) append(" · $failedCount with failures")
+                                        latestReport?.let {
+                                            val ageMs = System.currentTimeMillis() - it.timestamp
+                                            val ago = when {
+                                                ageMs < 60_000 -> "just now"
+                                                ageMs < 3_600_000 -> "${ageMs / 60_000}m ago"
+                                                else -> "${ageMs / 3_600_000}h ago"
+                                            }
+                                            append(" · latest $ago")
+                                        }
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Icon(
+                                Icons.Filled.ChevronRight,
+                                contentDescription = "View all",
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
                 }
-                if (publishesExpanded) {
-                    items(publishReports.take(20), key = { "pub_${it.eventId}" }) { report ->
-                        PublishReportRow(report = report)
+            }
+
+            // ── Outbox Delivery Stats (Thompson Sampling) ──
+            item(key = "outbox_stats") {
+                val deliveryStats = remember { RelayDeliveryTracker.getStats() }
+                if (deliveryStats.isNotEmpty()) {
+                    val topRelays = remember(deliveryStats) {
+                        deliveryStats.entries
+                            .filter { it.value.expected >= 1.0 }
+                            .sortedByDescending { it.value.successRate }
+                            .take(6)
+                    }
+                    if (topRelays.isNotEmpty()) {
+                        OutboxDeliveryCard(topRelays = topRelays)
                     }
                 }
             }
@@ -590,119 +652,107 @@ fun RelayHealthScreen(
     }
 }
 
-// ── Publish report row ──
+// ── Outbox Delivery Card (Thompson Sampling stats) ──
 
 @Composable
-private fun PublishReportRow(report: RelayHealthTracker.PublishReport) {
-    var expanded by remember { mutableStateOf(false) }
-    val kindLabel = when (report.kind) {
-        1 -> "Note"
-        7 -> "Reaction"
-        11 -> "Topic"
-        1111 -> "Reply"
-        6 -> "Repost"
-        else -> "Kind ${report.kind}"
-    }
-    val ageMs = System.currentTimeMillis() - report.timestamp
-    val timeAgo = when {
-        ageMs < 60_000 -> "just now"
-        ageMs < 3_600_000 -> "${ageMs / 60_000}m ago"
-        ageMs < 86_400_000 -> "${ageMs / 3_600_000}h ago"
-        else -> "${ageMs / 86_400_000}d ago"
-    }
-    val hasFailures = report.hasFailures
-    val containerColor = if (hasFailures)
-        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-    else
-        MaterialTheme.colorScheme.surfaceContainerLow
-
+private fun OutboxDeliveryCard(
+    topRelays: List<Map.Entry<String, RelayDeliveryTracker.RelayStats>>
+) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 2.dp)
-            .clickable { expanded = !expanded },
-        shape = RoundedCornerShape(10.dp),
-        color = containerColor
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 1.dp
     ) {
-        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                // Status dot
-                Box(
-                    Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(
-                            if (hasFailures) MaterialTheme.colorScheme.error
-                            else MaterialTheme.colorScheme.primary
-                        )
-                )
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = kindLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        text = "${report.successCount}/${report.targetRelayCount} OK" +
-                            if (hasFailures) " · ${report.failureCount} failed" else "",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (hasFailures) MaterialTheme.colorScheme.error
-                                else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Text(
-                    text = timeAgo,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.width(4.dp))
                 Icon(
-                    Icons.Filled.ExpandMore,
-                    contentDescription = if (expanded) "Collapse" else "Expand",
-                    modifier = Modifier
-                        .size(16.dp)
-                        .rotate(if (expanded) 0f else -90f),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    Icons.Outlined.TrendingUp,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "Outbox Delivery",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = "Thompson Sampling",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    fontSize = 10.sp
                 )
             }
+            Spacer(Modifier.height(10.dp))
 
-            // Expanded: per-relay results
-            AnimatedVisibility(visible = expanded) {
-                Column(modifier = Modifier.padding(top = 6.dp)) {
-                    report.results.forEach { result ->
-                        Row(
+            topRelays.forEach { (url, stat) ->
+                val displayUrl = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+                val rate = stat.successRate
+                val rateColor = when {
+                    rate >= 0.8 -> Color(0xFF4CAF50)
+                    rate >= 0.5 -> Color(0xFFFFA726)
+                    rate > 0.0 -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.outline
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(rateColor)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = displayUrl,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    // Mini delivery bar
+                    Box(
+                        modifier = Modifier
+                            .width(32.dp)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(1.5.dp))
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    ) {
+                        Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 2.dp, horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                if (result.success) Icons.Filled.CheckCircle else Icons.Filled.Cancel,
-                                contentDescription = null,
-                                modifier = Modifier.size(12.dp),
-                                tint = if (result.success) MaterialTheme.colorScheme.primary
-                                       else MaterialTheme.colorScheme.error
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                text = result.relayUrl.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.weight(1f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (result.message.isNotBlank()) {
-                                Text(
-                                    text = result.message.take(30),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
+                                .fillMaxHeight()
+                                .fillMaxWidth(rate.toFloat().coerceIn(0f, 1f))
+                                .clip(RoundedCornerShape(1.5.dp))
+                                .background(rateColor)
+                        )
                     }
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = "${(rate * 100).toInt()}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = rateColor,
+                        modifier = Modifier.width(30.dp)
+                    )
+                    Text(
+                        text = "${stat.delivered.toInt()}/${stat.expected.toInt()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        fontSize = 10.sp,
+                        modifier = Modifier.width(32.dp)
+                    )
                 }
             }
         }

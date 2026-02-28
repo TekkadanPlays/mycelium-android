@@ -77,6 +77,7 @@ import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
 import social.mycelium.android.repository.LiveActivityRepository
 import social.mycelium.android.repository.FeedSessionState
+import social.mycelium.android.utils.normalizeRelayUrl
 import social.mycelium.android.viewmodel.FeedState
 import social.mycelium.android.ui.performance.animatedYOffset
 import java.text.SimpleDateFormat
@@ -856,13 +857,14 @@ fun DashboardScreen(
     // Real per-relay connection status from RelayConnectionStateMachine
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().perRelayState.collectAsState()
     val liveConnectionStatus = remember(perRelayState) {
-        perRelayState.mapValues { (_, status) ->
-            when (status) {
-                social.mycelium.android.relay.RelayEndpointStatus.Connected -> RelayConnectionStatus.CONNECTED
-                social.mycelium.android.relay.RelayEndpointStatus.Connecting -> RelayConnectionStatus.CONNECTING
-                social.mycelium.android.relay.RelayEndpointStatus.Failed -> RelayConnectionStatus.ERROR
+        perRelayState.mapKeys { (url, _) -> normalizeRelayUrl(url) }
+            .mapValues { (_, status) ->
+                when (status) {
+                    social.mycelium.android.relay.RelayEndpointStatus.Connected -> RelayConnectionStatus.CONNECTED
+                    social.mycelium.android.relay.RelayEndpointStatus.Connecting -> RelayConnectionStatus.CONNECTING
+                    social.mycelium.android.relay.RelayEndpointStatus.Failed -> RelayConnectionStatus.ERROR
+                }
             }
-        }
     }
 
     // Relay management
@@ -881,39 +883,28 @@ fun DashboardScreen(
     val userRelayUrls = remember(currentAccount, relayUiState) {
         val pubkey = currentAccount?.toHexKey() ?: return@remember emptySet<String>()
         val categoryUrls = relayUiState.relayCategories
-            .flatMap { it.relays }.map { it.url.trim().removeSuffix("/").lowercase() }
+            .flatMap { it.relays }.map { normalizeRelayUrl(it.url) }
         val outboxUrls = relayUiState.outboxRelays
-            .map { it.url.trim().removeSuffix("/").lowercase() }
+            .map { normalizeRelayUrl(it.url) }
         val inboxUrls = relayUiState.inboxRelays
-            .map { it.url.trim().removeSuffix("/").lowercase() }
+            .map { normalizeRelayUrl(it.url) }
         (categoryUrls + outboxUrls + inboxUrls).toSet()
     }
     val connectedRelayCount = remember(perRelayState, userRelayUrls) {
         perRelayState.count { (url, status) ->
             status == social.mycelium.android.relay.RelayEndpointStatus.Connected &&
-                url.trim().removeSuffix("/").lowercase() in userRelayUrls
+                normalizeRelayUrl(url) in userRelayUrls
         }
     }
     val failedUserRelayCount = remember(perRelayState, userRelayUrls) {
         perRelayState.count { (url, status) ->
             status == social.mycelium.android.relay.RelayEndpointStatus.Failed &&
-                url.trim().removeSuffix("/").lowercase() in userRelayUrls
+                normalizeRelayUrl(url) in userRelayUrls
         }
     }
     val subscribedRelayCount = userRelayUrls.size
 
-    // Indexer relay count for sidebar badge
-    val indexerRelayUrls = remember(currentAccount, relayUiState) {
-        relayUiState.indexerRelays
-            .map { it.url.trim().removeSuffix("/").lowercase() }
-            .toSet()
-    }
-    val connectedIndexerCount = remember(perRelayState, indexerRelayUrls) {
-        perRelayState.count { (url, status) ->
-            status == social.mycelium.android.relay.RelayEndpointStatus.Connected &&
-                url.trim().removeSuffix("/").lowercase() in indexerRelayUrls
-        }
-    }
+    // (Indexer relay details removed from sidebar — icon-only access via onIndexerClick)
 
     // Load user relays when account changes
     LaunchedEffect(currentAccount) {
@@ -925,6 +916,13 @@ fun DashboardScreen(
     // Get active profile for sidebar + feed logic
     val activeProfile = relayUiState.relayProfiles.firstOrNull { it.isActive }
     val relayCategories = activeProfile?.categories ?: emptyList()
+
+    // Initialize sidebar sections as expanded on first load
+    LaunchedEffect(relayCategories) {
+        if (relayCategories.isNotEmpty()) {
+            feedStateViewModel.initializeExpandedCategories(relayCategories.map { it.id })
+        }
+    }
 
     // Synchronous check: does the user have ANY saved relay config?
     // Resolves instantly from local storage before the async ViewModel loads.
@@ -997,7 +995,7 @@ fun DashboardScreen(
         // doesn't drop notes from outbox relays that the user was already reading.
         // Indexer relays are NOT included — they are only for NIP-65 lookups.
         val outboxUrls = if (pubkey != null) relayUiState.outboxRelays.map { it.url } else emptyList()
-        val relayUrlsToUse = (allCategoryRelayUrls + outboxUrls).distinct()
+        val relayUrlsToUse = (allCategoryRelayUrls + outboxUrls).map { normalizeRelayUrl(it) }.distinct()
         val displayUrls = when {
             homeFeedState.isGlobal -> relayUrlsToUse
             homeFeedState.selectedCategoryId != null -> relayCategories
@@ -1100,12 +1098,18 @@ fun DashboardScreen(
         }
     }
 
-    // On fresh mount (app restart), ensure feed starts at the top
+    // On fresh mount (app restart), ensure feed starts at the top.
+    // Guard: ViewModel-scoped flag survives LaunchedEffect lifecycle restarts (STOPPED→STARTED
+    // during navigation to image_viewer/video_viewer). Without this, the LaunchedEffect re-fires
+    // on every pop-back and scrolls the feed to the top.
     LaunchedEffect(Unit) {
-        snapshotFlow { uiState.notes.isNotEmpty() }
-            .filter { it }
-            .first()
-        listState.scrollToItem(0)
+        if (!feedStateViewModel.hasInitializedHomeScroll) {
+            snapshotFlow { uiState.notes.isNotEmpty() }
+                .filter { it }
+                .first()
+            listState.scrollToItem(0)
+            feedStateViewModel.hasInitializedHomeScroll = true
+        }
     }
 
     // Notes are always at index 0 in the LazyColumn (loading indicator is an overlay).
@@ -1191,22 +1195,29 @@ fun DashboardScreen(
     val blockedPubkeys by social.mycelium.android.repository.MuteListRepository.blockedPubkeys.collectAsState()
     val mutedWords by social.mycelium.android.repository.MuteListRepository.mutedWords.collectAsState()
 
-    // Sort by engagement type: Most Replies / Most Likes / Most Zaps
-    val engagementFilteredNotes by remember(sortedNotes, engagementFilter, replyCountByNoteId, countsByNoteId, hiddenNoteIds, mutedPubkeys, blockedPubkeys, mutedWords) {
+    // Stage 1: mute/block/hidden filtering — only recomputes when the note list or mute lists change.
+    // countsByNoteId is deliberately excluded so frequent count updates don't trigger full refilter.
+    val baseFilteredNotes by remember(sortedNotes, hiddenNoteIds, mutedPubkeys, blockedPubkeys, mutedWords) {
         derivedStateOf {
             val hiddenAuthors = mutedPubkeys + blockedPubkeys
-            val base = sortedNotes.filter { note ->
+            sortedNotes.filter { note ->
                 note.id !in hiddenNoteIds &&
                 note.author.id.lowercase() !in hiddenAuthors &&
                 (mutedWords.isEmpty() || mutedWords.none { word -> note.content.contains(word, ignoreCase = true) })
             }
+        }
+    }
+    // Stage 2: engagement sort — only recomputes when filter type or counts change.
+    // For the default chronological feed (engagementFilter == null/empty), this is a no-op pass-through.
+    val engagementFilteredNotes by remember(baseFilteredNotes, engagementFilter, replyCountByNoteId, countsByNoteId) {
+        derivedStateOf {
             when (engagementFilter) {
-                "replies" -> base.sortedByDescending { replyCountByNoteId[it.id] ?: 0 }
-                "likes" -> base.sortedByDescending {
+                "replies" -> baseFilteredNotes.sortedByDescending { replyCountByNoteId[it.id] ?: 0 }
+                "likes" -> baseFilteredNotes.sortedByDescending {
                     countsByNoteId[it.id]?.reactionAuthors?.values?.sumOf { authors -> authors.size } ?: 0
                 }
-                "zaps" -> base.sortedByDescending { countsByNoteId[it.id]?.zapTotalSats ?: 0L }
-                else -> base
+                "zaps" -> baseFilteredNotes.sortedByDescending { countsByNoteId[it.id]?.zapTotalSats ?: 0L }
+                else -> baseFilteredNotes
             }
         }
     }
@@ -1250,13 +1261,14 @@ fun DashboardScreen(
         connectionStatus = liveConnectionStatus,
         connectedRelayCount = connectedRelayCount,
         subscribedRelayCount = subscribedRelayCount,
-        indexerRelayCount = relayUiState.indexerRelays.size,
-        connectedIndexerCount = connectedIndexerCount,
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
         onRelayHealthClick = onSidebarRelayHealthClick,
         onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,
         troubleRelayCount = troubleRelayCount,
         gesturesEnabled = currentAccount != null,
+        onToggleCategorySubscription = { categoryId ->
+            relayViewModel?.toggleCategorySubscription(categoryId)
+        },
         onItemClick = { itemId ->
             when {
                 itemId == "global" -> {

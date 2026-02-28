@@ -378,8 +378,6 @@ fun TopicsScreen(
         relayState = relayStateMachineState,
         connectedRelayCount = connectedRelayCount,
         subscribedRelayCount = subscribedRelayCount,
-        indexerRelayCount = relayUiState.indexerRelays.size,
-        connectedIndexerCount = connectedIndexerCount,
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
         onRelayHealthClick = onSidebarRelayHealthClick,
         onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,

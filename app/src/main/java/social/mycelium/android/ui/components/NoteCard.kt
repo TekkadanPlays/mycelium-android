@@ -508,29 +508,17 @@ private fun NoteMediaCarousel(
     LaunchedEffect(pagerState.currentPage) {
         onMediaPageChanged(pagerState.currentPage)
     }
-    // Stable container ratio: use the tallest (smallest ratio) across ALL
-    // media in the group so the container never resizes when swiping.
-    var containerRatio by remember(mediaList) {
+    // Stable container ratio: LOCKED after first composition to prevent layout shift.
+    // Uses cached aspect ratios if available; otherwise commits to 16:9 default.
+    // The real ratio is still written to MediaAspectRatioCache on load so NEXT
+    // time this card appears it uses the correct size from the start.
+    val containerRatio = remember(mediaList) {
         val ratios = mediaList.map { url ->
             MediaAspectRatioCache.get(url)
                 ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
         }
         val known = ratios.filterNotNull()
-        mutableStateOf(if (known.isNotEmpty()) known.min() else null)
-    }
-    // Periodically re-check cache for video ratios that weren't known at first render
-    LaunchedEffect(mediaList) {
-        while (true) {
-            kotlinx.coroutines.delay(1500)
-            val ratios = mediaList.mapNotNull { url -> MediaAspectRatioCache.get(url) }
-            if (ratios.isNotEmpty()) {
-                val best = ratios.min()
-                if (containerRatio == null || best < containerRatio!!) {
-                    containerRatio = best
-                }
-                if (ratios.size == mediaList.size) break
-            }
-        }
+        if (known.isNotEmpty()) known.min() else (16f / 9f)
     }
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
     // doesn't steal vertical gestures. Only single-image carousels disable paging entirely.
@@ -595,13 +583,10 @@ private fun NoteMediaCarousel(
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize(),
                         onSuccess = { state ->
+                            // Cache the real ratio for future renders — does NOT
+                            // resize the current container (ratio is locked).
                             val drawable = state.result.drawable
                             MediaAspectRatioCache.add(url, drawable.intrinsicWidth, drawable.intrinsicHeight)
-                            val newRatio = drawable.intrinsicWidth.toFloat() / drawable.intrinsicHeight.toFloat()
-                            val current = containerRatio
-                            if (current == null || newRatio < current) {
-                                containerRatio = newRatio
-                            }
                         }
                     )
                     // Fullscreen magnifier icon — one per image
@@ -1670,7 +1655,7 @@ fun NoteCard(
     LaunchedEffect(authorPubkey) {
         profileCache.profileUpdated
             .filter { it == authorPubkey }
-            .debounce(200)
+            .debounce(500)
             .collect { profileRevision++ }
     }
     // Snapshot read of diskCacheRestored avoids per-card flow collector; value only flips once at startup
@@ -1945,7 +1930,7 @@ fun NoteCard(
                     val pubkeySet = mentionedPubkeys.toSet()
                     profileCache.profileUpdated
                         .filter { it in pubkeySet }
-                        .debounce(300)
+                        .debounce(600)
                         .collect { mentionProfileVersion++ }
                 }
             }
@@ -1978,6 +1963,7 @@ fun NoteCard(
                     if (quotedAuthorPubkeys.isNotEmpty()) {
                         profileCache.profileUpdated
                             .filter { it in quotedAuthorPubkeys }
+                            .debounce(600)
                             .collect { quotedProfileRevision++ }
                     }
                 }

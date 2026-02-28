@@ -74,8 +74,9 @@ class ProfileMetadataCache {
         private const val DISK_SAVE_DEBOUNCE_MS = 2000L
         /** Profiles older than this are considered stale and will be re-fetched when encountered. */
         private const val PROFILE_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
-        /** How long to wait before checking if any profiles arrived (early-out for disconnected relays). */
-        private const val EARLY_PROBE_MS = 2000L
+        /** How long to wait before checking if any profiles arrived (early-out for disconnected relays).
+         *  Increased from 2s — relays often need 1-2s just to connect, leaving no time for kind-0 to return. */
+        private const val EARLY_PROBE_MS = 3500L
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
@@ -89,7 +90,7 @@ class ProfileMetadataCache {
     private var internalBatchScheduleJob: Job? = null
     private var internalBatchFetchJob: Job? = null
     private val INTERNAL_BATCH_DELAY_MS = 400L
-    private val INTERNAL_BATCH_SIZE = 80
+    private val INTERNAL_BATCH_SIZE = 30
     /** Shared counter for profiles received across all pool connections. */
     private val poolReceived = AtomicInteger(0)
     /** Consecutive early-out failures — drives exponential backoff to avoid retry spam. */

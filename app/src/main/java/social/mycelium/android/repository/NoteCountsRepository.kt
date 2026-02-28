@@ -56,7 +56,7 @@ data class NoteCounts(
 object NoteCountsRepository {
 
     private const val TAG = "NoteCountsRepository"
-    private const val DEBOUNCE_MS = 800L
+    private const val DEBOUNCE_MS = 1200L
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
@@ -86,6 +86,8 @@ object NoteCountsRepository {
     private var debounceJob: Job? = null
     /** Phase 2 job: delayed kind-7 + kind-9735 subscription after kind-1 replies. */
     private var phase2Job: Job? = null
+    /** Hash of the last snapshot sent to Phase 2, to skip redundant re-subscriptions. */
+    @Volatile private var lastPhase2SnapshotHash: Int = 0
 
     /** Dedup: event IDs we've already processed so relay overlap doesn't double-count. */
     private val processedEventIds = java.util.Collections.newSetFromMap(
@@ -144,16 +146,24 @@ object NoteCountsRepository {
             }
             updateCountsSubscription(phase = 1, overrideMerged = snapshot)
             // Phase 2: reactions + zaps after replies have had time to arrive
+            val snapshotHash = snapshot.keys.hashCode()
             phase2Job = launch {
                 delay(PHASE2_DELAY_MS)
+                // Skip Phase 2 if the snapshot hasn't changed since the last one
+                if (snapshotHash == lastPhase2SnapshotHash) {
+                    Log.d(TAG, "Phase 2: skipped — snapshot unchanged")
+                    return@launch
+                }
+                lastPhase2SnapshotHash = snapshotHash
                 Log.d(TAG, "Phase 2: sending kind-7 + kind-9735 enrichment")
                 updateCountsSubscription(phase = 2, overrideMerged = snapshot)
             }
         }
     }
 
-    /** Delay before sending kind-7/kind-9735 filters (let kind-1 replies arrive first). */
-    private const val PHASE2_DELAY_MS = 600L
+    /** Delay before sending kind-7/kind-9735 filters (let kind-1 replies arrive first).
+     *  Increased from 600ms to reduce churn — Phase 2 was firing 8+ times in 20s. */
+    private const val PHASE2_DELAY_MS = 2500L
 
     /**
      * Force re-trigger the counts subscription even if note IDs haven't changed.
@@ -273,8 +283,9 @@ object NoteCountsRepository {
 
     private val FALLBACK_RELAYS = emptyList<String>()
 
-    /** Max relays to fan out counts subscriptions to. Prevents subscription flood. */
-    private const val MAX_COUNTS_RELAYS = 10
+    /** Max relays to fan out counts subscriptions to. Prevents subscription flood.
+     *  Reduced from 10 — each relay takes a slot, and 10 was starving other subs. */
+    private const val MAX_COUNTS_RELAYS = 6
 
     /**
      * Called when a kind-1, kind-7, or kind-9735 event is received from ANY source:

@@ -365,6 +365,10 @@ class NotesRepository private constructor() {
     /** Handle for the active "load older" subscription; cancelled when a new one starts or feed resets. */
     @Volatile private var olderNotesHandle: social.mycelium.android.relay.TemporarySubscriptionHandle? = null
 
+    /** Index in the sorted notes list where a large temporal gap (>14 days) was detected after pagination. */
+    private val _timeGapIndex = MutableStateFlow<Int?>(null)
+    val timeGapIndex: StateFlow<Int?> = _timeGapIndex.asStateFlow()
+
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
@@ -1094,7 +1098,16 @@ class NotesRepository private constructor() {
             // If pagination produced very few new notes (< 10), the feed has reached
             // the gap between the main feed and outlier notes. Stop paginating to avoid
             // an infinite loop where notes keep inserting above outliers.
-            if (added < 10) {
+            if (added >= 10) {
+                // Check for temporal discontinuity before declaring exhaustion
+                val gap = social.mycelium.android.ui.screens.detectTimeGapIndex(
+                    _notes.value, thresholdMs = 14L * 24 * 3600 * 1000
+                )
+                if (gap != null) {
+                    _timeGapIndex.value = gap
+                    Log.d(TAG, "Time gap detected at index $gap after pagination")
+                }
+            } else {
                 _paginationExhausted.value = true
                 Log.d(TAG, "Older notes: pagination exhausted (only $added new notes from ${eventCount.get()} received)")
             }
@@ -1894,12 +1907,61 @@ class NotesRepository private constructor() {
         return fetched
     }
 
+    /**
+     * Batch-fetch multiple notes by ID from indexer relays in a single subscription.
+     * Much faster than fetching one-by-one for reply parent context on profile pages.
+     * Returns a map of noteId → Note for all successfully resolved notes.
+     */
+    suspend fun fetchNotesByIdsBatch(
+        noteIds: List<String>,
+        userRelayUrls: List<String> = emptyList()
+    ): Map<String, Note> {
+        if (noteIds.isEmpty()) return emptyMap()
+        val relays = buildList {
+            addAll(INDEXER_RELAYS)
+            addAll(userRelayUrls)
+        }.distinct().take(8)
+        if (relays.isEmpty()) return emptyMap()
+
+        val results = java.util.concurrent.ConcurrentHashMap<String, Note>()
+        val remaining = java.util.concurrent.atomic.AtomicInteger(noteIds.size)
+        val filter = Filter(ids = noteIds, limit = noteIds.size)
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        val lastEventAt = java.util.concurrent.atomic.AtomicLong(0L)
+
+        val handle = stateMachine.requestTemporarySubscription(
+            relays, filter, priority = SubscriptionPriority.HIGH
+        ) { event ->
+            if (event.id in noteIds && !results.containsKey(event.id)) {
+                results[event.id] = convertEventToNote(event, "")
+                remaining.decrementAndGet()
+                lastEventAt.set(System.currentTimeMillis())
+            }
+        }
+
+        // Settle-based wait: stop when stream goes quiet or all found
+        var waited = 0L
+        val maxWait = 6000L
+        val settleMs = 1000L
+        while (waited < maxWait && remaining.get() > 0) {
+            delay(150)
+            waited += 150
+            val lastAt = lastEventAt.get()
+            if (lastAt > 0 && System.currentTimeMillis() - lastAt >= settleMs) break
+        }
+        handle.cancel()
+        Log.d(TAG, "Batch fetch: requested=${noteIds.size}, found=${results.size} in ${waited}ms")
+        return results
+    }
+
     /** Well-known indexer relays that archive most public events (fallback for old threads). */
     val INDEXER_RELAYS = listOf(
         "wss://relay.nostr.band",
         "wss://relay.damus.io",
         "wss://nos.lol",
-        "wss://relay.primal.net"
+        "wss://relay.primal.net",
+        "wss://indexer.coracle.social",
+        "wss://directory.yabu.me"
     )
 
     /**

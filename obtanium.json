@@ -19,6 +19,28 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.23",
+      "versionCode": 17,
+      "releaseDate": "2026-02-28",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.23/Mycelium-v0.4.23.apk",
+      "changelog": "Profile & media fixes: feed scroll position preserved across fullscreen media navigation, profile header/tab state persistence, video thumbnails in Media column, contextual media fullscreen (per-note gallery instead of all-profile), scrollable profile header with collapsing behavior.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Feed scroll position preserved when dismissing fullscreen media",
+        "Profile header collapse state persists across navigation",
+        "Video thumbnails render in profile Media tab",
+        "Contextual media fullscreen — per-note gallery instead of all-profile",
+        "Scrollable profile header with collapsing behavior",
+        "Dashboard scroll position stable across media viewer transitions"
+      ]
+    },
+    {
       "version": "0.1.2",
       "versionCode": 6,
       "releaseDate": "2026-02-08",

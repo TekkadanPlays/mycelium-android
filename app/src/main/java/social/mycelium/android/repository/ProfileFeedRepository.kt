@@ -17,7 +17,9 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
+import social.mycelium.android.utils.Nip10ReplyDetector
 import social.mycelium.android.utils.UrlDetector
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Independent feed repository for a single author's profile page.
@@ -26,8 +28,13 @@ import social.mycelium.android.utils.UrlDetector
  * for the author's kind-1 notes. Supports relay-side cursor pagination
  * via the `until` filter parameter to load older history.
  *
+ * All tabs (Notes, Replies, Media) share the same underlying kind-1 stream
+ * because relays can't distinguish reply vs root notes. [loadMore] accepts
+ * an `activeTab` index so pagination continues until the *active* tab gets
+ * enough new items — e.g. scrolling on Replies keeps fetching even if most
+ * new events are root notes. Per-tab exhaustion prevents infinite load loops.
+ *
  * Lifecycle: create when entering a profile screen, call [dispose] when leaving.
- * Each instance manages its own subscription and note list.
  */
 class ProfileFeedRepository(
     private val authorPubkey: String,
@@ -36,9 +43,42 @@ class ProfileFeedRepository(
 ) {
     companion object {
         private const val TAG = "ProfileFeedRepo"
-        private const val PAGE_SIZE = 50
-        private const val INITIAL_LOAD_SIZE = 50
+        private const val PAGE_SIZE = 200
+        private const val INITIAL_LOAD_SIZE = 200
         private const val FLUSH_DEBOUNCE_MS = 120L
+        private const val SETTLE_QUIET_MS = 1200L
+        private const val MAX_WAIT_MS = 8000L
+        /** Minimum new items the *active tab* must gain before we stop a load-more page. */
+        private const val TAB_MIN_NEW = 15
+        /** Maximum consecutive pages that produced zero items for a tab before declaring exhaustion. */
+        private const val TAB_EMPTY_PAGE_LIMIT = 3
+
+        // Tab indices — shared with ProfileScreen
+        const val TAB_NOTES = 0
+        const val TAB_REPLIES = 1
+        const val TAB_MEDIA = 2
+
+        // ── Static instance cache ──────────────────────────────────────
+        // Survives composable lifecycle stops during Navigation Compose transitions
+        // (e.g. profile → image_viewer → back). Without this, remember() creates a
+        // new repo on every lifecycle restart, and start() wipes the notes.
+        private val instanceCache = HashMap<String, ProfileFeedRepository>()
+
+        /** Get or create a ProfileFeedRepository for [authorPubkey]. If the relay list
+         *  changed, the old instance is disposed and a fresh one is created. */
+        fun getOrCreate(authorPubkey: String, relayUrls: List<String>): ProfileFeedRepository {
+            val existing = instanceCache[authorPubkey]
+            if (existing != null && existing.relayUrls == relayUrls) return existing
+            existing?.dispose()
+            val repo = ProfileFeedRepository(authorPubkey, relayUrls)
+            instanceCache[authorPubkey] = repo
+            return repo
+        }
+
+        /** Remove a cached instance (call when the profile back-stack entry is fully destroyed). */
+        fun evict(authorPubkey: String) {
+            instanceCache.remove(authorPubkey)?.dispose()
+        }
     }
 
     // ── Public state ────────────────────────────────────────────────────
@@ -54,6 +94,13 @@ class ProfileFeedRepository(
     private val _hasMore = MutableStateFlow(true)
     val hasMore: StateFlow<Boolean> = _hasMore.asStateFlow()
 
+    /** Per-tab exhaustion: map of tab index → still has more content. */
+    private val _perTabHasMore = MutableStateFlow(mapOf(TAB_NOTES to true, TAB_REPLIES to true, TAB_MEDIA to true))
+    val perTabHasMore: StateFlow<Map<Int, Boolean>> = _perTabHasMore.asStateFlow()
+
+    private val _timeGapIndex = MutableStateFlow<Int?>(null)
+    val timeGapIndex: StateFlow<Int?> = _timeGapIndex.asStateFlow()
+
     // ── Internal state ──────────────────────────────────────────────────
     private var subscription: TemporarySubscriptionHandle? = null
     private var loadMoreSubscription: TemporarySubscriptionHandle? = null
@@ -61,6 +108,11 @@ class ProfileFeedRepository(
     private var flushJob: Job? = null
     private val seenIds = HashSet<String>()
     private val profileCache = ProfileMetadataCache.getInstance()
+
+    /** 5th-percentile pagination cursor — resists outliers pulling cursor back years. */
+    @Volatile private var paginationCursorMs: Long = 0L
+    /** Tracks consecutive pages that added zero items to a specific tab. */
+    private val tabEmptyPageCount = intArrayOf(0, 0, 0)
 
     /**
      * Start the initial subscription for the author's recent notes.
@@ -76,36 +128,39 @@ class ProfileFeedRepository(
         _isLoading.value = true
         _notes.value = emptyList()
         seenIds.clear()
+        paginationCursorMs = 0L
+        tabEmptyPageCount.fill(0)
 
         val filter = Filter(
             kinds = listOf(1),
             authors = listOf(authorPubkey),
             limit = INITIAL_LOAD_SIZE
-            // No 'since' — let the relay return the most recent N notes regardless of age
         )
 
         Log.d(TAG, "Starting profile feed for ${authorPubkey.take(8)}… on ${relayUrls.size} relays")
+        val lastEventAt = AtomicLong(0L)
         subscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscription(
             relayUrls = relayUrls,
             filter = filter,
-            priority = SubscriptionPriority.NORMAL,
+            priority = SubscriptionPriority.HIGH,
         ) { event ->
             if (event.kind == 1 && event.pubKey == authorPubkey) {
+                lastEventAt.set(System.currentTimeMillis())
                 pendingEvents.add(event)
                 scheduleFlush()
             }
         }
 
-        // Wait for initial batch then mark loading complete
+        // Settle-based wait for initial batch
         scope.launch {
-            val maxWaitMs = 3000L
-            val pollMs = 100L
             var waited = 0L
-            while (waited < maxWaitMs) {
-                delay(pollMs)
-                waited += pollMs
+            while (waited < MAX_WAIT_MS) {
+                delay(200)
+                waited += 200
                 flushEvents()
-                if (_notes.value.isNotEmpty()) break
+                val lastAt = lastEventAt.get()
+                if (lastAt > 0 && System.currentTimeMillis() - lastAt >= SETTLE_QUIET_MS) break
+                if (_notes.value.size >= INITIAL_LOAD_SIZE) break
             }
             flushEvents()
             _isLoading.value = false
@@ -114,18 +169,75 @@ class ProfileFeedRepository(
     }
 
     /**
-     * Load older notes by opening a new subscription with `until` set to the
-     * oldest note's timestamp. This is relay-side cursor pagination.
+     * Load older notes, continuing until the [activeTab] gains at least [TAB_MIN_NEW]
+     * new items or the global stream is exhausted.
+     *
+     * Since relays can't filter notes vs replies at the protocol level, a single kind-1
+     * page may produce mostly root notes when the user is on the Replies tab. This method
+     * will fetch up to 3 consecutive pages to satisfy the active tab's needs.
      */
-    fun loadMore() {
-        if (_isLoadingMore.value || !_hasMore.value) return
+    fun loadMore(activeTab: Int = TAB_NOTES) {
+        if (_isLoadingMore.value) return
+        val tabExhausted = _perTabHasMore.value[activeTab] == false
+        if (tabExhausted || !_hasMore.value) return
         val currentNotes = _notes.value
         if (currentNotes.isEmpty()) return
 
         _isLoadingMore.value = true
-        val oldestTimestamp = currentNotes.minOf { it.timestamp }
-        // `until` is exclusive in most relay implementations
-        val untilSeconds = oldestTimestamp / 1000
+        scope.launch {
+            val tabCountBefore = countForTab(activeTab, currentNotes)
+            var pagesLoaded = 0
+            var globalExhausted = false
+
+            while (pagesLoaded < 3) {
+                val beforeCount = _notes.value.size
+                val pageAdded = loadOnePage()
+                pagesLoaded++
+
+                if (pageAdded < 10) {
+                    globalExhausted = true
+                    break
+                }
+
+                // Check if the active tab got enough new items
+                val tabCountNow = countForTab(activeTab, _notes.value)
+                val tabGained = tabCountNow - tabCountBefore
+                if (tabGained >= TAB_MIN_NEW) break
+            }
+
+            // Update per-tab exhaustion
+            if (globalExhausted) {
+                _hasMore.value = false
+                _perTabHasMore.value = mapOf(TAB_NOTES to false, TAB_REPLIES to false, TAB_MEDIA to false)
+                Log.d(TAG, "Global exhaustion after $pagesLoaded pages")
+            } else {
+                // Check if this specific tab gained anything across all pages
+                val tabCountNow = countForTab(activeTab, _notes.value)
+                val tabGained = tabCountNow - tabCountBefore
+                if (tabGained == 0) {
+                    tabEmptyPageCount[activeTab]++
+                    if (tabEmptyPageCount[activeTab] >= TAB_EMPTY_PAGE_LIMIT) {
+                        val updated = _perTabHasMore.value.toMutableMap()
+                        updated[activeTab] = false
+                        _perTabHasMore.value = updated
+                        Log.d(TAG, "Tab $activeTab exhausted after ${TAB_EMPTY_PAGE_LIMIT} empty pages")
+                    }
+                } else {
+                    tabEmptyPageCount[activeTab] = 0
+                }
+            }
+
+            _isLoadingMore.value = false
+            Log.d(TAG, "Load more (tab=$activeTab): total=${_notes.value.size}, pages=$pagesLoaded")
+        }
+    }
+
+    /** Fetch a single page of older notes. Returns the number of new notes added to the global list. */
+    private suspend fun loadOnePage(): Int {
+        val beforeCount = _notes.value.size
+        val cursorMs = if (paginationCursorMs > 0) paginationCursorMs
+            else _notes.value.minOfOrNull { it.timestamp } ?: return 0
+        val untilSeconds = cursorMs / 1000
 
         val filter = Filter(
             kinds = listOf(1),
@@ -134,42 +246,57 @@ class ProfileFeedRepository(
             until = untilSeconds
         )
 
-        Log.d(TAG, "Loading more: until=${untilSeconds} (oldest=${oldestTimestamp})")
+        Log.d(TAG, "Loading page: until=$untilSeconds (cursor=$cursorMs)")
         loadMoreSubscription?.cancel()
-        var receivedCount = 0
+        val lastEventAt = AtomicLong(0L)
         loadMoreSubscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscription(
             relayUrls = relayUrls,
             filter = filter,
-            priority = SubscriptionPriority.LOW,
+            priority = SubscriptionPriority.HIGH,
         ) { event ->
             if (event.kind == 1 && event.pubKey == authorPubkey) {
-                receivedCount++
+                lastEventAt.set(System.currentTimeMillis())
                 pendingEvents.add(event)
                 scheduleFlush()
             }
         }
 
-        // Wait for batch, then close the load-more subscription
-        scope.launch {
-            val maxWaitMs = 3000L
-            val pollMs = 100L
-            var waited = 0L
-            while (waited < maxWaitMs) {
-                delay(pollMs)
-                waited += pollMs
-                flushEvents()
-                if (receivedCount >= PAGE_SIZE) break
-            }
+        // Settle-based wait
+        var waited = 0L
+        while (waited < MAX_WAIT_MS) {
+            delay(200)
+            waited += 200
             flushEvents()
-            loadMoreSubscription?.cancel()
-            loadMoreSubscription = null
-            _isLoadingMore.value = false
-            if (receivedCount < PAGE_SIZE / 2) {
-                _hasMore.value = false
-                Log.d(TAG, "No more history (got $receivedCount < ${PAGE_SIZE / 2})")
-            }
-            Log.d(TAG, "Load more: +$receivedCount notes, total=${_notes.value.size}")
+            val lastAt = lastEventAt.get()
+            if (lastAt > 0 && System.currentTimeMillis() - lastAt >= SETTLE_QUIET_MS) break
         }
+        flushEvents()
+        loadMoreSubscription?.cancel()
+        loadMoreSubscription = null
+
+        return _notes.value.size - beforeCount
+    }
+
+    /** Count items relevant to a specific tab. */
+    private fun countForTab(tab: Int, notes: List<Note>): Int = when (tab) {
+        TAB_NOTES -> notes.count { !it.isReply }
+        TAB_REPLIES -> notes.count { it.isReply }
+        TAB_MEDIA -> notes.count { it.mediaUrls.isNotEmpty() }
+        else -> notes.size
+    }
+
+    /** Pause the live subscription (e.g. when navigating away but keeping the entry). */
+    fun pause() {
+        subscription?.pause()
+        loadMoreSubscription?.cancel()
+        loadMoreSubscription = null
+        Log.d(TAG, "Paused profile feed for ${authorPubkey.take(8)}…")
+    }
+
+    /** Resume a paused live subscription. */
+    fun resume() {
+        subscription?.resume()
+        Log.d(TAG, "Resumed profile feed for ${authorPubkey.take(8)}…")
     }
 
     /** Stop all subscriptions and clean up. Call when leaving the profile screen. */
@@ -218,6 +345,25 @@ class ProfileFeedRepository(
             .sortedByDescending { it.timestamp }
 
         _notes.value = merged
+        advancePaginationCursor(merged)
+
+        // Detect temporal gap
+        _timeGapIndex.value = social.mycelium.android.ui.screens.detectTimeGapIndex(merged)
+    }
+
+    /** 5th-percentile cursor advancement — mirrors NotesRepository pattern. */
+    private fun advancePaginationCursor(notes: List<Note>) {
+        if (notes.isEmpty()) return
+        val timestamps = notes.map { it.timestamp }.sorted()
+        val p5Index = (timestamps.size * 0.05).toInt().coerceIn(0, timestamps.lastIndex)
+        val candidate = timestamps[p5Index]
+        val absMin = timestamps.first()
+        val prev = paginationCursorMs
+        if (prev == 0L || candidate < prev) {
+            paginationCursorMs = candidate
+        } else if (absMin < prev) {
+            paginationCursorMs = absMin // stall-break
+        }
     }
 
     private fun convertEventToNote(event: Event): Note {
@@ -229,7 +375,9 @@ class ProfileFeedRepository(
         val hashtags = event.tags
             .filter { it.isNotEmpty() && it[0] == "t" }
             .mapNotNull { it.getOrNull(1) }
-        val isReply = event.tags.any { it.size >= 2 && it[0] == "e" }
+        val isReply = Nip10ReplyDetector.isReply(event)
+        val rootNoteId = Nip10ReplyDetector.getRootId(event)
+        val replyToId = Nip10ReplyDetector.getReplyToId(event)
         val quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(content)
 
         return Note(
@@ -244,6 +392,9 @@ class ProfileFeedRepository(
             hashtags = hashtags,
             mediaUrls = imageUrls + videoUrls,
             isReply = isReply,
+            rootNoteId = rootNoteId,
+            replyToId = replyToId,
+            tags = event.tags.toList().map { it.toList() },
             relayUrl = null,
             relayUrls = emptyList(),
             quotedEventIds = quotedEventIds,

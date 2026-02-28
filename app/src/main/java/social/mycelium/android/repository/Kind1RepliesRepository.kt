@@ -218,12 +218,15 @@ class Kind1RepliesRepository {
         }
 
         try {
-            // Enrich with author's outbox relays if available (NIP-65 kind-10002)
+            // Enrich with author's outbox + inbox relays if available (NIP-65 kind-10002)
             val authorOutbox = authorPubkey?.let {
                 Nip65RelayListRepository.getCachedOutboxRelays(it)
             }?.takeIf { it.isNotEmpty() } ?: emptyList()
+            val authorInbox = authorPubkey?.let {
+                Nip65RelayListRepository.getCachedInboxRelays(it)
+            }?.takeIf { it.isNotEmpty() } ?: emptyList()
             val allRelays = social.mycelium.android.relay.RelayHealthTracker.filterBlocked(
-                (targetRelays + authorOutbox).distinct()
+                (targetRelays + authorOutbox + authorInbox).distinct()
             )
 
             Log.d(TAG, "Fetching Kind 1 replies for note ${noteId.take(8)}... from ${allRelays.size} relays (CybinRelayPool)")

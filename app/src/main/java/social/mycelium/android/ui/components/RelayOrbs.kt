@@ -46,6 +46,7 @@ import coil.request.ImageRequest
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.RelayInformation
+import social.mycelium.android.utils.normalizeRelayUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -53,7 +54,7 @@ import kotlinx.coroutines.withContext
 fun Note.displayRelayUrls(): List<String> {
     val raw = relayUrls.ifEmpty { listOfNotNull(relayUrl) }
     val seen = mutableSetOf<String>()
-    return raw.filter { url -> seen.add(url.trimEnd('/').lowercase()) }
+    return raw.filter { url -> seen.add(normalizeRelayUrl(url)) }
 }
 
 /** Max orbs shown in the stacked group before showing a "+N" badge. */

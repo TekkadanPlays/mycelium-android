@@ -808,6 +808,21 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
+     * Merged publish relay set: outbox relays + relays from all subscribed categories.
+     * Ensures events reach all relays the user has configured, not just outbox.
+     */
+    fun getPublishRelayUrlSet(): Set<String> {
+        val account = _currentAccount.value ?: return emptySet()
+        val accountHex = account.toHexKey() ?: return emptySet()
+        val outbox = relayStorageManager.loadOutboxRelays(accountHex).map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+        val categoryRelays = relayStorageManager.loadCategories(accountHex)
+            .filter { it.isSubscribed }
+            .flatMap { it.relays }
+            .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+        return (outbox + categoryRelays).toSet()
+    }
+
+    /**
      * Publish a Kind 1 text note. Signs with Amber and sends to the given relay URLs.
      * Returns null on success, or an error message for synchronous failures.
      * Async failures are emitted via [toastMessage].
@@ -892,8 +907,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun publishTopic(title: String, content: String, hashtags: List<String>, relayUrls: Set<String> = emptySet()): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
+        if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildTopicEventTemplate(title, content, hashtags)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
@@ -922,8 +937,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         relayUrls: Set<String> = emptySet()
     ): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
+        if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildThreadReplyEventTemplate(
                 rootThreadId, rootThreadPubkey, parentReplyId, parentReplyPubkey, content
@@ -950,8 +965,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     ): String? {
         if (content.isBlank()) return "Reply is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
+        if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 1, content = content) {
                 // NIP-10 e-tags: root marker always points to the thread root
@@ -999,8 +1014,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun publishRepost(noteId: String, noteAuthorPubkey: String, rawEventJson: String = "", originalNote: social.mycelium.android.data.Note? = null): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No relays configured"
         val pubkey = currentAccount.value?.toHexKey()
         viewModelScope.launch {
             val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 6, content = rawEventJson) {
@@ -1030,8 +1045,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun publishOffTopicModeration(anchor: String, noteId: String, reason: String = "off-topic"): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildOffTopicModerationTemplate(anchor, noteId, reason)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
@@ -1047,8 +1062,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun publishUserExclusion(anchor: String, pubkey: String, reason: String = "removed from topic"): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildUserExclusionModerationTemplate(anchor, pubkey, reason)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
@@ -1065,8 +1080,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun publishAnchorSubscriptions(anchors: List<String>, moderators: Map<String, List<String>> = emptyMap()): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getOutboxRelayUrlSet()
-        if (relaySet.isEmpty()) return "No outbox relays configured"
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildAnchorSubscriptionTemplate(anchors, moderators)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
@@ -1347,9 +1362,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             _toastMessage.value = signerUnavailableMessage()
             return
         }
-        val relaySet = relayUrls.ifEmpty { getOutboxRelayUrlSet() }
+        val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) {
-            _toastMessage.value = "No outbox relays configured"
+            _toastMessage.value = "No relays configured"
             return
         }
         viewModelScope.launch {

@@ -227,7 +227,7 @@ fun MyceliumNavigation(
                 duration = androidx.compose.material3.SnackbarDuration.Long
             )
             if (result == androidx.compose.material3.SnackbarResult.ActionPerformed) {
-                navController.navigate("settings/relay_health") { launchSingleTop = true }
+                navController.navigate("settings/publish_results") { launchSingleTop = true }
             }
         }
     }
@@ -733,7 +733,7 @@ fun MyceliumNavigation(
                                 onAmberLogin(loginIntent)
                             },
                             initialTopAppBarState = topAppBarState,
-                            isDashboardVisible = (currentRoute == "dashboard"),
+                            isDashboardVisible = currentRoute in setOf("dashboard", "image_viewer", "video_viewer"),
                             onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
                             onSidebarRelayHealthClick = {
                                 navController.navigate("settings/relay_health") {
@@ -1577,30 +1577,72 @@ fun MyceliumNavigation(
                         dashboardState.notes.filter { it.author.id.lowercase() == authorIdLower }
                     }
                     // Dedicated profile feed subscription (independent of home feed)
-                    val profileRelayUrls = remember(currentAccount) {
+                    // Start with current user's relays, then merge viewed profile's NIP-65 outbox relays
+                    val userRelayUrls = remember(currentAccount) {
                         currentAccount?.toHexKey()?.let { pubkey ->
                             val categories = storageManager.loadCategories(pubkey)
                             val categoryUrls = categories.filter { it.isSubscribed }
                                 .flatMap { it.relays }
-                                .map { it.url }
-                            val indexerUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
+                                .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+                            val indexerUrls = storageManager.loadIndexerRelays(pubkey).map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
                             (categoryUrls + indexerUrls).distinct()
                         } ?: emptyList()
                     }
+                    // Fetch the viewed profile's NIP-65 outbox (write) relays
+                    var authorOutboxRelays by remember(cacheKey) { mutableStateOf<List<String>>(emptyList()) }
+                    LaunchedEffect(cacheKey, cacheUrls) {
+                        if (cacheKey.isNotBlank()) {
+                            val discoveryRelays = cacheUrls.ifEmpty { userRelayUrls }
+                            if (discoveryRelays.isNotEmpty()) {
+                                social.mycelium.android.repository.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(cacheKey, discoveryRelays)
+                                // Poll for cached result (async batch fetch)
+                                repeat(10) {
+                                    val cached = social.mycelium.android.repository.Nip65RelayListRepository.getCachedOutboxRelays(cacheKey)
+                                    if (cached != null && cached.isNotEmpty()) {
+                                        authorOutboxRelays = cached
+                                        return@LaunchedEffect
+                                    }
+                                    kotlinx.coroutines.delay(400)
+                                }
+                            }
+                        }
+                    }
+                    // Merge: user's relays + viewed profile's outbox relays for comprehensive coverage
+                    val profileRelayUrls = remember(userRelayUrls, authorOutboxRelays) {
+                        (userRelayUrls + authorOutboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it) }).distinct()
+                    }
+                    // Use static cache so the repo (and its notes) survives composable lifecycle
+                    // stops during Navigation Compose transitions (profile → image_viewer → back).
                     val profileFeedRepo = remember(cacheKey, profileRelayUrls) {
-                        social.mycelium.android.repository.ProfileFeedRepository(
-                            authorPubkey = cacheKey,
-                            relayUrls = profileRelayUrls
-                        )
+                        social.mycelium.android.repository.ProfileFeedRepository.getOrCreate(cacheKey, profileRelayUrls)
                     }
                     val profileFeedNotes by profileFeedRepo.notes.collectAsState()
                     val profileIsLoading by profileFeedRepo.isLoading.collectAsState()
                     val profileIsLoadingMore by profileFeedRepo.isLoadingMore.collectAsState()
                     val profileHasMore by profileFeedRepo.hasMore.collectAsState()
-                    // Start subscription and dispose on exit
+                    // Start or resume subscription based on current state.
+                    // pause() on dispose keeps notes alive across lifecycle stops.
                     DisposableEffect(profileFeedRepo) {
-                        profileFeedRepo.start()
-                        onDispose { profileFeedRepo.dispose() }
+                        if (profileFeedRepo.notes.value.isEmpty()) {
+                            profileFeedRepo.start()
+                        } else {
+                            profileFeedRepo.resume()
+                        }
+                        onDispose { profileFeedRepo.pause() }
+                    }
+                    // Evict from static cache when the back-stack entry is truly destroyed
+                    // (user navigated back from profile). We observe the NavBackStackEntry lifecycle
+                    // directly — ON_DESTROY only fires when the entry is popped, not on STOPPED.
+                    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+                    val evictKey = cacheKey // capture for lambda
+                    DisposableEffect(lifecycleOwner, evictKey) {
+                        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+                            if (event == androidx.lifecycle.Lifecycle.Event.ON_DESTROY) {
+                                social.mycelium.android.repository.ProfileFeedRepository.evict(evictKey)
+                            }
+                        }
+                        lifecycleOwner.lifecycle.addObserver(observer)
+                        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                     }
                     // Merge: profile feed notes + dashboard notes, deduplicated, sorted by time
                     val authorNotes = remember(profileFeedNotes, dashboardAuthorNotes) {
@@ -1615,7 +1657,37 @@ fun MyceliumNavigation(
                     val allProfileCounts by social.mycelium.android.repository.ProfileCountsRepository.countsMap.collectAsState()
                     val profileCounts = allProfileCounts[cacheKey]
 
-                    val profileListState = rememberLazyListState()
+                    // ── Parent note fetching for reply context (batch via indexer relays) ──
+                    val parentNotesMap = remember { androidx.compose.runtime.mutableStateMapOf<String, social.mycelium.android.data.Note>() }
+                    LaunchedEffect(authorNotes) {
+                        val replies = authorNotes.filter { it.isReply && it.replyToId != null }
+                        val missingIds = replies.mapNotNull { it.replyToId }
+                            .distinct()
+                            .filter { id -> id !in parentNotesMap }
+                        if (missingIds.isEmpty()) return@LaunchedEffect
+                        val notesRepo = NotesRepository.getInstance()
+                        // Resolve from local cache first
+                        val stillMissing = mutableListOf<String>()
+                        for (parentId in missingIds) {
+                            val cached = notesRepo.getNoteFromCache(parentId)
+                            if (cached != null) {
+                                parentNotesMap[parentId] = cached
+                            } else {
+                                stillMissing.add(parentId)
+                            }
+                        }
+                        // Batch-fetch remaining from indexer relays in a single subscription
+                        if (stillMissing.isNotEmpty()) {
+                            val batchResults = notesRepo.fetchNotesByIdsBatch(
+                                noteIds = stillMissing,
+                                userRelayUrls = profileRelayUrls
+                            )
+                            parentNotesMap.putAll(batchResults)
+                        }
+                    }
+
+                    val profileTimeGapIndex by profileFeedRepo.timeGapIndex.collectAsState()
+                    val profilePerTabHasMore by profileFeedRepo.perTabHasMore.collectAsState()
                     val followList = dashboardState.followList
                     val followSetLower = remember(followList) { followList.map { it.lowercase() }.toSet() }
                     val isFollowing = followSetLower.isNotEmpty() && authorIdLower in followSetLower
@@ -1630,17 +1702,24 @@ fun MyceliumNavigation(
                             isProfileLoading = profileIsLoading,
                             isLoadingMore = profileIsLoadingMore,
                             hasMore = profileHasMore,
-                            onLoadMore = { profileFeedRepo.loadMore() },
+                            onLoadMore = { tab -> profileFeedRepo.loadMore(tab) },
                             followingCount = profileCounts?.followingCount,
                             followerCount = profileCounts?.followerCount,
                             isLoadingCounts = profileCounts?.isLoadingFollowing == true || profileCounts?.isLoadingFollowers == true,
-                            listState = profileListState,
+                            timeGapIndex = profileTimeGapIndex,
+                            perTabHasMore = profilePerTabHasMore,
                             onBackClick = { navController.popBackStack() },
                             onNoteClick = { note ->
                                 appViewModel.updateSelectedNote(note)
                                 appViewModel.updateThreadRelayUrls(note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) })
-                                overlayProfileThreadStack.clear()
-                                overlayProfileThreadStack.add(note)
+                                if (note.isReply && note.rootNoteId != null) {
+                                    // Reply: navigate to full thread with root walk-up, highlighting this reply
+                                    navController.navigate("thread/${note.rootNoteId}?replyKind=1&highlightReplyId=${note.id}")
+                                } else {
+                                    // Root note: show overlay thread on profile
+                                    overlayProfileThreadStack.clear()
+                                    overlayProfileThreadStack.add(note)
+                                }
                             },
                             onReact = { note, emoji ->
                                 val error = accountStateViewModel.sendReaction(note, emoji)
@@ -1704,6 +1783,7 @@ fun MyceliumNavigation(
                                 }
                             },
                             onMessageClick = { /* TODO: Open DM */ },
+                            parentNoteForReply = { parentId -> parentNotesMap[parentId] },
                             onSeeAllReactions = { note ->
                                 val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
                                 appViewModel.storeReactionsData(buildReactionsData(note.id, counts, note.repostedByAuthors, note.reactions))
@@ -1922,7 +2002,6 @@ fun MyceliumNavigation(
                             .sortedByDescending { it.timestamp }
                     }
 
-                    val userProfileListState = rememberLazyListState()
                     val userZapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
                     val userZappedIds by accountStateViewModel.zappedNoteIds.collectAsState()
                     val userZappedAmountByNoteId by accountStateViewModel.zappedAmountByNoteId.collectAsState()
@@ -1933,8 +2012,7 @@ fun MyceliumNavigation(
                             isProfileLoading = userProfileIsLoading,
                             isLoadingMore = userProfileIsLoadingMore,
                             hasMore = userProfileHasMore,
-                            onLoadMore = { userProfileFeedRepo?.loadMore() },
-                            listState = userProfileListState,
+                            onLoadMore = { tab -> userProfileFeedRepo?.loadMore(tab) },
                             onBackClick = { navController.popBackStack() },
                             onNoteClick = { note ->
                                 appViewModel.updateSelectedNote(note)
@@ -2210,8 +2288,25 @@ fun MyceliumNavigation(
                                 launchSingleTop = true
                             }
                         },
+                        onOpenPublishResults = {
+                            navController.navigate("settings/publish_results") {
+                                launchSingleTop = true
+                            }
+                        },
                         onProfileClick = { authorId ->
                             navController.navigateToProfile(authorId)
+                        }
+                    )
+                }
+
+                composable("settings/publish_results") {
+                    social.mycelium.android.ui.screens.PublishResultsScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onOpenRelayLog = { relayUrl ->
+                            val encoded = android.net.Uri.encode(relayUrl)
+                            navController.navigate("relay_log/$encoded") {
+                                launchSingleTop = true
+                            }
                         }
                     )
                 }
@@ -2639,7 +2734,12 @@ fun MyceliumNavigation(
                                         val pubkey = currentAccount?.toHexKey() ?: return@launch
                                         val categories = storageManager.loadCategories(pubkey)
                                         val relayUrls = (categories.flatMap { it.relays }.map { it.url } + NotesRepository.getInstance().INDEXER_RELAYS).distinct()
-                                        note = NotesRepository.getInstance().fetchNoteById(rootNoteId, relayUrls)
+                                        // Use expanded fetch (outbox + relay hints + indexers) for better coverage
+                                        note = NotesRepository.getInstance().fetchNoteByIdExpanded(
+                                            noteId = rootNoteId,
+                                            userRelayUrls = relayUrls,
+                                            authorPubkey = targetNote?.author?.id?.takeIf { it.isNotBlank() }
+                                        )
                                     }
                                     if (note != null) {
                                         withContext(Dispatchers.Main.immediate) {

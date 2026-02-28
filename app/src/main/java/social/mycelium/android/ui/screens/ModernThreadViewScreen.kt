@@ -1848,19 +1848,12 @@ private fun ReplyContentBody(
                     if (imgUrls.size == 1 && vidUrls.isEmpty()) {
                         val imgUrl = imgUrls[0]
                         val cachedRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
-                        val imgModifier = if (cachedRatio != null) {
-                            Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(cachedRatio.coerceIn(0.5f, 3.0f))
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onImageTap(mediaList, 0) }
-                        } else {
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 240.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .clickable { onImageTap(mediaList, 0) }
-                        }
+                        val effectiveRatio = (cachedRatio ?: (16f / 9f)).coerceIn(0.5f, 3.0f)
+                        val imgModifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(effectiveRatio)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { onImageTap(mediaList, 0) }
                         AsyncImage(
                             model = imgUrl,
                             contentDescription = null,

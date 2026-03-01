@@ -2,6 +2,8 @@ package social.mycelium.android.relay
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,12 +28,17 @@ data class RelayHealthInfo(
     val consecutiveFailures: Int = 0,
     /** Total events received from this relay across all subscriptions. */
     val eventsReceived: Long = 0,
-    /** Average connection latency in ms (rolling window of last 10). */
-    val avgLatencyMs: Long = 0,
+    /** Average WebSocket handshake time in ms (rolling window of last 10).
+     *  This is NOT message round-trip time — it includes DNS, TCP, TLS, and WS upgrade. */
+    val connectTimeMs: Long = 0,
     /** Last successful connection timestamp (epoch ms), 0 if never. */
     val lastConnectedAt: Long = 0,
     /** Last failure timestamp (epoch ms), 0 if never. */
     val lastFailedAt: Long = 0,
+    /** Last event received timestamp (epoch ms), 0 if never. */
+    val lastEventAt: Long = 0,
+    /** First time this relay was seen (epoch ms). */
+    val firstSeenAt: Long = 0,
     /** Last error message, null if last attempt succeeded. */
     val lastError: String? = null,
     /** True when consecutive failures exceed threshold — relay is unreliable. */
@@ -41,6 +48,9 @@ data class RelayHealthInfo(
 ) {
     val failureRate: Float
         get() = if (connectionAttempts > 0) connectionFailures.toFloat() / connectionAttempts else 0f
+    /** Uptime ratio: successful connections / total attempts. */
+    val uptimeRatio: Float
+        get() = if (connectionAttempts > 0) 1f - failureRate else 0f
 }
 
 /**
@@ -66,17 +76,17 @@ object RelayHealthTracker {
 
     private const val TAG = "RelayHealthTracker"
 
-    /** Consecutive failures before a relay is flagged. */
-    private const val FLAG_CONSECUTIVE_FAILURES = 5
+    /** Consecutive failures before a relay is flagged (warning state). */
+    private const val FLAG_CONSECUTIVE_FAILURES = 3
 
-    /** Consecutive failures before a relay is auto-blocked. */
-    private const val AUTO_BLOCK_CONSECUTIVE_FAILURES = 5
+    /** Consecutive failures before a relay is auto-blocked (must be > FLAG threshold). */
+    private const val AUTO_BLOCK_CONSECUTIVE_FAILURES = 8
 
     /** Duration of auto-block cooldown (6 hours). */
     private const val AUTO_BLOCK_DURATION_MS = 6 * 60 * 60 * 1000L
 
-    /** Max latency samples to keep per relay for rolling average. */
-    private const val MAX_LATENCY_SAMPLES = 10
+    /** Max connect-time samples to keep per relay for rolling average. */
+    private const val MAX_CONNECT_TIME_SAMPLES = 10
 
     /** SharedPreferences key for blocked relay list. */
     private const val PREFS_NAME = "relay_health"
@@ -93,13 +103,15 @@ object RelayHealthTracker {
         var connectionFailures: Int = 0,
         var consecutiveFailures: Int = 0,
         var eventsReceived: Long = 0,
-        var latencySamples: MutableList<Long> = mutableListOf(),
+        var connectTimeSamples: MutableList<Long> = mutableListOf(),
         var lastConnectedAt: Long = 0,
         var lastFailedAt: Long = 0,
+        var lastEventAt: Long = 0,
+        var firstSeenAt: Long = 0,
         var lastError: String? = null,
         var isFlagged: Boolean = false,
         var isBlocked: Boolean = false,
-        /** Timestamp when connection attempt started (for latency measurement). */
+        /** Timestamp when connection attempt started (for connect-time measurement). */
         var connectStartedAt: Long = 0
     )
 
@@ -128,6 +140,16 @@ object RelayHealthTracker {
     val blockedRelays: StateFlow<Set<String>> = _blockedRelays.asStateFlow()
 
     private var prefs: SharedPreferences? = null
+    private var connectivityManager: ConnectivityManager? = null
+
+    /** Check if the device currently has validated internet connectivity. */
+    private fun hasNetwork(): Boolean {
+        val cm = connectivityManager ?: return true // assume online if not initialized
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
 
     // --- Publish failure tracking ---
 
@@ -170,6 +192,12 @@ object RelayHealthTracker {
     private val _publishFailure = MutableSharedFlow<PublishReport>(extraBufferCapacity = 8)
     val publishFailure: SharedFlow<PublishReport> = _publishFailure.asSharedFlow()
 
+    /** Broadcast: emits (eventId, relayUrl) when a relay confirms a published event.
+     *  Thread reply repos observe this to update relay orbs in real-time. */
+    data class PublishRelayConfirmation(val eventId: String, val relayUrl: String)
+    private val _publishRelayConfirmed = MutableSharedFlow<PublishRelayConfirmation>(extraBufferCapacity = 32)
+    val publishRelayConfirmed: SharedFlow<PublishRelayConfirmation> = _publishRelayConfirmed.asSharedFlow()
+
     /**
      * Register a pending publish so we can track OK responses from relays.
      * Call immediately after sending the event to relays.
@@ -188,6 +216,14 @@ object RelayHealthTracker {
      */
     fun recordPublishOk(relayUrl: String, eventId: String, success: Boolean, message: String) {
         val url = normalize(relayUrl)
+        // Merge relay URL into feed note so relay orbs update in real-time
+        if (success) {
+            try {
+                social.mycelium.android.repository.NotesRepository.getInstance().mergePublishRelayUrl(eventId, url)
+            } catch (_: Exception) { /* NotesRepository may not be initialized yet */ }
+            // Broadcast so thread reply repositories can also update relay orbs
+            _publishRelayConfirmed.tryEmit(PublishRelayConfirmation(eventId, url))
+        }
         var report: PublishReport? = null
         synchronized(lock) {
             val pending = pendingPublishes[eventId] ?: return
@@ -271,18 +307,21 @@ object RelayHealthTracker {
      */
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         loadBlockedRelays()
     }
 
     // --- Recording events ---
 
-    /** Call when a connection attempt starts (for latency tracking). */
+    /** Call when a connection attempt starts (for connect-time tracking). */
     fun recordConnectionAttempt(relayUrl: String) {
         val url = normalize(relayUrl)
         synchronized(lock) {
             val data = getOrCreate(url)
             data.connectionAttempts++
-            data.connectStartedAt = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            data.connectStartedAt = now
+            if (data.firstSeenAt == 0L) data.firstSeenAt = now
         }
         emitState()
         RelayLogBuffer.logConnecting(url)
@@ -296,12 +335,12 @@ object RelayHealthTracker {
             data.consecutiveFailures = 0
             data.lastConnectedAt = System.currentTimeMillis()
             data.lastError = null
-            // Latency
+            // WS handshake time (NOT RTT — includes DNS, TCP, TLS, WS upgrade)
             if (data.connectStartedAt > 0) {
-                val latency = System.currentTimeMillis() - data.connectStartedAt
-                data.latencySamples.add(latency)
-                if (data.latencySamples.size > MAX_LATENCY_SAMPLES) {
-                    data.latencySamples.removeAt(0)
+                val elapsed = System.currentTimeMillis() - data.connectStartedAt
+                data.connectTimeSamples.add(elapsed)
+                if (data.connectTimeSamples.size > MAX_CONNECT_TIME_SAMPLES) {
+                    data.connectTimeSamples.removeAt(0)
                 }
                 data.connectStartedAt = 0
             }
@@ -318,26 +357,33 @@ object RelayHealthTracker {
     /** Call when a connection fails. */
     fun recordConnectionFailure(relayUrl: String, error: String?) {
         val url = normalize(relayUrl)
+        val deviceOnline = hasNetwork()
         var nowFlagged = false
         var nowAutoBlocked = false
         synchronized(lock) {
             val data = getOrCreate(url)
             data.connectionFailures++
-            data.consecutiveFailures++
             data.lastFailedAt = System.currentTimeMillis()
             data.lastError = error
             data.connectStartedAt = 0
-            // Flag check
-            if (!data.isFlagged && data.consecutiveFailures >= FLAG_CONSECUTIVE_FAILURES) {
-                data.isFlagged = true
-                nowFlagged = true
-            }
-            // Auto-block: block after threshold consecutive failures (with timed cooldown)
-            if (!data.isBlocked && data.consecutiveFailures >= AUTO_BLOCK_CONSECUTIVE_FAILURES) {
-                data.isBlocked = true
-                nowAutoBlocked = true
-                val expiry = System.currentTimeMillis() + AUTO_BLOCK_DURATION_MS
-                autoBlockExpiry[url] = expiry
+            // Only count consecutive failures when device has network.
+            // Offline failures are the device's fault, not the relay's.
+            if (deviceOnline) {
+                data.consecutiveFailures++
+                // Flag check
+                if (!data.isFlagged && data.consecutiveFailures >= FLAG_CONSECUTIVE_FAILURES) {
+                    data.isFlagged = true
+                    nowFlagged = true
+                }
+                // Auto-block: block after threshold consecutive failures (with timed cooldown)
+                if (!data.isBlocked && data.consecutiveFailures >= AUTO_BLOCK_CONSECUTIVE_FAILURES) {
+                    data.isBlocked = true
+                    nowAutoBlocked = true
+                    val expiry = System.currentTimeMillis() + AUTO_BLOCK_DURATION_MS
+                    autoBlockExpiry[url] = expiry
+                }
+            } else {
+                Log.d(TAG, "Relay $url failure while OFFLINE — not counting toward consecutive failures")
             }
         }
         if (nowFlagged) {
@@ -360,6 +406,7 @@ object RelayHealthTracker {
         synchronized(lock) {
             val data = getOrCreate(url)
             data.eventsReceived++
+            data.lastEventAt = System.currentTimeMillis()
         }
         // Don't emit on every event — too noisy. Batch via periodic or threshold.
     }
@@ -458,6 +505,47 @@ object RelayHealthTracker {
         Log.i(TAG, "Relay manually unflagged: $url")
     }
 
+    /**
+     * Grant amnesty to all relays after the device regains network connectivity.
+     * Resets consecutive failure counts, removes flags, and releases auto-blocks that
+     * were caused by device-offline failures rather than genuine relay problems.
+     * Call from NetworkConnectivityMonitor when network is restored after a loss.
+     */
+    fun grantOfflineAmnesty() {
+        var releasedAutoBlocks = 0
+        var unflaggedCount = 0
+        synchronized(lock) {
+            for ((url, data) in healthData) {
+                if (data.consecutiveFailures > 0) {
+                    data.consecutiveFailures = 0
+                }
+                if (data.isFlagged) {
+                    data.isFlagged = false
+                    unflaggedCount++
+                }
+                // Release auto-blocks (but not manual blocks)
+                if (data.isBlocked && autoBlockExpiry.containsKey(url)) {
+                    data.isBlocked = false
+                    autoBlockExpiry.remove(url)
+                    releasedAutoBlocks++
+                }
+            }
+        }
+        if (releasedAutoBlocks > 0 || unflaggedCount > 0) {
+            _blockedRelays.value = synchronized(lock) {
+                healthData.filter { it.value.isBlocked }.keys.toSet()
+            }
+            _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
+            persistBlockedRelays()
+            persistAutoBlockExpiry()
+            emitState()
+            Log.i(TAG, "Offline amnesty: unflagged $unflaggedCount relays, released $releasedAutoBlocks auto-blocks")
+        } else {
+            emitState()
+            Log.d(TAG, "Offline amnesty: no relays needed recovery")
+        }
+    }
+
     /** Reset all health data for a relay (e.g. after user reconfigures it). */
     fun resetRelay(relayUrl: String) {
         val url = normalize(relayUrl)
@@ -506,9 +594,11 @@ object RelayHealthTracker {
         connectionFailures = connectionFailures,
         consecutiveFailures = consecutiveFailures,
         eventsReceived = eventsReceived,
-        avgLatencyMs = if (latencySamples.isNotEmpty()) latencySamples.average().toLong() else 0,
+        connectTimeMs = if (connectTimeSamples.isNotEmpty()) connectTimeSamples.average().toLong() else 0,
         lastConnectedAt = lastConnectedAt,
         lastFailedAt = lastFailedAt,
+        lastEventAt = lastEventAt,
+        firstSeenAt = firstSeenAt,
         lastError = lastError,
         isFlagged = isFlagged,
         isBlocked = isBlocked

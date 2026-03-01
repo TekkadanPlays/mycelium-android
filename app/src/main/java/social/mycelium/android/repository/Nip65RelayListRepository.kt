@@ -31,7 +31,7 @@ object Nip65RelayListRepository {
 
     private const val TAG = "Nip65RelayListRepo"
     private const val KIND_RELAY_LIST = 10002
-    private const val FETCH_TIMEOUT_MS = 8_000L
+    private const val FETCH_TIMEOUT_MS = 5_000L
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
@@ -264,10 +264,13 @@ object Nip65RelayListRepository {
      */
     private const val MAX_CONCURRENT = 20
 
+    /** Once this many indexers return results, signal early completion. */
+    private const val MIN_RESULTS_FOR_EARLY_DONE = 3
+
     fun fetchRelayListMultiSource(
         pubkeyHex: String,
         indexerUrls: List<String>,
-        timeoutMs: Long = 6_000L
+        timeoutMs: Long = 3_000L
     ) {
         if (indexerUrls.isEmpty()) {
             Log.w(TAG, "No indexers for multi-source NIP-65 search")
@@ -302,21 +305,33 @@ object Nip65RelayListRepository {
         // fast relays never wait for slow ones in the same batch.
         scope.launch {
             val semaphore = kotlinx.coroutines.sync.Semaphore(MAX_CONCURRENT)
+            val earlyDone = kotlinx.coroutines.CompletableDeferred<Unit>()
             val jobs = indexerUrls.map { indexerUrl ->
                 scope.launch {
                     semaphore.acquire()
                     try {
                         queryOneIndexer(pubkeyHex, indexerUrl, filter, timeoutMs)
+                        // Check for early completion after each successful result
+                        if (_multiSourceResults.value.size >= MIN_RESULTS_FOR_EARLY_DONE) {
+                            earlyDone.complete(Unit)
+                        }
                     } finally {
                         semaphore.release()
                     }
                 }
             }
 
-            // Wait for ALL relays to complete
-            jobs.forEach { it.join() }
+            // Race: wait for ALL relays OR early completion (enough results arrived)
+            scope.launch {
+                jobs.forEach { it.join() }
+                earlyDone.complete(Unit) // all done naturally
+            }
+            earlyDone.await()
 
-            // Mark any still-PENDING as TIMEOUT (shouldn't happen with proper timeouts, but safety net)
+            // Cancel remaining in-flight jobs
+            jobs.forEach { it.cancel() }
+
+            // Mark any still-PENDING as TIMEOUT
             synchronized(_multiSourceStatuses) {
                 _multiSourceStatuses.value = _multiSourceStatuses.value.map { state ->
                     if (state.status == IndexerQueryStatus.PENDING)
@@ -337,10 +352,9 @@ object Nip65RelayListRepository {
             // connections persist and bleed into feed/notification subscriptions.
             // The feed will re-establish only the connections it actually needs.
             RelayConnectionStateMachine.getInstance().requestDisconnect()
-            Log.d(TAG, "Disconnected all relays after multi-source search cleanup")
 
             _multiSourceDone.value = true
-            Log.d(TAG, "Multi-source search complete: ${_multiSourceResults.value.size}/${indexerUrls.size} indexers returned results")
+            Log.d(TAG, "Multi-source search complete: ${_multiSourceResults.value.size}/${indexerUrls.size} indexers returned results (early=${_multiSourceResults.value.size >= MIN_RESULTS_FOR_EARLY_DONE})")
         }
     }
 

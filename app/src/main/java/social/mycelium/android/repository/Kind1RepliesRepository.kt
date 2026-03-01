@@ -167,6 +167,28 @@ class Kind1RepliesRepository {
     }
 
     /**
+     * Merge a confirmed relay URL into a displayed reply (called when relay sends OK).
+     * Updates relay orbs in real-time as confirmations arrive.
+     */
+    fun mergePublishRelayUrl(eventId: String, relayUrl: String) {
+        if (relayUrl.isBlank()) return
+        val current = _replies.value
+        for ((rootId, replies) in current) {
+            val idx = replies.indexOfFirst { it.id == eventId }
+            if (idx >= 0) {
+                val reply = replies[idx]
+                val existingUrls = reply.relayUrls.ifEmpty { listOfNotNull(reply.relayUrl) }
+                if (relayUrl in existingUrls) return
+                val updated = replies.toMutableList()
+                updated[idx] = reply.copy(relayUrls = (existingUrls + relayUrl).distinct())
+                _replies.value = current + (rootId to updated)
+                Log.d(TAG, "Merged publish relay $relayUrl into reply ${eventId.take(8)}")
+                return
+            }
+        }
+    }
+
+    /**
      * Fetch Kind 1 replies for a specific note
      *
      * @param noteId The ID of the note to fetch replies for

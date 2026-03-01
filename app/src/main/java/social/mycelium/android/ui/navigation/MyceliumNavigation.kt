@@ -87,6 +87,7 @@ import social.mycelium.android.ui.screens.ComposeNoteScreen
 import social.mycelium.android.ui.screens.ComposeTopicScreen
 import social.mycelium.android.ui.screens.ComposeTopicReplyScreen
 import social.mycelium.android.ui.screens.DashboardScreen
+import social.mycelium.android.ui.screens.EffectsLabScreen
 import social.mycelium.android.ui.screens.DebugFollowListScreen
 import social.mycelium.android.ui.screens.ImageContentViewerScreen
 import social.mycelium.android.ui.screens.VideoContentViewerScreen
@@ -375,8 +376,19 @@ fun MyceliumNavigation(
         && overlayProfileThreadNoteId == null
         && overlayNotifThreadNoteId == null
 
-    // Sidebar drawer state — hide bottom nav when drawer is open so it doesn't overlap
+    // Sidebar drawer state — shared across Dashboard + Topics so it survives navigation
+    val sidebarDrawerState = androidx.compose.material3.rememberDrawerState(
+        initialValue = androidx.compose.material3.DrawerValue.Closed
+    )
     var isDrawerOpen by remember { mutableStateOf(false) }
+    // Helper: perform an action then close the drawer. Action runs synchronously on the main thread,
+    // then the drawer close fires in a nav-level coroutine that survives screen changes.
+    fun closeDrawerThen(action: () -> Unit) {
+        action()
+        coroutineScope.launch {
+            sidebarDrawerState.snapTo(androidx.compose.material3.DrawerValue.Closed)
+        }
+    }
 
     // Defer showing bottom bar when returning from thread so pop transition settles (avoids flash)
     var allowBottomNavVisible by remember { mutableStateOf(true) }
@@ -655,7 +667,7 @@ fun MyceliumNavigation(
                             onProfileClick = { authorId ->
                                 navController.navigateToProfile(authorId)
                             },
-                            onNavigateTo = { screen ->
+                            onNavigateTo = { screen -> closeDrawerThen {
                                 when {
                                     screen == "settings" -> navController.navigate("settings") { launchSingleTop = true }
                                     screen.startsWith("relays") -> navController.navigate(screen) { launchSingleTop = true }
@@ -683,7 +695,7 @@ fun MyceliumNavigation(
                                     screen == "onboarding" -> navController.navigate("onboarding") { launchSingleTop = true }
                                     screen.startsWith("settings/") -> navController.navigate(screen) { launchSingleTop = true }
                                 }
-                            },
+                            } },
                             onThreadClick = { note, _ ->
                                 feedStateViewModel.saveHomeScrollPosition(
                                     dashboardListState.firstVisibleItemIndex,
@@ -735,16 +747,16 @@ fun MyceliumNavigation(
                             initialTopAppBarState = topAppBarState,
                             isDashboardVisible = currentRoute in setOf("dashboard", "image_viewer", "video_viewer"),
                             onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
-                            onSidebarRelayHealthClick = {
+                            onSidebarRelayHealthClick = { closeDrawerThen {
                                 navController.navigate("settings/relay_health") {
                                     launchSingleTop = true
                                 }
-                            },
-                            onSidebarRelayDiscoveryClick = {
+                            } },
+                            onSidebarRelayDiscoveryClick = { closeDrawerThen {
                                 navController.navigate("relay_discovery") {
                                     launchSingleTop = true
                                 }
-                            },
+                            } },
                             onRelayClick = { relayUrl ->
                                 val encoded = android.net.Uri.encode(relayUrl)
                                 navController.navigate("relay_log/$encoded") { launchSingleTop = true }
@@ -762,7 +774,8 @@ fun MyceliumNavigation(
                             onClearRead = { appViewModel.clearReadNotes() },
                             hasReadNotes = appViewModel.hasViewedNotes(),
                             onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } },
-                            onDrawerStateChanged = { open -> isDrawerOpen = open }
+                            onDrawerStateChanged = { open -> isDrawerOpen = open },
+                            drawerState = sidebarDrawerState
                         )
 
                         // Intercept system back gesture when overlay thread is showing
@@ -861,6 +874,7 @@ fun MyceliumNavigation(
                                         zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
                                         zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
                                         myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
+                                        boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
                                         onLoginClick = {
                                             val loginIntent = accountStateViewModel.loginWithAmber()
                                             onAmberLogin(loginIntent)
@@ -1315,6 +1329,10 @@ fun MyceliumNavigation(
                             zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
                             zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
                             myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
+                            boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
+                            onVote = { noteId, authorPubkey, direction ->
+                                accountStateViewModel.sendVote(noteId, authorPubkey, direction, replyKind)
+                            },
                             onCommentLike = { /* TODO: Handle comment like */},
                             onCommentReply = { /* Handled inside ModernThreadViewScreen via effectiveOnCommentReply */},
                             onPublishThreadReply = when (replyKind) {
@@ -1862,6 +1880,7 @@ fun MyceliumNavigation(
                                     zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
                                     zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
                                     myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
+                                    boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
                                     onPublishThreadReply = { rootId, rootPubkey, parentId, parentPubkey, content ->
                                         accountStateViewModel.publishKind1Reply(rootId, rootPubkey, parentId, parentPubkey, content)
                                     },
@@ -2231,6 +2250,16 @@ fun MyceliumNavigation(
                     )
                 }
 
+                composable("effects_lab") {
+                    EffectsLabScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onNoteClick = { note ->
+                            appViewModel.updateSelectedNote(note)
+                            navController.navigate("thread/${note.id}") { launchSingleTop = true }
+                        }
+                    )
+                }
+
                 composable("note_relays/{relayUrlsEncoded}") { backStackEntry ->
                     val encodedUrls = backStackEntry.arguments?.getString("relayUrlsEncoded") ?: ""
                     val relayUrls = encodedUrls.split(",").map { android.net.Uri.decode(it) }.filter { it.isNotBlank() }
@@ -2431,6 +2460,9 @@ fun MyceliumNavigation(
                         },
                         onConfigureRelays = {
                             navController.navigate("relays?tab=system") { launchSingleTop = true }
+                        },
+                        onEffectsLab = {
+                            navController.navigate("effects_lab") { launchSingleTop = true }
                         },
                         topAppBarState = topAppBarState,
                         onMenuClick = { /* no drawer on announcements */ },
@@ -2849,6 +2881,10 @@ fun MyceliumNavigation(
                                     zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
                                     zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
                                     myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
+                                    boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
+                                    onVote = { noteId, authorPubkey, direction ->
+                                        accountStateViewModel.sendVote(noteId, authorPubkey, direction, notifReplyKind)
+                                    },
                                     onPublishThreadReply = when (notifReplyKind) {
                                         1111 -> { { rootId, rootPubkey, parentId, parentPubkey, content ->
                                             accountStateViewModel.publishThreadReply(rootId, rootPubkey, parentId, parentPubkey, content)
@@ -2924,7 +2960,7 @@ fun MyceliumNavigation(
 
                     Box(modifier = Modifier.fillMaxSize()) {
                         TopicsScreen(
-                                onNavigateTo = { destination ->
+                                onNavigateTo = { destination -> closeDrawerThen {
                                     if (destination == "dashboard") {
                                         navController.navigate("dashboard") {
                                             popUpTo("dashboard") { inclusive = true }
@@ -2933,7 +2969,7 @@ fun MyceliumNavigation(
                                     } else {
                                         navController.navigate(destination) { launchSingleTop = true }
                                     }
-                                },
+                                } },
                                 onThreadClick = { note, relayUrls ->
                                     appViewModel.updateSelectedNote(note)
                                     appViewModel.updateThreadRelayUrls(relayUrls)
@@ -2954,16 +2990,16 @@ fun MyceliumNavigation(
                                 },
                                 initialTopAppBarState = topAppBarState,
                                 onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
-                                onSidebarRelayHealthClick = {
+                                onSidebarRelayHealthClick = { closeDrawerThen {
                                     navController.navigate("settings/relay_health") {
                                         launchSingleTop = true
                                     }
-                                },
-                                onSidebarRelayDiscoveryClick = {
+                                } },
+                                onSidebarRelayDiscoveryClick = { closeDrawerThen {
                                     navController.navigate("relay_discovery") {
                                         launchSingleTop = true
                                     }
-                                },
+                                } },
                                 onNavigateToCreateTopic = { hashtag ->
                                     val encoded = android.net.Uri.encode(hashtag ?: "")
                                     navController.navigate("compose_topic?hashtag=$encoded") { launchSingleTop = true }
@@ -2973,7 +3009,8 @@ fun MyceliumNavigation(
                                     navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                                 },
                                 onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } },
-                                onDrawerStateChanged = { open -> isDrawerOpen = open }
+                                onDrawerStateChanged = { open -> isDrawerOpen = open },
+                                drawerState = sidebarDrawerState
                         )
 
                         // Intercept system back gesture when overlay thread is showing
@@ -3070,6 +3107,10 @@ fun MyceliumNavigation(
                                         zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
                                         zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
                                         myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
+                                        boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
+                                        onVote = { noteId, authorPubkey, direction ->
+                                            accountStateViewModel.sendVote(noteId, authorPubkey, direction, 1111)
+                                        },
                                         onLoginClick = {
                                             val loginIntent = accountStateViewModel.loginWithAmber()
                                             onAmberLogin(loginIntent)

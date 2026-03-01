@@ -49,6 +49,7 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import kotlinx.coroutines.delay
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -410,6 +411,7 @@ private fun DashboardFeedContent(
     zapInProgressNoteIds: Set<String>,
     zappedNoteIds: Set<String>,
     zappedAmountByNoteId: Map<String, Long>,
+    boostedNoteIds: Set<String>,
     accountNpub: String?,
     shouldCloseZapMenus: Boolean,
     feedTimedOut: Boolean,
@@ -669,7 +671,8 @@ private fun DashboardFeedContent(
                     },
                     accountNpub = accountNpub,
                     isZapInProgress = note.id in zapInProgressNoteIds,
-                    isZapped = note.id in zappedNoteIds,
+                    isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(note.id),
+                    isBoosted = note.id in boostedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.id),
                     myZappedAmount = zappedAmountByNoteId[note.id],
                     overrideReplyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
                     overrideZapCount = counts?.zapCount,
@@ -826,6 +829,7 @@ fun DashboardScreen(
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
     onDrawerStateChanged: (Boolean) -> Unit = {},
+    drawerState: DrawerState = rememberDrawerState(initialValue = DrawerValue.Closed),
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -838,9 +842,9 @@ fun DashboardScreen(
     val zapInProgressNoteIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
     val zappedNoteIds by accountStateViewModel.zappedNoteIds.collectAsState()
     val zappedAmountByNoteId by accountStateViewModel.zappedAmountByNoteId.collectAsState()
+    val boostedNoteIds by accountStateViewModel.boostedNoteIds.collectAsState()
     val replyCountByNoteId by social.mycelium.android.repository.ReplyCountCache.replyCountByNoteId.collectAsState()
     val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
     // Report drawer state to parent (for hiding bottom nav when drawer is open)
@@ -1102,10 +1106,14 @@ fun DashboardScreen(
     // Guard: ViewModel-scoped flag survives LaunchedEffect lifecycle restarts (STOPPED→STARTED
     // during navigation to image_viewer/video_viewer). Without this, the LaunchedEffect re-fires
     // on every pop-back and scrolls the feed to the top.
+    // Debounce: wait for the note count to stabilize (300ms with no new notes) before scrolling,
+    // so the feed settles before we snap to top — prevents landing mid-feed after relay events stream in.
     LaunchedEffect(Unit) {
         if (!feedStateViewModel.hasInitializedHomeScroll) {
-            snapshotFlow { uiState.notes.isNotEmpty() }
-                .filter { it }
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            snapshotFlow { uiState.notes.size }
+                .filter { it > 0 }
+                .debounce(300)
                 .first()
             listState.scrollToItem(0)
             feedStateViewModel.hasInitializedHomeScroll = true
@@ -1262,8 +1270,8 @@ fun DashboardScreen(
         connectedRelayCount = connectedRelayCount,
         subscribedRelayCount = subscribedRelayCount,
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
-        onRelayHealthClick = onSidebarRelayHealthClick,
-        onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,
+        onRelayHealthClick = { onSidebarRelayHealthClick() },
+        onRelayDiscoveryClick = { onSidebarRelayDiscoveryClick() },
         troubleRelayCount = troubleRelayCount,
         gesturesEnabled = currentAccount != null,
         onToggleCategorySubscription = { categoryId ->
@@ -1293,21 +1301,11 @@ fun DashboardScreen(
                     feedStateViewModel.setTopicsSelectedRelay(relayUrl, relay?.displayName)
                     viewModel.setDisplayFilterOnly(listOf(relayUrl))
                 }
-                itemId == "user_profile" -> {
-                    onNavigateTo("user_profile")
-                }
-                itemId == "relays" -> {
-                    onNavigateTo("relays")
-                }
-                itemId == "login" -> {
-                    onLoginClick?.invoke()
-                }
-                itemId == "logout" -> {
-                    onNavigateTo("settings")
-                }
-                itemId == "settings" -> {
-                    onNavigateTo("settings")
-                }
+                itemId == "user_profile" -> onNavigateTo("user_profile")
+                itemId == "relays" -> onNavigateTo("relays")
+                itemId == "login" -> onLoginClick?.invoke()
+                itemId == "logout" -> onNavigateTo("settings")
+                itemId == "settings" -> onNavigateTo("settings")
                 else -> viewModel.onSidebarItemClick(itemId)
             }
         },
@@ -1585,6 +1583,7 @@ fun DashboardScreen(
                 zapInProgressNoteIds = zapInProgressNoteIds,
                 zappedNoteIds = zappedNoteIds,
                 zappedAmountByNoteId = zappedAmountByNoteId,
+                boostedNoteIds = boostedNoteIds,
                 accountNpub = currentAccount?.npub,
                 shouldCloseZapMenus = shouldCloseZapMenus,
                 feedTimedOut = feedTimedOut,

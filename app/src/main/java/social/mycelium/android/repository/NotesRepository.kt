@@ -1582,6 +1582,27 @@ class NotesRepository private constructor() {
     fun isLocallyPublished(eventId: String): Boolean = locallyPublishedIds.contains(eventId)
 
     /**
+     * Merge a relay URL into a locally-published note when a relay sends OK.
+     * Called from RelayHealthTracker's publish tracking path so relay orbs
+     * update in real-time as relay confirmations arrive.
+     */
+    fun mergePublishRelayUrl(eventId: String, relayUrl: String) {
+        if (relayUrl.isBlank()) return
+        val currentNotes = _notes.value
+        val index = currentNotes.indexOfFirst { it.id == eventId || it.id == "repost:$eventId" }
+        if (index < 0) return
+        val note = currentNotes[index]
+        val existingUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+        if (relayUrl in existingUrls) return
+        val updatedUrls = (existingUrls + relayUrl).distinct().filter { it.isNotBlank() }
+        val updated = currentNotes.toMutableList()
+        updated[index] = note.copy(relayUrls = updatedUrls)
+        _notes.value = updated
+        scheduleDisplayUpdate()
+        Log.d(TAG, "Merged publish relay $relayUrl into ${eventId.take(8)} (now ${updatedUrls.size} orbs)")
+    }
+
+    /**
      * Inject a local repost into the feed immediately after the user publishes a boost.
      * This makes the boost appear instantly without waiting for the relay echo.
      * @param originalNote The note being boosted

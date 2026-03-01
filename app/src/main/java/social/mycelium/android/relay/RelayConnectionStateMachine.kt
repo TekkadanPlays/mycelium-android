@@ -773,6 +773,10 @@ class RelayConnectionStateMachine {
         val (relayUrls, kind1Filter) = resumeSubscriptionProvider?.invoke()?.takeIf { it.first.isNotEmpty() }
             ?: (cur.relayUrls to cur.kind1Filter)
         if (relayUrls.isEmpty()) return
+        // Reset retry counter so that if this reconnect fails, the state machine
+        // can retry from scratch instead of being stuck at MAX_RETRIES from an
+        // earlier offline period.
+        retryAttempt = 0
         Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (following=${kind1Filter != null})")
         stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter, null))
     }

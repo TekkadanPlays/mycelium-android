@@ -123,6 +123,7 @@ fun TopicsScreen(
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
     onDrawerStateChanged: (Boolean) -> Unit = {},
+    drawerState: DrawerState = rememberDrawerState(initialValue = DrawerValue.Closed),
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -132,7 +133,6 @@ fun TopicsScreen(
     val authState by accountStateViewModel.authState.collectAsState()
     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
     val onboardingComplete by accountStateViewModel.onboardingComplete.collectAsState()
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
 
     // Report drawer state to parent (for hiding bottom nav when drawer is open)
@@ -379,8 +379,8 @@ fun TopicsScreen(
         connectedRelayCount = connectedRelayCount,
         subscribedRelayCount = subscribedRelayCount,
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
-        onRelayHealthClick = onSidebarRelayHealthClick,
-        onRelayDiscoveryClick = onSidebarRelayDiscoveryClick,
+        onRelayHealthClick = { onSidebarRelayHealthClick() },
+        onRelayDiscoveryClick = { onSidebarRelayDiscoveryClick() },
         troubleRelayCount = troubleRelayCount,
         onItemClick = { itemId ->
             when {
@@ -407,21 +407,11 @@ fun TopicsScreen(
                     feedStateViewModel.setHomeSelectedRelay(relayUrl, relay?.displayName)
                     topicsViewModel.setDisplayFilterOnly(listOf(relayUrl))
                 }
-                itemId == "user_profile" -> {
-                    onNavigateTo("user_profile")
-                }
-                itemId == "relays" -> {
-                    onNavigateTo("relays")
-                }
-                itemId == "login" -> {
-                    onLoginClick?.invoke()
-                }
-                itemId == "logout" -> {
-                    onNavigateTo("settings")
-                }
-                itemId == "settings" -> {
-                    onNavigateTo("settings")
-                }
+                itemId == "user_profile" -> onNavigateTo("user_profile")
+                itemId == "relays" -> onNavigateTo("relays")
+                itemId == "login" -> onLoginClick?.invoke()
+                itemId == "logout" -> onNavigateTo("settings")
+                itemId == "settings" -> onNavigateTo("settings")
                 else -> { /* Other sidebar actions */ }
             }
         },
@@ -853,6 +843,11 @@ fun TopicsScreen(
                                             onCustomZapSend = { n, amount, zapType, msg ->
                                                 accountStateViewModel.sendZap(n, amount, zapType, msg)
                                             },
+                                            onVote = { noteId, authorPubkey, direction ->
+                                                accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
+                                            },
+                                            ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
+                                            voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
                                             shouldCloseZapMenus = shouldCloseZapMenus,
                                             onZapSettings = { onNavigateToZapSettings() },
                                             onRelayClick = onRelayClick,

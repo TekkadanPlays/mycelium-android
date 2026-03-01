@@ -322,11 +322,11 @@ fun OnboardingScreen(
             try {
                 Nip65RelayListRepository.fetchRelayListMultiSource(hexPubkey, indexerUrls)
 
-                // Wait for multi-source search to complete. With batched processing
-                // (20 relays per batch, 8s timeout each), large sets take longer.
-                // 500 relays = 25 batches ≈ 210s worst case. Cap at 5 minutes.
+                // Wait for multi-source search to complete. With early completion
+                // (3+ results → done) and 3s per-indexer timeout, this typically
+                // finishes in under 5s. Cap at 30s as a safety net.
                 var waited = 0L
-                while (!Nip65RelayListRepository.multiSourceDone.value && waited < 300_000L) {
+                while (!Nip65RelayListRepository.multiSourceDone.value && waited < 30_000L) {
                     delay(500)
                     waited += 500
                 }

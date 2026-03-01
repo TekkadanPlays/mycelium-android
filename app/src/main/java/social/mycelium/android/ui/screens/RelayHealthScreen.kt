@@ -21,6 +21,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -248,35 +250,29 @@ fun RelayHealthScreen(
     val totalEvents = remember(healthMap) { healthMap.values.sumOf { it.eventsReceived } }
     val totalActiveSubs = remember(slotSnapshots) { slotSnapshots.sumOf { it.activeCount } }
     val totalQueuedSubs = remember(slotSnapshots) { slotSnapshots.sumOf { it.queuedCount } }
-    val avgLatency = remember(healthMap) {
-        val latencies = healthMap.values.filter { it.avgLatencyMs > 0 }.map { it.avgLatencyMs }
-        if (latencies.isNotEmpty()) latencies.average().toLong() else 0L
+    val avgConnectTime = remember(healthMap) {
+        val times = healthMap.values.filter { it.connectTimeMs > 0 }.map { it.connectTimeMs }
+        if (times.isNotEmpty()) times.average().toLong() else 0L
     }
-    val healthScore = remember(connectedCount, totalTracked, troubleRelays) {
-        if (totalTracked == 0) 0f
-        else ((connectedCount.toFloat() / totalTracked) * 100f * (1f - troubleRelays.size.toFloat() / totalTracked.coerceAtLeast(1))).coerceIn(0f, 100f)
+    // Health score: weighted average of per-relay uptime ratios (only relays with >=2 attempts).
+    // Penalizes relays with high failure rates proportionally, not just by count.
+    val healthScore = remember(healthMap, connectedCount, totalTracked) {
+        val eligible = healthMap.values.filter { it.connectionAttempts >= 2 }
+        if (eligible.isEmpty()) {
+            if (connectedCount > 0) 100f else 0f
+        } else {
+            (eligible.map { it.uptimeRatio }.average() * 100f).toFloat().coerceIn(0f, 100f)
+        }
     }
-
-    val topAppBarState = rememberTopAppBarState()
-    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
-
-    // Section expand state
-    var myRelaysExpanded by remember { mutableStateOf(true) }
-    var followingOutboxExpanded by remember { mutableStateOf(true) }
-    var followingInboxExpanded by remember { mutableStateOf(false) }
-    var indexerExpanded by remember { mutableStateOf(false) }
-    var otherExpanded by remember { mutableStateOf(false) }
 
     // NIP-11 cache
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
 
     Scaffold(
-        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             Column(Modifier.statusBarsPadding()) {
                 TopAppBar(
-                    scrollBehavior = scrollBehavior,
                     title = {
                         Text(
                             text = "relay health",
@@ -302,349 +298,954 @@ fun RelayHealthScreen(
             }
         }
     ) { paddingValues ->
-        LazyColumn(
+        val tabTitles = listOf("Overview", "Relays", "Delivery", "Attention")
+        val tabIcons = listOf(
+            Icons.Outlined.Dashboard,
+            Icons.Outlined.Router,
+            Icons.Outlined.Outbox,
+            Icons.Outlined.Warning
+        )
+        val pagerState = rememberPagerState(pageCount = { tabTitles.size })
+
+        Column(
             modifier = modifier
                 .fillMaxSize()
-                .padding(paddingValues),
-            contentPadding = PaddingValues(bottom = 100.dp),
-            verticalArrangement = Arrangement.spacedBy(0.dp)
+                .padding(paddingValues)
         ) {
-            // ── Needs Attention (flagged/blocked relays) — shown first ──
-            if (troubleRelays.isNotEmpty()) {
-                item(key = "attention_header") {
+            // ── Tab row ──
+            TabRow(
+                selectedTabIndex = pagerState.currentPage,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+                divider = {
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    )
+                }
+            ) {
+                tabTitles.forEachIndexed { index, title ->
+                    val selected = pagerState.currentPage == index
+                    val showBadge = index == 3 && troubleRelays.isNotEmpty()
+                    Tab(
+                        selected = selected,
+                        onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    tabIcons[index],
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    title,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 1
+                                )
+                                if (showBadge) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(6.dp)
+                                    ) {}
+                                }
+                            }
+                        },
+                        selectedContentColor = MaterialTheme.colorScheme.primary,
+                        unselectedContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // ── Pager body ──
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                beyondViewportPageCount = 1
+            ) { page ->
+                when (page) {
+                    0 -> OverviewTab(
+                        healthScore = healthScore,
+                        connectedCount = connectedCount,
+                        totalTracked = totalTracked,
+                        totalEvents = totalEvents,
+                        totalActiveSubs = totalActiveSubs,
+                        totalQueuedSubs = totalQueuedSubs,
+                        avgConnectTime = avgConnectTime,
+                        troubleCount = troubleRelays.size,
+                        followingRelayCount = followingRelayCount,
+                        slotSnapshots = slotSnapshots,
+                        healthMap = healthMap,
+                        perRelayState = perRelayState
+                    )
+                    1 -> RelaysTab(
+                        myRelays = myRelays,
+                        followingOutbox = followingOutbox,
+                        followingInbox = followingInbox,
+                        indexerRelays = indexerRelays,
+                        otherRelays = otherRelays,
+                        perRelayState = perRelayState,
+                        slotsByUrl = slotsByUrl,
+                        nip11 = nip11,
+                        profileCache = profileCache,
+                        profileRevision = profileRevision,
+                        authorRelaySnapshot = authorRelaySnapshot,
+                        batchFetchTriggered = batchFetchTriggered,
+                        healthMap = healthMap,
+                        onOpenRelayLog = onOpenRelayLog,
+                        onOpenRelayUsers = onOpenRelayUsers,
+                        onProfileClick = onProfileClick
+                    )
+                    2 -> DeliveryTab(
+                        publishReports = publishReports,
+                        onOpenPublishResults = onOpenPublishResults,
+                        onOpenRelayLog = onOpenRelayLog
+                    )
+                    3 -> AttentionTab(
+                        troubleRelays = troubleRelays,
+                        healthMap = healthMap,
+                        autoBlockExpiryMap = autoBlockExpiryMap,
+                        onOpenNeedsAttention = onOpenNeedsAttention,
+                        onOpenRelayLog = onOpenRelayLog
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+// ── TAB 0: Overview ──
+// ══════════════════════════════════════════════════════
+
+@Composable
+private fun OverviewTab(
+    healthScore: Float,
+    connectedCount: Int,
+    totalTracked: Int,
+    totalEvents: Long,
+    totalActiveSubs: Int,
+    totalQueuedSubs: Int,
+    avgConnectTime: Long,
+    troubleCount: Int,
+    followingRelayCount: Int,
+    slotSnapshots: List<RelaySlotSnapshot>,
+    healthMap: Map<String, RelayHealthInfo>,
+    perRelayState: Map<String, RelayEndpointStatus>
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // Health score donut + status
+        item(key = "overview_card") {
+            NetworkOverviewCard(
+                healthScore = healthScore,
+                connectedCount = connectedCount,
+                totalTracked = totalTracked,
+                totalEvents = totalEvents,
+                totalActiveSubs = totalActiveSubs,
+                totalQueuedSubs = totalQueuedSubs,
+                avgConnectTime = avgConnectTime,
+                troubleCount = troubleCount,
+                followingRelayCount = followingRelayCount
+            )
+        }
+
+        // Live connection summary — compact relay status list
+        val connectedRelays = perRelayState.filter { it.value == RelayEndpointStatus.Connected }
+            .keys.sorted()
+        val failedRelays = perRelayState.filter { it.value == RelayEndpointStatus.Failed }
+            .keys.sorted()
+
+        if (connectedRelays.isNotEmpty()) {
+            item(key = "connected_summary") {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF4CAF50))
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "${connectedRelays.size} Connected",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF4CAF50)
+                            )
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        connectedRelays.take(8).forEach { url ->
+                            val h = healthMap[url]
+                            val uptimePct = h?.let { (it.uptimeRatio * 100).toInt() } ?: 0
+                            val evts = h?.eventsReceived ?: 0
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.weight(1f),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                if (evts > 0) {
+                                    Text(
+                                        formatCount(evts),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 6.dp)
+                                    )
+                                }
+                                Text(
+                                    "${uptimePct}%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = when {
+                                        uptimePct >= 80 -> Color(0xFF4CAF50)
+                                        uptimePct >= 50 -> Color(0xFFFFA726)
+                                        else -> MaterialTheme.colorScheme.error
+                                    },
+                                    modifier = Modifier.width(32.dp)
+                                )
+                            }
+                        }
+                        if (connectedRelays.size > 8) {
+                            Text(
+                                "+${connectedRelays.size - 8} more",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (failedRelays.isNotEmpty()) {
+            item(key = "failed_summary") {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.15f)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.error)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "${failedRelays.size} Failed",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        failedRelays.take(5).forEach { url ->
+                            val h = healthMap[url]
+                            Text(
+                                buildString {
+                                    append(url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"))
+                                    h?.lastError?.let { append(" · $it") }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(vertical = 1.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Global slot utilization
+        if (slotSnapshots.isNotEmpty()) {
+            item(key = "global_slots") {
+                val totalActive = slotSnapshots.sumOf { it.activeCount }
+                val totalQueued = slotSnapshots.sumOf { it.queuedCount }
+                val totalEose = slotSnapshots.sumOf { it.eoseCount }
+                val totalLimit = slotSnapshots.sumOf { it.effectiveLimit }
+                val utilization = if (totalLimit > 0) totalActive.toFloat() / totalLimit else 0f
+                val barColor = when {
+                    utilization >= 0.9f -> MaterialTheme.colorScheme.error
+                    utilization >= 0.7f -> Color(0xFFFFA726)
+                    else -> Color(0xFF4CAF50)
+                }
+                val animatedUtil by animateFloatAsState(
+                    targetValue = utilization.coerceIn(0f, 1f),
+                    animationSpec = tween(400),
+                    label = "globalSlotUtil"
+                )
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Tune, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Subscription Slots", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                            OverviewStat(label = "Active", value = "$totalActive", icon = Icons.Outlined.Sync)
+                            OverviewStat(label = "Queued", value = "$totalQueued", icon = Icons.Outlined.HourglassTop,
+                                accent = if (totalQueued > 0) Color(0xFFFFA726) else null)
+                            OverviewStat(label = "EOSE", value = "$totalEose", icon = Icons.Outlined.CheckCircle,
+                                accent = Color(0xFF4CAF50))
+                            OverviewStat(label = "Capacity", value = "$totalLimit", icon = Icons.Outlined.ViewWeek)
+                        }
+                        Spacer(Modifier.height(8.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Utilization", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(72.dp))
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(6.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxHeight()
+                                        .fillMaxWidth(animatedUtil)
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(barColor)
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                            Text("${(utilization * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold, color = barColor)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+// ── TAB 1: Relays Directory ──
+// ══════════════════════════════════════════════════════
+
+@Composable
+private fun RelaysTab(
+    myRelays: List<RelayDirectoryEntry>,
+    followingOutbox: List<RelayDirectoryEntry>,
+    followingInbox: List<RelayDirectoryEntry>,
+    indexerRelays: List<RelayDirectoryEntry>,
+    otherRelays: List<RelayDirectoryEntry>,
+    perRelayState: Map<String, RelayEndpointStatus>,
+    slotsByUrl: Map<String, RelaySlotSnapshot>,
+    nip11: Nip11CacheManager,
+    profileCache: ProfileMetadataCache,
+    profileRevision: Int,
+    authorRelaySnapshot: Map<String, Nip65RelayListRepository.AuthorRelayList>,
+    batchFetchTriggered: Boolean,
+    healthMap: Map<String, RelayHealthInfo>,
+    onOpenRelayLog: (String) -> Unit,
+    onOpenRelayUsers: (String) -> Unit,
+    onProfileClick: (String) -> Unit
+) {
+    var myRelaysExpanded by remember { mutableStateOf(true) }
+    var followingOutboxExpanded by remember { mutableStateOf(true) }
+    var followingInboxExpanded by remember { mutableStateOf(false) }
+    var indexerExpanded by remember { mutableStateOf(false) }
+    var otherExpanded by remember { mutableStateOf(false) }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 100.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
+    ) {
+        // Loading indicator for NIP-65 batch fetch
+        if (authorRelaySnapshot.isEmpty() && batchFetchTriggered) {
+            item(key = "loading_nip65") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        text = "Loading relay lists for followed users…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // My Relays
+        if (myRelays.isNotEmpty()) {
+            item(key = "section_my") {
+                SectionHeader(title = "My Relays", count = myRelays.size, icon = Icons.Outlined.Person,
+                    expanded = myRelaysExpanded, onToggle = { myRelaysExpanded = !myRelaysExpanded })
+            }
+            if (myRelaysExpanded) {
+                items(myRelays, key = { "my_${it.url}" }) { entry ->
+                    RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
+                        slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
+                        profileCache = profileCache, profileRevision = profileRevision,
+                        onRelayClick = { onOpenRelayLog(entry.url) },
+                        onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
+                        onProfileClick = onProfileClick, modifier = Modifier.animateItem())
+                }
+            }
+        }
+
+        // Following · Outbox
+        if (followingOutbox.isNotEmpty()) {
+            item(key = "section_following_outbox") {
+                SectionHeader(title = "Following · Outbox", count = followingOutbox.size, icon = Icons.Outlined.Upload,
+                    expanded = followingOutboxExpanded, onToggle = { followingOutboxExpanded = !followingOutboxExpanded })
+            }
+            if (followingOutboxExpanded) {
+                items(followingOutbox, key = { "fout_${it.url}" }) { entry ->
+                    RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
+                        slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
+                        profileCache = profileCache, profileRevision = profileRevision,
+                        onRelayClick = { onOpenRelayLog(entry.url) },
+                        onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
+                        onProfileClick = onProfileClick, modifier = Modifier.animateItem())
+                }
+            }
+        }
+
+        // Following · Inbox
+        if (followingInbox.isNotEmpty()) {
+            item(key = "section_following_inbox") {
+                SectionHeader(title = "Following · Inbox", count = followingInbox.size, icon = Icons.Outlined.Download,
+                    expanded = followingInboxExpanded, onToggle = { followingInboxExpanded = !followingInboxExpanded })
+            }
+            if (followingInboxExpanded) {
+                items(followingInbox, key = { "fin_${it.url}" }) { entry ->
+                    RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
+                        slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
+                        profileCache = profileCache, profileRevision = profileRevision,
+                        onRelayClick = { onOpenRelayLog(entry.url) },
+                        onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
+                        onProfileClick = onProfileClick, modifier = Modifier.animateItem())
+                }
+            }
+        }
+
+        // Indexer Relays
+        if (indexerRelays.isNotEmpty()) {
+            item(key = "section_indexer") {
+                SectionHeader(title = "Indexer Relays", count = indexerRelays.size, icon = Icons.Outlined.Storage,
+                    expanded = indexerExpanded, onToggle = { indexerExpanded = !indexerExpanded })
+            }
+            if (indexerExpanded) {
+                items(indexerRelays, key = { "idx_${it.url}" }) { entry ->
+                    RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
+                        slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
+                        profileCache = profileCache, profileRevision = profileRevision,
+                        onRelayClick = { onOpenRelayLog(entry.url) },
+                        onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
+                        onProfileClick = onProfileClick, modifier = Modifier.animateItem())
+                }
+            }
+        }
+
+        // Other Relays
+        if (otherRelays.isNotEmpty()) {
+            item(key = "section_other") {
+                SectionHeader(title = "Other Relays", count = otherRelays.size, icon = Icons.Outlined.Public,
+                    expanded = otherExpanded, onToggle = { otherExpanded = !otherExpanded })
+            }
+            if (otherExpanded) {
+                items(otherRelays, key = { "oth_${it.url}" }) { entry ->
+                    RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
+                        slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
+                        profileCache = profileCache, profileRevision = profileRevision,
+                        onRelayClick = { onOpenRelayLog(entry.url) },
+                        onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
+                        onProfileClick = onProfileClick, modifier = Modifier.animateItem())
+                }
+            }
+        }
+
+        // Empty state
+        if (myRelays.isEmpty() && followingOutbox.isEmpty() && followingInbox.isEmpty()
+            && indexerRelays.isEmpty() && otherRelays.isEmpty()) {
+            item(key = "empty") {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.size(72.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.Public, null, Modifier.size(36.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Text("No relay activity yet", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Health data will appear as relays connect",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+// ── TAB 2: Delivery ──
+// ══════════════════════════════════════════════════════
+
+@Composable
+private fun DeliveryTab(
+    publishReports: List<RelayHealthTracker.PublishReport>,
+    onOpenPublishResults: () -> Unit,
+    onOpenRelayLog: (String) -> Unit
+) {
+    val deliveryStats = remember { RelayDeliveryTracker.getStats() }
+    val allRelays = remember(deliveryStats) {
+        deliveryStats.entries
+            .filter { it.value.expected >= 1.0 }
+            .sortedByDescending { it.value.successRate }
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Publish results card
+        if (publishReports.isNotEmpty()) {
+            item(key = "publish_card") {
+                val failedCount = publishReports.count { it.hasFailures }
+                val latestReport = publishReports.firstOrNull()
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenPublishResults),
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (failedCount > 0)
+                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                    else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
+                    tonalElevation = 0.5.dp
+                ) {
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable(onClick = onOpenNeedsAttention)
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            Icons.Outlined.Warning,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(18.dp)
+                            Icons.Outlined.Publish, null, Modifier.size(20.dp),
+                            tint = if (failedCount > 0) MaterialTheme.colorScheme.error
+                                   else MaterialTheme.colorScheme.primary
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "${troubleRelays.size} relay${if (troubleRelays.size != 1) "s" else ""} need attention",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Icon(
-                            Icons.Filled.ChevronRight,
-                            contentDescription = "View all",
-                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.6f),
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-                }
-                item(key = "attention_spacer") {
-                    Spacer(Modifier.height(4.dp))
-                }
-            }
-
-            // ── Publish Results navigation card ──
-            if (publishReports.isNotEmpty()) {
-                item(key = "publish_nav_card") {
-                    val failedCount = publishReports.count { it.hasFailures }
-                    val latestReport = publishReports.firstOrNull()
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 6.dp)
-                            .clickable(onClick = onOpenPublishResults),
-                        shape = RoundedCornerShape(14.dp),
-                        color = if (failedCount > 0)
-                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
-                        else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
-                        tonalElevation = 0.5.dp
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Outlined.Publish,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp),
-                                tint = if (failedCount > 0) MaterialTheme.colorScheme.error
-                                       else MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    text = "Publish Results",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    text = buildString {
-                                        append("${publishReports.size} events")
-                                        if (failedCount > 0) append(" · $failedCount with failures")
-                                        latestReport?.let {
-                                            val ageMs = System.currentTimeMillis() - it.timestamp
-                                            val ago = when {
-                                                ageMs < 60_000 -> "just now"
-                                                ageMs < 3_600_000 -> "${ageMs / 60_000}m ago"
-                                                else -> "${ageMs / 3_600_000}h ago"
-                                            }
-                                            append(" · latest $ago")
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Publish Results", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                buildString {
+                                    append("${publishReports.size} events")
+                                    if (failedCount > 0) append(" · $failedCount with failures")
+                                    latestReport?.let {
+                                        val ageMs = System.currentTimeMillis() - it.timestamp
+                                        val ago = when {
+                                            ageMs < 60_000 -> "just now"
+                                            ageMs < 3_600_000 -> "${ageMs / 60_000}m ago"
+                                            else -> "${ageMs / 3_600_000}h ago"
                                         }
-                                    },
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Icon(
-                                Icons.Filled.ChevronRight,
-                                contentDescription = "View all",
-                                modifier = Modifier.size(18.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                        append(" · latest $ago")
+                                    }
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        Icon(Icons.Filled.ChevronRight, null, Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                     }
                 }
             }
+        }
 
-            // ── Outbox Delivery Stats (Thompson Sampling) ──
-            item(key = "outbox_stats") {
-                val deliveryStats = remember { RelayDeliveryTracker.getStats() }
-                if (deliveryStats.isNotEmpty()) {
-                    val topRelays = remember(deliveryStats) {
-                        deliveryStats.entries
-                            .filter { it.value.expected >= 1.0 }
-                            .sortedByDescending { it.value.successRate }
-                            .take(6)
-                    }
-                    if (topRelays.isNotEmpty()) {
-                        OutboxDeliveryCard(topRelays = topRelays)
-                    }
-                }
+        // Outbox delivery summary card
+        if (allRelays.isNotEmpty()) {
+            item(key = "delivery_summary") {
+                val topRelays = allRelays.take(6)
+                OutboxDeliveryCard(topRelays = topRelays)
             }
+        }
 
-            // ── Network Overview Card ──
-            item(key = "overview") {
-                NetworkOverviewCard(
-                    healthScore = healthScore,
-                    connectedCount = connectedCount,
-                    totalTracked = totalTracked,
-                    totalEvents = totalEvents,
-                    totalActiveSubs = totalActiveSubs,
-                    totalQueuedSubs = totalQueuedSubs,
-                    avgLatency = avgLatency,
-                    troubleCount = troubleRelays.size,
-                    followingRelayCount = followingRelayCount
+        // Full delivery stats — every relay with data
+        if (allRelays.isNotEmpty()) {
+            item(key = "full_delivery_header") {
+                Text(
+                    "All Relays",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    letterSpacing = 0.5.sp,
+                    modifier = Modifier.padding(top = 4.dp)
                 )
             }
+            items(allRelays, key = { "delivery_${it.key}" }) { (url, stat) ->
+                val displayUrl = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+                val rate = stat.successRate
+                val rateColor = when {
+                    rate >= 0.8 -> Color(0xFF4CAF50)
+                    rate >= 0.5 -> Color(0xFFFFA726)
+                    rate > 0.0 -> MaterialTheme.colorScheme.error
+                    else -> MaterialTheme.colorScheme.outline
+                }
+                val animatedRate by animateFloatAsState(
+                    targetValue = rate.toFloat().coerceIn(0f, 1f),
+                    animationSpec = tween(400),
+                    label = "delRate_$displayUrl"
+                )
 
-            // ── Loading indicator for NIP-65 batch fetch ──
-            if (authorRelaySnapshot.isEmpty() && batchFetchTriggered) {
-                item(key = "loading_nip65") {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text(
-                            text = "Loading relay lists for followed users…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // ── My Relays (user's own inbox/outbox) ──
-            if (myRelays.isNotEmpty()) {
-                item(key = "section_my") {
-                    SectionHeader(
-                        title = "My Relays",
-                        count = myRelays.size,
-                        icon = Icons.Outlined.Person,
-                        expanded = myRelaysExpanded,
-                        onToggle = { myRelaysExpanded = !myRelaysExpanded }
-                    )
-                }
-                if (myRelaysExpanded) {
-                    items(myRelays, key = { "my_${it.url}" }) { entry ->
-                        RelayDirectoryRow(
-                            entry = entry,
-                            liveStatus = perRelayState[entry.url],
-                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
-                            nip11 = nip11,
-                            profileCache = profileCache,
-                            profileRevision = profileRevision,
-                            onRelayClick = { onOpenRelayLog(entry.url) },
-                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
-                            onProfileClick = onProfileClick,
-                            modifier = Modifier.animateItem()
-                        )
-                    }
-                }
-            }
-
-            // ── Following Outbox (relays followed users write to) ──
-            if (followingOutbox.isNotEmpty()) {
-                item(key = "section_following_outbox") {
-                    SectionHeader(
-                        title = "Following · Outbox",
-                        count = followingOutbox.size,
-                        icon = Icons.Outlined.Upload,
-                        expanded = followingOutboxExpanded,
-                        onToggle = { followingOutboxExpanded = !followingOutboxExpanded }
-                    )
-                }
-                if (followingOutboxExpanded) {
-                    items(followingOutbox, key = { "fout_${it.url}" }) { entry ->
-                        RelayDirectoryRow(
-                            entry = entry,
-                            liveStatus = perRelayState[entry.url],
-                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
-                            nip11 = nip11,
-                            profileCache = profileCache,
-                            profileRevision = profileRevision,
-                            onRelayClick = { onOpenRelayLog(entry.url) },
-                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
-                            onProfileClick = onProfileClick,
-                            modifier = Modifier.animateItem()
-                        )
-                    }
-                }
-            }
-
-            // ── Following Inbox (relays followed users read from) ──
-            if (followingInbox.isNotEmpty()) {
-                item(key = "section_following_inbox") {
-                    SectionHeader(
-                        title = "Following · Inbox",
-                        count = followingInbox.size,
-                        icon = Icons.Outlined.Download,
-                        expanded = followingInboxExpanded,
-                        onToggle = { followingInboxExpanded = !followingInboxExpanded }
-                    )
-                }
-                if (followingInboxExpanded) {
-                    items(followingInbox, key = { "fin_${it.url}" }) { entry ->
-                        RelayDirectoryRow(
-                            entry = entry,
-                            liveStatus = perRelayState[entry.url],
-                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
-                            nip11 = nip11,
-                            profileCache = profileCache,
-                            profileRevision = profileRevision,
-                            onRelayClick = { onOpenRelayLog(entry.url) },
-                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
-                            onProfileClick = onProfileClick,
-                            modifier = Modifier.animateItem()
-                        )
-                    }
-                }
-            }
-
-            // ── Indexer Relays (collapsed by default) ──
-            if (indexerRelays.isNotEmpty()) {
-                item(key = "section_indexer") {
-                    SectionHeader(
-                        title = "Indexer Relays",
-                        count = indexerRelays.size,
-                        icon = Icons.Outlined.Storage,
-                        expanded = indexerExpanded,
-                        onToggle = { indexerExpanded = !indexerExpanded }
-                    )
-                }
-                if (indexerExpanded) {
-                    items(indexerRelays, key = { "idx_${it.url}" }) { entry ->
-                        RelayDirectoryRow(
-                            entry = entry,
-                            liveStatus = perRelayState[entry.url],
-                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
-                            nip11 = nip11,
-                            profileCache = profileCache,
-                            profileRevision = profileRevision,
-                            onRelayClick = { onOpenRelayLog(entry.url) },
-                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
-                            onProfileClick = onProfileClick,
-                            modifier = Modifier.animateItem()
-                        )
-                    }
-                }
-            }
-
-            // ── Other Relays ──
-            if (otherRelays.isNotEmpty()) {
-                item(key = "section_other") {
-                    SectionHeader(
-                        title = "Other Relays",
-                        count = otherRelays.size,
-                        icon = Icons.Outlined.Public,
-                        expanded = otherExpanded,
-                        onToggle = { otherExpanded = !otherExpanded }
-                    )
-                }
-                if (otherExpanded) {
-                    items(otherRelays, key = { "oth_${it.url}" }) { entry ->
-                        RelayDirectoryRow(
-                            entry = entry,
-                            liveStatus = perRelayState[entry.url],
-                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')],
-                            nip11 = nip11,
-                            profileCache = profileCache,
-                            profileRevision = profileRevision,
-                            onRelayClick = { onOpenRelayLog(entry.url) },
-                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
-                            onProfileClick = onProfileClick,
-                            modifier = Modifier.animateItem()
-                        )
-                    }
-                }
-            }
-
-            // ── Empty State ──
-            if (healthMap.isEmpty() && authorRelaySnapshot.isEmpty()) {
-                item(key = "empty") {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 64.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Surface(
-                            shape = CircleShape,
-                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            modifier = Modifier.size(72.dp)
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenRelayLog(url) },
+                    shape = RoundedCornerShape(10.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(rateColor)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                displayUrl,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                "${(rate * 100).toInt()}%",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = rateColor
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        // Rate bar
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    Icons.Outlined.Public,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(36.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxHeight()
+                                    .fillMaxWidth(animatedRate)
+                                    .clip(RoundedCornerShape(2.dp))
+                                    .background(rateColor)
+                            )
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                            Text("${stat.delivered.toInt()} delivered",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("${stat.expected.toInt()} expected",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            val missed = (stat.expected - stat.delivered).toInt().coerceAtLeast(0)
+                            if (missed > 0) {
+                                Text("$missed missed",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Empty state
+        if (allRelays.isEmpty() && publishReports.isEmpty()) {
+            item(key = "delivery_empty") {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.size(72.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.Outbox, null, Modifier.size(36.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Text("No delivery data yet", style = MaterialTheme.typography.titleSmall)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Publish events to see relay delivery performance",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════
+// ── TAB 3: Attention ──
+// ══════════════════════════════════════════════════════
+
+@Composable
+private fun AttentionTab(
+    troubleRelays: List<String>,
+    healthMap: Map<String, RelayHealthInfo>,
+    autoBlockExpiryMap: Map<String, Long>,
+    onOpenNeedsAttention: () -> Unit,
+    onOpenRelayLog: (String) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        if (troubleRelays.isEmpty()) {
+            item(key = "attention_empty") {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Surface(shape = CircleShape, color = Color(0xFF4CAF50).copy(alpha = 0.12f),
+                        modifier = Modifier.size(72.dp)) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Outlined.CheckCircle, null, Modifier.size(36.dp),
+                                tint = Color(0xFF4CAF50))
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Text("All clear", style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("No relays need attention right now",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        } else {
+            item(key = "attention_summary") {
+                Surface(
+                    modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenNeedsAttention),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Outlined.Warning, null, Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "${troubleRelays.size} relay${if (troubleRelays.size != 1) "s" else ""} need attention",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Text("Tap to open full management view",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Icon(Icons.Filled.ChevronRight, null, Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.6f))
+                    }
+                }
+            }
+
+            items(troubleRelays, key = { "trouble_$it" }) { url ->
+                val health = healthMap[url]
+                val isBlocked = health?.isBlocked == true
+                val isFlagged = health?.isFlagged == true
+                val expiry = autoBlockExpiryMap[url]
+
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onOpenRelayLog(url) },
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isBlocked) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.12f)
+                            else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.12f)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                if (isBlocked) Icons.Outlined.Block else Icons.Outlined.Warning,
+                                null, Modifier.size(16.dp),
+                                tint = if (isBlocked) MaterialTheme.colorScheme.error
+                                       else MaterialTheme.colorScheme.tertiary
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isBlocked) MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
+                                        else MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    if (isBlocked) "Blocked" else "Flagged",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = if (isBlocked) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.tertiary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                 )
                             }
                         }
-                        Spacer(Modifier.height(16.dp))
-                        Text(
-                            text = "No relay activity yet",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = "Health data will appear as relays connect",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+
+                        if (health != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("${health.consecutiveFailures} consecutive failures",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (health.connectionFailures > 0) {
+                                    Text("${health.connectionFailures} total",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            health.lastError?.let { err ->
+                                Spacer(Modifier.height(4.dp))
+                                Text("$err",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+
+                        if (expiry != null) {
+                            val remaining = expiry - System.currentTimeMillis()
+                            if (remaining > 0) {
+                                Spacer(Modifier.height(4.dp))
+                                Text("Auto-unblocks in ${remaining / 3_600_000}h ${(remaining % 3_600_000) / 60_000}m",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (isBlocked) {
+                                Surface(
+                                    onClick = { RelayHealthTracker.unblockRelay(url) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                ) {
+                                    Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Outlined.LockOpen, null, Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.primary)
+                                        Text("Unblock", style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            }
+                            if (isFlagged && !isBlocked) {
+                                Surface(
+                                    onClick = { RelayHealthTracker.unflagRelay(url) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                ) {
+                                    Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Outlined.CheckCircle, null, Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.primary)
+                                        Text("Dismiss", style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                Surface(
+                                    onClick = { RelayHealthTracker.blockRelay(url) },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.08f)
+                                ) {
+                                    Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Icon(Icons.Outlined.Block, null, Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.error)
+                                        Text("Block", style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.error)
+                                    }
+                                }
+                            }
+                            Surface(
+                                onClick = { RelayHealthTracker.resetRelay(url) },
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerHighest
+                            ) {
+                                Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    Icon(Icons.Outlined.RestartAlt, null, Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Reset", style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -659,9 +1260,7 @@ private fun OutboxDeliveryCard(
     topRelays: List<Map.Entry<String, RelayDeliveryTracker.RelayStats>>
 ) {
     Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 1.dp
@@ -959,7 +1558,7 @@ private fun NetworkOverviewCard(
     totalEvents: Long,
     totalActiveSubs: Int,
     totalQueuedSubs: Int,
-    avgLatency: Long,
+    avgConnectTime: Long,
     troubleCount: Int,
     followingRelayCount: Int
 ) {
@@ -1079,13 +1678,13 @@ private fun NetworkOverviewCard(
                     badge = if (totalQueuedSubs > 0) "+$totalQueuedSubs queued" else null
                 )
                 OverviewStat(
-                    label = "Latency",
-                    value = if (avgLatency > 0) "${avgLatency}ms" else "—",
+                    label = "Connect",
+                    value = if (avgConnectTime > 0) "${avgConnectTime}ms" else "—",
                     icon = Icons.Outlined.Speed,
                     accent = when {
-                        avgLatency in 1..199 -> Color(0xFF4CAF50)
-                        avgLatency in 200..499 -> Color(0xFFFFA726)
-                        avgLatency >= 500 -> MaterialTheme.colorScheme.error
+                        avgConnectTime in 1..999 -> Color(0xFF4CAF50)
+                        avgConnectTime in 1000..2999 -> Color(0xFFFFA726)
+                        avgConnectTime >= 3000 -> MaterialTheme.colorScheme.error
                         else -> null
                     }
                 )
@@ -1341,16 +1940,29 @@ private fun RelayDirectoryRow(
                                     text = formatCount(health.eventsReceived)
                                 )
                             }
-                            if (health != null && health.avgLatencyMs > 0) {
-                                val latColor = when {
-                                    health.avgLatencyMs < 200 -> Color(0xFF4CAF50)
-                                    health.avgLatencyMs < 500 -> Color(0xFFFFA726)
+                            if (health != null && health.connectTimeMs > 0) {
+                                val ctColor = when {
+                                    health.connectTimeMs < 1000 -> Color(0xFF4CAF50)
+                                    health.connectTimeMs < 3000 -> Color(0xFFFFA726)
                                     else -> MaterialTheme.colorScheme.error
                                 }
                                 MetricLabel(
                                     icon = Icons.Outlined.Speed,
-                                    text = "${health.avgLatencyMs}ms",
-                                    tint = latColor
+                                    text = "${health.connectTimeMs}ms",
+                                    tint = ctColor
+                                )
+                            }
+                            if (health != null && health.lastEventAt > 0) {
+                                val recency = formatEventRecency(health.lastEventAt)
+                                val recencyColor = when {
+                                    System.currentTimeMillis() - health.lastEventAt < 60_000 -> Color(0xFF4CAF50)
+                                    System.currentTimeMillis() - health.lastEventAt < 300_000 -> MaterialTheme.colorScheme.onSurfaceVariant
+                                    else -> MaterialTheme.colorScheme.outline
+                                }
+                                MetricLabel(
+                                    icon = Icons.Outlined.Schedule,
+                                    text = recency,
+                                    tint = recencyColor
                                 )
                             }
                         }
@@ -1450,6 +2062,19 @@ private fun StatusBadge(text: String, color: Color) {
             color = color,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
         )
+    }
+}
+
+// ── Format event recency ──
+
+private fun formatEventRecency(epochMs: Long): String {
+    val delta = System.currentTimeMillis() - epochMs
+    return when {
+        delta < 0 -> "now"
+        delta < 60_000 -> "${delta / 1000}s ago"
+        delta < 3_600_000 -> "${delta / 60_000}m ago"
+        delta < 86_400_000 -> "${delta / 3_600_000}h ago"
+        else -> "${delta / 86_400_000}d ago"
     }
 }
 

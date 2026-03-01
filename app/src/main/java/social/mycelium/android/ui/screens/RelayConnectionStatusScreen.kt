@@ -187,8 +187,8 @@ private fun RelayConnectionRow(
                         RelayEndpointStatus.Failed -> "Failed"
                     })
                     if (health != null) {
-                        if (health.avgLatencyMs > 0 && status == RelayEndpointStatus.Connected) {
-                            append(" \u00b7 ${health.avgLatencyMs}ms")
+                        if (health.connectTimeMs > 0 && status == RelayEndpointStatus.Connected) {
+                            append(" · ${health.connectTimeMs}ms")
                         }
                         if (health.eventsReceived > 0) {
                             append(" \u00b7 ${formatEventCount(health.eventsReceived)} events")

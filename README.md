@@ -22,7 +22,7 @@ Single-activity MVVM with Jetpack Navigation Compose. See [`docs/ARCHITECTURE.md
 
 **Key layers:**
 - **Cybin** (`cybin/`) — In-repo Nostr protocol library: event model, filters, secp256k1 signing, NIP implementations, Ktor WebSocket relay client with priority-based subscription scheduler
-- **Relay Layer** (`relay/`) — `RelayConnectionStateMachine` (Tinder state machine), `SubscriptionMultiplexer` (filter merging, ref-counting, dedup), `RelayHealthTracker`, `Nip42AuthHandler`, `NetworkConnectivityMonitor`
+- **Relay Layer** (`relay/`) — `RelayConnectionStateMachine`, `SubscriptionMultiplexer` (filter merging, ref-counting, dedup), `RelayHealthTracker`, `Nip42AuthHandler`, `NetworkConnectivityMonitor`
 - **Repository Layer** (`repository/`) — 33 specialized data repositories handling feed ingestion, thread resolution, notifications, profile metadata, relay lists, bookmarks, moderation, and payments
 - **ViewModel Layer** (`viewmodel/`) — 11 ViewModels (3 activity-scoped global, 8 screen-scoped)
 - **UI Layer** (`ui/`) — 44 screen composables, 42 reusable components, Material Design 3 theming
@@ -79,25 +79,21 @@ NIP-01 (protocol), NIP-02 (contacts), NIP-04 (encryption), NIP-10 (reply threadi
 
 ## Changelog
 
-### v0.4.23-beta (2026-02-28)
-- **Feed scroll position preserved** — dismissing fullscreen media no longer resets feed position (dashboard and profile)
-- **Profile header state persists** — collapsing header offset, selected tab, and bio expanded state survive navigation
-- **Video thumbnails** — Media tab now renders video frame thumbnails via Coil VideoFrameDecoder
-- **Contextual media fullscreen** — tapping media opens per-note gallery instead of all-profile media
-- **Scrollable profile header** — profile top section now collapses on scroll with nested scroll connection
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
-### v0.1.2 (2026-02-08)
-- Kind-1111 merge/UI fix, edge-to-edge embeds and images in feed
-- Conditional body highlight, relay orbs, OP styling
+## Credits & Acknowledgments
 
-### v0.1.1 (2026-02-08)
-- Amber lifecycle fix, zap error feedback, relay picker, NIP-25 on kind-1111
+Mycelium builds on the work of several open-source projects:
 
-### v0.1.0 (2026-02-08)
-- Thread UI polish, topic and thread reply notifications
-
-### v0.0.3 (2025-01-22)
-- Lightning Zaps and Wallet Connect
+- **[Amethyst / Quartz](https://github.com/vitorpamplona/amethyst)** — Reference Nostr client architecture, outbox relay model, relay hint extraction, and expanded relay fetch strategies
+- **[NextPlayer](https://github.com/anilbeesetti/nextplayer)** — Video gesture system (seek, volume/brightness, pinch-to-zoom) adapted for Compose
+- **[TinderStateMachine](https://github.com/nicklashansen/tinder-state-machine)** — Finite state machine used in relay connection management
+- **[nostr.watch](https://nostr.watch)** — NIP-66 relay discovery and monitoring data
+- **[relay.tools](https://relay.tools)** — Relay metadata and information service
+- **[secp256k1-kmp](https://github.com/nicklashansen/secp256k1-kmp)** — Kotlin Multiplatform secp256k1 cryptography for Nostr event signing
+- **[Ktor](https://ktor.io)** — Kotlin async HTTP client and WebSocket engine
+- **[Coil](https://coil-kt.github.io/coil/)** — Image loading with GIF and video frame support
+- **[Media3 / ExoPlayer](https://developer.android.com/media/media3)** — Video and livestream playback
 
 ## License
 

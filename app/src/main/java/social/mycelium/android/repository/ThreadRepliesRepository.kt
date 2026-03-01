@@ -272,6 +272,27 @@ class ThreadRepliesRepository {
         Log.d(TAG, "📬 Pending reply from ${reply.author.displayName}: ${reply.content.take(40)}...")
     }
 
+    /**
+     * Merge a confirmed relay URL into a displayed reply (called when relay sends OK).
+     * Updates relay orbs in real-time as confirmations arrive.
+     */
+    fun mergePublishRelayUrl(eventId: String, relayUrl: String) {
+        if (relayUrl.isBlank()) return
+        val current = _replies.value
+        for ((noteId, replies) in current) {
+            val idx = replies.indexOfFirst { it.id == eventId }
+            if (idx >= 0) {
+                val reply = replies[idx]
+                if (relayUrl in reply.relayUrls) return
+                val updated = replies.toMutableList()
+                updated[idx] = reply.copy(relayUrls = reply.relayUrls + relayUrl)
+                _replies.value = current + (noteId to updated)
+                Log.d(TAG, "Merged publish relay $relayUrl into reply ${eventId.take(8)}")
+                return
+            }
+        }
+    }
+
     /** Merge relay URLs for an already-displayed reply (same event from different relay). */
     private fun mergeRelayUrls(noteId: String, reply: ThreadReply) {
         if (reply.relayUrls.isEmpty()) return

@@ -212,6 +212,10 @@ fun ModernThreadViewScreen(
     zappedNoteIds: Set<String> = emptySet(),
     /** Amount (sats) the current user zapped per note ID; for "You zapped X sats". */
     myZappedAmountByNoteId: Map<String, Long> = emptyMap(),
+    /** Note IDs the current user has boosted (repost icon turns green). */
+    boostedNoteIds: Set<String> = emptySet(),
+    /** Kind-30011 vote: (noteId, authorPubkey, direction +1/-1). */
+    onVote: ((String, String, Int) -> Unit)? = null,
     onCommentLike: (String) -> Unit = {},
     onCommentReply: (String) -> Unit = {},
     /** When non-null and replyKind==1111, enables kind-1111 reply dialog and publish. Returns error message or null on success. */
@@ -607,7 +611,11 @@ fun ModernThreadViewScreen(
                         onCustomZapSend = onCustomZapSend,
                         onZap = effectiveOnZap,
                         isZapInProgress = note.id in zapInProgressNoteIds,
-                        isZapped = note.id in zappedNoteIds,
+                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(note.id),
+                        isBoosted = note.id in boostedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.id),
+                        onVote = onVote,
+                        ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
+                        voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
                         myZappedAmount = myZappedAmountByNoteId[note.id],
                         overrideReplyCount = repliesState.totalReplyCount,
                         overrideZapCount = noteCountsByNoteId[note.id]?.zapCount,
@@ -905,6 +913,7 @@ fun ModernThreadViewScreen(
                             },
                             onNoteClick = { clickedNote -> if (clickedNote.id != note.id) onNoteClick(clickedNote) },
                             onReact = onReact,
+                            onVote = onVote,
                             onImageTap = { urls, idx -> onImageTap(note, urls, idx) },
                             onVideoClick = onVideoClick,
                             collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
@@ -2018,11 +2027,14 @@ private fun ReplyControlsPanel(
     onZap: (String, Long) -> Unit,
     onZapSettings: () -> Unit,
     onReact: (Note, String) -> Unit,
+    onVote: ((String, String, Int) -> Unit)? = null,
     onRelayClick: (String) -> Unit = {},
     onNavigateToRelayList: ((List<String>) -> Unit)? = null,
     isScrolling: Boolean = false,
 ) {
     var isDetailsExpanded by remember { mutableStateOf(false) }
+    val replyOwnVote = social.mycelium.android.repository.VoteRepository.getOwnVote(reply.id)
+    val replyVoteScore = social.mycelium.android.repository.VoteRepository.getScore(reply.id)
 
     AnimatedVisibility(
         visible = isControlsExpanded,
@@ -2062,14 +2074,28 @@ private fun ReplyControlsPanel(
                         CompactModernButton(
                             icon = Icons.Outlined.ArrowUpward,
                             contentDescription = "Upvote",
-                            isActive = false,
-                            onClick = { /* placeholder for future voting */ }
+                            isActive = replyOwnVote > 0,
+                            tint = if (replyOwnVote > 0) Color(0xFF8FBC8F) else null,
+                            onClick = { onVote?.invoke(reply.id, reply.author.id, 1) }
                         )
+                        if (replyVoteScore != 0) {
+                            Text(
+                                text = if (replyVoteScore > 0) "+$replyVoteScore" else "$replyVoteScore",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = when {
+                                    replyVoteScore > 0 -> Color(0xFF8FBC8F)
+                                    replyVoteScore < 0 -> Color(0xFFE57373)
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.padding(horizontal = 1.dp)
+                            )
+                        }
                         CompactModernButton(
                             icon = Icons.Outlined.ArrowDownward,
                             contentDescription = "Downvote",
-                            isActive = false,
-                            onClick = { /* placeholder for future voting */ }
+                            isActive = replyOwnVote < 0,
+                            tint = if (replyOwnVote < 0) Color(0xFFE57373) else null,
+                            onClick = { onVote?.invoke(reply.id, reply.author.id, -1) }
                         )
                     }
                     // Lightning (Zap)
@@ -2247,7 +2273,7 @@ private fun ReplyDetailsPanel(
     val hasZaps = detailZapCount > 0
 
     AnimatedVisibility(
-        visible = isDetailsExpanded && (hasReactions || hasZaps),
+        visible = isDetailsExpanded,
         enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
         exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
     ) {
@@ -2263,6 +2289,13 @@ private fun ReplyDetailsPanel(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            if (!hasReactions && !hasZaps) {
+                Text(
+                    text = "No reactions or zaps yet",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
+            }
                 // Reactions section
                 if (hasReactions) {
                     var reactionsExpanded by remember { mutableStateOf(false) }
@@ -2481,6 +2514,8 @@ private fun ThreadedReplyCard(
     onNoteClick: (Note) -> Unit = {},
     /** Send a reaction (emoji) to a reply. */
     onReact: (Note, String) -> Unit = { _, _ -> },
+    /** Kind-30011 vote: (noteId, authorPubkey, direction +1/-1). */
+    onVote: ((String, String, Int) -> Unit)? = null,
     onImageTap: (List<String>, Int) -> Unit = { _, _ -> },
     onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
     /** When non-null and > 0, shows "N replies in thread" badge (root-only mode). */
@@ -2654,6 +2689,7 @@ private fun ThreadedReplyCard(
                             onZap = onZap,
                             onZapSettings = onZapSettings,
                             onReact = onReact,
+                            onVote = onVote,
                             onRelayClick = onRelayClick,
                             onNavigateToRelayList = onNavigateToRelayList,
                             isScrolling = isScrolling,
@@ -2741,6 +2777,7 @@ private fun ThreadedReplyCard(
                         onReadMoreReplies = onReadMoreReplies,
                         onNoteClick = onNoteClick,
                         onReact = onReact,
+                        onVote = onVote,
                         onImageTap = onImageTap,
                         onVideoClick = onVideoClick,
                         modifier = Modifier.fillMaxWidth()

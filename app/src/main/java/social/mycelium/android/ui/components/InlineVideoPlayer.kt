@@ -32,12 +32,13 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import social.mycelium.android.R
 import social.mycelium.android.ui.settings.MediaPreferences
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.layout.Column
@@ -50,6 +51,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.sp
 
@@ -102,8 +104,27 @@ private fun FeedVideoPlayer(
     var isMuted by remember(url) { mutableStateOf(VideoMuteCache.get(url) ?: !prefSound) }
     var isActuallyPlaying by remember(url) { mutableStateOf(prefAutoplay) }
     var showControls by remember { mutableStateOf(true) }
+    var playbackProgress by remember(url) { mutableFloatStateOf(0f) }
+    var playbackDuration by remember(url) { mutableLongStateOf(0L) }
+    var playbackPosition by remember(url) { mutableLongStateOf(0L) }
+    var isSeeking by remember(url) { mutableStateOf(false) }
     // Track fullscreen transition so onDispose uses detach (keep player) instead of release (destroy)
     var goingFullscreen by remember(url) { mutableStateOf(false) }
+
+    // Poll playback position for seekbar
+    LaunchedEffect(player, isActuallyPlaying) {
+        val p = player ?: return@LaunchedEffect
+        while (isActuallyPlaying) {
+            if (!isSeeking) {
+                val dur = p.duration.coerceAtLeast(1L)
+                val pos = p.currentPosition
+                playbackDuration = dur
+                playbackPosition = pos
+                playbackProgress = (pos.toFloat() / dur).coerceIn(0f, 1f)
+            }
+            delay(250)
+        }
+    }
 
     // Auto-hide controls after 3s
     LaunchedEffect(showControls) {
@@ -196,12 +217,11 @@ private fun FeedVideoPlayer(
                 .fillMaxSize()
                 .onSizeChanged { stablePlayerView.value?.requestLayout() },
             factory = { ctx ->
-                PlayerView(ctx).apply {
-                    useController = false
-                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                // Inflate from XML to get surface_type="texture_view" which
+                // prevents HDR video from overriding Night Mode / dark theme.
+                (android.view.LayoutInflater.from(ctx)
+                    .inflate(R.layout.video_player_texture_view, null) as PlayerView).apply {
                     stablePlayerView.value = this
-                    // Attach current player if already acquired
                     player?.let { this.player = it }
                 }
             },
@@ -250,7 +270,17 @@ private fun FeedVideoPlayer(
                         player = null
                         onFullscreenClick()
                     },
-                    isFullscreen = false
+                    isFullscreen = false,
+                    progress = playbackProgress,
+                    duration = playbackDuration,
+                    position = playbackPosition,
+                    onSeekStart = { isSeeking = true },
+                    onSeek = { frac -> playbackProgress = frac; playbackPosition = (frac * playbackDuration).toLong() },
+                    onSeekEnd = { frac ->
+                        val seekMs = (frac * p.duration).toLong()
+                        p.seekTo(seekMs)
+                        isSeeking = false
+                    }
                 )
             }
         }
@@ -260,6 +290,13 @@ private fun FeedVideoPlayer(
 /**
  * Fullscreen video player: acquires the pooled ExoPlayer for seamless transition.
  * Inherits mute state from feed via [VideoMuteCache].
+ *
+ * Gesture support (inspired by Next Player):
+ * - Horizontal swipe to seek
+ * - Vertical swipe left side for brightness, right side for volume
+ * - Double-tap left/right to seek ±10s
+ * - Long-press for 2× speed
+ * - Pinch-to-zoom
  */
 @Composable
 private fun FullVideoPlayer(
@@ -279,11 +316,20 @@ private fun FullVideoPlayer(
     var playbackPosition by remember(url) { mutableLongStateOf(0L) }
     var isSeeking by remember(url) { mutableStateOf(false) }
 
+    // Gesture state holders
+    val seekGestureState = rememberSeekGestureState(player)
+    val doubleTapState = rememberDoubleTapState(player)
+    val volumeBrightnessState = rememberVolumeAndBrightnessState()
+    val zoomState = rememberVideoZoomState()
+
+    // Track whether gesture-based seeking is active (swipe or slider)
+    val isGestureSeeking = seekGestureState.isSeeking
+
     // Poll playback position for seekbar
     LaunchedEffect(player, isActuallyPlaying) {
         val p = player ?: return@LaunchedEffect
         while (isActuallyPlaying) {
-            if (!isSeeking) {
+            if (!isSeeking && !isGestureSeeking) {
                 val dur = p.duration.coerceAtLeast(1L)
                 val pos = p.currentPosition
                 playbackDuration = dur
@@ -309,9 +355,9 @@ private fun FullVideoPlayer(
         player = p
     }
 
-    // Auto-hide controls after 3s
-    LaunchedEffect(showControls) {
-        if (showControls) {
+    // Auto-hide controls after 3s (reset when gestures are active)
+    LaunchedEffect(showControls, isGestureSeeking) {
+        if (showControls && !isGestureSeeking) {
             delay(3000)
             showControls = false
         }
@@ -327,6 +373,9 @@ private fun FullVideoPlayer(
             p.pause()
         }
     }
+
+    // Reset zoom when switching videos
+    LaunchedEffect(url) { zoomState.reset() }
 
     DisposableEffect(url) {
         onDispose {
@@ -356,13 +405,21 @@ private fun FullVideoPlayer(
     }
 
     Box(modifier = modifier) {
+        // Video surface with pinch-to-zoom transform applied
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = zoomState.zoom
+                    scaleY = zoomState.zoom
+                    translationX = zoomState.offset.x
+                    translationY = zoomState.offset.y
+                },
             factory = { ctx ->
-                PlayerView(ctx).apply {
-                    useController = false
-                    resizeMode = androidx.media3.ui.AspectRatioFrameLayout.RESIZE_MODE_FIT
-                    setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                // Inflate from XML to get surface_type="texture_view" which
+                // prevents HDR video from overriding Night Mode / dark theme.
+                (android.view.LayoutInflater.from(ctx)
+                    .inflate(R.layout.video_player_texture_view, null) as PlayerView).apply {
                     stablePlayerView.value = this
                     player?.let { this.player = it }
                 }
@@ -375,22 +432,28 @@ private fun FullVideoPlayer(
         )
 
         player?.let { p ->
-            // Tap to show/hide controls
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clickable(
-                        indication = null,
-                        interactionSource = remember { MutableInteractionSource() }
-                    ) { showControls = !showControls }
+            // Gesture detection layer (replaces simple tap-to-toggle)
+            VideoGestureLayer(
+                seekState = seekGestureState,
+                doubleTapState = doubleTapState,
+                volumeBrightnessState = volumeBrightnessState,
+                zoomState = zoomState,
+                onToggleControls = { showControls = !showControls },
             )
 
-            // Modern controls overlay
+            // Gesture feedback overlays
+            SeekGestureOverlay(seekState = seekGestureState)
+            DoubleTapSeekOverlay(doubleTapState = doubleTapState)
+            LongPressSpeedOverlay(doubleTapState = doubleTapState)
+            VolumeBrightnessOverlay(state = volumeBrightnessState)
+            ZoomIndicatorOverlay(zoomState = zoomState)
+
+            // Controls pill overlay (seekbar + buttons)
             AnimatedVisibility(
-                visible = showControls,
+                visible = showControls && !isGestureSeeking,
                 enter = fadeIn(),
                 exit = fadeOut(),
-                modifier = Modifier.align(Alignment.BottomEnd)
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
             ) {
                 VideoControlsPill(
                     isMuted = isMuted,
@@ -448,12 +511,13 @@ private fun VideoControlsPill(
 ) {
     Column(
         modifier = Modifier
+            .then(if (isFullscreen) Modifier.fillMaxWidth() else Modifier)
             .padding(8.dp)
             .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp)
     ) {
-        // Seekbar (only in fullscreen or when duration is known)
-        if (isFullscreen && duration > 0) {
+        // Seekbar (shown when duration is known)
+        if (duration > 0) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -485,8 +549,9 @@ private fun VideoControlsPill(
             }
         }
         Row(
+            modifier = if (isFullscreen) Modifier.fillMaxWidth() else Modifier,
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp)
+            horizontalArrangement = if (isFullscreen) Arrangement.SpaceEvenly else Arrangement.spacedBy(2.dp)
         ) {
             // Play/Pause
             IconButton(onClick = onPlayPauseToggle, modifier = Modifier.size(40.dp)) {
@@ -500,7 +565,7 @@ private fun VideoControlsPill(
             // Mute toggle
             IconButton(onClick = onMuteToggle, modifier = Modifier.size(40.dp)) {
                 Icon(
-                    imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                    imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
                     contentDescription = if (isMuted) "Unmute" else "Mute",
                     tint = Color.White,
                     modifier = Modifier.size(24.dp)

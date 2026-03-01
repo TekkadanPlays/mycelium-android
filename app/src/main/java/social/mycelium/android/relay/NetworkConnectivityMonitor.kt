@@ -38,9 +38,8 @@ class NetworkConnectivityMonitor(private val context: Context) {
             val now = System.currentTimeMillis()
             if (!hadNetwork && now - lastReconnectAtMs > DEBOUNCE_MS) {
                 lastReconnectAtMs = now
-                Log.i(TAG, "Network available after loss — triggering relay reconnect")
-                RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
-                RelayConnectionStateMachine.getInstance().markEventReceived() // reset keepalive timer
+                Log.i(TAG, "Network available after loss — granting amnesty and triggering relay reconnect")
+                onNetworkRegained()
             }
             hadNetwork = true
         }
@@ -61,13 +60,34 @@ class NetworkConnectivityMonitor(private val context: Context) {
                 val now = System.currentTimeMillis()
                 if (now - lastReconnectAtMs > DEBOUNCE_MS) {
                     lastReconnectAtMs = now
-                    Log.i(TAG, "Network capabilities restored — triggering relay reconnect")
-                    RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
-                    RelayConnectionStateMachine.getInstance().markEventReceived()
+                    Log.i(TAG, "Network capabilities restored — granting amnesty and triggering relay reconnect")
+                    onNetworkRegained()
                 }
                 hadNetwork = true
             }
         }
+    }
+
+    /**
+     * Called when the device regains network after a loss period.
+     * Clears all penalty state accumulated while offline, then reconnects.
+     *
+     * Order matters:
+     * 1. RelayHealthTracker amnesty — clears consecutive failures, flags, auto-blocks
+     * 2. CybinRelayPool reconnect state — clears session blacklist + attempt counters + cooldowns
+     * 3. State machine retry counter reset
+     * 4. requestReconnectOnResume — re-applies subscriptions (now with all relays unblocked)
+     */
+    private fun onNetworkRegained() {
+        val rcsm = RelayConnectionStateMachine.getInstance()
+        // 1. Clear health tracker penalties (consecutive failures, flags, auto-blocks)
+        RelayHealthTracker.grantOfflineAmnesty()
+        // 2. Clear pool-level reconnect state (session blacklist, attempt counters, cooldowns)
+        rcsm.relayPool.clearReconnectState()
+        // 3. Reset keepalive timer so stale-connection check doesn't fire immediately
+        rcsm.markEventReceived()
+        // 4. Re-apply subscriptions — filterBlocked() now returns all relays
+        rcsm.requestReconnectOnResume()
     }
 
     fun start() {

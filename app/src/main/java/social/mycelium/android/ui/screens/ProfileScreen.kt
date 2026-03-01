@@ -147,9 +147,23 @@ fun ProfileScreen(
         }
     }
 
-    // Per-tab list states (preserve scroll per tab)
-    val notesListState = rememberLazyListState()
-    val repliesListState = rememberLazyListState()
+    // Per-tab list states — use rememberSaveable to survive lifecycle stops
+    // (e.g. navigating to image_viewer/video_viewer and returning)
+    var notesScrollIndex by rememberSaveable { mutableIntStateOf(0) }
+    var notesScrollOffset by rememberSaveable { mutableIntStateOf(0) }
+    var repliesScrollIndex by rememberSaveable { mutableIntStateOf(0) }
+    var repliesScrollOffset by rememberSaveable { mutableIntStateOf(0) }
+    val notesListState = rememberLazyListState(notesScrollIndex, notesScrollOffset)
+    val repliesListState = rememberLazyListState(repliesScrollIndex, repliesScrollOffset)
+    // Continuously save scroll position so it survives lifecycle stops
+    LaunchedEffect(notesListState) {
+        snapshotFlow { notesListState.firstVisibleItemIndex to notesListState.firstVisibleItemScrollOffset }
+            .collect { (idx, offset) -> notesScrollIndex = idx; notesScrollOffset = offset }
+    }
+    LaunchedEffect(repliesListState) {
+        snapshotFlow { repliesListState.firstVisibleItemIndex to repliesListState.firstVisibleItemScrollOffset }
+            .collect { (idx, offset) -> repliesScrollIndex = idx; repliesScrollOffset = offset }
+    }
 
     // Per-tab filtered notes
     val notesOnly = remember(authorNotes) { authorNotes.filter { !it.isReply } }
@@ -582,6 +596,7 @@ private fun ProfileNoteCard(
         onZap = onZap,
         isZapInProgress = isZapInProgress(note.id),
         isZapped = isZapped(note.id),
+        isBoosted = social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.id),
         myZappedAmount = myZappedAmountForNote(note.id),
         overrideReplyCount = overrideReplyCountForNote(note.id),
         overrideZapCount = counts?.zapCount,

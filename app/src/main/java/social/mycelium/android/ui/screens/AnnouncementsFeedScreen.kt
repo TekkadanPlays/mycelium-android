@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -29,6 +30,7 @@ fun AnnouncementsFeedScreen(
     onNoteClick: (Note) -> Unit,
     onProfileClick: (String) -> Unit,
     onConfigureRelays: () -> Unit,
+    onEffectsLab: () -> Unit = {},
     topAppBarState: TopAppBarState,
     // AdaptiveHeader callbacks
     onMenuClick: () -> Unit = {},
@@ -121,6 +123,20 @@ fun AnnouncementsFeedScreen(
                     Spacer(Modifier.height(24.dp))
                     FilledTonalButton(onClick = onConfigureRelays) {
                         Text("Configure Relays")
+                    }
+                    Spacer(Modifier.height(32.dp))
+                    HorizontalDivider(modifier = Modifier.padding(horizontal = 48.dp))
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Developer Tools",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = onEffectsLab) {
+                        Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Effects Lab")
                     }
                 }
             }

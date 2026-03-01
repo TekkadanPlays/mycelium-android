@@ -4,8 +4,10 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.KeyframesSpec
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
@@ -358,19 +360,12 @@ private fun QuotedNoteContent(
         )
     }
 
-    // Outer surface: same background as body text for visual continuity
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-        shape = RectangleShape,
-        tonalElevation = 0.dp,
-        shadowElevation = 0.dp
-    ) {
-    // Inner surface: slightly elevated for quote distinction
-    Surface(
+    // Borderless quoted note: left accent bar + content, edge-to-edge
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .height(IntrinsicSize.Min)
+            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp)
             .clickable {
                 val quotedNote = Note(
                     id = meta.eventId,
@@ -384,21 +379,19 @@ private fun QuotedNoteContent(
                     relayUrls = listOfNotNull(meta.relayUrl)
                 )
                 onNoteClick(quotedNote)
-            },
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-        shape = MaterialTheme.shapes.small,
-        shadowElevation = 0.dp
+            }
     ) {
-        Row(modifier = Modifier.fillMaxWidth()) {
-            // Left accent bar
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-            )
-        Column(modifier = Modifier.padding(10.dp).weight(1f)) {
+        // Left accent bar — stretches full height of content
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .fillMaxHeight()
+                .background(
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                    shape = RoundedCornerShape(1.5.dp)
+                )
+        )
+        Column(modifier = Modifier.padding(start = 10.dp, top = 2.dp, bottom = 2.dp).weight(1f)) {
             // ── Header row: author (left) + counters & emojis (right) ──
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -471,9 +464,7 @@ private fun QuotedNoteContent(
                 onOpenImageViewer = onOpenImageViewer,
             )
         }
-        }
     }
-    } // outer Surface
 }
 
 /**
@@ -1056,6 +1047,10 @@ private fun NoteActionRow(
     actionRowSchema: ActionRowSchema,
     isZapInProgress: Boolean,
     isZapped: Boolean,
+    isBoosted: Boolean,
+    onVote: ((String, String, Int) -> Unit)?,
+    ownVoteValue: Int,
+    voteScore: Int,
     reactionEmoji: String?,
     isDetailsExpanded: Boolean,
     onDetailsToggle: () -> Unit,
@@ -1317,12 +1312,26 @@ private fun NoteActionRow(
             ActionButton(
                 icon = Icons.Outlined.ArrowUpward,
                 contentDescription = "Upvote",
-                onClick = { /* TODO: Upvote */ }
+                tint = if (ownVoteValue > 0) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
+                onClick = { onVote?.invoke(note.id, note.author.id, 1) }
             )
+            if (voteScore != 0) {
+                Text(
+                    text = if (voteScore > 0) "+$voteScore" else "$voteScore",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = when {
+                        voteScore > 0 -> Color(0xFF8FBC8F)
+                        voteScore < 0 -> Color(0xFFE57373)
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    modifier = Modifier.padding(horizontal = 2.dp)
+                )
+            }
             ActionButton(
                 icon = Icons.Outlined.ArrowDownward,
                 contentDescription = "Downvote",
-                onClick = { /* TODO: Downvote */ }
+                tint = if (ownVoteValue < 0) Color(0xFFE57373) else MaterialTheme.colorScheme.onSurfaceVariant,
+                onClick = { onVote?.invoke(note.id, note.author.id, -1) }
             )
         }
 
@@ -1331,6 +1340,7 @@ private fun NoteActionRow(
             ActionButton(
                 icon = Icons.Outlined.Repeat,
                 contentDescription = "Repost",
+                tint = if (isBoosted) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { showRepostMenu = true }
             )
         }
@@ -1520,7 +1530,7 @@ private fun PublishProgressLine(state: PublishState) {
                     modifier = Modifier
                         .fillMaxWidth(fraction = expandFraction)
                         .height(height)
-                        .background(Color(0xFF4CAF50).copy(alpha = 0.7f * (1f - fadeAlpha * 0.7f)))
+                        .background(Color(0xFF8FBC8F).copy(alpha = 0.7f * (1f - fadeAlpha * 0.7f)))
                 )
             }
         }
@@ -1533,6 +1543,117 @@ private fun PublishProgressLine(state: PublishState) {
             )
         }
     }
+}
+
+/**
+ * Like/reaction success animation — smooth pink glow pulse across the top of the card.
+ * Visually distinct from the publish progress line (pink vs green/purple).
+ */
+@Composable
+private fun ReactionSuccessLine() {
+    val infiniteTransition = rememberInfiniteTransition(label = "reaction_success")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(600, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "like_glow"
+    )
+    val pink = Color(0xFFE57373)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(pink.copy(alpha = alpha * 0.8f))
+    )
+}
+
+/**
+ * Reaction failure animation — rapid red strobe/flash that looks like an error.
+ * Uses fast staccato keyframes to distinguish from the smooth like pulse.
+ * Only shown when the event goes *nowhere* (total failure, all relays reject).
+ */
+@Composable
+private fun ReactionFailureLine() {
+    val infiniteTransition = rememberInfiniteTransition(label = "reaction_fail")
+    val flash by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = keyframes {
+                durationMillis = 400
+                0f at 0
+                1f at 50
+                0.1f at 100
+                0.9f at 150
+                0f at 200
+                0.8f at 250
+                0f at 400
+            },
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "error_strobe"
+    )
+    val errorRed = Color(0xFFD32F2F)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(errorRed.copy(alpha = flash * 0.9f))
+    )
+}
+
+/**
+ * Boost success animation — green shimmer expanding from center.
+ * Uses the same MyceliumGreen as the confirmed publish line.
+ */
+@Composable
+private fun BoostSuccessLine() {
+    val infiniteTransition = rememberInfiniteTransition(label = "boost_success")
+    val sweep by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "boost_sweep"
+    )
+    val boostGreen = Color(0xFF8FBC8F)
+    Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(fraction = sweep)
+                .height(3.dp)
+                .background(boostGreen.copy(alpha = 0.8f * (1f - sweep * 0.3f)))
+        )
+    }
+}
+
+/**
+ * Zap success animation — gold lightning pulse across the top of the card.
+ */
+@Composable
+private fun ZapSuccessLine() {
+    val infiniteTransition = rememberInfiniteTransition(label = "zap_success")
+    val alpha by infiniteTransition.animateFloat(
+        initialValue = 0.3f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "zap_glow"
+    )
+    val zapGold = Color(0xFFFFD700)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(zapGold.copy(alpha = alpha * 0.8f))
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, FlowPreview::class)
@@ -1549,6 +1670,12 @@ fun NoteCard(
     onQuote: ((Note) -> Unit)? = null,
     /** Fork: open compose pre-filled with this note's content for editing. */
     onFork: ((Note) -> Unit)? = null,
+    /** Kind-30011 vote: (noteId, authorPubkey, direction +1/-1). */
+    onVote: ((String, String, Int) -> Unit)? = null,
+    /** Current user's own vote on this note: +1, -1, or 0. */
+    ownVoteValue: Int = 0,
+    /** Net vote score for this note (upvotes - downvotes). */
+    voteScore: Int = 0,
     onProfileClick: (String) -> Unit = {},
     onNoteClick: (Note) -> Unit = {},
     /** Called when user taps the image (not the magnifier): (note, urls, index). E.g. feed = open thread, thread = open viewer. */
@@ -1588,6 +1715,8 @@ fun NoteCard(
     isZapInProgress: Boolean = false,
     /** True if current user has zapped this note (bolt turns yellow). */
     isZapped: Boolean = false,
+    /** True if current user has boosted this note (repost icon turns green). */
+    isBoosted: Boolean = false,
     /** Amount (sats) the current user zapped this note; shown as "You zapped X sats" when isZapped. */
     myZappedAmount: Long? = null,
     /** Override comment count (e.g. from ReplyCountCache when thread was loaded); used for counts row when non-null. */
@@ -1636,6 +1765,20 @@ fun NoteCard(
     var reactionEmoji by remember(note.id) { mutableStateOf(ReactionsRepository.getLastReaction(note.id)) }
     var recentEmojis by remember(accountNpub) { mutableStateOf(ReactionsRepository.getRecentEmojis(context, accountNpub)) }
 
+    // ── Note animation state (reaction / boost / zap) ─────────────────
+    // Observe ReactionsRepository.noteAnimations for this note
+    var noteAnimState by remember(note.id) { mutableStateOf<ReactionsRepository.NoteAnimationEvent?>(null) }
+    LaunchedEffect(note.id) {
+        ReactionsRepository.noteAnimations.collect { event ->
+            if (event.noteId == note.id) {
+                noteAnimState = event
+                // Auto-clear after animation duration
+                kotlinx.coroutines.delay(if (event.success) 1500L else 1200L)
+                noteAnimState = null
+            }
+        }
+    }
+
     // On-demand translation state
     var translationResult by remember(note.id) { mutableStateOf(social.mycelium.android.repository.TranslationService.getCached(note.id)) }
     var isTranslating by remember(note.id) { mutableStateOf(false) }
@@ -1678,6 +1821,63 @@ fun NoteCard(
             // ── Publish progress line ──────────────────────────────────────
             if (note.publishState != null) {
                 PublishProgressLine(state = note.publishState)
+            }
+            // ── Note animation line (reaction / boost / zap) ─────────────────
+            val animEvent = noteAnimState
+            if (animEvent != null) {
+                if (!animEvent.success) {
+                    ReactionFailureLine()
+                } else when (animEvent.type) {
+                    ReactionsRepository.AnimationType.REACTION -> ReactionSuccessLine()
+                    ReactionsRepository.AnimationType.BOOST -> BoostSuccessLine()
+                    ReactionsRepository.AnimationType.ZAP -> ZapSuccessLine()
+                }
+            }
+            // Repost label (kind-6) — at the top of the card
+            if (note.repostedByAuthors.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 0.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Repeat,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = Color(0xFF4CAF50).copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    // Stacked avatars (up to 3)
+                    val displayBoostAuthors = note.repostedByAuthors.take(3)
+                    Box(modifier = Modifier.width(if (displayBoostAuthors.size > 1) (16 + (displayBoostAuthors.size - 1) * 10).dp else 16.dp)) {
+                        displayBoostAuthors.forEachIndexed { i, author ->
+                            Box(modifier = Modifier.offset(x = (i * 10).dp)) {
+                                ProfilePicture(
+                                    author = author,
+                                    size = 16.dp,
+                                    onClick = { onProfileClick(author.id) }
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    val repostTimeText = note.repostTimestamp?.let { " \u2022 ${formatTimestamp(it)}" } ?: ""
+                    val boosterCount = note.repostedByAuthors.size
+                    val firstName = authorDisplayLabel(note.repostedByAuthors.first())
+                    val boostText = when {
+                        boosterCount == 1 -> "$firstName boosted"
+                        boosterCount == 2 -> "$firstName & ${authorDisplayLabel(note.repostedByAuthors[1])} boosted"
+                        else -> "$firstName & ${boosterCount - 1} others boosted"
+                    }
+                    Text(
+                        text = "$boostText$repostTimeText",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
             // Author info
             Row(
@@ -2040,7 +2240,7 @@ fun NoteCard(
                         if (annotated.isNotEmpty()) {
                             Surface(
                                 modifier = Modifier.fillMaxWidth(),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                color = Color.Transparent,
                                 shape = RectangleShape,
                                 tonalElevation = 0.dp,
                                 shadowElevation = 0.dp
@@ -2114,7 +2314,7 @@ fun NoteCard(
                         val activity = allActivities.firstOrNull { it.id == block.eventId }
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                            color = Color.Transparent,
                             shape = RectangleShape
                         ) {
                         Surface(
@@ -2210,46 +2410,46 @@ fun NoteCard(
                                 onOpenImageViewer = onOpenImageViewer,
                             )
                         } else if (eventId in quotedFailedIds) {
-                            // Outer wrapper matches body text background
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                shape = RectangleShape
-                            ) {
-                            Surface(
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 4.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                                shape = MaterialTheme.shapes.small
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Icon(Icons.Outlined.Info, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                                    Text("Quoted event not found", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                                }
-                            }
+                                Box(
+                                    modifier = Modifier
+                                        .width(3.dp)
+                                        .height(20.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
+                                            shape = RoundedCornerShape(1.5.dp)
+                                        )
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Icon(Icons.Outlined.Info, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Quoted event not found", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                             }
                         } else if (quotedLoading) {
-                            // Outer wrapper matches body text background
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                shape = RectangleShape
-                            ) {
-                            Surface(
+                            Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 4.dp),
-                                color = MaterialTheme.colorScheme.surface,
-                                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                                shape = MaterialTheme.shapes.small
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
-                                    Text("Loading quoted note\u2026", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                                }
-                            }
+                                Box(
+                                    modifier = Modifier
+                                        .width(3.dp)
+                                        .height(20.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
+                                            shape = RoundedCornerShape(1.5.dp)
+                                        )
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Loading quoted note\u2026", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                             }
                         }
                     }
@@ -2289,59 +2489,16 @@ fun NoteCard(
                 )
             }
 
-            // Repost label (kind-6) — below body, above controls
-            if (note.repostedByAuthors.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 0.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Repeat,
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp),
-                        tint = Color(0xFF4CAF50).copy(alpha = 0.7f)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    // Stacked avatars (up to 3)
-                    val displayAuthors = note.repostedByAuthors.take(3)
-                    Box(modifier = Modifier.width(if (displayAuthors.size > 1) (16 + (displayAuthors.size - 1) * 10).dp else 16.dp)) {
-                        displayAuthors.forEachIndexed { i, author ->
-                            Box(modifier = Modifier.offset(x = (i * 10).dp)) {
-                                ProfilePicture(
-                                    author = author,
-                                    size = 16.dp,
-                                    onClick = { onProfileClick(author.id) }
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.width(4.dp))
-                    val repostTimeText = note.repostTimestamp?.let { " • ${formatTimestamp(it)}" } ?: ""
-                    val boosterCount = note.repostedByAuthors.size
-                    val firstName = authorDisplayLabel(note.repostedByAuthors.first())
-                    val boostText = when {
-                        boosterCount == 1 -> "$firstName boosted"
-                        boosterCount == 2 -> "$firstName & ${authorDisplayLabel(note.repostedByAuthors[1])} boosted"
-                        else -> "$firstName & ${boosterCount - 1} others boosted"
-                    }
-                    Text(
-                        text = "$boostText$repostTimeText",
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
             if (showActionRow) {
             NoteActionRow(
                 note = note,
                 actionRowSchema = actionRowSchema,
                 isZapInProgress = isZapInProgress,
                 isZapped = isZapped,
+                isBoosted = isBoosted,
+                onVote = onVote,
+                ownVoteValue = ownVoteValue,
+                voteScore = voteScore,
                 reactionEmoji = reactionEmoji,
                 isDetailsExpanded = isDetailsExpanded,
                 onDetailsToggle = { isDetailsExpanded = !isDetailsExpanded },
@@ -2439,7 +2596,8 @@ private fun ActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant
 ) {
     Box(
         modifier = modifier
@@ -2450,7 +2608,7 @@ private fun ActionButton(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = tint,
             modifier = Modifier.size(20.dp)
         )
     }

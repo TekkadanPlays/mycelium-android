@@ -38,10 +38,22 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import com.example.cybin.relay.RelaySlotSnapshot
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.data.DiscoveredRelay
 import social.mycelium.android.data.RelayInformation
 import social.mycelium.android.relay.LogType
+import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.RelayDeliveryTracker
+import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.RelayLogBuffer
 import social.mycelium.android.relay.RelayLogEntry
 import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
@@ -96,6 +108,30 @@ fun RelayLogScreen(
         logs.sortedByDescending { it.timestamp }
     }
     val listState = rememberLazyListState()
+
+    // ── Live subscription slot snapshot (refreshes every 1s) ──
+    val relayStateMachine = remember { RelayConnectionStateMachine.getInstance() }
+    var slotSnapshot by remember { mutableStateOf<RelaySlotSnapshot?>(null) }
+    LaunchedEffect(relayUrl) {
+        while (true) {
+            val normalized = relayUrl.trimEnd('/')
+            slotSnapshot = relayStateMachine.getRelaySlotSnapshots()
+                .firstOrNull { it.url.trimEnd('/') == normalized }
+            delay(1000)
+        }
+    }
+
+    // ── Delivery stats from Thompson Sampling tracker ──
+    val deliveryStat = remember(relayUrl) {
+        val normalized = relayUrl.trimEnd('/')
+        RelayDeliveryTracker.getStats().entries
+            .firstOrNull { it.key.trimEnd('/') == normalized }
+            ?.value
+    }
+
+    // ── Health data (live) ──
+    val healthMap by RelayHealthTracker.healthByRelay.collectAsState()
+    val health = healthMap[relayUrl]
 
     Scaffold(
         topBar = {
@@ -189,11 +225,23 @@ fun RelayLogScreen(
 
             // ── Connection Status ──
             item(key = "connection_status") {
-                val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().perRelayState.collectAsState()
+                val perRelayState by relayStateMachine.perRelayState.collectAsState()
                 val connState = perRelayState[relayUrl]
-                val healthMap by social.mycelium.android.relay.RelayHealthTracker.healthByRelay.collectAsState()
-                val health = healthMap[relayUrl]
                 ConnectionStatusCard(relayUrl = relayUrl, connState = connState, health = health)
+            }
+
+            // ── Subscription Slots (live) ──
+            if (slotSnapshot != null) {
+                item(key = "subscription_slots") {
+                    SubscriptionSlotsCard(snapshot = slotSnapshot!!)
+                }
+            }
+
+            // ── Delivery Performance (Thompson Sampling) ──
+            if (deliveryStat != null && deliveryStat.expected >= 1.0) {
+                item(key = "delivery_stats") {
+                    DeliveryPerformanceCard(stat = deliveryStat)
+                }
             }
 
             // ── NIP-66 Discovery Data ──
@@ -282,8 +330,6 @@ fun RelayLogScreen(
 
             // ── Health Stats ──
             item(key = "health_stats") {
-                val healthMap by social.mycelium.android.relay.RelayHealthTracker.healthByRelay.collectAsState()
-                val health = healthMap[relayUrl]
                 if (health != null && health.connectionAttempts > 0) {
                     HealthCard(
                         health = health,
@@ -567,7 +613,7 @@ private fun Nip66DataCard(discovery: DiscoveredRelay) {
     }
 }
 
-// ── Connection Status Card ──
+// ── Connection Status Card (enhanced) ──
 
 @Composable
 private fun ConnectionStatusCard(
@@ -616,27 +662,266 @@ private fun ConnectionStatusCard(
         shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Surface(shape = CircleShape, color = statusColor.copy(alpha = 0.12f), modifier = Modifier.size(40.dp)) {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    Icon(statusIcon, null, Modifier.size(20.dp), tint = statusColor)
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Top row: status icon + label + events
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Surface(shape = CircleShape, color = statusColor.copy(alpha = 0.12f), modifier = Modifier.size(40.dp)) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                        Icon(statusIcon, null, Modifier.size(20.dp), tint = statusColor)
+                    }
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(statusLabel, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = statusColor)
+                    if (health != null && health.connectTimeMs > 0) {
+                        Text("${health.connectTimeMs}ms connect", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (health != null) {
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text("${health.eventsReceived}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text("events", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(statusLabel, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = statusColor)
-                if (health != null && health.avgLatencyMs > 0) {
-                    Text("${health.avgLatencyMs}ms avg latency", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+            // Uptime ratio bar (if we have enough data)
+            if (health != null && health.connectionAttempts >= 2) {
+                Spacer(Modifier.height(12.dp))
+                val uptimePercent = (health.uptimeRatio * 100).toInt()
+                val barColor = when {
+                    health.uptimeRatio >= 0.8f -> Color(0xFF4CAF50)
+                    health.uptimeRatio >= 0.5f -> Color(0xFFFFA726)
+                    else -> MaterialTheme.colorScheme.error
+                }
+                val animatedRatio by animateFloatAsState(
+                    targetValue = health.uptimeRatio.coerceIn(0f, 1f),
+                    animationSpec = tween(600),
+                    label = "uptimeBar"
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Uptime", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(48.dp))
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(animatedRatio)
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(barColor)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text("$uptimePercent%", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = barColor)
                 }
             }
+
+            // Timeline: last connected, last failed, last event, first seen
             if (health != null) {
-                Column(horizontalAlignment = Alignment.End) {
-                    Text("${health.eventsReceived}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    Text("events", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val timestamps = mutableListOf<Pair<String, Long>>()
+                if (health.lastConnectedAt > 0) timestamps.add("Connected" to health.lastConnectedAt)
+                if (health.lastFailedAt > 0) timestamps.add("Failed" to health.lastFailedAt)
+                if (health.lastEventAt > 0) timestamps.add("Event" to health.lastEventAt)
+                if (health.firstSeenAt > 0) timestamps.add("First seen" to health.firstSeenAt)
+
+                if (timestamps.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    timestamps.forEach { (label, ts) ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 1.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(formatRelativeTime(ts), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
                 }
+            }
+
+            // Last error
+            if (health?.lastError != null) {
+                Spacer(Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(Icons.Outlined.ErrorOutline, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            health.lastError!!,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.9f),
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Subscription Slots Card ──
+
+@Composable
+private fun SubscriptionSlotsCard(snapshot: RelaySlotSnapshot) {
+    val utilization = if (snapshot.effectiveLimit > 0)
+        snapshot.activeCount.toFloat() / snapshot.effectiveLimit else 0f
+    val barColor = when {
+        utilization >= 0.9f -> MaterialTheme.colorScheme.error
+        utilization >= 0.7f -> Color(0xFFFFA726)
+        else -> Color(0xFF4CAF50)
+    }
+    val animatedUtil by animateFloatAsState(
+        targetValue = utilization.coerceIn(0f, 1f),
+        animationSpec = tween(400),
+        label = "slotUtil"
+    )
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Tune, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Subscription Slots", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(12.dp))
+
+            // Stats row
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                RelayStatItem("Active", "${snapshot.activeCount}")
+                RelayStatItem("Queued", "${snapshot.queuedCount}",
+                    if (snapshot.queuedCount > 0) Color(0xFFFFA726) else null)
+                RelayStatItem("EOSE", "${snapshot.eoseCount}", Color(0xFF4CAF50))
+                RelayStatItem("Limit", "${snapshot.effectiveLimit}")
+            }
+
+            // Utilization bar
+            Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Utilization", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(72.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(animatedUtil)
+                            .clip(RoundedCornerShape(3.dp))
+                            .background(barColor)
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${(utilization * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = barColor
+                )
+            }
+
+            // Priority breakdown (if available)
+            if (snapshot.activePriorityBreakdown.isNotEmpty()) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    snapshot.activePriorityBreakdown.forEach { (priority, count) ->
+                        RelayDetailChip(
+                            "$priority: $count",
+                            MaterialTheme.colorScheme.surfaceContainerHighest,
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Delivery Performance Card ──
+
+@Composable
+private fun DeliveryPerformanceCard(stat: RelayDeliveryTracker.RelayStats) {
+    val rate = stat.successRate
+    val rateColor = when {
+        rate >= 0.8 -> Color(0xFF4CAF50)
+        rate >= 0.5 -> Color(0xFFFFA726)
+        rate > 0.0 -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val animatedRate by animateFloatAsState(
+        targetValue = rate.toFloat().coerceIn(0f, 1f),
+        animationSpec = tween(600),
+        label = "deliveryRate"
+    )
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Outbox, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Delivery", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                Text("Thompson Sampling", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 10.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+
+            // Delivery rate bar
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Success", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(52.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(animatedRate)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(rateColor)
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("${(rate * 100).toInt()}%", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = rateColor)
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                RelayStatItem("Delivered", "${stat.delivered.toInt()}")
+                RelayStatItem("Expected", "${stat.expected.toInt()}")
+                RelayStatItem("Missed", "${(stat.expected - stat.delivered).toInt().coerceAtLeast(0)}",
+                    if (stat.expected - stat.delivered > 0) MaterialTheme.colorScheme.error else null)
             }
         }
     }
@@ -848,7 +1133,7 @@ private fun OperatorCard(pubkey: String?, contact: String?) {
     }
 }
 
-// ── Health Card ──
+// ── Health Card (enhanced with quick actions) ──
 
 @Composable
 private fun HealthCard(
@@ -861,13 +1146,14 @@ private fun HealthCard(
         color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "Health",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.MonitorHeart, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Health", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            }
             Spacer(Modifier.height(12.dp))
+
+            // Stats grid row 1
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
@@ -880,16 +1166,19 @@ private fun HealthCard(
                     if (ratePercent > 30) MaterialTheme.colorScheme.error else null)
             }
             Spacer(Modifier.height(8.dp))
+
+            // Stats grid row 2
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                RelayStatItem("Avg Latency", if (health.avgLatencyMs > 0) "${health.avgLatencyMs}ms" else "—")
+                RelayStatItem("Connect", if (health.connectTimeMs > 0) "${health.connectTimeMs}ms" else "—")
                 RelayStatItem("Events", "${health.eventsReceived}")
-                RelayStatItem("Consec. Fails", "${health.consecutiveFailures}",
+                RelayStatItem("Streak", "${health.consecutiveFailures}",
                     if (health.consecutiveFailures > 2) MaterialTheme.colorScheme.error else null)
             }
 
+            // Flagged/Blocked status badge
             if (health.isFlagged || health.isBlocked) {
                 Spacer(Modifier.height(12.dp))
                 Row(
@@ -914,38 +1203,82 @@ private fun HealthCard(
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
-                    if (health.isBlocked) {
-                        TextButton(
-                            onClick = { social.mycelium.android.relay.RelayHealthTracker.unblockRelay(relayUrl) },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.height(28.dp)
-                        ) { Text("Unblock", style = MaterialTheme.typography.labelSmall) }
-                    } else if (health.isFlagged) {
-                        TextButton(
-                            onClick = { social.mycelium.android.relay.RelayHealthTracker.blockRelay(relayUrl) },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.height(28.dp),
-                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                        ) { Text("Block", style = MaterialTheme.typography.labelSmall) }
-                        TextButton(
-                            onClick = { social.mycelium.android.relay.RelayHealthTracker.unflagRelay(relayUrl) },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                            modifier = Modifier.height(28.dp)
-                        ) { Text("Dismiss", style = MaterialTheme.typography.labelSmall) }
-                    }
                 }
             }
 
-            if (health.lastError != null) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "Last error: ${health.lastError}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+            // ── Quick Actions strip ──
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(
+                thickness = 0.5.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                // Block / Unblock
+                if (health.isBlocked) {
+                    ActionChip(
+                        label = "Unblock",
+                        icon = Icons.Outlined.LockOpen,
+                        onClick = { RelayHealthTracker.unblockRelay(relayUrl) }
+                    )
+                } else {
+                    ActionChip(
+                        label = "Block",
+                        icon = Icons.Outlined.Block,
+                        onClick = { RelayHealthTracker.blockRelay(relayUrl) },
+                        isDestructive = true
+                    )
+                }
+                // Dismiss flag
+                if (health.isFlagged && !health.isBlocked) {
+                    ActionChip(
+                        label = "Dismiss",
+                        icon = Icons.Outlined.CheckCircle,
+                        onClick = { RelayHealthTracker.unflagRelay(relayUrl) }
+                    )
+                }
+                // Reset health data
+                ActionChip(
+                    label = "Reset",
+                    icon = Icons.Outlined.RestartAlt,
+                    onClick = { RelayHealthTracker.resetRelay(relayUrl) }
+                )
+                // Clear logs
+                ActionChip(
+                    label = "Clear Log",
+                    icon = Icons.Outlined.DeleteSweep,
+                    onClick = { RelayLogBuffer.clearLogsForRelay(relayUrl) }
                 )
             }
+        }
+    }
+}
+
+// ── Action Chip (compact tappable action) ──
+
+@Composable
+private fun ActionChip(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+    isDestructive: Boolean = false
+) {
+    val color = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = color.copy(alpha = 0.08f)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Icon(icon, null, Modifier.size(14.dp), tint = color)
+            Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = color)
         }
     }
 }
@@ -1045,6 +1378,23 @@ private fun RelayDetailChip(text: String, backgroundColor: Color, textColor: Col
             color = textColor,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
         )
+    }
+}
+
+/** Format epoch ms timestamp to human-readable relative time. */
+private fun formatRelativeTime(epochMs: Long): String {
+    val now = System.currentTimeMillis()
+    val delta = now - epochMs
+    return when {
+        delta < 0 -> "just now"
+        delta < 60_000 -> "${delta / 1000}s ago"
+        delta < 3_600_000 -> "${delta / 60_000}m ago"
+        delta < 86_400_000 -> "${delta / 3_600_000}h ago"
+        delta < 604_800_000 -> "${delta / 86_400_000}d ago"
+        else -> {
+            val sdf = java.text.SimpleDateFormat("MMM d", java.util.Locale.US)
+            sdf.format(java.util.Date(epochMs))
+        }
     }
 }
 

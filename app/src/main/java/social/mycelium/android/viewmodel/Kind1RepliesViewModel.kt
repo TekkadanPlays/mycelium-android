@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import social.mycelium.android.relay.RelayHealthTracker
 
 @Immutable
 data class Kind1RepliesUiState(
@@ -71,6 +72,12 @@ class Kind1RepliesViewModel : ViewModel() {
                     if (batch.isEmpty()) return@launch
                     repository.updateAuthorsInRepliesBatch(batch)
                 }
+            }
+            .launchIn(viewModelScope)
+        // Observe relay OK confirmations: merge relay URLs into displayed replies for orb updates
+        RelayHealthTracker.publishRelayConfirmed
+            .onEach { (eventId, relayUrl) ->
+                repository.mergePublishRelayUrl(eventId, relayUrl)
             }
             .launchIn(viewModelScope)
     }

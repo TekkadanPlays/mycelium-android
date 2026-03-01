@@ -4,6 +4,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -16,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import social.mycelium.android.data.Author
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ProfilePicture
@@ -54,14 +57,11 @@ fun RelayUsersScreen(
     }
     @Suppress("UNUSED_EXPRESSION") profileRevision
 
-    // Tab state
-    var selectedTab by remember { mutableIntStateOf(0) }
+    // Tab + pager state
     val tabs = listOf("All (${allUsers.size})", "Write (${outboxUsers.size})", "Read (${inboxUsers.size})")
-    val displayedUsers = when (selectedTab) {
-        1 -> outboxUsers
-        2 -> inboxUsers
-        else -> allUsers
-    }
+    val pagerState = rememberPagerState(pageCount = { tabs.size })
+    val scope = rememberCoroutineScope()
+    val usersPerPage = listOf(allUsers, outboxUsers, inboxUsers)
 
     val displayName = relayUrl.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
 
@@ -94,18 +94,18 @@ fun RelayUsersScreen(
                     )
                 )
                 TabRow(
-                    selectedTabIndex = selectedTab,
+                    selectedTabIndex = pagerState.currentPage,
                     containerColor = MaterialTheme.colorScheme.surface
                 ) {
                     tabs.forEachIndexed { index, title ->
                         Tab(
-                            selected = selectedTab == index,
-                            onClick = { selectedTab = index },
+                            selected = pagerState.currentPage == index,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
                             text = {
                                 Text(
                                     title,
                                     style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal
+                                    fontWeight = if (pagerState.currentPage == index) FontWeight.Bold else FontWeight.Normal
                                 )
                             }
                         )
@@ -115,86 +115,91 @@ fun RelayUsersScreen(
         },
         modifier = modifier
     ) { paddingValues ->
-        if (displayedUsers.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    "No users in this category",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues),
-                contentPadding = PaddingValues(vertical = 8.dp)
-            ) {
-                items(displayedUsers, key = { it }) { pk ->
-                    @Suppress("UNUSED_EXPRESSION") profileRevision
-                    val author = remember(pk, profileRevision) {
-                        profileCache.getAuthor(normalizeAuthorIdForCache(pk))
-                            ?: Author(id = pk, username = pk.take(8) + "…", displayName = pk.take(8) + "…")
-                    }
-                    val isWriter = pk in outboxSet
-                    val isReader = pk in inboxSet
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues),
+            beyondViewportPageCount = 1
+        ) { page ->
+            val displayedUsers = usersPerPage[page]
+            if (displayedUsers.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        "No users in this category",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 8.dp)
+                ) {
+                    items(displayedUsers, key = { "${page}_$it" }) { pk ->
+                        @Suppress("UNUSED_EXPRESSION") profileRevision
+                        val author = remember(pk, profileRevision) {
+                            profileCache.getAuthor(normalizeAuthorIdForCache(pk))
+                                ?: Author(id = pk, username = pk.take(8) + "…", displayName = pk.take(8) + "…")
+                        }
+                        val isWriter = pk in outboxSet
+                        val isReader = pk in inboxSet
 
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onProfileClick(pk) },
-                        color = MaterialTheme.colorScheme.surface
-                    ) {
-                        Row(
+                        Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .clickable { onProfileClick(pk) },
+                            color = MaterialTheme.colorScheme.surface
                         ) {
-                            ProfilePicture(
-                                author = author,
-                                size = 40.dp,
-                                onClick = { onProfileClick(pk) }
-                            )
-                            Spacer(Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = author.displayName.ifBlank { author.username.ifBlank { pk.take(12) + "…" } },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Medium,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ProfilePicture(
+                                    author = author,
+                                    size = 40.dp,
+                                    onClick = { onProfileClick(pk) }
                                 )
-                                if (author.username.isNotBlank() && author.username != author.displayName) {
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "@${author.username}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        text = author.displayName.ifBlank { author.username.ifBlank { pk.take(12) + "…" } },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Medium,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
+                                    if (author.username.isNotBlank() && author.username != author.displayName) {
+                                        Text(
+                                            text = "@${author.username}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
-                            }
-                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                if (isWriter) {
-                                    RelayUserBadge(text = "write", color = MaterialTheme.colorScheme.primary)
-                                }
-                                if (isReader) {
-                                    RelayUserBadge(text = "read", color = Color(0xFF4CAF50))
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (isWriter) {
+                                        RelayUserBadge(text = "write", color = MaterialTheme.colorScheme.primary)
+                                    }
+                                    if (isReader) {
+                                        RelayUserBadge(text = "read", color = Color(0xFF4CAF50))
+                                    }
                                 }
                             }
                         }
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 68.dp),
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                        )
                     }
-                    HorizontalDivider(
-                        modifier = Modifier.padding(start = 68.dp),
-                        thickness = 0.5.dp,
-                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-                    )
                 }
             }
         }

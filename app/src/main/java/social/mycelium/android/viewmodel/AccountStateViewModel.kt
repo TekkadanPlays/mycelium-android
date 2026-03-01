@@ -15,11 +15,13 @@ import social.mycelium.android.data.GUEST_PROFILE
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.ContactListRepository
 import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.NoteCountsRepository
 import social.mycelium.android.repository.ReactionsRepository
 import social.mycelium.android.repository.ZapStatePersistence
 import social.mycelium.android.repository.NotesRepository
 import social.mycelium.android.repository.TopicsPublishService
 import social.mycelium.android.repository.TopicsRepository
+import social.mycelium.android.repository.VoteRepository
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.bechToBytes
 import com.example.cybin.nip19.NPub
@@ -307,6 +309,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     private fun setGuestMode() {
         Log.d("AccountStateViewModel", "👤 Setting guest mode")
         _currentAccount.value = null
+        NoteCountsRepository.currentUserPubkey = null
         _zappedNoteIds.value = emptySet()
         _zappedAmountByNoteId.value = emptyMap()
         _authState.value = AuthState(
@@ -388,6 +391,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
         restoreZapState(accountInfo.npub)
         ReactionsRepository.loadForAccount(getApplication(), accountInfo.npub)
+        NoteCountsRepository.currentUserPubkey = hexPubkey
 
         // Set NIP-42 signer for new account
         RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
@@ -464,6 +468,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
                 restoreZapState(updatedAccount.npub)
                 ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
+                NoteCountsRepository.currentUserPubkey = hexPubkey
 
                 // Set NIP-42 signer for new account
                 RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
@@ -678,6 +683,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     private val _zappedAmountByNoteId = MutableStateFlow<Map<String, Long>>(emptyMap())
     val zappedAmountByNoteId: StateFlow<Map<String, Long>> = _zappedAmountByNoteId.asStateFlow()
 
+    /** Note IDs the current user has boosted (repost icon turns green). */
+    private val _boostedNoteIds = MutableStateFlow<Set<String>>(emptySet())
+    val boostedNoteIds: StateFlow<Set<String>> = _boostedNoteIds.asStateFlow()
+
     /**
      * Get the NostrSigner for the current account (Amber or nsec-based).
      * Returns null if no signer is available (read-only npub accounts).
@@ -699,22 +708,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Send a NIP-25 reaction (kind-7) using the external signer (Amber).
      * Returns null on success, or an error message for synchronous failures.
      * Async failures are emitted via [toastMessage].
+     *
+     * On successful send: emits a success animation event so NoteCard can flash the like glow.
+     * On total failure (signing or no relays): emits a failure animation event for the red strobe.
      */
     fun sendReaction(note: Note, emoji: String): String? {
         val account = _currentAccount.value ?: return "Sign in to react"
         val accountHex = account.toHexKey() ?: return "Invalid account key"
-        val signer = when {
-            account.isExternalSigner -> amberSignerManager.getCurrentSigner()
-            account.hasPrivateKey -> {
-                val privKeyBytes = nsecPrivKeyByHex[accountHex]
-                if (privKeyBytes != null) NostrSignerInternal(KeyPair(privKey = privKeyBytes)) else null
-            }
-            else -> null
-        } ?: return when {
-            account.isExternalSigner -> "Amber signer not available"
-            account.hasPrivateKey -> "Private key not available. Sign in again with nsec."
-            else -> "Sign in with nsec or Amber to react"
-        }
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
 
         val relaySet = relayStorageManager.loadOutboxRelays(accountHex)
             .mapNotNull { RelayUrlNormalizer.normalizeOrNull(it.url)?.url }
@@ -736,36 +737,24 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val relayHint = note.relayUrl?.let { RelayUrlNormalizer.normalizeOrNull(it)?.url }
         val template = ReactionEvent.build(emoji, targetEvent, relayHint)
 
-        // Inject NIP-89 client tag if enabled
-        val finalTemplate = if (ClientTagManager.isEnabled(getApplication())) {
-            EventTemplate(template.createdAt, template.kind, template.tags + arrayOf(ClientTagManager.CLIENT_TAG), template.content)
-        } else template
-
-        Log.d("AccountStateViewModel", "sendReaction: template kind=${finalTemplate.kind}, tags=${finalTemplate.tags.size}")
-
         viewModelScope.launch {
-            try {
-                Log.d("AccountStateViewModel", "sendReaction: signing...")
-                val signed = signer.sign(finalTemplate)
-                Log.d("AccountStateViewModel", "sendReaction: signed! id=${signed.id.take(8)}, kind=${signed.kind}, sig=${signed.sig.take(8)}...")
-
-                // Validate the signed event
-                if (signed.sig.isBlank()) {
-                    Log.e("AccountStateViewModel", "sendReaction: signed event has empty sig!")
-                    _toastMessage.value = "Reaction signing failed (empty signature)"
-                    return@launch
+            when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
+                is PublishResult.Success -> {
+                    Log.d("AccountStateViewModel", "sendReaction: published ${result.event.id.take(8)}")
+                    ReactionsRepository.setLastReaction(note.id, emoji)
+                    ReactionsRepository.persist(getApplication(), account.npub)
+                    ReactionsRepository.recordEmoji(getApplication(), account.npub, emoji)
+                    // Optimistically inject reaction into counts so thread/feed UI updates immediately
+                    NoteCountsRepository.injectOwnReaction(note.id, emoji, accountHex)
+                    // Emit success animation — NoteCard will flash the like glow
+                    ReactionsRepository.emitAnimation(note.id, emoji, success = true)
                 }
-
-                Log.d("AccountStateViewModel", "sendReaction: sending to ${relaySet.size} outbox relays")
-                RelayConnectionStateMachine.getInstance().send(signed, relaySet)
-                Log.d("AccountStateViewModel", "sendReaction: sent successfully")
-
-                ReactionsRepository.setLastReaction(note.id, emoji)
-                ReactionsRepository.persist(getApplication(), account.npub)
-                ReactionsRepository.recordEmoji(getApplication(), account.npub, emoji)
-            } catch (e: Exception) {
-                Log.e("AccountStateViewModel", "sendReaction failed: ${e.message}", e)
-                _toastMessage.value = "Reaction failed: ${e.message?.take(60)}"
+                is PublishResult.Error -> {
+                    Log.e("AccountStateViewModel", "sendReaction failed: ${result.message}")
+                    _toastMessage.value = "Reaction failed: ${result.message}"
+                    // Emit failure animation — NoteCard will flash the red strobe
+                    ReactionsRepository.emitAnimation(note.id, emoji, success = false)
+                }
             }
         }
         return null
@@ -1030,8 +1019,58 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         delay(400) // Minimum shimmer display before green confirmation
                         NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
                     }
+                    _boostedNoteIds.value = _boostedNoteIds.value + noteId
+                    // Optimistically inject repost count so UI updates immediately
+                    if (pubkey != null) NoteCountsRepository.injectOwnRepost(noteId, pubkey)
+                    // Flash boost animation on the original note
+                    ReactionsRepository.emitAnimation(noteId, ReactionsRepository.AnimationType.BOOST, success = true)
                 }
-                is PublishResult.Error -> _toastMessage.value = "Boost failed: ${result.message}"
+                is PublishResult.Error -> {
+                    _toastMessage.value = "Boost failed: ${result.message}"
+                    ReactionsRepository.emitAnimation(noteId, ReactionsRepository.AnimationType.BOOST, success = false)
+                }
+            }
+        }
+        return null
+    }
+
+    // ── Kind-30011: Votes (parameterized replaceable) ──────────────────
+
+    /**
+     * Publish a kind-30011 vote on a note/topic/comment.
+     * Optimistically updates VoteRepository immediately, then publishes.
+     * @param direction +1 for upvote, -1 for downvote
+     * @param targetKind the kind of the target event (1, 11, or 1111)
+     */
+    fun sendVote(noteId: String, noteAuthorPubkey: String, direction: Int, targetKind: Int): String? {
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No relays configured"
+        val newVote = VoteRepository.computeNewVote(noteId, direction)
+        val accountNpub = _currentAccount.value?.npub
+        // Optimistic update
+        VoteRepository.setOwnVote(noteId, newVote)
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                getApplication(), signer, relaySet,
+                kind = VoteRepository.KIND_VOTE,
+                content = newVote.toString()
+            ) {
+                add(arrayOf("d", "vote:$noteId"))
+                add(arrayOf("e", noteId))
+                add(arrayOf("p", noteAuthorPubkey))
+                add(arrayOf("k", targetKind.toString()))
+            }
+            when (result) {
+                is PublishResult.Success -> {
+                    VoteRepository.persist(getApplication(), accountNpub)
+                    Log.d("AccountStateViewModel", "Vote published: ${noteId.take(8)} = $newVote")
+                }
+                is PublishResult.Error -> {
+                    // Revert optimistic vote on failure
+                    VoteRepository.setOwnVote(noteId, VoteRepository.computeNewVote(noteId, newVote))
+                    _toastMessage.value = "Vote failed: ${result.message}"
+                }
             }
         }
         return null
@@ -1202,12 +1241,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                                 _zappedAmountByNoteId.value = _zappedAmountByNoteId.value + (noteId to amountSats)
                                 ZapStatePersistence.saveZappedIds(getApplication(), accountNpub, _zappedNoteIds.value)
                                 ZapStatePersistence.saveZappedAmounts(getApplication(), accountNpub, _zappedAmountByNoteId.value)
-                                // Zap confirmed — bolt icon already turned yellow as feedback
+                                ReactionsRepository.emitAnimation(noteId, ReactionsRepository.AnimationType.ZAP, success = true)
                             }
                             is social.mycelium.android.services.ZapProgress.Failed -> {
                                 viewModelScope.launch(Dispatchers.Main.immediate) {
                                     _toastMessage.value = "Zap failed: ${progress.message}"
                                 }
+                                ReactionsRepository.emitAnimation(noteId, ReactionsRepository.AnimationType.ZAP, success = false)
                             }
                             is social.mycelium.android.services.ZapProgress.Idle -> {}
                         }

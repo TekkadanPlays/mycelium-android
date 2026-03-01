@@ -58,6 +58,20 @@ object NoteCountsRepository {
     private const val TAG = "NoteCountsRepository"
     private const val DEBOUNCE_MS = 1200L
 
+    /** Current user's hex pubkey. Set on login/account switch so own reactions can be detected. */
+    @Volatile
+    var currentUserPubkey: String? = null
+
+    /** Note IDs the current user has boosted (detected from incoming kind-6 events). */
+    private val _ownBoostedNoteIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    /** Note IDs the current user has zapped (detected from incoming kind-9735 events). */
+    private val _ownZappedNoteIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    /** Check if the current user has boosted a note (from relay data). */
+    fun isOwnBoost(noteId: String): Boolean = _ownBoostedNoteIds.contains(noteId)
+    /** Check if the current user has zapped a note (from relay data). */
+    fun isOwnZap(noteId: String): Boolean = _ownZappedNoteIds.contains(noteId)
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     private val _countsByNoteId = MutableStateFlow<Map<String, NoteCounts>>(emptyMap())
@@ -401,6 +415,10 @@ object NoteCountsRepository {
     private fun applyKind6Repost(event: Event, snapshot: MutableMap<String, NoteCounts>) {
         val noteId = event.tags.filter { it.getOrNull(0) == "e" }.firstOrNull()?.getOrNull(1) ?: return
         val authorPubkey = event.pubKey
+        // If this is our own boost, track it so the boost icon turns green
+        if (authorPubkey == currentUserPubkey && noteId.isNotBlank()) {
+            _ownBoostedNoteIds.add(noteId)
+        }
         val counts = snapshot[noteId] ?: NoteCounts()
         val authors = counts.repostAuthors.toMutableList()
         if (authorPubkey !in authors) authors.add(authorPubkey)
@@ -422,6 +440,8 @@ object NoteCountsRepository {
             event.tags.firstOrNull { it.getOrNull(0) == "emoji" && it.getOrNull(1) == shortcode }?.getOrNull(2)
         } else null
         val authorPubkey = event.pubKey
+        // If this is our own reaction, populate the emoji button so it persists across cache clears
+        ReactionsRepository.populateOwnReaction(noteId, emoji, authorPubkey, currentUserPubkey)
         val counts = snapshot[noteId] ?: NoteCounts()
         val existing = counts.reactions.toMutableSet()
         existing.add(emoji)
@@ -439,6 +459,10 @@ object NoteCountsRepository {
         val noteId = event.tags.filter { it.getOrNull(0) == "e" }.lastOrNull()?.getOrNull(1) ?: return
         val senderPubkey = extractZapSenderPubkey(event) ?: event.pubKey
         val amountSats = extractZapAmountSats(event)
+        // If this is our own zap, track it so the bolt icon turns yellow
+        if (senderPubkey == currentUserPubkey && noteId.isNotBlank()) {
+            _ownZappedNoteIds.add(noteId)
+        }
         if (amountSats > 0) Log.d(TAG, "Zap receipt ${event.id.take(8)}: ${amountSats} sats for note ${noteId.take(8)}")
         val counts = snapshot[noteId] ?: NoteCounts()
         val authors = counts.zapAuthors.toMutableList()
@@ -522,6 +546,43 @@ object NoteCountsRepository {
             else -> 0L
         }
         return sats.coerceAtLeast(0L)
+    }
+
+    // ─── Optimistic injection (publish → instant UI) ───────────────────────────
+
+    /**
+     * Optimistically inject our own reaction into the counts so the UI updates
+     * immediately after publishing, without waiting for relay echo of kind-7.
+     */
+    fun injectOwnReaction(noteId: String, emoji: String, authorPubkey: String) {
+        if (noteId.isBlank() || emoji.isBlank()) return
+        val snapshot = _countsByNoteId.value.toMutableMap()
+        val counts = snapshot[noteId] ?: NoteCounts()
+        val existing = counts.reactions.toMutableSet()
+        existing.add(emoji)
+        val authors = counts.reactionAuthors.toMutableMap()
+        val emojiAuthors = (authors[emoji] ?: emptyList()).toMutableList()
+        if (authorPubkey !in emojiAuthors) emojiAuthors.add(authorPubkey)
+        authors[emoji] = emojiAuthors
+        snapshot[noteId] = counts.copy(reactions = existing.toList(), reactionAuthors = authors)
+        _countsByNoteId.value = snapshot
+        Log.d(TAG, "Optimistic reaction injected: $emoji on ${noteId.take(8)} by ${authorPubkey.take(8)}")
+    }
+
+    /**
+     * Optimistically inject our own repost into the counts so the boost count
+     * updates immediately after publishing.
+     */
+    fun injectOwnRepost(noteId: String, authorPubkey: String) {
+        if (noteId.isBlank()) return
+        val snapshot = _countsByNoteId.value.toMutableMap()
+        val counts = snapshot[noteId] ?: NoteCounts()
+        val authors = counts.repostAuthors.toMutableList()
+        if (authorPubkey !in authors) authors.add(authorPubkey)
+        snapshot[noteId] = counts.copy(repostCount = counts.repostCount + 1, repostAuthors = authors)
+        _countsByNoteId.value = snapshot
+        _ownBoostedNoteIds.add(noteId)
+        Log.d(TAG, "Optimistic repost injected: ${noteId.take(8)} by ${authorPubkey.take(8)}")
     }
 
     /**

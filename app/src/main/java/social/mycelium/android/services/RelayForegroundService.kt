@@ -14,14 +14,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import social.mycelium.android.ui.settings.ConnectionMode
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
  * Foreground service to keep relay connections alive while the app is backgrounded.
  * Shows a persistent notification via [NotificationChannelManager.CHANNEL_RELAY_SERVICE].
- * Respects [NotificationPreferences.backgroundServiceEnabled] — if the user disables
- * background service, the service stops itself.
+ * Respects [NotificationPreferences.connectionMode] — only runs when mode is [ConnectionMode.ALWAYS_ON].
+ * Stops itself if the user switches to a different mode.
  */
 class RelayForegroundService : Service() {
 
@@ -38,9 +39,9 @@ class RelayForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Respect user preference — if background service is disabled, stop immediately
-        if (!NotificationPreferences.backgroundServiceEnabled.value) {
-            Log.d(TAG, "Background service disabled by user, stopping")
+        // Respect user preference — only run in ALWAYS_ON mode
+        if (!NotificationPreferences.backgroundServiceEnabled) {
+            Log.d(TAG, "Connection mode is not ALWAYS_ON, stopping")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -85,11 +86,11 @@ class RelayForegroundService : Service() {
             }
         }
 
-        // Watch for user disabling background service at runtime
+        // Watch for user switching away from ALWAYS_ON mode at runtime
         serviceScope.launch {
-            NotificationPreferences.backgroundServiceEnabled.collectLatest { enabled ->
-                if (!enabled) {
-                    Log.d(TAG, "Background service disabled at runtime, stopping")
+            NotificationPreferences.connectionMode.collectLatest { mode ->
+                if (mode != ConnectionMode.ALWAYS_ON) {
+                    Log.d(TAG, "Connection mode changed to $mode, stopping service")
                     stopSelf()
                 }
             }

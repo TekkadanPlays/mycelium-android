@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Repository for real Nostr notifications: events that reference the user (p tag).
@@ -48,6 +49,8 @@ object NotificationsRepository {
     private const val ONE_WEEK_SEC = 7 * 24 * 60 * 60L
     private const val PREFS_NAME = "notifications_seen"
     private const val PREFS_KEY_SEEN_IDS = "seen_ids"
+    private const val PREFS_KEY_PUBKEY = "my_pubkey_hex"
+    private const val PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS = "mark_all_seen_epoch_ms"
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
     private val profileCache = ProfileMetadataCache.getInstance()
@@ -64,7 +67,16 @@ object NotificationsRepository {
     }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     private val notificationsById = ConcurrentHashMap<String, NotificationData>()
-    private var notificationsHandle: TemporarySubscriptionHandle? = null
+    /** Active notification subscription handles (inbox deep + sweep + extras). */
+    private val notificationHandles = CopyOnWriteArrayList<TemporarySubscriptionHandle>()
+
+    /** Fallback inbox relays for users without a NIP-65 relay list. */
+    private val BOOTSTRAP_INBOX_RELAYS = listOf(
+        "wss://relay.damus.io", "wss://relay.primal.net", "wss://nos.lol",
+        "wss://nostr.mom", "wss://relay.nostr.band",
+    )
+    /** Delay before starting the non-inbox sweep phase (ms). */
+    private const val SWEEP_DELAY_MS = 3_000L
 
     /** Event IDs already processed — prevents re-processing on relay reconnect (which replays all stored events). */
     private val seenEventIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
@@ -89,8 +101,14 @@ object NotificationsRepository {
 
     private var prefs: SharedPreferences? = null
     @Volatile private var appContext: Context? = null
-    /** Suppress Android notifications during initial subscription replay (old events). */
-    @Volatile private var suppressAndroidNotifications = true
+    /** Wall-clock millis when the user last pressed "Read All".
+     *  Any notification with sortTimestamp <= this is auto-marked as seen,
+     *  even if it arrives from a later subscription phase (e.g. Phase 3). */
+    @Volatile private var markAllSeenEpochMs: Long = 0L
+    /** Epoch seconds when the current notification subscription session started.
+     *  Push notifications are only fired for events created AFTER this timestamp,
+     *  so historical relay replay never spams the notification shade. */
+    @Volatile private var sessionStartEpochSec = Long.MAX_VALUE
 
     // ── Batched target note fetch ──────────────────────────────────────────────
     /** Pending target note fetch entry. */
@@ -111,11 +129,21 @@ object NotificationsRepository {
         appContext = context.applicationContext
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         loadSeenIds()
+        // Restore last-known pubkey so cold-start of the same user isn't treated as "new user"
+        myPubkeyHex = prefs?.getString(PREFS_KEY_PUBKEY, null)
+        if (myPubkeyHex != null) Log.d(TAG, "init: restored myPubkeyHex=${myPubkeyHex?.take(8)}")
+        // Restore "Read All" watermark so historical events stay seen across restarts
+        markAllSeenEpochMs = prefs?.getLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, 0L) ?: 0L
+        if (markAllSeenEpochMs > 0) Log.d(TAG, "init: restored markAllSeenEpochMs=$markAllSeenEpochMs")
     }
 
-    /** Allow Android notifications after initial event replay is complete. */
+    /** Allow Android notifications for events created after this moment.
+     *  Called once the initial relay replay window has settled. */
     fun enableAndroidNotifications() {
-        suppressAndroidNotifications = false
+        // Events created before this timestamp are historical replay — suppress them.
+        // Events created after this timestamp are genuinely new — show push.
+        sessionStartEpochSec = System.currentTimeMillis() / 1000
+        Log.d(TAG, "Push notifications enabled for events after epoch=$sessionStartEpochSec")
     }
 
     /**
@@ -123,8 +151,12 @@ object NotificationsRepository {
      * Each notification type maps to a specific Android notification channel so the user
      * can independently configure sounds, vibration, and visibility in system settings.
      */
-    private fun fireAndroidNotification(type: NotificationType, title: String, body: String, notifIdSuffix: String) {
-        if (suppressAndroidNotifications) return
+    private fun fireAndroidNotification(type: NotificationType, title: String, body: String, notifIdSuffix: String, eventEpochSec: Long = 0L) {
+        // Suppress historical replay: only fire for events created after session start
+        if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) return
+        if (sessionStartEpochSec == Long.MAX_VALUE) return // not yet enabled
+        // Don't re-fire for events the user has already seen/read
+        if (notifIdSuffix in _seenIds.value) return
         val ctx = appContext ?: return
         val prefs = social.mycelium.android.ui.settings.NotificationPreferences
         if (!prefs.pushEnabled.value) return
@@ -146,6 +178,7 @@ object NotificationsRepository {
     private fun loadSeenIds() {
         val stored = prefs?.getStringSet(PREFS_KEY_SEEN_IDS, emptySet()) ?: emptySet()
         _seenIds.value = stored.toSet()
+        Log.d(TAG, "loadSeenIds: loaded ${stored.size} seen IDs from prefs")
     }
 
     private fun persistSeenIds() {
@@ -162,10 +195,15 @@ object NotificationsRepository {
 
     fun getMyPubkeyHex(): String? = myPubkeyHex
 
-    /** Mark all current notifications as seen (e.g. when user opens the notifications screen). Clears badge. */
+    /** Mark all current notifications as seen (e.g. when user opens the notifications screen). Clears badge.
+     *  Also sets a watermark timestamp so that historical events arriving later (e.g. Phase 3
+     *  thread replies / quotes) are auto-marked as seen without requiring another button press. */
     fun markAllAsSeen() {
-        _seenIds.value = _notifications.value.mapTo(mutableSetOf()) { it.id }
+        _seenIds.value = _seenIds.value + _notifications.value.mapTo(mutableSetOf()) { it.id }
+        markAllSeenEpochMs = System.currentTimeMillis()
         persistSeenIds()
+        scope.launch(Dispatchers.IO) { prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply() }
+        Log.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
     }
 
     /** Mark one notification as seen (e.g. when user taps it to open thread). */
@@ -194,22 +232,51 @@ object NotificationsRepository {
     }
 
     /**
-     * Start subscription for the given user; events with "p" tag = pubkey (replies, likes, reposts, zaps). No follows.
+     * Start tiered notification subscriptions for the given user.
+     *
+     * **Phase 1** (immediate): Deep fetch from inbox relays — these are where well-behaved
+     * clients send reactions/replies TO us. No `since` restriction, high limits → complete
+     * user history.
+     *
+     * **Phase 2** (delayed [SWEEP_DELAY_MS]): Moderate sweep of outbox/category relays
+     * (minus inbox set) — catches notifications from users who don't know our inbox relays.
+     * Uses a 1-week `since` window with modest limits.
+     *
+     * **Phase 3** (delayed 2s after phase 1): Discover user's kind-11 topic IDs and kind-1
+     * note IDs, then subscribe for kind-1111 thread replies (E-tag) and quote posts (q-tag)
+     * on inbox relays.
+     *
+     * All subscriptions use [SubscriptionPriority.BACKGROUND] so foreground UI (feed,
+     * threads, profiles) always wins relay slots via preemption. Connections to new relays
+     * are jittered at the pool level ([CybinRelayPool.connectWithJitter]) to avoid
+     * thundering-herd on startup.
+     *
+     * @param inboxRelayUrls  NIP-65 read relays (where others send events TO us)
+     * @param outboxRelayUrls NIP-65 write relays (where our notes live)
+     * @param categoryRelayUrls  User's custom relay categories
      */
-    fun startSubscription(pubkey: String, relayUrls: List<String>) {
-        if (relayUrls.isEmpty() || pubkey.isBlank()) {
+    fun startSubscription(
+        pubkey: String,
+        inboxRelayUrls: List<String>,
+        outboxRelayUrls: List<String>,
+        categoryRelayUrls: List<String>,
+    ) {
+        val allRelays = (inboxRelayUrls + outboxRelayUrls + categoryRelayUrls)
+            .map { it.trim().removeSuffix("/") }
+            .distinct()
+        if (allRelays.isEmpty() || pubkey.isBlank()) {
             Log.w(TAG, "startSubscription: empty relays or pubkey")
             return
         }
-        // Same user + active handle = already subscribed, skip restart
-        if (myPubkeyHex == pubkey && notificationsHandle != null) {
+        if (myPubkeyHex == pubkey && notificationHandles.isNotEmpty()) {
             Log.d(TAG, "startSubscription: already active for ${pubkey.take(8)}..., skipping")
             return
         }
         val isNewUser = myPubkeyHex != pubkey
+        Log.d(TAG, "startSubscription: isNewUser=$isNewUser (myPubkeyHex=${myPubkeyHex?.take(8)}, pubkey=${pubkey.take(8)}), seenIds=${_seenIds.value.size}")
         stopSubscription()
-        // Only clear notification data when switching users, not when re-subscribing for the same user
-        // This preserves seen state and existing notifications across navigation
+        // Re-suppress push notifications until enableAndroidNotifications() is called
+        sessionStartEpochSec = Long.MAX_VALUE
         if (isNewUser) {
             notificationsById.clear()
             seenEventIds.clear()
@@ -221,72 +288,109 @@ object NotificationsRepository {
             myNoteIds.clear()
             _notifications.value = emptyList()
         }
-        subscriptionRelayUrls = relayUrls
+        subscriptionRelayUrls = allRelays
         myPubkeyHex = pubkey
-        val since = (System.currentTimeMillis() / 1000) - ONE_WEEK_SEC
-        // Primary filter: high-volume kinds (text, reaction, repost, zap, topic reply)
-        val filter = Filter(
-            kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
-            tags = mapOf("p" to listOf(pubkey)),
-            since = since,
-            limit = 500
-        )
+        // Persist pubkey so cold-start recognises the same user
+        scope.launch(Dispatchers.IO) { prefs?.edit()?.putString(PREFS_KEY_PUBKEY, pubkey)?.apply() }
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        // Merge all notification kinds into a single multi-filter subscription (saves 2 relay slots)
-        val filters = mutableListOf(filter)
-        // Secondary filter: lower-volume kinds (reports, highlights)
-        filters.add(Filter(
-            kinds = listOf(NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT),
-            tags = mapOf("p" to listOf(pubkey)),
-            since = since,
-            limit = 100
-        ))
-        notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, filters, priority = SubscriptionPriority.LOW) { event -> handleEvent(event) }
-        Log.d(TAG, "Notifications subscription started for ${pubkey.take(8)}... on ${relayUrls.size} relays (${filters.size} filters, 1 slot)")
 
-        // Fetch user's kind-11 topic IDs and kind-1 note IDs, then add thread replies + quotes filters
+        // ── Phase 1: Deep inbox fetch (immediate) ────────────────────────────
+        val inboxUrls = inboxRelayUrls.map { it.trim().removeSuffix("/") }.distinct()
+            .ifEmpty { BOOTSTRAP_INBOX_RELAYS }
+        val inboxFilters = listOf(
+            // High-volume: text, reaction, repost, zap, topic reply — complete history
+            Filter(
+                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
+                tags = mapOf("p" to listOf(pubkey)),
+                limit = 5000
+            ),
+            // Lower-volume: reports, highlights
+            Filter(
+                kinds = listOf(NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT),
+                tags = mapOf("p" to listOf(pubkey)),
+                limit = 1000
+            ),
+        )
+        val inboxHandle = stateMachine.requestTemporarySubscription(
+            inboxUrls, inboxFilters, priority = SubscriptionPriority.BACKGROUND
+        ) { event -> handleEvent(event) }
+        notificationHandles.add(inboxHandle)
+        Log.d(TAG, "Phase 1: Deep inbox fetch on ${inboxUrls.size} relays (${inboxFilters.size} filters, BACKGROUND)")
+
+        // ── Phase 2: Sweep non-inbox relays (delayed) ────────────────────────
+        val sweepUrls = (outboxRelayUrls + categoryRelayUrls)
+            .map { it.trim().removeSuffix("/") }
+            .distinct()
+            .filter { it !in inboxUrls }
+        if (sweepUrls.isNotEmpty()) {
+            scope.launch {
+                delay(SWEEP_DELAY_MS)
+                val sweepSince = (System.currentTimeMillis() / 1000) - ONE_WEEK_SEC
+                val sweepFilters = listOf(
+                    Filter(
+                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
+                        tags = mapOf("p" to listOf(pubkey)),
+                        since = sweepSince,
+                        limit = 200
+                    ),
+                    Filter(
+                        kinds = listOf(NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT),
+                        tags = mapOf("p" to listOf(pubkey)),
+                        since = sweepSince,
+                        limit = 50
+                    ),
+                )
+                val sweepHandle = stateMachine.requestTemporarySubscription(
+                    sweepUrls, sweepFilters, priority = SubscriptionPriority.BACKGROUND
+                ) { event -> handleEvent(event) }
+                notificationHandles.add(sweepHandle)
+                Log.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1w, BACKGROUND)")
+            }
+        }
+
+        Log.d(TAG, "Tiered notification sub started for ${pubkey.take(8)}...: " +
+            "inbox=${inboxUrls.size} (deep), sweep=${sweepUrls.size} (delayed ${SWEEP_DELAY_MS}ms)")
+
+        // ── Phase 3: Discover user content IDs → thread reply + quote subs ───
         scope.launch {
-            val topicIds = fetchUserTopicIds(pubkey, relayUrls, since)
+            delay(2_000L) // Let inbox phase settle first
+            val topicIds = fetchUserTopicIds(pubkey, allRelays, null)
             myTopicIds.addAll(topicIds)
-            val noteIds = fetchUserNoteIds(pubkey, relayUrls, since)
+            val noteIds = fetchUserNoteIds(pubkey, allRelays, null)
             myNoteIds.addAll(noteIds)
             val extraFilters = mutableListOf<Filter>()
             if (topicIds.isNotEmpty()) {
-                Log.d(TAG, "Found ${topicIds.size} user topics, adding thread replies filter")
+                Log.d(TAG, "Phase 3: Found ${topicIds.size} topics, adding thread replies filter")
                 extraFilters.add(Filter(
                     kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
                     tags = mapOf("E" to topicIds),
-                    since = since,
-                    limit = 200
+                    limit = 2000
                 ))
-            } else {
-                Log.d(TAG, "No user topics found, skipping thread replies filter")
             }
             if (noteIds.isNotEmpty()) {
-                Log.d(TAG, "Found ${noteIds.size} user notes, adding quotes filter")
+                Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes filter")
                 extraFilters.add(Filter(
                     kinds = listOf(NOTIFICATION_KIND_TEXT),
                     tags = mapOf("q" to noteIds),
-                    since = since,
-                    limit = 200
+                    limit = 2000
                 ))
-            } else {
-                Log.d(TAG, "No user notes found, skipping quotes filter")
             }
             if (extraFilters.isNotEmpty()) {
-                notificationsHandle?.cancel()
-                val allFilters = filters + extraFilters
-                notificationsHandle = stateMachine.requestTemporarySubscription(relayUrls, allFilters, priority = SubscriptionPriority.LOW) { event ->
-                    handleEvent(event)
-                }
-                Log.d(TAG, "Notifications re-subscribed with ${allFilters.size} filters (still 1 slot)")
+                val extraHandle = stateMachine.requestTemporarySubscription(
+                    inboxUrls, extraFilters, priority = SubscriptionPriority.BACKGROUND
+                ) { event -> handleEvent(event) }
+                notificationHandles.add(extraHandle)
+                Log.d(TAG, "Phase 3: Thread reply + quote filters on ${inboxUrls.size} inbox relays")
             }
         }
     }
 
     fun stopSubscription() {
-        try { notificationsHandle?.cancel(); notificationsHandle = null } catch (_: Exception) { }
-        Log.d(TAG, "Notifications subscription stopped")
+        for (handle in notificationHandles) {
+            try { handle.cancel() } catch (_: Exception) { }
+        }
+        notificationHandles.clear()
+        Log.d(TAG, "Notifications subscription stopped (${notificationHandles.size} handles)")
     }
 
     private val ACCEPTED_KINDS = setOf(
@@ -309,8 +413,9 @@ object NotificationsRepository {
         when (event.kind) {
             NOTIFICATION_KIND_REACTION -> handleLike(event, author, ts)
             NOTIFICATION_KIND_TEXT -> {
-                // Check if this is a quote (has q-tag referencing one of our notes)
-                val quotedId = event.tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
+                // Check if this is a quote: q-tag OR nostr:nevent1/nostr:note1 in content referencing our notes
+                val quotedIdFromTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
+                val quotedId = quotedIdFromTag ?: findQuotedNoteIdInContent(event.content)
                 if (quotedId != null) {
                     handleQuote(event, author, ts, quotedId)
                 } else {
@@ -366,7 +471,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id)
+        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
     }
@@ -398,7 +503,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id)
+        fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
         if (rootId != null) {
             // Fetch the direct parent to verify the reply is TO one of our notes.
             // If the parent note author isn't us AND we're not cited in content,
@@ -426,7 +531,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id)
+        fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
         // Fetch the quoted note for display
         scope.launch { fetchAndSetTargetNote(quotedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
     }
@@ -451,6 +556,30 @@ object NotificationsRepository {
             } catch (_: Exception) { }
         }
         return false
+    }
+
+    /** Find a quoted note ID in content by parsing nostr:nevent1... and nostr:note1... URIs.
+     *  Returns the first note ID that matches one of our known notes (myNoteIds), or null.
+     *  This complements q-tag detection — many clients embed quotes as nostr: URIs in content. */
+    private fun findQuotedNoteIdInContent(content: String): String? {
+        if (content.isBlank() || myNoteIds.isEmpty()) return null
+        val neventRegex = Regex("nostr:(nevent1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)", RegexOption.IGNORE_CASE)
+        val nnoteRegex = Regex("nostr:(note1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)", RegexOption.IGNORE_CASE)
+        for (match in neventRegex.findAll(content)) {
+            try {
+                val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
+                val hex = (parsed?.entity as? com.example.cybin.nip19.NEvent)?.hex
+                if (hex != null && hex in myNoteIds) return hex
+            } catch (_: Exception) { }
+        }
+        for (match in nnoteRegex.findAll(content)) {
+            try {
+                val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
+                val hex = (parsed?.entity as? com.example.cybin.nip19.NNote)?.hex
+                if (hex != null && hex in myNoteIds) return hex
+            } catch (_: Exception) { }
+        }
+        return null
     }
 
     /** NIP-22: root note id from uppercase "E" tag or ["e", id, ..., "root"] for kind-1111. */
@@ -493,7 +622,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.COMMENT, author.displayName ?: "Someone", text, event.id)
+        fireAndroidNotification(NotificationType.COMMENT, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         updateTodaySummary(NotificationType.REPLY, ts, 0L)
     }
@@ -617,7 +746,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id)
+        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000)
         // Always fetch the reposted note so flushTargetFetchBatch can verify authorship
         // (even if we parsed it from content — content parsing doesn't verify it's OUR note)
         scope.launch { fetchAndSetTargetNote(repostedNoteId, data.id) { d -> { n -> d.copy(targetNote = n) } } }
@@ -681,7 +810,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id)
+        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
     }
@@ -747,14 +876,14 @@ object NotificationsRepository {
     /**
      * Fetch the user's kind-11 topic event IDs from relays so we can subscribe for kind-1111 replies.
      */
-    private suspend fun fetchUserTopicIds(pubkey: String, relayUrls: List<String>, since: Long): List<String> {
+    private suspend fun fetchUserTopicIds(pubkey: String, relayUrls: List<String>, since: Long?): List<String> {
         val topicIds = mutableListOf<String>()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val filter = Filter(
             kinds = listOf(11),
             authors = listOf(pubkey),
             since = since,
-            limit = 100
+            limit = 500
         )
         val handle = stateMachine.requestOneShotSubscription(relayUrls, filter,
             priority = SubscriptionPriority.BACKGROUND, settleMs = 300L, maxWaitMs = 4_000L,
@@ -770,7 +899,7 @@ object NotificationsRepository {
     }
 
     /** Fetch user's kind-1 note IDs for quote detection (q-tag subscriptions). */
-    private suspend fun fetchUserNoteIds(pubkey: String, relayUrls: List<String>, since: Long): List<String> {
+    private suspend fun fetchUserNoteIds(pubkey: String, relayUrls: List<String>, since: Long?): List<String> {
         val noteIds = mutableListOf<String>()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         // Use indexer relays for broader coverage of the user's notes
@@ -780,7 +909,7 @@ object NotificationsRepository {
             kinds = listOf(1),
             authors = listOf(pubkey),
             since = since,
-            limit = 500
+            limit = 2000
         )
         val handle = stateMachine.requestOneShotSubscription(allRelays, filter,
             priority = SubscriptionPriority.BACKGROUND, settleMs = 300L, maxWaitMs = 5_000L,
@@ -808,9 +937,21 @@ object NotificationsRepository {
     }
 
     private fun emitSorted() {
-        _notifications.value = notificationsById.values
+        val sorted = notificationsById.values
             .sortedByDescending { it.sortTimestamp }
             .toList()
+        _notifications.value = sorted
+        // Auto-mark historical notifications that arrived after user pressed "Read All".
+        // sortTimestamp is event.createdAt * 1000 — any event created before the watermark
+        // is a historical replay and should be considered already seen.
+        val cutoff = markAllSeenEpochMs
+        if (cutoff > 0) {
+            val currentSeen = _seenIds.value
+            val autoSeen = sorted.filter { it.sortTimestamp <= cutoff && it.id !in currentSeen }.map { it.id }.toSet()
+            if (autoSeen.isNotEmpty()) {
+                _seenIds.value = currentSeen + autoSeen
+            }
+        }
     }
 
     private fun fetchAndSetTargetNote(noteId: String, notificationId: String, update: (NotificationData) -> (Note?) -> NotificationData) {
@@ -917,7 +1058,11 @@ object NotificationsRepository {
         val mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(event.content)
             .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
             .distinct()
-        val quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(event.content)
+        val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(event.content)
+        val quotedEventIds = quotedRefs.map { it.eventId }
+        quotedRefs.forEach { ref ->
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+        }
         // Parse NIP-10 reply context so tapping notifications can open the full thread
         val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
         val replyToId = social.mycelium.android.utils.Nip10ReplyDetector.getReplyToId(event)

@@ -21,7 +21,7 @@ object QuotedNoteCache {
 
     private const val TAG = "QuotedNoteCache"
     private const val FETCH_TIMEOUT_MS = 6000L
-    private const val SNIPPET_MAX_LEN = 150
+    private const val SNIPPET_MAX_LEN = 280
     private const val MAX_ENTRIES = 200
 
     /** Size to trim to when UI is hidden. */
@@ -49,6 +49,20 @@ object QuotedNoteCache {
     @Volatile
     private var indexerRelayUrls: List<String> = emptyList()
 
+    /** Relay hints extracted from nevent1 TLV, keyed by event ID.
+     *  Populated at note parse time so fetchAndCache can use them without changing the Note data class. */
+    private val relayHintsCache = Collections.synchronizedMap(
+        object : LinkedHashMap<String, List<String>>(MAX_ENTRIES, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>): Boolean =
+                size > MAX_ENTRIES
+        }
+    )
+
+    /** Register relay hints for a quoted event ID (extracted from nevent1 TLV at parse time). */
+    fun putRelayHints(eventId: String, hints: List<String>) {
+        if (hints.isNotEmpty()) relayHintsCache[eventId] = hints
+    }
+
     /** Set the user's subscription relay URLs so quoted note fetches use real note relays. */
     fun setRelayUrls(urls: List<String>) {
         userRelayUrls = urls
@@ -67,16 +81,20 @@ object QuotedNoteCache {
 
     /**
      * Get quoted note metadata by event id (hex). Returns from memory cache or fetches from relays.
+     * Relay hints registered via [putRelayHints] are used automatically; explicit hints take priority.
      */
-    suspend fun get(eventId: String): QuotedNoteMeta? {
+    suspend fun get(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
         if (eventId.isBlank() || eventId.length != 64) return null
         memoryCache[eventId]?.let { return it }
-        return fetchAndCache(eventId)
+        // Merge explicit hints with any previously registered hints from nevent1 TLV
+        val allHints = (relayHints + (relayHintsCache[eventId] ?: emptyList())).distinct()
+        return fetchAndCache(eventId, allHints)
     }
 
-    private suspend fun fetchAndCache(eventId: String): QuotedNoteMeta? {
+    private suspend fun fetchAndCache(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
         return try {
-            val relays = (userRelayUrls + indexerRelayUrls + fallbackRelays).distinct().filter { it.isNotBlank() }.take(8)
+            // Relay hints from nevent1 TLV first (most likely to have the event), then user relays as fallback
+            val relays = (relayHints + userRelayUrls).distinct().filter { it.isNotBlank() }.take(8)
             if (relays.isEmpty()) {
                 Log.w(TAG, "No relays available to fetch quoted note ${eventId.take(8)}")
                 return null
@@ -95,14 +113,18 @@ object QuotedNoteCache {
             val result = withTimeoutOrNull(FETCH_TIMEOUT_MS) { deferred.await() }
             handle.cancel()
             result?.let { (e, sourceRelay) ->
-                val snippet = e.content.take(SNIPPET_MAX_LEN).let { if (e.content.length > SNIPPET_MAX_LEN) "$it…" else it }
+                val snippet = buildSmartSnippet(e.content, SNIPPET_MAX_LEN)
+                // Extract NIP-10 root id so navigation can open the full thread for kind-1 replies
+                val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(e)
                 val meta = QuotedNoteMeta(
                     eventId = e.id,
                     authorId = e.pubKey,
                     contentSnippet = snippet,
                     fullContent = e.content,
                     createdAt = e.createdAt,
-                    relayUrl = sourceRelay.ifBlank { relays.firstOrNull() }
+                    relayUrl = sourceRelay.ifBlank { relays.firstOrNull() },
+                    rootNoteId = rootId,
+                    kind = e.kind
                 )
                 memoryCache[eventId] = meta
                 meta
@@ -113,8 +135,32 @@ object QuotedNoteCache {
         }
     }
 
+    /**
+     * Build a snippet that never truncates inside a `nostr:` URI.
+     * If the naive cut falls mid-URI, back up to before the URI so the
+     * annotated string builder can fully resolve all NIP-19 identifiers.
+     */
+    private fun buildSmartSnippet(content: String, maxLen: Int): String {
+        if (content.length <= maxLen) return content
+        var cutAt = maxLen
+        // Check if the cut point falls inside a nostr: URI
+        val nostrPattern = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
+        for (match in nostrPattern.findAll(content)) {
+            if (match.range.first < cutAt && match.range.last >= cutAt) {
+                // Cut falls inside this URI — back up to before it
+                cutAt = match.range.first
+                break
+            }
+        }
+        // Also avoid cutting mid-word: find the last whitespace before cutAt
+        val lastSpace = content.lastIndexOf(' ', cutAt - 1)
+        if (lastSpace > cutAt / 2) cutAt = lastSpace
+        return content.take(cutAt).trimEnd() + "…"
+    }
+
     fun clear() {
         memoryCache.clear()
+        relayHintsCache.clear()
     }
 
     /**
@@ -126,6 +172,12 @@ object QuotedNoteCache {
             while (memoryCache.size > maxEntries && memoryCache.isNotEmpty()) {
                 val eldest = memoryCache.keys.iterator().next()
                 memoryCache.remove(eldest)
+            }
+        }
+        synchronized(relayHintsCache) {
+            while (relayHintsCache.size > maxEntries && relayHintsCache.isNotEmpty()) {
+                val eldest = relayHintsCache.keys.iterator().next()
+                relayHintsCache.remove(eldest)
             }
         }
     }

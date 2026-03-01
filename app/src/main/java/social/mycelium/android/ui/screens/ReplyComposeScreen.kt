@@ -7,10 +7,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.Author
@@ -19,7 +22,11 @@ import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.repository.Nip65RelayListRepository
+import social.mycelium.android.repository.ProfileMetadataCache
 import android.widget.Toast
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 
 /**
  * Dedicated screen for replying to a comment. Shows the note being replied to at the top,
@@ -33,7 +40,7 @@ fun ReplyComposeScreen(
     rootPubkey: String,
     parentId: String?,
     parentPubkey: String?,
-    onPublish: (rootId: String, rootPubkey: String, parentId: String?, parentPubkey: String?, content: String, relayUrls: Set<String>) -> String?,
+    onPublish: (rootId: String, rootPubkey: String, parentId: String?, parentPubkey: String?, content: String, relayUrls: Set<String>, taggedPubkeys: List<String>) -> String?,
     onBack: () -> Unit,
     myAuthor: Author? = null,
     myOutboxRelays: List<UserRelay> = emptyList(),
@@ -62,46 +69,92 @@ fun ReplyComposeScreen(
     }
     var showRelayPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+    val myPubkey = myAuthor?.id
 
-    // Resolve target user's inbox relays from NIP-65 cache (updated reactively after fetch)
-    val targetPubkey = parentPubkey ?: rootPubkey
-    val targetAuthor = replyToNote?.author
-    var targetInboxRelays by remember(targetPubkey) {
-        mutableStateOf(
-            Nip65RelayListRepository.getCachedAuthorRelays(targetPubkey)?.readRelays ?: emptyList()
-        )
+    // ── Amethyst-style reply chain tagging ──
+    // Collect p-tags from parent event + parent author (like Amethyst ShortNotePostViewModel)
+    val initialTaggedPubkeys = remember(replyToNote, rootPubkey, parentPubkey) {
+        val parentMentions = replyToNote?.mentionedPubkeys ?: emptyList()
+        val parentAuthorPubkey = parentPubkey ?: rootPubkey
+        // Amethyst logic: forward parent's p-tags, ensure parent author is included
+        val combined = if (parentMentions.contains(parentAuthorPubkey)) {
+            parentMentions
+        } else {
+            parentMentions + parentAuthorPubkey
+        }
+        // Also ensure root author is included if different
+        val withRoot = if (rootPubkey !in combined) combined + rootPubkey else combined
+        // Remove our own pubkey — don't tag yourself
+        withRoot.filter { it != myPubkey }.distinct()
     }
+    var taggedPubkeys by remember { mutableStateOf(initialTaggedPubkeys) }
 
-    // Fetch NIP-65 relay list for target if not cached
-    LaunchedEffect(targetPubkey) {
-        if (targetInboxRelays.isEmpty() && targetPubkey.isNotBlank()) {
-            val discoveryRelays = listOf("wss://purplepag.es", "wss://user.kindpag.es", "wss://indexer.coracle.social", "wss://directory.yabu.me") +
-                (Nip65RelayListRepository.readRelays.value.takeIf { it.isNotEmpty() } ?: emptyList())
-            Nip65RelayListRepository.batchFetchRelayLists(listOf(targetPubkey), discoveryRelays)
-            // Poll for cache population (batchFetchRelayLists is async)
-            kotlinx.coroutines.withTimeoutOrNull(5000) {
-                while (true) {
-                    kotlinx.coroutines.delay(300)
-                    val cached = Nip65RelayListRepository.getCachedAuthorRelays(targetPubkey)
-                    if (cached != null && cached.readRelays.isNotEmpty()) {
-                        targetInboxRelays = cached.readRelays
-                        break
-                    }
-                }
-            }
+    // Resolve display names for tagged pubkeys
+    val taggedAuthors by remember {
+        derivedStateOf {
+            taggedPubkeys.map { pk -> profileCache.resolveAuthor(pk) }
         }
     }
 
-    // Build relay sections with target user + our profile
-    val sections = remember(targetAuthor, targetInboxRelays, myAuthor, myOutboxRelays, relayCategories, relayProfiles, replyToNote) {
+    // ── Inbox relay fetching for all tagged users ──
+    // Map of pubkey -> inbox relay URLs (fetched from NIP-65)
+    var taggedInboxRelays by remember { mutableStateOf<Map<String, List<String>>>(emptyMap()) }
+
+    // Fetch NIP-65 inbox relays for all tagged pubkeys
+    LaunchedEffect(taggedPubkeys) {
+        if (taggedPubkeys.isEmpty()) {
+            taggedInboxRelays = emptyMap()
+            return@LaunchedEffect
+        }
+        val discoveryRelays = listOf("wss://purplepag.es", "wss://user.kindpag.es", "wss://indexer.coracle.social", "wss://directory.yabu.me") +
+            (Nip65RelayListRepository.readRelays.value.takeIf { it.isNotEmpty() } ?: emptyList())
+        // Batch fetch for any pubkeys not yet cached
+        val uncached = taggedPubkeys.filter { Nip65RelayListRepository.getCachedAuthorRelays(it) == null }
+        if (uncached.isNotEmpty()) {
+            Nip65RelayListRepository.batchFetchRelayLists(uncached, discoveryRelays)
+            // Poll for cache population
+            kotlinx.coroutines.withTimeoutOrNull(5000) {
+                while (true) {
+                    kotlinx.coroutines.delay(300)
+                    val allCached = uncached.all { Nip65RelayListRepository.getCachedAuthorRelays(it) != null }
+                    if (allCached) break
+                }
+            }
+        }
+        // Build map from cache
+        taggedInboxRelays = taggedPubkeys.associateWith { pk ->
+            Nip65RelayListRepository.getCachedAuthorRelays(pk)?.readRelays ?: emptyList()
+        }
+    }
+
+    // Also request kind-0 profiles for tagged pubkeys so display names resolve
+    LaunchedEffect(taggedPubkeys) {
+        val unknownPubkeys = taggedPubkeys.filter { profileCache.getAuthor(it) == null }
+        if (unknownPubkeys.isNotEmpty()) {
+            val discoveryRelays = listOf("wss://purplepag.es", "wss://user.kindpag.es") +
+                (Nip65RelayListRepository.readRelays.value.takeIf { it.isNotEmpty() } ?: emptyList())
+            profileCache.requestProfiles(unknownPubkeys, discoveryRelays)
+        }
+    }
+
+    // Build per-user inbox list for relay selection (each tagged person gets own section)
+    val taggedUserInboxes = remember(taggedAuthors, taggedInboxRelays) {
+        taggedAuthors.mapIndexed { index, author ->
+            val pk = taggedPubkeys.getOrNull(index) ?: author.id
+            author to (taggedInboxRelays[pk] ?: emptyList())
+        }
+    }
+
+    // Build relay sections with per-user inbox sections + our profile
+    val sections = remember(taggedUserInboxes, myAuthor, myOutboxRelays, relayCategories, relayProfiles, replyToNote) {
         buildRelaySections(
-            targetAuthor = targetAuthor,
-            targetInboxRelays = targetInboxRelays,
             myAuthor = myAuthor,
             myOutboxRelays = myOutboxRelays,
             relayCategories = relayCategories ?: emptyList(),
             relayProfiles = relayProfiles,
-            noteRelayUrls = replyToNote?.relayUrls ?: emptyList()
+            noteRelayUrls = replyToNote?.relayUrls ?: emptyList(),
+            taggedUserInboxes = taggedUserInboxes
         )
     }
 
@@ -111,7 +164,7 @@ fun ReplyComposeScreen(
             sections = sections,
             onConfirm = { selectedUrls ->
                 showRelayPicker = false
-                val err = onPublish(rootId, rootPubkey, parentId?.takeIf { it.isNotBlank() }, parentPubkey?.takeIf { it.isNotBlank() }, content, selectedUrls)
+                val err = onPublish(rootId, rootPubkey, parentId?.takeIf { it.isNotBlank() }, parentPubkey?.takeIf { it.isNotBlank() }, content, selectedUrls, taggedPubkeys)
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
@@ -173,15 +226,67 @@ fun ReplyComposeScreen(
                     }
                 }
             }
-            OutlinedTextField(
+
+            // ── Tagged users (removable chips) ──
+            if (taggedPubkeys.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Tagging",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 8.dp)
+                    )
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        taggedAuthors.forEachIndexed { index, author ->
+                            InputChip(
+                                selected = true,
+                                onClick = {
+                                    // Remove this tagged user
+                                    taggedPubkeys = taggedPubkeys.filterIndexed { i, _ -> i != index }
+                                },
+                                label = {
+                                    Text(
+                                        text = author.displayName.ifBlank { author.username }.ifBlank { author.id.take(8) + "…" },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                },
+                                trailingIcon = {
+                                    Icon(
+                                        Icons.Filled.Close,
+                                        contentDescription = "Remove",
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                },
+                                modifier = Modifier.height(28.dp)
+                            )
+                        }
+                    }
+                }
+            }
+            social.mycelium.android.ui.components.ModernTextField(
                 value = content,
                 onValueChange = { content = it },
-                label = { Text("Your reply") },
+                placeholder = "Write your reply...",
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(vertical = 12.dp),
-                placeholder = { Text("Write your reply...") },
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    keyboardType = KeyboardType.Text
+                ),
             )
             Button(
                 onClick = { showRelayPicker = true },

@@ -14,6 +14,79 @@ import java.util.Date
  */
 enum class PublishState { Sending, Confirmed, Failed }
 
+/**
+ * NIP-92 imeta tag metadata for a single media URL.
+ * Parsed at event-processing time so the UI can size containers
+ * and show blurhash placeholders before the media loads.
+ */
+@Immutable
+@Serializable
+data class IMetaData(
+    val url: String,
+    /** Width x Height parsed from "dim" field (e.g. "1920x1080"). */
+    val width: Int? = null,
+    val height: Int? = null,
+    /** Blurhash string for placeholder rendering. */
+    val blurhash: String? = null,
+    /** MIME type (e.g. "image/jpeg", "video/mp4"). */
+    val mimeType: String? = null,
+    /** Alt text / description. */
+    val alt: String? = null,
+) {
+    /** Aspect ratio (width/height) or null if dimensions unknown. */
+    fun aspectRatio(): Float? {
+        if (width != null && height != null && height > 0 && width > 0) {
+            return width.toFloat() / height.toFloat()
+        }
+        return null
+    }
+
+    companion object {
+        /**
+         * Parse a single NIP-92 imeta tag array into a list of IMetaData.
+         * Tag format: ["imeta", "url https://...", "dim 1920x1080", "blurhash ...", "m image/jpeg", ...]
+         */
+        fun parseIMetaTag(tag: Array<String>): IMetaData? {
+            if (tag.size < 2 || tag[0] != "imeta") return null
+            var url: String? = null
+            var width: Int? = null
+            var height: Int? = null
+            var blurhash: String? = null
+            var mimeType: String? = null
+            var alt: String? = null
+            for (i in 1 until tag.size) {
+                val parts = tag[i].split(" ", limit = 2)
+                if (parts.size < 2) continue
+                when (parts[0]) {
+                    "url" -> url = parts[1]
+                    "dim" -> {
+                        val dims = parts[1].split("x")
+                        if (dims.size == 2) {
+                            width = dims[0].toIntOrNull()
+                            height = dims[1].toIntOrNull()
+                        }
+                    }
+                    "blurhash" -> blurhash = parts[1]
+                    "m" -> mimeType = parts[1]
+                    "alt" -> alt = parts[1]
+                }
+            }
+            if (url.isNullOrBlank()) return null
+            return IMetaData(url, width, height, blurhash, mimeType, alt)
+        }
+
+        /** Parse all imeta tags from an event's tag array into a map keyed by URL. */
+        fun parseAll(tags: Array<Array<String>>): Map<String, IMetaData> {
+            val result = mutableMapOf<String, IMetaData>()
+            for (tag in tags) {
+                val meta = parseIMetaTag(tag) ?: continue
+                result[meta.url] = meta
+            }
+            return result
+        }
+    }
+}
+
 @Immutable
 @Serializable
 data class Note(
@@ -31,6 +104,8 @@ data class Note(
     val isLiked: Boolean = false,
     val isShared: Boolean = false,
     val mediaUrls: List<String> = emptyList(),
+    /** NIP-92 imeta metadata keyed by media URL (dimensions, blurhash, mimeType). */
+    val mediaMeta: Map<String, IMetaData> = emptyMap(),
     val hashtags: List<String> = emptyList(),
     val urlPreviews: List<UrlPreviewInfo> = emptyList(),
     /** Event IDs of quoted notes (from nostr:nevent1... / nostr:note1... in content). */
@@ -57,6 +132,8 @@ data class Note(
     val repostedByAuthors: List<Author> = emptyList(),
     /** Timestamp (ms) of the latest repost event (kind-6 created_at); null for non-reposts. */
     val repostTimestamp: Long? = null,
+    /** Pubkeys mentioned in p-tags of this event; used to auto-tag people in reply chain (Amethyst-style). */
+    val mentionedPubkeys: List<String> = emptyList(),
     /** Publish progress for locally-published notes; null for notes from subscriptions. Not serialized. */
     @Transient val publishState: PublishState? = null
 ) {
@@ -115,7 +192,11 @@ data class QuotedNoteMeta(
     /** Unix epoch seconds. */
     val createdAt: Long = 0L,
     /** Relay URLs where this event was seen (for counts subscription). */
-    val relayUrl: String? = null
+    val relayUrl: String? = null,
+    /** NIP-10 root note id — set when this quoted event is a kind-1 reply, so navigation can open the full thread. */
+    val rootNoteId: String? = null,
+    /** Event kind (1 = text note, 11 = topic, 1111 = thread reply). */
+    val kind: Int = 1
 )
 
 enum class NoteAction {

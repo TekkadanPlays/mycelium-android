@@ -69,6 +69,9 @@ class DashboardViewModel : ViewModel() {
     /** Feed session lifecycle: Idle → Loading → Live. Drives the loading indicator in the UI. */
     val feedSessionState: StateFlow<FeedSessionState> = notesRepository.feedSessionState
 
+    /** True after the on-disk feed cache has been checked. UI waits for this before showing the loading overlay. */
+    val feedCacheChecked: StateFlow<Boolean> = notesRepository.feedCacheChecked
+
     companion object {
         private const val TAG = "DashboardViewModel"
     }

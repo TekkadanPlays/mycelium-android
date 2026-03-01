@@ -772,7 +772,7 @@ private fun FullNotificationCard(
         else -> MaterialTheme.colorScheme.primary
     }
     val linkColor = MaterialTheme.colorScheme.primary
-    val linkStyle = remember(linkColor) { SpanStyle(color = linkColor) }
+    val linkStyle = remember(linkColor) { SpanStyle(color = linkColor, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline) }
 
     val accentColor = MaterialTheme.colorScheme.primary
     Surface(
@@ -906,7 +906,7 @@ private fun NotificationReplyContent(
     val videoUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
     val mediaUrlSet = remember(replyNote.mediaUrls) { replyNote.mediaUrls.toSet() }
     val linkColor = MaterialTheme.colorScheme.primary
-    val linkStyle = remember(linkColor) { SpanStyle(color = linkColor) }
+    val linkStyle = remember(linkColor) { SpanStyle(color = linkColor, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline) }
     val annotatedContent = remember(replyNote.content, mediaUrlSet, linkStyle) {
         buildNoteContentAnnotatedString(
             content = replyNote.content,

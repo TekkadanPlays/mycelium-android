@@ -41,7 +41,7 @@ import androidx.compose.ui.unit.dp
 import social.mycelium.android.R
 import social.mycelium.android.ui.settings.MediaPreferences
 import kotlinx.coroutines.delay
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.Slider
@@ -509,77 +509,66 @@ private fun VideoControlsPill(
     onSeek: (Float) -> Unit = {},
     onSeekEnd: (Float) -> Unit = {}
 ) {
-    Column(
+    Row(
         modifier = Modifier
             .then(if (isFullscreen) Modifier.fillMaxWidth() else Modifier)
             .padding(8.dp)
             .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(16.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(start = 10.dp, end = 2.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Seekbar (shown when duration is known)
+        // Seekbar with timestamps (takes remaining space)
         if (duration > 0) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text(
-                    text = formatDuration(position),
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    style = MaterialTheme.typography.labelSmall
+            Text(
+                text = formatDuration(position),
+                color = Color.White,
+                fontSize = 11.sp,
+                style = MaterialTheme.typography.labelSmall
+            )
+            Slider(
+                value = progress,
+                onValueChange = { onSeekStart(); onSeek(it) },
+                onValueChangeFinished = { onSeekEnd(progress) },
+                modifier = Modifier.weight(1f).height(24.dp),
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color.White,
+                    inactiveTrackColor = Color.White.copy(alpha = 0.3f)
                 )
-                Slider(
-                    value = progress,
-                    onValueChange = { onSeekStart(); onSeek(it) },
-                    onValueChangeFinished = { onSeekEnd(progress) },
-                    modifier = Modifier.weight(1f).height(24.dp),
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color.White,
-                        activeTrackColor = Color.White,
-                        inactiveTrackColor = Color.White.copy(alpha = 0.3f)
-                    )
-                )
-                Text(
-                    text = formatDuration(duration),
-                    color = Color.White.copy(alpha = 0.7f),
-                    fontSize = 11.sp,
-                    style = MaterialTheme.typography.labelSmall
-                )
-            }
+            )
+            Text(
+                text = formatDuration(duration),
+                color = Color.White.copy(alpha = 0.7f),
+                fontSize = 11.sp,
+                style = MaterialTheme.typography.labelSmall
+            )
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
         }
-        Row(
-            modifier = if (isFullscreen) Modifier.fillMaxWidth() else Modifier,
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = if (isFullscreen) Arrangement.SpaceEvenly else Arrangement.spacedBy(2.dp)
-        ) {
-            // Play/Pause
-            IconButton(onClick = onPlayPauseToggle, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-            // Mute toggle
-            IconButton(onClick = onMuteToggle, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
-                    contentDescription = if (isMuted) "Unmute" else "Mute",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
-            // Fullscreen / Exit fullscreen
-            IconButton(onClick = onScreenToggle, modifier = Modifier.size(40.dp)) {
-                Icon(
-                    imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                    contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
-                    tint = Color.White,
-                    modifier = Modifier.size(24.dp)
-                )
-            }
+        // Controls on the right
+        IconButton(onClick = onPlayPauseToggle, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        IconButton(onClick = onMuteToggle, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = if (isMuted) Icons.AutoMirrored.Filled.VolumeOff else Icons.AutoMirrored.Filled.VolumeUp,
+                contentDescription = if (isMuted) "Unmute" else "Mute",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        IconButton(onClick = onScreenToggle, modifier = Modifier.size(36.dp)) {
+            Icon(
+                imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                contentDescription = if (isFullscreen) "Exit fullscreen" else "Fullscreen",
+                tint = Color.White,
+                modifier = Modifier.size(20.dp)
+            )
         }
     }
 }

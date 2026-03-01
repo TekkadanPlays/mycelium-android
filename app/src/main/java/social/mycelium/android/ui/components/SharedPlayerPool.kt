@@ -2,7 +2,10 @@ package social.mycelium.android.ui.components
 
 import android.content.Context
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
+import social.mycelium.android.utils.MediaAspectRatioCache
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -59,6 +62,14 @@ object SharedPlayerPool {
         }
 
         val player = ExoPlayer.Builder(context.applicationContext).build().apply {
+            // Cache video aspect ratio on size change (like Amethyst's AspectRatioCacher)
+            addListener(object : Player.Listener {
+                override fun onVideoSizeChanged(videoSize: VideoSize) {
+                    if (videoSize.width > 0 && videoSize.height > 0) {
+                        MediaAspectRatioCache.add(url, videoSize.width, videoSize.height)
+                    }
+                }
+            })
             setMediaItem(MediaItem.fromUri(url))
             prepare()
             playWhenReady = false

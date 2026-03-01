@@ -13,6 +13,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
@@ -117,31 +120,33 @@ fun ComposeTopicScreen(
                 .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
-            OutlinedTextField(
+            social.mycelium.android.ui.components.ModernTextField(
                 value = title,
                 onValueChange = { title = it },
-                label = { Text("Title") },
+                placeholder = "Title",
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 16.dp),
                 singleLine = true
             )
-            OutlinedTextField(
+            social.mycelium.android.ui.components.ModernTextField(
                 value = content,
                 onValueChange = { content = it },
-                label = { Text("Content") },
+                placeholder = "What's this topic about?",
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(vertical = 12.dp),
-                placeholder = { Text("What's this topic about?") },
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    keyboardType = KeyboardType.Text
+                ),
             )
-            OutlinedTextField(
+            social.mycelium.android.ui.components.ModernTextField(
                 value = hashtags,
                 onValueChange = { hashtags = it },
-                label = { Text("Hashtags (comma-separated)") },
+                placeholder = "Hashtags (comma-separated)",
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("e.g. nostr, relay") },
                 singleLine = true
             )
             Spacer(modifier = Modifier.height(12.dp))

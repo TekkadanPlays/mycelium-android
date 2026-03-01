@@ -84,6 +84,9 @@ class Kind1RepliesRepository {
     /** Per-thread cache: rootNoteId -> (replyId -> Note) for fast lookup and tree building. */
     private val threadReplyCache = mutableMapOf<String, MutableMap<String, Note>>()
 
+    /** Buffer for relay confirmations that arrived before their reply was injected. eventId → set of relay URLs. */
+    private val pendingRelayConfirmations = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+
     /** Pending pubkeys for batched kind-0 profile fetch. */
     private val pendingProfilePubkeys = java.util.Collections.synchronizedSet(HashSet<String>())
     private var profileBatchJob: kotlinx.coroutines.Job? = null
@@ -158,12 +161,19 @@ class Kind1RepliesRepository {
     fun injectLocalReply(rootId: String, reply: Note) {
         val current = _replies.value[rootId] ?: emptyList()
         if (current.any { it.id == reply.id }) return
-        val updated = (current + reply).sortedBy { it.timestamp }
+        // Apply any buffered relay confirmations that arrived before this injection
+        val buffered = pendingRelayConfirmations.remove(reply.id)
+        val enrichedReply = if (buffered != null) {
+            val merged = (reply.relayUrls + buffered).distinct()
+            Log.d(TAG, "📌 Applied ${buffered.size} buffered relay confirmations for ${reply.id.take(8)}")
+            reply.copy(relayUrls = merged)
+        } else reply
+        val updated = (current + enrichedReply).sortedBy { it.timestamp }
         _replies.value = _replies.value + (rootId to updated)
         // Also update internal cache for tree building
         val cacheMap = threadReplyCache.getOrPut(rootId) { mutableMapOf() }
-        cacheMap[reply.id] = reply
-        Log.d(TAG, "Injected local reply ${reply.id.take(8)} into thread ${rootId.take(8)} (now ${updated.size} replies)")
+        cacheMap[enrichedReply.id] = enrichedReply
+        Log.d(TAG, "Injected local reply ${reply.id.take(8)} into thread ${rootId.take(8)} (now ${updated.size} replies, ${enrichedReply.relayUrls.size} orbs)")
     }
 
     /**
@@ -186,6 +196,8 @@ class Kind1RepliesRepository {
                 return
             }
         }
+        // Reply not yet injected — buffer for retroactive application
+        pendingRelayConfirmations.getOrPut(eventId) { java.util.Collections.synchronizedSet(mutableSetOf()) }.add(relayUrl)
     }
 
     /**
@@ -703,9 +715,22 @@ class Kind1RepliesRepository {
         val mediaUrls = UrlDetector.findUrls(event.content)
             .filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }
             .distinct()
+        // NIP-92: parse imeta tags for dimensions, blurhash, mimeType
+        val mediaMeta = social.mycelium.android.data.IMetaData.parseAll(event.tags)
+        for ((url, meta) in mediaMeta) {
+            if (meta.width != null && meta.height != null && meta.height > 0) {
+                social.mycelium.android.utils.MediaAspectRatioCache.add(url, meta.width, meta.height)
+            }
+        }
 
         // NIP-10 thread relationship
         val (rootId, replyToId) = parseRootAndReplyFromEvent(event)
+
+        // Extract p-tags for reply chain tagging (Amethyst-style)
+        val mentionedPubkeys = event.tags
+            .filter { tag -> tag.size >= 2 && tag[0] == "p" }
+            .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
+            .distinct()
 
         return Note(
             id = event.id,
@@ -718,11 +743,13 @@ class Kind1RepliesRepository {
             isLiked = false,
             hashtags = hashtags,
             mediaUrls = mediaUrls,
+            mediaMeta = mediaMeta,
             isReply = rootId != null || replyToId != null,
             rootNoteId = rootId,
             replyToId = replyToId,
             relayUrl = relayUrl.ifEmpty { null },
-            relayUrls = if (relayUrl.isNotBlank()) listOf(relayUrl) else emptyList()
+            relayUrls = if (relayUrl.isNotBlank()) listOf(relayUrl) else emptyList(),
+            mentionedPubkeys = mentionedPubkeys
         )
     }
 

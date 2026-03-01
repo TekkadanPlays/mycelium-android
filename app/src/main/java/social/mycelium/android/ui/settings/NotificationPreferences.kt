@@ -7,13 +7,37 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
+ * Controls how relay connections behave when the app is not in the foreground.
+ *
+ * - [ALWAYS_ON]: Foreground service keeps WebSockets open. Real-time notifications. Highest battery usage.
+ * - [ADAPTIVE]: WorkManager periodic inbox check (configurable interval). No persistent connections. Moderate battery.
+ * - [WHEN_ACTIVE]: Connections only while app is visible. Zero background activity. Best battery life.
+ */
+enum class ConnectionMode {
+    ALWAYS_ON,
+    ADAPTIVE,
+    WHEN_ACTIVE;
+
+    companion object {
+        fun fromString(value: String?): ConnectionMode = when (value) {
+            "ALWAYS_ON" -> ALWAYS_ON
+            "ADAPTIVE" -> ADAPTIVE
+            "WHEN_ACTIVE" -> WHEN_ACTIVE
+            else -> ADAPTIVE
+        }
+    }
+}
+
+/**
  * Persists notification preferences using SharedPreferences.
  * Singleton — call init(context) once from Application/Activity.
  */
 object NotificationPreferences {
     private const val PREFS_NAME = "Mycelium_notification_prefs"
     private const val KEY_PUSH_ENABLED = "push_enabled"
-    private const val KEY_BACKGROUND_SERVICE = "background_service_enabled"
+    private const val KEY_BACKGROUND_SERVICE = "background_service_enabled" // legacy, migrated to connection_mode
+    private const val KEY_CONNECTION_MODE = "connection_mode"
+    private const val KEY_ADAPTIVE_CHECK_INTERVAL = "adaptive_check_interval_minutes"
     private const val KEY_NOTIFY_REACTIONS = "notify_reactions"
     private const val KEY_NOTIFY_ZAPS = "notify_zaps"
     private const val KEY_NOTIFY_REPOSTS = "notify_reposts"
@@ -22,13 +46,23 @@ object NotificationPreferences {
     private const val KEY_NOTIFY_DMS = "notify_dms"
     private const val KEY_MUTE_STRANGERS = "mute_strangers"
 
+    /** Default adaptive check interval in minutes. */
+    const val DEFAULT_ADAPTIVE_INTERVAL_MINUTES = 15L
+
     private lateinit var prefs: SharedPreferences
 
     private val _pushEnabled = MutableStateFlow(true)
     val pushEnabled: StateFlow<Boolean> = _pushEnabled.asStateFlow()
 
-    private val _backgroundServiceEnabled = MutableStateFlow(true)
-    val backgroundServiceEnabled: StateFlow<Boolean> = _backgroundServiceEnabled.asStateFlow()
+    private val _connectionMode = MutableStateFlow(ConnectionMode.ADAPTIVE)
+    val connectionMode: StateFlow<ConnectionMode> = _connectionMode.asStateFlow()
+
+    /** Backward-compat: true only when mode is ALWAYS_ON. */
+    val backgroundServiceEnabled: Boolean get() = _connectionMode.value == ConnectionMode.ALWAYS_ON
+
+    /** Adaptive mode: how often to check inbox relays (minutes). */
+    private val _adaptiveCheckIntervalMinutes = MutableStateFlow(DEFAULT_ADAPTIVE_INTERVAL_MINUTES)
+    val adaptiveCheckIntervalMinutes: StateFlow<Long> = _adaptiveCheckIntervalMinutes.asStateFlow()
 
     private val _notifyReactions = MutableStateFlow(true)
     val notifyReactions: StateFlow<Boolean> = _notifyReactions.asStateFlow()
@@ -54,7 +88,24 @@ object NotificationPreferences {
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, true)
-        _backgroundServiceEnabled.value = prefs.getBoolean(KEY_BACKGROUND_SERVICE, true)
+
+        // Migration: old boolean toggle → new ConnectionMode enum
+        if (prefs.contains(KEY_CONNECTION_MODE)) {
+            _connectionMode.value = ConnectionMode.fromString(prefs.getString(KEY_CONNECTION_MODE, null))
+        } else if (prefs.contains(KEY_BACKGROUND_SERVICE)) {
+            // Migrate: old true → ALWAYS_ON, old false → ADAPTIVE (upgrade to new default)
+            val wasEnabled = prefs.getBoolean(KEY_BACKGROUND_SERVICE, true)
+            val migrated = if (wasEnabled) ConnectionMode.ALWAYS_ON else ConnectionMode.ADAPTIVE
+            _connectionMode.value = migrated
+            prefs.edit()
+                .putString(KEY_CONNECTION_MODE, migrated.name)
+                .remove(KEY_BACKGROUND_SERVICE)
+                .apply()
+        } else {
+            _connectionMode.value = ConnectionMode.ADAPTIVE
+        }
+
+        _adaptiveCheckIntervalMinutes.value = prefs.getLong(KEY_ADAPTIVE_CHECK_INTERVAL, DEFAULT_ADAPTIVE_INTERVAL_MINUTES)
         _notifyReactions.value = prefs.getBoolean(KEY_NOTIFY_REACTIONS, true)
         _notifyZaps.value = prefs.getBoolean(KEY_NOTIFY_ZAPS, true)
         _notifyReposts.value = prefs.getBoolean(KEY_NOTIFY_REPOSTS, true)
@@ -69,9 +120,14 @@ object NotificationPreferences {
         prefs.edit().putBoolean(KEY_PUSH_ENABLED, enabled).apply()
     }
 
-    fun setBackgroundServiceEnabled(enabled: Boolean) {
-        _backgroundServiceEnabled.value = enabled
-        prefs.edit().putBoolean(KEY_BACKGROUND_SERVICE, enabled).apply()
+    fun setConnectionMode(mode: ConnectionMode) {
+        _connectionMode.value = mode
+        prefs.edit().putString(KEY_CONNECTION_MODE, mode.name).apply()
+    }
+
+    fun setAdaptiveCheckIntervalMinutes(minutes: Long) {
+        _adaptiveCheckIntervalMinutes.value = minutes
+        prefs.edit().putLong(KEY_ADAPTIVE_CHECK_INTERVAL, minutes).apply()
     }
 
     fun setNotifyReactions(enabled: Boolean) {

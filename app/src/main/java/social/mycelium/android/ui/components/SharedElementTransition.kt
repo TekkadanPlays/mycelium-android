@@ -71,7 +71,7 @@ fun ProfilePicture(
             val imageRequest = remember(author.avatarUrl, sizePx) {
                 ImageRequest.Builder(context)
                     .data(author.avatarUrl)
-                    .crossfade(true)
+                    .crossfade(false)
                     .size(sizePx)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)

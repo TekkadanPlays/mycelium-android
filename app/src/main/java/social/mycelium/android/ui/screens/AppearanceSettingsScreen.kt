@@ -31,6 +31,7 @@ fun AppearanceSettingsScreen(
 ) {
     val currentThemeMode by ThemePreferences.themeMode.collectAsState()
     val currentAccent by ThemePreferences.accentColor.collectAsState()
+    val compactMedia by ThemePreferences.compactMedia.collectAsState()
     var showThemeSheet by remember { mutableStateOf(false) }
     var showAccentSheet by remember { mutableStateOf(false) }
 
@@ -93,6 +94,43 @@ fun AppearanceSettingsScreen(
                 }
             )
 
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+
+            // Compact media toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { ThemePreferences.setCompactMedia(!compactMedia) }
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.PhotoSizeSelectLarge,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Compact media",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = if (compactMedia) "Media aligns with text width"
+                               else "Media spans edge-to-edge",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = compactMedia,
+                    onCheckedChange = { ThemePreferences.setCompactMedia(it) }
+                )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
         }

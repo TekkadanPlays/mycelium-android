@@ -13,6 +13,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
@@ -247,18 +250,16 @@ fun ComposeTopicReplyScreen(
             }
 
             // Content input
-            OutlinedTextField(
+            social.mycelium.android.ui.components.ModernTextField(
                 value = content,
                 onValueChange = { content = it },
+                placeholder = "Share your thoughts...",
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                placeholder = {
-                    Text("Share your thoughts...")
-                },
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    keyboardType = KeyboardType.Text
                 ),
             )
         }

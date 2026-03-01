@@ -47,6 +47,12 @@ object NotificationChannelManager {
     const val NOTIFICATION_ID_RELAY_SERVICE = 1001
     /** Base ID for social notifications — offset by notification type ordinal + hash. */
     const val NOTIFICATION_ID_SOCIAL_BASE = 2000
+    // Summary notification IDs for Adaptive mode periodic checks
+    const val NOTIFICATION_ID_REPLY_SUMMARY = 3001
+    const val NOTIFICATION_ID_REACTION_SUMMARY = 3002
+    const val NOTIFICATION_ID_ZAP_SUMMARY = 3003
+    const val NOTIFICATION_ID_DM_SUMMARY = 3004
+    const val NOTIFICATION_ID_MENTION_SUMMARY = 3005
 
     // ── Old channel to delete ──
     private const val OLD_CHANNEL_ID = "Mycelium_relay_channel"
@@ -209,5 +215,19 @@ object NotificationChannelManager {
             // POST_NOTIFICATIONS permission not granted
             android.util.Log.w("NotificationChannelMgr", "Cannot post notification: ${e.message}")
         }
+    }
+
+    /**
+     * Post a summary notification from the Adaptive mode background check.
+     * Uses a fixed notification ID per type so repeated checks update rather than stack.
+     */
+    fun sendSummaryNotification(
+        context: Context,
+        channelId: String,
+        title: String,
+        body: String,
+        notificationId: Int
+    ) {
+        postSocialNotification(context, channelId, notificationId, title, body, autoCancel = true)
     }
 }

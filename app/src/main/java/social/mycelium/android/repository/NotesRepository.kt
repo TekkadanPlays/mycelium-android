@@ -91,8 +91,15 @@ class NotesRepository private constructor() {
     private val pendingKind1Events = ConcurrentLinkedQueue<Pair<Event, String>>()
     /** Job that schedules the next batch flush (debounce timer). */
     private var kind1FlushJob: Job? = null
+    /** Separate job for continuation flushes (not cancelled by new incoming events). */
+    private var continuationFlushJob: Job? = null
     /** Debounce window for batching incoming kind-1 events before flushing to the notes list. */
     private val KIND1_BATCH_DEBOUNCE_MS = 120L
+    /** Max events to process per flush cycle. Remaining events trigger an immediate follow-up flush
+     *  so rendering spreads across multiple frames instead of one giant recomposition. */
+    private val MAX_FLUSH_CHUNK_SIZE = 50
+    /** Shorter debounce for continuation flushes (just enough to yield a frame). */
+    private val CONTINUATION_FLUSH_MS = 16L
 
     private val outboxFeedManager = OutboxFeedManager.getInstance()
 
@@ -157,9 +164,11 @@ class NotesRepository private constructor() {
      */
     private suspend fun flushKind1Events() {
         val batch = mutableListOf<Pair<Event, String>>()
-        while (true) {
+        var drained = 0
+        while (drained < MAX_FLUSH_CHUNK_SIZE) {
             val item = pendingKind1Events.poll() ?: break
             batch.add(item)
+            drained++
         }
         if (batch.isEmpty()) return
 
@@ -215,8 +224,11 @@ class NotesRepository private constructor() {
                     val existingLocal = currentIds[note.id]
                     if (existingLocal != null) {
                         val existingUrls = existingLocal.relayUrls.ifEmpty { listOfNotNull(existingLocal.relayUrl) }
-                        val newRelayUrls = (existingUrls + listOfNotNull(note.relayUrl)).distinct().filter { it.isNotBlank() }
-                        if (newRelayUrls != existingUrls) relayUpdates[note.id] = newRelayUrls
+                        val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                        val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                        if (normalizedNew != null && normalizedNew !in existingNorm) {
+                            relayUpdates[note.id] = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                        }
                     }
                     continue
                 }
@@ -225,9 +237,10 @@ class NotesRepository private constructor() {
                 val existing = currentIds[note.id]
                 if (existing != null) {
                     val existingUrls = existing.relayUrls.ifEmpty { listOfNotNull(existing.relayUrl) }
-                    val newRelayUrls = (existingUrls + listOfNotNull(note.relayUrl)).distinct().filter { it.isNotBlank() }
-                    if (newRelayUrls != existingUrls) {
-                        relayUpdates[note.id] = newRelayUrls
+                    val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                    val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                    if (normalizedNew != null && normalizedNew !in existingNorm) {
+                        relayUpdates[note.id] = (existingUrls + normalizedNew).filter { it.isNotBlank() }
                     }
                     continue
                 }
@@ -302,6 +315,16 @@ class NotesRepository private constructor() {
 
             if (BuildConfig.DEBUG && batch.size > 5) {
                 Log.d(TAG, "Flushed ${batch.size} events: ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges")
+            }
+
+            // If more events remain after this chunk, schedule a continuation flush
+            // (separate from kind1FlushJob so incoming events don't cancel the continuation)
+            if (pendingKind1Events.isNotEmpty()) {
+                continuationFlushJob?.cancel()
+                continuationFlushJob = scope.launch {
+                    delay(CONTINUATION_FLUSH_MS)
+                    flushKind1Events()
+                }
             }
         } catch (e: Throwable) {
             Log.e(TAG, "flushKind1Events failed: ${e.message}", e)
@@ -455,6 +478,12 @@ class NotesRepository private constructor() {
     private val _feedSessionState = MutableStateFlow(FeedSessionState.Idle)
     val feedSessionState: StateFlow<FeedSessionState> = _feedSessionState.asStateFlow()
 
+    /** True after the on-disk feed cache has been checked (whether or not notes were found).
+     *  The dashboard overlay waits for this before showing the loading indicator so it
+     *  doesn't flash on resume after process death. */
+    private val _feedCacheChecked = MutableStateFlow(false)
+    val feedCacheChecked: StateFlow<Boolean> = _feedCacheChecked.asStateFlow()
+
     /** Optional context for feed cache persistence so notes survive process death. Set from MainActivity. */
     @Volatile private var appContext: Context? = null
     private var feedCacheSaveJob: Job? = null
@@ -510,7 +539,7 @@ class NotesRepository private constructor() {
     }
 
     private suspend fun loadFeedCacheFromDisk() {
-        val ctx = appContext ?: return
+        val ctx = appContext ?: run { _feedCacheChecked.value = true; return }
         withContext(Dispatchers.IO) {
             try {
                 val prefs = ctx.getSharedPreferences(FEED_CACHE_PREFS, Context.MODE_PRIVATE)
@@ -521,7 +550,10 @@ class NotesRepository private constructor() {
                     val fallbackKey = if (primaryKey == FEED_CACHE_KEY) FEED_CACHE_FOLLOWING_KEY else FEED_CACHE_KEY
                     json = prefs.getString(fallbackKey, null)
                 }
-                val list = json?.let { feedCacheJson.decodeFromString<List<Note>>(it) } ?: return@withContext
+                val list = json?.let { feedCacheJson.decodeFromString<List<Note>>(it) } ?: run {
+                    _feedCacheChecked.value = true
+                    return@withContext
+                }
                 if (list.isNotEmpty() && _notes.value.isEmpty()) {
                     _notes.value = list
                     _displayedNotes.value = list
@@ -539,6 +571,8 @@ class NotesRepository private constructor() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Load feed cache failed: ${e.message}", e)
+            } finally {
+                _feedCacheChecked.value = true
             }
         }
     }
@@ -762,8 +796,12 @@ class NotesRepository private constructor() {
                 }
             }
             val relayMatch: (Note) -> Boolean = { note ->
-                val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                urls.isEmpty() || urls.any { it in connectedSet }
+                // Locally-published notes always pass — their outbox URLs may not overlap with inbox relays
+                if (locallyPublishedIds.contains(note.id) || (note.originalNoteId != null && locallyPublishedIds.contains(note.originalNoteId))) true
+                else {
+                    val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    urls.isEmpty() || urls.any { it in connectedSet }
+                }
             }
             val allNotes = _notes.value
             var filtered = if (connectedRelays.isEmpty()) allNotes else allNotes.filter(relayMatch)
@@ -1065,17 +1103,17 @@ class NotesRepository private constructor() {
 
         val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
         val eventCount = java.util.concurrent.atomic.AtomicInteger(0)
-        olderNotesHandle = relayStateMachine.requestTemporarySubscription(
+        olderNotesHandle = relayStateMachine.requestTemporarySubscriptionWithRelay(
             relayUrls = relays,
             filters = listOf(filter),
             priority = SubscriptionPriority.CRITICAL,
-        ) { event ->
+        ) { event, relayUrl ->
             if (event.kind == 1) {
                 lastEventAt.set(System.currentTimeMillis())
                 eventCount.incrementAndGet()
                 // Cursor advancement handled by advancePaginationCursor in flushKind1Events
                 // (outlier-resistant, 5th-percentile, capped jump)
-                pendingKind1Events.add(event to "")
+                pendingKind1Events.add(event to relayUrl)
                 scheduleKind1Flush()
             }
         }
@@ -1310,7 +1348,27 @@ class NotesRepository private constructor() {
                     } ?: emptyList()
 
                 val mediaUrls = UrlDetector.findUrls(noteContent).filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
-                val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(noteContent)
+                // NIP-92: parse imeta from reposted note's JSON tags
+                val repostImetaTags = (jsonObj["tags"] as? kotlinx.serialization.json.JsonArray)
+                    ?.mapNotNull { tag ->
+                        val arr = tag as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
+                        if (arr.size >= 2 && (arr[0] as? kotlinx.serialization.json.JsonPrimitive)?.content == "imeta") {
+                            arr.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "" }.toTypedArray()
+                        } else null
+                    } ?: emptyList()
+                val repostMediaMeta = if (repostImetaTags.isNotEmpty()) {
+                    social.mycelium.android.data.IMetaData.parseAll(repostImetaTags.toTypedArray())
+                } else emptyMap()
+                for ((mUrl, mMeta) in repostMediaMeta) {
+                    if (mMeta.width != null && mMeta.height != null && mMeta.height > 0) {
+                        social.mycelium.android.utils.MediaAspectRatioCache.add(mUrl, mMeta.width, mMeta.height)
+                    }
+                }
+                val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(noteContent)
+                val quotedEventIds = quotedRefs.map { it.eventId }
+                quotedRefs.forEach { ref ->
+                    if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+                }
                 val originalTimestampMs = noteCreatedAt * 1000L
 
                 // Parse NIP-10 e-tags from JSON to detect if the reposted note is a reply
@@ -1340,7 +1398,8 @@ class NotesRepository private constructor() {
                     content = noteContent,
                     timestamp = originalTimestampMs,
                     likes = 0, shares = 0, comments = 0, isLiked = false,
-                    hashtags = hashtags, mediaUrls = mediaUrls, quotedEventIds = quotedEventIds,
+                    hashtags = hashtags, mediaUrls = mediaUrls, mediaMeta = repostMediaMeta,
+                    quotedEventIds = quotedEventIds,
                     relayUrl = relayUrl.ifEmpty { null },
                     relayUrls = if (relayUrl.isNotEmpty()) listOf(relayUrl) else emptyList(),
                     isReply = repostIsReply,
@@ -1588,13 +1647,15 @@ class NotesRepository private constructor() {
      */
     fun mergePublishRelayUrl(eventId: String, relayUrl: String) {
         if (relayUrl.isBlank()) return
+        val normalized = social.mycelium.android.utils.normalizeRelayUrl(relayUrl)
         val currentNotes = _notes.value
         val index = currentNotes.indexOfFirst { it.id == eventId || it.id == "repost:$eventId" }
         if (index < 0) return
         val note = currentNotes[index]
         val existingUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-        if (relayUrl in existingUrls) return
-        val updatedUrls = (existingUrls + relayUrl).distinct().filter { it.isNotBlank() }
+        val existingNormalized = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+        if (normalized in existingNormalized) return
+        val updatedUrls = (existingUrls + normalized).distinct().filter { it.isNotBlank() }
         val updated = currentNotes.toMutableList()
         updated[index] = note.copy(relayUrls = updatedUrls)
         _notes.value = updated
@@ -1678,7 +1739,11 @@ class NotesRepository private constructor() {
                             .filter { it.size >= 2 && it[0] == "t" }
                             .map { it[1] }
                         val mediaUrls = UrlDetector.findUrls(noteContent).filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
-                        val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(noteContent)
+                        val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(noteContent)
+                        val quotedEventIds = quotedRefs.map { it.eventId }
+                        quotedRefs.forEach { ref ->
+                            if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+                        }
                         val originalTimestampMs = originalEvent.createdAt * 1000L
 
                         // Parse NIP-10 e-tags to detect if the reposted note is a reply
@@ -1776,7 +1841,7 @@ class NotesRepository private constructor() {
 
     private fun convertEventToNote(event: Event, relayUrl: String): Note {
         android.os.Trace.beginSection("NotesRepo.convertEventToNote")
-        val storedRelayUrl = relayUrl.ifEmpty { null }
+        val storedRelayUrl = relayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
         val pubkeyHex = event.pubKey
         val author = profileCache.resolveAuthor(pubkeyHex)
         val profileRelayUrls = getProfileRelayUrls()
@@ -1793,7 +1858,20 @@ class NotesRepository private constructor() {
             .filter { tag -> tag.size >= 2 && tag[0] == "t" }
             .mapNotNull { tag -> tag.getOrNull(1) }
         val mediaUrls = UrlDetector.findUrls(event.content).filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
-        val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(event.content)
+        // NIP-92: parse imeta tags for dimensions, blurhash, mimeType
+        val mediaMeta = social.mycelium.android.data.IMetaData.parseAll(event.tags)
+        // Seed aspect ratio cache from imeta dimensions so containers size correctly on first render
+        for ((url, meta) in mediaMeta) {
+            if (meta.width != null && meta.height != null && meta.height > 0) {
+                social.mycelium.android.utils.MediaAspectRatioCache.add(url, meta.width, meta.height)
+            }
+        }
+        val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(event.content)
+        val quotedEventIds = quotedRefs.map { it.eventId }
+        // Register relay hints from nevent1 TLV so QuotedNoteCache can use them for fetching
+        quotedRefs.forEach { ref ->
+            if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+        }
         val isReply = Nip10ReplyDetector.isReply(event)
         val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(event) else null
         val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(event) else null
@@ -1824,6 +1902,7 @@ class NotesRepository private constructor() {
             isLiked = false,
             hashtags = hashtags,
             mediaUrls = mediaUrls,
+            mediaMeta = mediaMeta,
             quotedEventIds = quotedEventIds,
             relayUrl = storedRelayUrl,
             relayUrls = relayUrls,
@@ -1918,10 +1997,9 @@ class NotesRepository private constructor() {
         if (relayUrls.isEmpty()) return null
         val filter = Filter(ids = listOf(noteId), limit = 1)
         var fetched: Note? = null
-        val relayUrl = relayUrls.firstOrNull() ?: ""
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        val handle = stateMachine.requestTemporarySubscription(relayUrls, filter, priority = SubscriptionPriority.HIGH) { ev ->
-            fetched = convertEventToNote(ev, relayUrl)
+        val handle = stateMachine.requestTemporarySubscriptionWithRelay(relayUrls, filter, priority = SubscriptionPriority.HIGH) { ev, actualRelayUrl ->
+            fetched = convertEventToNote(ev, actualRelayUrl)
         }
         delay(5000)
         handle.cancel()
@@ -1950,11 +2028,11 @@ class NotesRepository private constructor() {
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val lastEventAt = java.util.concurrent.atomic.AtomicLong(0L)
 
-        val handle = stateMachine.requestTemporarySubscription(
+        val handle = stateMachine.requestTemporarySubscriptionWithRelay(
             relays, filter, priority = SubscriptionPriority.HIGH
-        ) { event ->
+        ) { event, actualRelayUrl ->
             if (event.id in noteIds && !results.containsKey(event.id)) {
-                results[event.id] = convertEventToNote(event, "")
+                results[event.id] = convertEventToNote(event, actualRelayUrl)
                 remaining.decrementAndGet()
                 lastEventAt.set(System.currentTimeMillis())
             }

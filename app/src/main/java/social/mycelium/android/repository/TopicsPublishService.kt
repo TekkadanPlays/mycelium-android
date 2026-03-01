@@ -88,7 +88,8 @@ object TopicsPublishService {
         rootThreadPubkey: String,
         parentReplyId: String?,
         parentReplyPubkey: String?,
-        content: String
+        content: String,
+        taggedPubkeys: List<String> = emptyList()
     ): EventTemplate {
         return Event.build(1111, content) {
             add(arrayOf("E", rootThreadId, "", rootThreadPubkey))
@@ -103,6 +104,12 @@ object TopicsPublishService {
                 add(arrayOf("k", "11"))
                 add(arrayOf("p", rootThreadPubkey, ""))
             }
+            // Amethyst-style: forward all tagged pubkeys from the reply chain
+            // (skip any already added as the primary p-tag above)
+            val primaryPubkey = parentReplyPubkey ?: rootThreadPubkey
+            taggedPubkeys.distinct()
+                .filter { it != primaryPubkey }
+                .forEach { pk -> add(arrayOf("p", pk, "")) }
         }
     }
 }

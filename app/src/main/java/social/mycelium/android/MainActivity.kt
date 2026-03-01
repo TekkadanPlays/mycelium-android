@@ -192,6 +192,10 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     if (!social.mycelium.android.ui.components.PipStreamManager.continueInBackground.value) {
                         social.mycelium.android.ui.components.PipStreamManager.pauseIfActive()
                     }
+                    // WHEN_ACTIVE mode: disconnect all relays when app goes to background
+                    if (social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value == social.mycelium.android.ui.settings.ConnectionMode.WHEN_ACTIVE) {
+                        RelayConnectionStateMachine.getInstance().disconnectAll()
+                    }
                 }
                 else -> {}
             }
@@ -233,6 +237,12 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     LaunchedEffect(currentAccount) {
                         setRelayServiceEnabled(currentAccount != null)
                     }
+
+                    // React to connection mode changes in real-time (e.g. user changes in settings)
+                    val connectionMode by social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.collectAsState()
+                    LaunchedEffect(connectionMode) {
+                        applyConnectionModeScheduling(connectionMode)
+                    }
                 }
             }
         }
@@ -244,11 +254,14 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         if (::accountStateViewModel.isInitialized) {
             accountStateViewModel.setAmberActivityContext(this)
         }
-        if (shouldRunRelayService) {
+        val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
+        if (shouldRunRelayService && mode == social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
             maybeStartRelayForegroundService()
         }
-        // Start keepalive health check to detect stale WebSocket connections
+        // Start keepalive health check to detect stale WebSocket connections (all modes while foregrounded)
         RelayConnectionStateMachine.getInstance().startKeepalive()
+        // Schedule or cancel WorkManager based on connection mode
+        applyConnectionModeScheduling(mode)
     }
 
     override fun onPause() {
@@ -300,12 +313,36 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             stopRelayForegroundService()
             return
         }
-        // Respect user preference — don't start service if background mode is disabled
-        if (!social.mycelium.android.ui.settings.NotificationPreferences.backgroundServiceEnabled.value) {
+        val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
+        if (mode != social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
+            // Not in ALWAYS_ON mode — don't start foreground service
             return
         }
         if (isInForeground) {
             maybeStartRelayForegroundService()
+        }
+    }
+
+    /**
+     * Schedule or cancel WorkManager periodic checks based on the current [ConnectionMode].
+     * - ALWAYS_ON: cancel WorkManager (foreground service handles it), stop any stale service on mode change
+     * - ADAPTIVE: schedule periodic inbox checks
+     * - WHEN_ACTIVE: cancel WorkManager (no background activity)
+     */
+    private fun applyConnectionModeScheduling(mode: social.mycelium.android.ui.settings.ConnectionMode) {
+        when (mode) {
+            social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON -> {
+                social.mycelium.android.services.RelayCheckWorker.cancel(this)
+            }
+            social.mycelium.android.ui.settings.ConnectionMode.ADAPTIVE -> {
+                stopRelayForegroundService()
+                val interval = social.mycelium.android.ui.settings.NotificationPreferences.adaptiveCheckIntervalMinutes.value
+                social.mycelium.android.services.RelayCheckWorker.schedule(this, interval)
+            }
+            social.mycelium.android.ui.settings.ConnectionMode.WHEN_ACTIVE -> {
+                stopRelayForegroundService()
+                social.mycelium.android.services.RelayCheckWorker.cancel(this)
+            }
         }
     }
 

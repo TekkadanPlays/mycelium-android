@@ -473,8 +473,8 @@ fun MyceliumNavigation(
         if (allUserRelayUrls.isNotEmpty()) {
             val indexerUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
             NotificationsRepository.setCacheRelayUrls(indexerUrls)
-            NotificationsRepository.startSubscription(pubkey, allUserRelayUrls)
-            Log.d("MyceliumNav", "Notif subscription started with ${allUserRelayUrls.size} relays")
+            NotificationsRepository.startSubscription(pubkey, inboxUrls, outboxUrls, categoryUrls)
+            Log.d("MyceliumNav", "Notif subscription started: inbox=${inboxUrls.size}, outbox=${outboxUrls.size}, categories=${categoryUrls.size}")
             // Enable Android push notifications after initial event replay settles (10s)
             // so old events from relay reconnect don't spam the notification shade
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
@@ -565,16 +565,9 @@ fun MyceliumNavigation(
             contentWindowInsets = WindowInsets(0),
     ) { scaffoldPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(top = scaffoldPadding.calculateTopPadding())) {
-            // Don't render NavHost until account state is resolved — prevents dashboard flash
-            if (!accountsRestored) {
-                // Show nothing (or a loading indicator) while accounts are being restored
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    // Intentionally blank — splash screen covers this
-                }
-            } else {
             NavHost(
                     navController = navController,
-                    startDestination = if (needsOnboarding) "onboarding" else "dashboard",
+                    startDestination = "dashboard",
                     // Instant transitions everywhere — seamless like Topics.
                     // Only thread routes get a slide animation (unique thread UX).
                     enterTransition = {
@@ -620,6 +613,16 @@ fun MyceliumNavigation(
             ) {
                 // Dashboard - Home feed (thread opens as overlay so feed stays visible for slide-back)
                 composable("dashboard") {
+                    // Wait for account restoration before rendering anything — prevents
+                    // login/guest UI flashing on cold start for signed-in users.
+                    val accountsRestoredLocal by accountStateViewModel.accountsRestored.collectAsState()
+                    if (!accountsRestoredLocal) {
+                        // Blank placeholder while account state loads — prevents guest/login flash.
+                        // Scaffold background already provides the correct color.
+                        Box(Modifier.fillMaxSize())
+                        return@composable
+                    }
+
                     // Guard: if we have account but onboarding not complete, redirect to onboarding
                     // If NO account, stay on dashboard to show "Login with Amber" button
                     val onboardingComplete by accountStateViewModel.onboardingComplete.collectAsState()
@@ -705,11 +708,46 @@ fun MyceliumNavigation(
                                 val threadNote = if (note.originalNoteId != null) {
                                     note.copy(id = note.originalNoteId)
                                 } else note
-                                appViewModel.updateSelectedNote(threadNote)
-                                appViewModel.updateThreadRelayUrls(threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) })
-                                appViewModel.markThreadViewed(note.id)
-                                overlayThreadStack.clear()
-                                overlayThreadStack.add(threadNote)
+                                // If this is a kind-1 reply (e.g. quoted reply), navigate to the thread root
+                                if (threadNote.rootNoteId != null && threadNote.isReply) {
+                                    val rootId = threadNote.rootNoteId!!
+                                    val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
+                                    val overlayNote = rootFromCache ?: social.mycelium.android.data.Note(
+                                        id = rootId,
+                                        author = Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
+                                        content = "",
+                                        timestamp = 0L,
+                                        relayUrls = threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) }
+                                    )
+                                    appViewModel.updateSelectedNote(overlayNote)
+                                    appViewModel.updateThreadRelayUrls(overlayNote.relayUrls.ifEmpty { listOfNotNull(overlayNote.relayUrl) })
+                                    appViewModel.markThreadViewed(note.id)
+                                    overlayThreadStack.clear()
+                                    overlayThreadStack.add(overlayNote)
+                                    // Async-fetch the root note so thread view has full data
+                                    if (rootFromCache == null) {
+                                        coroutineScope.launch(Dispatchers.IO) {
+                                            val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
+                                                noteId = rootId,
+                                                userRelayUrls = threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) } +
+                                                    NotesRepository.getInstance().INDEXER_RELAYS,
+                                                authorPubkey = threadNote.author.id.takeIf { it.isNotBlank() }
+                                            )
+                                            if (fetched != null) {
+                                                withContext(Dispatchers.Main.immediate) {
+                                                    val idx = overlayThreadStack.indexOfFirst { it.id == rootId }
+                                                    if (idx >= 0) overlayThreadStack[idx] = fetched
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    appViewModel.updateSelectedNote(threadNote)
+                                    appViewModel.updateThreadRelayUrls(threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) })
+                                    appViewModel.markThreadViewed(note.id)
+                                    overlayThreadStack.clear()
+                                    overlayThreadStack.add(threadNote)
+                                }
                             },
                             onImageTap = { note, _, _ ->
                                 val threadNote = if (note.originalNoteId != null) {
@@ -2096,7 +2134,6 @@ fun MyceliumNavigation(
                             onBackClick = { navController.popBackStack() },
                             onNavigateTo = { screen ->
                                 when (screen) {
-                                    "general" -> navController.navigate("settings/general") { launchSingleTop = true }
                                     "appearance" -> navController.navigate("settings/appearance") { launchSingleTop = true }
                                     "media" -> navController.navigate("settings/media") { launchSingleTop = true }
                                     "account_preferences" ->
@@ -2104,9 +2141,8 @@ fun MyceliumNavigation(
                                     "notifications" -> navController.navigate("settings/notifications") { launchSingleTop = true }
                                     "filters_blocks" -> navController.navigate("settings/filters_blocks") { launchSingleTop = true }
                                     "data_storage" -> navController.navigate("settings/data_storage") { launchSingleTop = true }
-                                    "zap_settings" -> navController.navigate("zap_settings") { launchSingleTop = true }
+                                    "power" -> navController.navigate("settings/power") { launchSingleTop = true }
                                     "about" -> navController.navigate("settings/about") { launchSingleTop = true }
-                                    "relays" -> navController.navigate("relays") { launchSingleTop = true }
                                     "direct_messages" -> navController.navigate("settings/direct_messages") { launchSingleTop = true }
                                 }
                             },
@@ -2123,8 +2159,8 @@ fun MyceliumNavigation(
                 }
 
                 // Settings sub-screens
-                composable("settings/general") {
-                    GeneralSettingsScreen(onBackClick = { navController.popBackStack() })
+                composable("settings/power") {
+                    social.mycelium.android.ui.screens.PowerSettingsScreen(onBackClick = { navController.popBackStack() })
                 }
 
                 composable("settings/appearance") {
@@ -3441,11 +3477,11 @@ fun MyceliumNavigation(
                         rootPubkey = rootPubkey,
                         parentId = parentId,
                         parentPubkey = parentPubkey,
-                        onPublish = { rId, rPk, pId, pPk, content, relayUrls ->
+                        onPublish = { rId, rPk, pId, pPk, content, relayUrls, taggedPubkeys ->
                             if (composeReplyKind == 1) {
-                                accountStateViewModel.publishKind1Reply(rId, rPk, pId, pPk, content, relayUrls)
+                                accountStateViewModel.publishKind1Reply(rId, rPk, pId, pPk, content, relayUrls, taggedPubkeys)
                             } else {
-                                accountStateViewModel.publishThreadReply(rId, rPk, pId, pPk, content, relayUrls)
+                                accountStateViewModel.publishThreadReply(rId, rPk, pId, pPk, content, relayUrls, taggedPubkeys)
                             }
                         },
                         onBack = {
@@ -3458,8 +3494,7 @@ fun MyceliumNavigation(
                         relayProfiles = threadReplyProfiles
                     )
                 }
-            }
-            } // end if (accountsRestored)
+            } // end NavHost
 
             // Bottom nav — inside content Box (not Scaffold bottomBar) so ModalNavigationDrawer sidebar renders above it
             androidx.compose.animation.AnimatedVisibility(

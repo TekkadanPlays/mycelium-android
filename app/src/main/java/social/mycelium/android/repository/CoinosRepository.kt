@@ -13,42 +13,34 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.request.post
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.ContentType
-import io.ktor.http.content.TextContent
-import io.ktor.http.isSuccess
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
-import social.mycelium.android.network.MyceliumHttpClient
+import social.mycelium.android.BuildConfig
 
 /**
- * Repository for coinos.io Bitcoin/Lightning wallet API.
- * Uses Nostr auth (kind-27235 challenge signing) for captcha-free authentication.
- * Server auto-registers new users from their Nostr profile.
- * API base: https://coinos.io/api
+ * Repository for CoinOS Bitcoin/Lightning wallet.
+ *
+ * Delegates all API calls to a [CoinosApiProvider]:
+ * - **Debug builds** (`WALLET_DEV_MODE = true`): [MockCoinosApiProvider] — fake data, no network.
+ * - **Release builds**: [RealCoinosApiProvider] — real HTTP calls to coinos.io/api.
+ *
+ * The wallet UI is only accessible in debug builds; release shows the
+ * "Coming soon" lander via `BuildConfig.WALLET_DEV_MODE`.
  */
 object CoinosRepository {
 
     private const val TAG = "CoinosRepo"
-    private const val BASE_URL = "https://coinos.io/api"
     private const val PREFS_NAME = "coinos_wallet"
     private const val KEY_TOKEN = "jwt_token"
     private const val KEY_USERNAME = "username"
-    private const val USER_AGENT = "Mycelium"
 
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() +
             CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
 
-    private val httpClient = MyceliumHttpClient.instance
+    private val provider: CoinosApiProvider =
+        if (BuildConfig.WALLET_DEV_MODE) MockCoinosApiProvider() else RealCoinosApiProvider()
+
+    val isMockMode: Boolean get() = provider is MockCoinosApiProvider
 
     private var prefs: SharedPreferences? = null
     private var token: String? = null
@@ -88,36 +80,24 @@ object CoinosRepository {
                 _username.value = savedUser
                 refreshBalance()
             }
+            Log.d(TAG, "init: mock=${isMockMode}, loggedIn=${_isLoggedIn.value}")
         }
     }
 
     // ── Nostr Auth ──
 
-    /**
-     * Authenticate with coinos using a signed Nostr event (kind 27235).
-     * Flow: GET /challenge -> sign event with challenge tag -> POST /nostr/auth.
-     * Server auto-registers new users from their Nostr profile (kind-0).
-     */
     fun loginWithNostr(signer: NostrSigner, pubkey: String) {
         _isLoading.value = true
         _error.value = null
         scope.launch {
             try {
-                // Step 1: Get challenge UUID from server
-                Log.d(TAG, "loginWithNostr: starting auth for pubkey=${pubkey.take(8)}...")
-                val challengeResp = httpClient.get("$BASE_URL/challenge")
-                val challengeBody = challengeResp.bodyAsText()
-                if (!challengeResp.status.isSuccess() || challengeBody.isBlank()) {
-                    _error.value = "Failed to get challenge: ${challengeResp.status}"
-                    _isLoading.value = false
-                    return@launch
-                }
-                val challengeObj = json.decodeFromString<JsonObject>(challengeBody)
-                val challenge = challengeObj["challenge"]?.jsonPrimitive?.content
-                    ?: throw Exception("No challenge in response")
+                Log.d(TAG, "loginWithNostr: starting auth (mock=$isMockMode) for ${pubkey.take(8)}...")
+
+                // Step 1: Get challenge
+                val challenge = provider.fetchChallenge().getOrThrow()
                 Log.d(TAG, "Got challenge: ${challenge.take(8)}...")
 
-                // Step 2: Build and sign kind-27235 event with challenge tag
+                // Step 2: Sign kind-27235 event
                 val template = Event.build(27235, "") {
                     add(arrayOf("challenge", challenge))
                 }
@@ -125,57 +105,25 @@ object CoinosRepository {
                 val eventJson = signedEvent.toJson()
                 Log.d(TAG, "Signed auth event: kind=${signedEvent.kind}, id=${signedEvent.id.take(8)}")
 
-                // Step 3: POST signed event to /nostrAuth
-                val authPayload = """{"event":$eventJson,"challenge":"$challenge"}"""
-                Log.d(TAG, "loginWithNostr: POST /nostrAuth body=${authPayload.take(200)}...")
-                val authResp = httpClient.post("$BASE_URL/nostrAuth") {
-                    header("User-Agent", USER_AGENT)
-                    setBody(TextContent(authPayload, ContentType.Application.Json))
-                }
-                val authRespBody = authResp.bodyAsText()
+                // Step 3: Authenticate
+                val authResult = provider.authenticate(eventJson, challenge).getOrThrow()
+                token = authResult.token
+                _username.value = authResult.username
+                _isLoggedIn.value = true
+                prefs?.edit()
+                    ?.putString(KEY_TOKEN, authResult.token)
+                    ?.putString(KEY_USERNAME, authResult.username)
+                    ?.apply()
+                Log.d(TAG, "Auth successful: ${authResult.username}")
 
-                Log.d(TAG, "loginWithNostr: response code=${authResp.status}, body=${authRespBody.take(300)}")
-                if (authResp.status.isSuccess() && authRespBody.isNotBlank()) {
-                    handleAuthSuccess(authRespBody, pubkey)
-                } else {
-                    Log.e(TAG, "Nostr auth failed: ${authResp.status} $authRespBody")
-                    _error.value = "Auth failed: ${authResp.status}"
-                }
+                refreshBalanceInternal()
+                fetchTransactionsInternal()
             } catch (e: Exception) {
-                Log.e(TAG, "Nostr auth error: ${e.message}", e)
+                Log.e(TAG, "Auth error: ${e.message}", e)
                 _error.value = "Auth error: ${e.message}"
             } finally {
                 _isLoading.value = false
             }
-        }
-    }
-
-    private suspend fun handleAuthSuccess(responseBody: String, pubkey: String) {
-        val obj = json.decodeFromString<JsonObject>(responseBody)
-        val jwt = obj["token"]?.jsonPrimitive?.content
-        val userObj = obj["user"]
-        val coinosUsername = try {
-            userObj?.jsonPrimitive?.content
-        } catch (_: Exception) {
-            try {
-                val userMap = json.decodeFromString<JsonObject>(userObj.toString())
-                userMap["username"]?.jsonPrimitive?.content
-            } catch (_: Exception) { null }
-        } ?: pubkey.take(16)
-
-        if (jwt != null) {
-            token = jwt
-            _username.value = coinosUsername
-            _isLoggedIn.value = true
-            prefs?.edit()
-                ?.putString(KEY_TOKEN, jwt)
-                ?.putString(KEY_USERNAME, coinosUsername)
-                ?.apply()
-            Log.d(TAG, "Nostr auth successful: $coinosUsername")
-            refreshBalanceInternal()
-            fetchTransactionsInternal()
-        } else {
-            _error.value = "Auth failed: no token in response"
         }
     }
 
@@ -198,23 +146,16 @@ object CoinosRepository {
 
     private suspend fun refreshBalanceInternal() {
         val jwt = token ?: return
-        try {
-            val response = httpClient.get("$BASE_URL/me") {
-                header("Authorization", "Bearer $jwt")
-            }
-            val responseBody = response.bodyAsText()
-
-            if (response.status.isSuccess() && responseBody.isNotBlank()) {
-                val obj = json.decodeFromString<JsonObject>(responseBody)
-                val balance = obj["balance"]?.jsonPrimitive?.longOrNull ?: 0L
-                _balanceSats.value = balance
-                Log.d(TAG, "Balance: $balance sats")
-            } else if (response.status.value == 401) {
+        provider.fetchUserInfo(jwt).onSuccess { info ->
+            _balanceSats.value = info.balance
+            Log.d(TAG, "Balance: ${info.balance} sats")
+        }.onFailure { e ->
+            if (e.message?.contains("expired", ignoreCase = true) == true) {
                 _error.value = "Session expired. Please log in again."
                 logout()
+            } else {
+                Log.e(TAG, "Balance fetch error: ${e.message}", e)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Balance fetch error: ${e.message}", e)
         }
     }
 
@@ -230,27 +171,10 @@ object CoinosRepository {
                     _isLoading.value = false
                     return@launch
                 }
-                val invoicePayload = if (memo.isNotBlank()) {
-                    """{"invoice":{"amount":$amountSats,"memo":"$memo","type":"lightning"}}"""
-                } else {
-                    """{"invoice":{"amount":$amountSats,"type":"lightning"}}"""
-                }
-                val response = httpClient.post("$BASE_URL/invoice") {
-                    header("Authorization", "Bearer $jwt")
-                    setBody(TextContent(invoicePayload, ContentType.Application.Json))
-                }
-                val responseBody = response.bodyAsText()
-
-                if (response.status.isSuccess() && responseBody.isNotBlank()) {
-                    val obj = json.decodeFromString<JsonObject>(responseBody)
-                    val invoice = obj["text"]?.jsonPrimitive?.content
-                        ?: obj["address"]?.jsonPrimitive?.content
-                        ?: obj["hash"]?.jsonPrimitive?.content
-                    _lastInvoice.value = invoice
-                    Log.d(TAG, "Invoice created: ${invoice?.take(30)}...")
-                } else {
-                    _error.value = "Invoice creation failed: ${response.status}"
-                }
+                val invoice = provider.createInvoice(jwt, amountSats, memo).getOrThrow()
+                _lastInvoice.value = invoice
+                Log.d(TAG, "Invoice created: ${invoice.take(30)}...")
+                refreshBalanceInternal()
             } catch (e: Exception) {
                 Log.e(TAG, "Invoice error: ${e.message}", e)
                 _error.value = "Invoice error: ${e.message}"
@@ -272,20 +196,10 @@ object CoinosRepository {
                     _isLoading.value = false
                     return@launch
                 }
-                val paymentPayload = """{"payreq":"$bolt11"}"""
-                val response = httpClient.post("$BASE_URL/payments") {
-                    header("Authorization", "Bearer $jwt")
-                    setBody(TextContent(paymentPayload, ContentType.Application.Json))
-                }
-                val responseBody = response.bodyAsText()
-
-                if (response.status.isSuccess()) {
-                    Log.d(TAG, "Payment sent successfully")
-                    refreshBalanceInternal()
-                    fetchTransactionsInternal()
-                } else {
-                    _error.value = "Payment failed: ${response.status} $responseBody"
-                }
+                provider.payInvoice(jwt, bolt11).getOrThrow()
+                Log.d(TAG, "Payment sent successfully")
+                refreshBalanceInternal()
+                fetchTransactionsInternal()
             } catch (e: Exception) {
                 Log.e(TAG, "Payment error: ${e.message}", e)
                 _error.value = "Payment error: ${e.message}"
@@ -303,30 +217,10 @@ object CoinosRepository {
 
     private suspend fun fetchTransactionsInternal() {
         val jwt = token ?: return
-        try {
-            val response = httpClient.get("$BASE_URL/payments") {
-                header("Authorization", "Bearer $jwt")
-            }
-            val responseBody = response.bodyAsText()
-
-            if (response.status.isSuccess() && responseBody.isNotBlank()) {
-                val arr = json.decodeFromString<List<JsonObject>>(responseBody)
-                val txs = arr.mapNotNull { obj ->
-                    try {
-                        CoinosTransaction(
-                            id = obj["id"]?.jsonPrimitive?.content ?: "",
-                            amount = obj["amount"]?.jsonPrimitive?.longOrNull ?: 0L,
-                            memo = obj["memo"]?.jsonPrimitive?.content,
-                            createdAt = obj["created_at"]?.jsonPrimitive?.content,
-                            confirmed = obj["confirmed"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true,
-                            type = obj["type"]?.jsonPrimitive?.content ?: "lightning"
-                        )
-                    } catch (_: Exception) { null }
-                }
-                _transactions.value = txs
-                Log.d(TAG, "Fetched ${txs.size} transactions")
-            }
-        } catch (e: Exception) {
+        provider.fetchTransactions(jwt).onSuccess { txs ->
+            _transactions.value = txs
+            Log.d(TAG, "Fetched ${txs.size} transactions")
+        }.onFailure { e ->
             Log.e(TAG, "Transactions fetch error: ${e.message}", e)
         }
     }

@@ -72,7 +72,10 @@ import social.mycelium.android.ui.theme.NoteBodyTextStyle
 import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
 import social.mycelium.android.utils.UrlDetector
 import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.AsyncImagePainter
 import coil.request.ImageRequest
+import social.mycelium.android.data.IMetaData
 import social.mycelium.android.utils.MediaAspectRatioCache
 import social.mycelium.android.ui.components.InlineVideoPlayer
 import androidx.compose.ui.tooling.preview.Preview
@@ -148,6 +151,7 @@ private fun QuotedNoteBody(
     hasMore: Boolean,
     meta: QuotedNoteMeta,
     quotedAuthor: social.mycelium.android.data.Author,
+    quotedMediaUrls: Set<String>,
     isVisible: Boolean,
     onExpandToggle: () -> Unit,
     onProfileClick: (String) -> Unit,
@@ -192,9 +196,12 @@ private fun QuotedNoteBody(
                                             timestamp = meta.createdAt,
                                             likes = 0, shares = 0, comments = 0,
                                             isLiked = false, hashtags = emptyList(),
-                                            mediaUrls = emptyList(), isReply = false,
+                                            mediaUrls = quotedMediaUrls.toList(),
+                                            isReply = meta.rootNoteId != null,
+                                            rootNoteId = meta.rootNoteId,
                                             relayUrl = meta.relayUrl,
-                                            relayUrls = listOfNotNull(meta.relayUrl)
+                                            relayUrls = listOfNotNull(meta.relayUrl),
+                                            kind = meta.kind
                                         )
                                         onNoteClick(quotedNote)
                                     }
@@ -230,7 +237,7 @@ private fun QuotedNoteBody(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 200.dp)
+                                    .heightIn(min = 80.dp, max = 240.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
                             )
@@ -374,9 +381,12 @@ private fun QuotedNoteContent(
                     timestamp = meta.createdAt,
                     likes = 0, shares = 0, comments = 0,
                     isLiked = false, hashtags = emptyList(),
-                    mediaUrls = emptyList(), isReply = false,
+                    mediaUrls = quotedMediaUrls.toList(),
+                    isReply = meta.rootNoteId != null,
+                    rootNoteId = meta.rootNoteId,
                     relayUrl = meta.relayUrl,
-                    relayUrls = listOfNotNull(meta.relayUrl)
+                    relayUrls = listOfNotNull(meta.relayUrl),
+                    kind = meta.kind
                 )
                 onNoteClick(quotedNote)
             }
@@ -456,6 +466,7 @@ private fun QuotedNoteContent(
                 hasMore = hasMore,
                 meta = meta,
                 quotedAuthor = quotedAuthor,
+                quotedMediaUrls = quotedMediaUrls,
                 isVisible = isVisible,
                 onExpandToggle = { QuotedNoteExpandedState.toggle(meta.eventId) },
                 onProfileClick = onProfileClick,
@@ -479,6 +490,7 @@ private fun NoteMediaCarousel(
     groupStartIndex: Int,
     initialMediaPage: Int,
     isVisible: Boolean,
+    mediaMeta: Map<String, IMetaData> = emptyMap(),
     onMediaPageChanged: (Int) -> Unit,
     onImageTap: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
@@ -503,9 +515,11 @@ private fun NoteMediaCarousel(
     // Uses cached aspect ratios if available; otherwise commits to 16:9 default.
     // The real ratio is still written to MediaAspectRatioCache on load so NEXT
     // time this card appears it uses the correct size from the start.
-    val containerRatio = remember(mediaList) {
+    val containerRatio = remember(mediaList, mediaMeta) {
         val ratios = mediaList.map { url ->
-            MediaAspectRatioCache.get(url)
+            // Priority: 1) imeta dim tag  2) cached ratio  3) video default 16:9
+            mediaMeta[url]?.aspectRatio()
+                ?: MediaAspectRatioCache.get(url)
                 ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
         }
         val known = ratios.filterNotNull()
@@ -524,10 +538,13 @@ private fun NoteMediaCarousel(
             }
         }
     }
+    val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (compactMedia) Modifier.padding(horizontal = 16.dp) else Modifier)
             .aspectRatio((containerRatio ?: (16f / 9f)).coerceIn(0.3f, 3.0f))
+            .clip(if (compactMedia) RoundedCornerShape(8.dp) else RectangleShape)
             .clipToBounds()
             .nestedScroll(verticalPassthrough)
             .background(Color.Black),
@@ -563,23 +580,74 @@ private fun NoteMediaCarousel(
                     )
                 } else {
                     val imageContext = LocalContext.current
-                    AsyncImage(
+                    val meta = mediaMeta[url]
+                    SubcomposeAsyncImage(
                         model = ImageRequest.Builder(imageContext)
                             .data(url)
                             .crossfade(true)
                             .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                             .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                             .build(),
-                        contentDescription = null,
+                        contentDescription = meta?.alt,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize(),
-                        onSuccess = { state ->
-                            // Cache the real ratio for future renders — does NOT
-                            // resize the current container (ratio is locked).
-                            val drawable = state.result.drawable
-                            MediaAspectRatioCache.add(url, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                    ) {
+                        when (painter.state) {
+                            is AsyncImagePainter.State.Loading -> {
+                                if (meta?.blurhash != null) {
+                                    DisplayBlurHash(
+                                        blurhash = meta.blurhash,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.15f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(24.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                        )
+                                    }
+                                }
+                            }
+                            is AsyncImagePainter.State.Error -> {
+                                Box(
+                                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.BrokenImage,
+                                        contentDescription = "Image failed to load",
+                                        tint = Color.Gray,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                }
+                            }
+                            is AsyncImagePainter.State.Success -> {
+                                androidx.compose.foundation.Image(
+                                    painter = painter,
+                                    contentDescription = meta?.alt,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                SideEffect {
+                                    val success = painter.state as? AsyncImagePainter.State.Success
+                                    val drawable = success?.result?.drawable
+                                    if (drawable != null) {
+                                        val w = drawable.intrinsicWidth
+                                        val h = drawable.intrinsicHeight
+                                        if (w > 0 && h > 0) {
+                                            MediaAspectRatioCache.add(url, w, h)
+                                        }
+                                    }
+                                }
+                            }
+                            else -> {}
                         }
-                    )
+                    }
                     // Fullscreen magnifier icon — one per image
                     Box(
                         modifier = Modifier
@@ -1037,8 +1105,295 @@ private fun NoteDetailsPanel(
 }
 
 /**
- * Extracted action row + 3-dot menu + zap menu.
- * Splits the deeply nested DropdownMenu lambdas out of NoteCard to reduce ART JIT instruction count.
+ * Extracted More menu + Boost/Repost dialogs — splits the 4.2MB JIT compilation of
+ * NoteActionRow into two smaller methods, eliminating first-scroll jank.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NoteActionMenus(
+    note: Note,
+    showRepostMenu: Boolean,
+    onDismissRepostMenu: () -> Unit,
+    showHeaderMenu: Boolean,
+    onDismissHeaderMenu: () -> Unit,
+    onBoost: ((Note) -> Unit)?,
+    onQuote: ((Note) -> Unit)?,
+    onFork: ((Note) -> Unit)?,
+    isAuthorFollowed: Boolean,
+    onFollowAuthor: ((String) -> Unit)?,
+    onUnfollowAuthor: ((String) -> Unit)?,
+    onMessageAuthor: ((String) -> Unit)?,
+    onBlockAuthor: ((String) -> Unit)?,
+    onMuteAuthor: ((String) -> Unit)?,
+    onBookmarkToggle: ((String, Boolean) -> Unit)?,
+    extraMoreMenuItems: List<Pair<String, () -> Unit>>,
+    translationResult: social.mycelium.android.repository.TranslationService.TranslationResult?,
+    isTranslating: Boolean,
+    showOriginal: Boolean,
+    onTranslate: () -> Unit,
+    onShowOriginal: () -> Unit,
+    onShowTranslation: () -> Unit,
+    onProfileClick: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    var menuLevel by remember { mutableIntStateOf(0) }
+    val authorLabel = remember(note.author) { authorDisplayLabel(note.author) }
+    val closeMenu = { onDismissHeaderMenu(); menuLevel = 0 }
+
+    // ── Boost dialog — centered floating menu ──
+    if (showRepostMenu) {
+        Dialog(onDismissRequest = onDismissRepostMenu) {
+            CompositionLocalProvider(LocalRippleConfiguration provides RippleConfiguration()) {
+                Surface(
+                    shape = RectangleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.fillMaxWidth(0.75f)
+                ) {
+                    Column {
+                        DropdownMenuItem(
+                            text = { Text("Boost") },
+                            leadingIcon = { Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = { onDismissRepostMenu(); onBoost?.invoke(note) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Quote") },
+                            leadingIcon = { Icon(Icons.Outlined.FormatQuote, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = { onDismissRepostMenu(); onQuote?.invoke(note) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Fork") },
+                            leadingIcon = { Icon(Icons.Outlined.ForkRight, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = { onDismissRepostMenu(); onFork?.invoke(note) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // ── More menu dialog — centered floating menu ──
+    if (showHeaderMenu) {
+        Dialog(onDismissRequest = { closeMenu() }) {
+            CompositionLocalProvider(LocalRippleConfiguration provides RippleConfiguration()) {
+                Surface(
+                    shape = RectangleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    tonalElevation = 0.dp,
+                    modifier = Modifier.fillMaxWidth(0.85f)
+                ) {
+                    Column {
+                        when (menuLevel) {
+                            // ═══ ROOT LEVEL ═══
+                            0 -> {
+                                // Follow / Unfollow
+                                if (isAuthorFollowed) {
+                                    onUnfollowAuthor?.let { unfollow ->
+                                        DropdownMenuItem(
+                                            text = { Text("Unfollow $authorLabel") },
+                                            leadingIcon = { Icon(Icons.Default.PersonRemove, null, modifier = Modifier.size(18.dp)) },
+                                            onClick = { closeMenu(); unfollow(note.author.id) }
+                                        )
+                                    }
+                                } else {
+                                    onFollowAuthor?.let { follow ->
+                                        DropdownMenuItem(
+                                            text = { Text("Follow $authorLabel") },
+                                            leadingIcon = { Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(18.dp)) },
+                                            onClick = { closeMenu(); follow(note.author.id) }
+                                        )
+                                    }
+                                }
+                                // Message author
+                                onMessageAuthor?.let { msg ->
+                                    DropdownMenuItem(
+                                        text = { Text("Message $authorLabel") },
+                                        leadingIcon = { Icon(Icons.Default.Send, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = { closeMenu(); msg(note.author.id) }
+                                    )
+                                }
+                                // Copy → sub-menu
+                                DropdownMenuItem(
+                                    text = { Text("Copy\u2026") },
+                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+                                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { menuLevel = 1 }
+                                )
+                                // Bookmarks → sub-menu
+                                DropdownMenuItem(
+                                    text = { Text("Bookmarks") },
+                                    leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null, modifier = Modifier.size(18.dp)) },
+                                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { menuLevel = 2 }
+                                )
+                                // Share (direct action)
+                                DropdownMenuItem(
+                                    text = { Text("Share") },
+                                    leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = {
+                                        closeMenu()
+                                        val nevent = com.example.cybin.nip19.encodeNevent(
+                                            eventIdHex = note.id,
+                                            relays = note.relayUrls.take(2),
+                                            authorHex = note.author.id
+                                        )
+                                        val sendIntent = android.content.Intent().apply {
+                                            action = android.content.Intent.ACTION_SEND
+                                            putExtra(android.content.Intent.EXTRA_TEXT, "https://njump.me/$nevent")
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(android.content.Intent.createChooser(sendIntent, "Share note"))
+                                    }
+                                )
+                                // Translate / Show Original
+                                if (translationResult != null && !showOriginal) {
+                                    DropdownMenuItem(
+                                        text = { Text("Show original") },
+                                        leadingIcon = { Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = { onShowOriginal(); closeMenu() }
+                                    )
+                                } else {
+                                    DropdownMenuItem(
+                                        text = {
+                                            if (isTranslating) Text("Translating\u2026")
+                                            else if (translationResult != null) Text("Show translation")
+                                            else Text("Translate")
+                                        },
+                                        leadingIcon = {
+                                            if (isTranslating) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp)
+                                            else Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp))
+                                        },
+                                        onClick = {
+                                            closeMenu()
+                                            if (translationResult != null) {
+                                                onShowTranslation()
+                                            } else {
+                                                onTranslate()
+                                            }
+                                        }
+                                    )
+                                }
+                                // Filters & Blocks → sub-menu
+                                if (onBlockAuthor != null || onMuteAuthor != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Filters & Blocks") },
+                                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
+                                        trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = { menuLevel = 3 }
+                                    )
+                                }
+                                // Report
+                                DropdownMenuItem(
+                                    text = { Text("Report") },
+                                    leadingIcon = { Icon(Icons.Default.Report, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { closeMenu() }
+                                )
+                                // Extra items from caller
+                                extraMoreMenuItems.forEach { (label, action) ->
+                                    DropdownMenuItem(
+                                        text = { Text(label) },
+                                        onClick = { action(); closeMenu() }
+                                    )
+                                }
+                            }
+                            // ═══ COPY SUB-MENU ═══
+                            1 -> {
+                                DropdownMenuItem(
+                                    text = { Text("Copy text") },
+                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = {
+                                        closeMenu()
+                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Note text", note.content))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Copy author npub") },
+                                    leadingIcon = { Icon(Icons.Outlined.Person, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = {
+                                        closeMenu()
+                                        val npub = note.author.id.toNpub()
+                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("npub", npub))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Copy nevent") },
+                                    leadingIcon = { Icon(Icons.Outlined.Link, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = {
+                                        closeMenu()
+                                        val nevent = com.example.cybin.nip19.encodeNevent(
+                                            eventIdHex = note.id,
+                                            relays = note.relayUrls.take(2),
+                                            authorHex = note.author.id
+                                        )
+                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("nevent", nevent))
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("← Back") },
+                                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { menuLevel = 0 }
+                                )
+                            }
+                            // ═══ BOOKMARKS SUB-MENU ═══
+                            2 -> {
+                                val bookmarkedIds by social.mycelium.android.repository.BookmarkRepository.bookmarkedNoteIds.collectAsState()
+                                val isBookmarked = note.id in bookmarkedIds
+                                DropdownMenuItem(
+                                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add to public") },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    onClick = {
+                                        closeMenu()
+                                        onBookmarkToggle?.invoke(note.id, isBookmarked)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("← Back") },
+                                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { menuLevel = 0 }
+                                )
+                            }
+                            // ═══ FILTERS & BLOCKS SUB-MENU ═══
+                            3 -> {
+                                onBlockAuthor?.let { block ->
+                                    DropdownMenuItem(
+                                        text = { Text("Block ${authorDisplayLabel(note.author)}") },
+                                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = { closeMenu(); block(note.author.id) }
+                                    )
+                                }
+                                onMuteAuthor?.let { mute ->
+                                    DropdownMenuItem(
+                                        text = { Text("Mute ${authorDisplayLabel(note.author)}") },
+                                        leadingIcon = { Icon(Icons.Outlined.VolumeOff, null, modifier = Modifier.size(18.dp)) },
+                                        onClick = { closeMenu(); mute(note.author.id) }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("← Back") },
+                                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { menuLevel = 0 }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Action row buttons only — menus extracted to [NoteActionMenus] to reduce JIT compilation
+ * from 4.2MB to ~1MB per method.
  */
 @OptIn(ExperimentalFoundationApi::class, FlowPreview::class)
 @Composable
@@ -1083,217 +1438,6 @@ private fun NoteActionRow(
 ) {
     var showRepostMenu by remember { mutableStateOf(false) }
     var showHeaderMenu by remember { mutableStateOf(false) }
-    var menuLevel by remember { mutableIntStateOf(0) }
-    val context = LocalContext.current
-
-    // Menu content and helpers declared before Row so DropdownMenu inside Box can reference them
-    val authorLabel = remember(note.author) { authorDisplayLabel(note.author) }
-    val closeMenu = { showHeaderMenu = false; menuLevel = 0 }
-
-    @Composable
-    fun MoreMenuContent() {
-        when (menuLevel) {
-            // ═══ ROOT LEVEL ═══
-            0 -> {
-                // Follow / Unfollow
-                if (isAuthorFollowed) {
-                    onUnfollowAuthor?.let { unfollow ->
-                        DropdownMenuItem(
-                            text = { Text("Unfollow $authorLabel") },
-                            leadingIcon = { Icon(Icons.Default.PersonRemove, null, modifier = Modifier.size(18.dp)) },
-                            onClick = { closeMenu(); unfollow(note.author.id) }
-                        )
-                    }
-                } else {
-                    onFollowAuthor?.let { follow ->
-                        DropdownMenuItem(
-                            text = { Text("Follow $authorLabel") },
-                            leadingIcon = { Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(18.dp)) },
-                            onClick = { closeMenu(); follow(note.author.id) }
-                        )
-                    }
-                }
-                // Message author
-                onMessageAuthor?.let { msg ->
-                    DropdownMenuItem(
-                        text = { Text("Message $authorLabel") },
-                        leadingIcon = { Icon(Icons.Default.Send, null, modifier = Modifier.size(18.dp)) },
-                        onClick = { closeMenu(); msg(note.author.id) }
-                    )
-                }
-                // Copy → sub-menu
-                DropdownMenuItem(
-                    text = { Text("Copy\u2026") },
-                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
-                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
-                    onClick = { menuLevel = 1 }
-                )
-                // Bookmarks → sub-menu
-                DropdownMenuItem(
-                    text = { Text("Bookmarks") },
-                    leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null, modifier = Modifier.size(18.dp)) },
-                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
-                    onClick = { menuLevel = 2 }
-                )
-                // Share (direct action)
-                DropdownMenuItem(
-                    text = { Text("Share") },
-                    leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
-                    onClick = {
-                        closeMenu()
-                        val nevent = com.example.cybin.nip19.encodeNevent(
-                            eventIdHex = note.id,
-                            relays = note.relayUrls.take(2),
-                            authorHex = note.author.id
-                        )
-                        val sendIntent = android.content.Intent().apply {
-                            action = android.content.Intent.ACTION_SEND
-                            putExtra(android.content.Intent.EXTRA_TEXT, "https://njump.me/$nevent")
-                            type = "text/plain"
-                        }
-                        context.startActivity(android.content.Intent.createChooser(sendIntent, "Share note"))
-                    }
-                )
-                // Translate / Show Original
-                if (translationResult != null && !showOriginal) {
-                    DropdownMenuItem(
-                        text = { Text("Show original") },
-                        leadingIcon = { Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp)) },
-                        onClick = { onShowOriginal(); closeMenu() }
-                    )
-                } else {
-                    DropdownMenuItem(
-                        text = {
-                            if (isTranslating) Text("Translating\u2026")
-                            else if (translationResult != null) Text("Show translation")
-                            else Text("Translate")
-                        },
-                        leadingIcon = {
-                            if (isTranslating) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp)
-                            else Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp))
-                        },
-                        onClick = {
-                            closeMenu()
-                            if (translationResult != null) {
-                                onShowTranslation()
-                            } else {
-                                onTranslate()
-                            }
-                        }
-                    )
-                }
-                // Filters & Blocks → sub-menu
-                if (onBlockAuthor != null || onMuteAuthor != null) {
-                    DropdownMenuItem(
-                        text = { Text("Filters & Blocks") },
-                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
-                        trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
-                        onClick = { menuLevel = 3 }
-                    )
-                }
-                // Report
-                DropdownMenuItem(
-                    text = { Text("Report") },
-                    leadingIcon = { Icon(Icons.Default.Report, null, modifier = Modifier.size(18.dp)) },
-                    onClick = { closeMenu() }
-                )
-                // Extra items from caller
-                extraMoreMenuItems.forEach { (label, action) ->
-                    DropdownMenuItem(
-                        text = { Text(label) },
-                        onClick = { action(); closeMenu() }
-                    )
-                }
-            }
-            // ═══ COPY SUB-MENU ═══
-            1 -> {
-                DropdownMenuItem(
-                    text = { Text("Copy text") },
-                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
-                    onClick = {
-                        closeMenu()
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Note text", note.content))
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Copy author npub") },
-                    leadingIcon = { Icon(Icons.Outlined.Person, null, modifier = Modifier.size(18.dp)) },
-                    onClick = {
-                        closeMenu()
-                        val npub = note.author.id.toNpub()
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("npub", npub))
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Copy nevent") },
-                    leadingIcon = { Icon(Icons.Outlined.Link, null, modifier = Modifier.size(18.dp)) },
-                    onClick = {
-                        closeMenu()
-                        val nevent = com.example.cybin.nip19.encodeNevent(
-                            eventIdHex = note.id,
-                            relays = note.relayUrls.take(2),
-                            authorHex = note.author.id
-                        )
-                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("nevent", nevent))
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("← Back") },
-                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
-                    onClick = { menuLevel = 0 }
-                )
-            }
-            // ═══ BOOKMARKS SUB-MENU ═══
-            2 -> {
-                val bookmarkedIds by social.mycelium.android.repository.BookmarkRepository.bookmarkedNoteIds.collectAsState()
-                val isBookmarked = note.id in bookmarkedIds
-                DropdownMenuItem(
-                    text = { Text(if (isBookmarked) "Remove bookmark" else "Add to public") },
-                    leadingIcon = {
-                        Icon(
-                            if (isBookmarked) Icons.Filled.Bookmark else Icons.Outlined.BookmarkBorder,
-                            null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    },
-                    onClick = {
-                        closeMenu()
-                        onBookmarkToggle?.invoke(note.id, isBookmarked)
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("← Back") },
-                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
-                    onClick = { menuLevel = 0 }
-                )
-            }
-            // ═══ FILTERS & BLOCKS SUB-MENU ═══
-            3 -> {
-                onBlockAuthor?.let { block ->
-                    DropdownMenuItem(
-                        text = { Text("Block ${authorDisplayLabel(note.author)}") },
-                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
-                        onClick = { closeMenu(); block(note.author.id) }
-                    )
-                }
-                onMuteAuthor?.let { mute ->
-                    DropdownMenuItem(
-                        text = { Text("Mute ${authorDisplayLabel(note.author)}") },
-                        leadingIcon = { Icon(Icons.Outlined.VolumeOff, null, modifier = Modifier.size(18.dp)) },
-                        onClick = { closeMenu(); mute(note.author.id) }
-                    )
-                }
-                DropdownMenuItem(
-                    text = { Text("← Back") },
-                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
-                    onClick = { menuLevel = 0 }
-                )
-            }
-        }
-    }
 
     // Action row — layout driven by actionRowSchema, right-aligned with consistent sizing
     Row(
@@ -1399,57 +1543,32 @@ private fun NoteActionRow(
         )
     }
 
-    // ── Boost dialog — centered floating menu ──
-    if (showRepostMenu) {
-        Dialog(onDismissRequest = { showRepostMenu = false }) {
-            @OptIn(ExperimentalMaterial3Api::class)
-            CompositionLocalProvider(LocalRippleConfiguration provides RippleConfiguration()) {
-                Surface(
-                    shape = RectangleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.fillMaxWidth(0.75f)
-                ) {
-                    Column {
-                        DropdownMenuItem(
-                            text = { Text("Boost") },
-                            leadingIcon = { Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                            onClick = { showRepostMenu = false; onBoost?.invoke(note) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Quote") },
-                            leadingIcon = { Icon(Icons.Outlined.FormatQuote, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                            onClick = { showRepostMenu = false; onQuote?.invoke(note) }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Fork") },
-                            leadingIcon = { Icon(Icons.Outlined.ForkRight, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                            onClick = { showRepostMenu = false; onFork?.invoke(note) }
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    // ── More menu dialog — centered floating menu ──
-    if (showHeaderMenu) {
-        Dialog(onDismissRequest = { showHeaderMenu = false; menuLevel = 0 }) {
-            @OptIn(ExperimentalMaterial3Api::class)
-            CompositionLocalProvider(LocalRippleConfiguration provides RippleConfiguration()) {
-                Surface(
-                    shape = RectangleShape,
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    tonalElevation = 0.dp,
-                    modifier = Modifier.fillMaxWidth(0.85f)
-                ) {
-                    Column {
-                        MoreMenuContent()
-                    }
-                }
-            }
-        }
-    }
+    // Menus extracted to separate composable — reduces JIT from 4.2MB to ~1MB
+    NoteActionMenus(
+        note = note,
+        showRepostMenu = showRepostMenu,
+        onDismissRepostMenu = { showRepostMenu = false },
+        showHeaderMenu = showHeaderMenu,
+        onDismissHeaderMenu = { showHeaderMenu = false },
+        onBoost = onBoost,
+        onQuote = onQuote,
+        onFork = onFork,
+        isAuthorFollowed = isAuthorFollowed,
+        onFollowAuthor = onFollowAuthor,
+        onUnfollowAuthor = onUnfollowAuthor,
+        onMessageAuthor = onMessageAuthor,
+        onBlockAuthor = onBlockAuthor,
+        onMuteAuthor = onMuteAuthor,
+        onBookmarkToggle = onBookmarkToggle,
+        extraMoreMenuItems = extraMoreMenuItems,
+        translationResult = translationResult,
+        isTranslating = isTranslating,
+        showOriginal = showOriginal,
+        onTranslate = onTranslate,
+        onShowOriginal = onShowOriginal,
+        onShowTranslation = onShowTranslation,
+        onProfileClick = onProfileClick,
+    )
 
     // Zap menu - completely separate, appears below action buttons; Custom chip opens dialog
     ZapMenuRow(
@@ -1766,15 +1885,16 @@ fun NoteCard(
     var recentEmojis by remember(accountNpub) { mutableStateOf(ReactionsRepository.getRecentEmojis(context, accountNpub)) }
 
     // ── Note animation state (reaction / boost / zap) ─────────────────
-    // Observe ReactionsRepository.noteAnimations for this note
+    // Only collect when card is visible to avoid N coroutines filtering the same SharedFlow
     var noteAnimState by remember(note.id) { mutableStateOf<ReactionsRepository.NoteAnimationEvent?>(null) }
-    LaunchedEffect(note.id) {
-        ReactionsRepository.noteAnimations.collect { event ->
-            if (event.noteId == note.id) {
-                noteAnimState = event
-                // Auto-clear after animation duration
-                kotlinx.coroutines.delay(if (event.success) 1500L else 1200L)
-                noteAnimState = null
+    if (isVisible) {
+        LaunchedEffect(note.id) {
+            ReactionsRepository.noteAnimations.collect { event ->
+                if (event.noteId == note.id) {
+                    noteAnimState = event
+                    kotlinx.coroutines.delay(if (event.success) 1500L else 1200L)
+                    noteAnimState = null
+                }
             }
         }
     }
@@ -2113,7 +2233,7 @@ fun NoteCard(
             }
 
             // Body zone: only when there is text or quoted notes; otherwise embed/media only
-            val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
             // When firstPreview is shown as the top-level embed, pass its URL as "consumed"
             // so the text builder hides it from body text but does NOT add it to media groups
             // (the preview URL is a webpage, not an image — adding it to mediaUrls creates blank album entries)
@@ -2291,6 +2411,7 @@ fun NoteCard(
                             groupStartIndex = groupStartIndex,
                             initialMediaPage = initialMediaPage,
                             isVisible = isVisible,
+                            mediaMeta = note.mediaMeta,
                             onMediaPageChanged = onMediaPageChanged,
                             onImageTap = { urls, index -> onImageTap(note, urls, index) },
                             onOpenImageViewer = onOpenImageViewer,
@@ -2309,9 +2430,9 @@ fun NoteCard(
                     }
                     is NoteContentBlock.LiveEventReference -> {
                         // NIP-53 live event referenced via nevent (kind=30311)
-                        val liveRepo = social.mycelium.android.repository.LiveActivityRepository.getInstance()
-                        val allActivities by liveRepo.allActivities.collectAsState()
-                        val activity = allActivities.firstOrNull { it.id == block.eventId }
+                        // Snapshot read — avoids per-card StateFlow subscription that recomposes all cards on any activity update
+                        val liveRepo = remember { social.mycelium.android.repository.LiveActivityRepository.getInstance() }
+                        val activity = remember(block.eventId) { liveRepo.allActivities.value.firstOrNull { it.id == block.eventId } }
                         Surface(
                             modifier = Modifier.fillMaxWidth(),
                             color = Color.Transparent,

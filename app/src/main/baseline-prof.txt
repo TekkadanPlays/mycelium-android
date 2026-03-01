@@ -1,52 +1,84 @@
-# Baseline profile rules for Ribbit
-# This profile optimizes critical user journeys for faster app startup and smoother interactions
+# Baseline profile rules for Mycelium (social.mycelium.android)
+# Pre-compiles hot composables at install time to eliminate first-scroll JIT jank.
+# Generated from ART JIT "Compiler allocated" logs — these methods each cost 4-12MB JIT.
 
-# MainActivity and app startup
-Lcom/example/views/MainActivity;
-HSPLcom/example/views/MainActivity;-><init>()V
-HSPLcom/example/views/MainActivity;->onCreate(Landroid/os/Bundle;)V
+# -- App startup --
+HSPLsocial/mycelium/android/MainActivity;->onCreate(Landroid/os/Bundle;)V
 
-# Theme and UI initialization
-Lcom/example/views/ui/theme/ThemeKt;
-HSPLcom/example/views/ui/theme/ThemeKt;->ViewsTheme(ZZLkotlin/jvm/functions/Function2;Landroidx/compose/runtime/Composer;II)V
+# -- Feed scrolling — NoteCard and sub-composables --
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->NoteCard(**)V
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->NoteActionRow(**)V
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->NoteActionMenus(**)V
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->QuotedNoteContent(**)V
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->QuotedNoteBody(**)V
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->NoteMediaCarousel(**)V
+HSPLsocial/mycelium/android/ui/components/NoteCardKt;->NoteDetailsPanel(**)V
 
-# Dashboard screen - critical user journey
-Lcom/example/views/ui/screens/DashboardScreenKt;
-HSPLcom/example/views/ui/screens/DashboardScreenKt;->DashboardScreen(ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;Landroidx/compose/foundation/lazy/LazyListState;Lcom/example/views/viewmodel/DashboardViewModel;Landroidx/compose/ui/Modifier;Landroidx/compose/runtime/Composer;II)V
+# -- Profile picture (rendered per card) --
+HSPLsocial/mycelium/android/ui/components/SharedElementTransitionKt;->ProfilePicture(**)V
 
-# ViewModel - state management
-Lcom/example/views/viewmodel/DashboardViewModel;
-HSPLcom/example/views/viewmodel/DashboardViewModel;-><init>()V
-HSPLcom/example/views/viewmodel/DashboardViewModel;->getUiState()Lkotlinx/coroutines/flow/StateFlow;
-HSPLcom/example/views/viewmodel/DashboardViewModel;->toggleLike(Ljava/lang/String;)V
+# -- Clickable note content --
+HSPLsocial/mycelium/android/ui/components/ClickableNoteContentKt;->ClickableNoteContent(**)V
 
-# Note cards - frequently rendered
-Lcom/example/views/ui/components/ModernNoteCardKt;
-HSPLcom/example/views/ui/components/ModernNoteCardKt;->ModernNoteCard(Lcom/example/views/data/Note;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;Landroidx/compose/ui/Modifier;Landroidx/compose/runtime/Composer;III)V
+# -- Note content builder (text parsing, per card) --
+HSPLsocial/mycelium/android/utils/NoteContentAnnotatedBuilderKt;->buildNoteContentAnnotatedString(**)Landroidx/compose/ui/text/AnnotatedString;
+HSPLsocial/mycelium/android/utils/NoteContentAnnotatedBuilderKt;->buildNoteContentWithInlinePreviews(**)Ljava/util/List;
 
-# Data models
-Lcom/example/views/data/Note;
-Lcom/example/views/data/Author;
-HSPLcom/example/views/data/Note;-><init>(Ljava/lang/String;Lcom/example/views/data/Author;Ljava/lang/String;JIIIZZLjava/util/List;Ljava/util/List;)V
-HSPLcom/example/views/data/Author;-><init>(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V
+# -- Navigation --
+HSPLsocial/mycelium/android/ui/navigation/MyceliumNavigationKt;->MyceliumNavigation(**)V
 
-# Navigation components
-Lcom/example/views/ui/components/AdaptiveHeaderKt;
-Lcom/example/views/ui/components/BottomNavigationKt;
-Lcom/example/views/ui/components/ModernSidebarKt;
+# -- Dashboard screen --
+HSPLsocial/mycelium/android/ui/screens/DashboardScreenKt;->DashboardScreen(**)V
+HSPLsocial/mycelium/android/ui/screens/DashboardScreenKt;->FeedOverlay(**)V
 
-# Profile picture component
-Lcom/example/views/ui/components/SharedElementTransitionKt;
-HSPLcom/example/views/ui/components/SharedElementTransitionKt;->ProfilePicture(Lcom/example/views/data/Author;FLandroidx/compose/ui/Modifier;Lkotlin/jvm/functions/Function0;Landroidx/compose/runtime/Composer;II)V
+# -- Thread view (12MB JIT) --
+HSPLsocial/mycelium/android/ui/screens/ModernThreadViewScreenKt;->ModernThreadViewScreen(**)V
+HSPLsocial/mycelium/android/ui/screens/ModernThreadViewScreenKt;->ThreadedReplyCard(**)V
+HSPLsocial/mycelium/android/ui/screens/ModernThreadViewScreenKt;->ThreadedReplyChildren(**)V
+HSPLsocial/mycelium/android/ui/screens/ModernThreadViewScreenKt;->ReplyHeader(**)V
+HSPLsocial/mycelium/android/ui/screens/ModernThreadViewScreenKt;->ReplyContentBody(**)V
+HSPLsocial/mycelium/android/ui/screens/ModernThreadViewScreenKt;->ReplyControlsPanel(**)V
 
-# Search functionality
-Lcom/example/views/ui/components/ModernSearchBarKt;
+# -- Topics screen (10MB JIT) --
+HSPLsocial/mycelium/android/ui/screens/TopicsScreenKt;->TopicsScreen(**)V
 
-# WebSocket client for real-time updates
-Lcom/example/views/network/WebSocketClient;
-HSPLcom/example/views/network/WebSocketClient;-><init>()V
+# -- Notifications screen --
+HSPLsocial/mycelium/android/ui/screens/NotificationsScreenKt;->NotificationsScreen(**)V
 
+# -- Profile screen --
+HSPLsocial/mycelium/android/ui/screens/ProfileScreenKt;->ProfileScreen(**)V
 
+# -- Global sidebar / drawer (7MB JIT) --
+HSPLsocial/mycelium/android/ui/components/GlobalSidebarKt;->DrawerContent(**)V
+HSPLsocial/mycelium/android/ui/components/GlobalSidebarKt;->GlobalSidebar(**)V
 
+# -- Relay health screen --
+HSPLsocial/mycelium/android/ui/screens/RelayHealthScreenKt;->RelayHealthScreen(**)V
+HSPLsocial/mycelium/android/ui/screens/RelayHealthScreenKt;->RelayDirectoryRow(**)V
 
+# -- Zap menu --
+HSPLsocial/mycelium/android/ui/components/SemiCircleZapMenuKt;->ZapMenuRow(**)V
 
+# -- Relay orbs --
+HSPLsocial/mycelium/android/ui/components/RelayOrbsKt;->RelayOrbs(**)V
+
+# -- Inline video player --
+HSPLsocial/mycelium/android/ui/components/InlineVideoPlayerKt;->InlineVideoPlayer(**)V
+
+# -- ViewModels (startup critical) --
+HSPLsocial/mycelium/android/viewmodel/AccountStateViewModel;-><init>(**)V
+HSPLsocial/mycelium/android/viewmodel/DashboardViewModel;-><init>(**)V
+HSPLsocial/mycelium/android/viewmodel/AppViewModel;-><init>(**)V
+
+# -- Repositories (startup critical) --
+HSPLsocial/mycelium/android/repository/NotesRepository;->getInstance()Lsocial/mycelium/android/repository/NotesRepository;
+HSPLsocial/mycelium/android/repository/ProfileMetadataCache;->getInstance()Lsocial/mycelium/android/repository/ProfileMetadataCache;
+HSPLsocial/mycelium/android/repository/ProfileMetadataCache;->resolveAuthor(Ljava/lang/String;)Lsocial/mycelium/android/data/Author;
+
+# -- Compose runtime (critical for all screens) --
+Landroidx/compose/runtime/**;
+Landroidx/compose/ui/**;
+Landroidx/compose/foundation/**;
+Landroidx/compose/material3/**;
+Landroidx/navigation/compose/**;
+Landroidx/compose/animation/**;

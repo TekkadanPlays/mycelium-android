@@ -1800,14 +1800,26 @@ private fun ReplyContentBody(
 ) {
     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
-    val linkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary)
+    val linkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
     val replyMediaUrls = remember(reply.content) {
         social.mycelium.android.utils.UrlDetector.findUrls(reply.content)
             .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
             .toSet()
     }
     val replyIsMarkdown = remember(reply.content) { social.mycelium.android.ui.components.isMarkdown(reply.content) }
-    val replyContentBlocks = remember(reply.content, replyMediaUrls) {
+    val replyMentionedPubkeys = remember(reply.content) {
+        social.mycelium.android.utils.extractPubkeysFromContent(reply.content)
+    }
+    var replyMentionVersion by remember { androidx.compose.runtime.mutableStateOf(0) }
+    if (replyMentionedPubkeys.isNotEmpty()) {
+        LaunchedEffect(replyMentionedPubkeys) {
+            val pubkeySet = replyMentionedPubkeys.toSet()
+            profileCache.profileUpdated
+                .filter { it in pubkeySet }
+                .collect { replyMentionVersion++ }
+        }
+    }
+    val replyContentBlocks = remember(reply.content, replyMediaUrls, replyMentionVersion) {
         social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
             reply.content,
             replyMediaUrls,
@@ -1856,23 +1868,50 @@ private fun ReplyContentBody(
                     val vidUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
                     if (imgUrls.size == 1 && vidUrls.isEmpty()) {
                         val imgUrl = imgUrls[0]
-                        val cachedRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
+                        val imgMeta = reply.mediaMeta[imgUrl]
+                        val cachedRatio = imgMeta?.aspectRatio()
+                            ?: social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
                         val effectiveRatio = (cachedRatio ?: (16f / 9f)).coerceIn(0.5f, 3.0f)
                         val imgModifier = Modifier
                             .fillMaxWidth()
                             .aspectRatio(effectiveRatio)
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { onImageTap(mediaList, 0) }
-                        AsyncImage(
+                        coil.compose.SubcomposeAsyncImage(
                             model = imgUrl,
-                            contentDescription = null,
+                            contentDescription = imgMeta?.alt,
                             contentScale = ContentScale.FillWidth,
                             modifier = imgModifier,
-                            onSuccess = { state ->
-                                val drawable = state.result.drawable
-                                social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                        ) {
+                            when (painter.state) {
+                                is coil.compose.AsyncImagePainter.State.Loading -> {
+                                    if (imgMeta?.blurhash != null) {
+                                        social.mycelium.android.ui.components.DisplayBlurHash(
+                                            blurhash = imgMeta.blurhash,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize(),
+                                        )
+                                    } else {
+                                        Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)))
+                                    }
+                                }
+                                is coil.compose.AsyncImagePainter.State.Success -> {
+                                    androidx.compose.foundation.Image(painter = painter, contentDescription = imgMeta?.alt, contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxSize())
+                                    SideEffect {
+                                        val drawable = (painter.state as? coil.compose.AsyncImagePainter.State.Success)?.result?.drawable
+                                        if (drawable != null) {
+                                            social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                                        }
+                                    }
+                                }
+                                is coil.compose.AsyncImagePainter.State.Error -> {
+                                    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
+                                        Icon(Icons.Outlined.BrokenImage, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
+                                    }
+                                }
+                                else -> {}
                             }
-                        )
+                        }
                     } else {
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             imgUrls.take(3).forEachIndexed { idx, url ->
@@ -2035,6 +2074,14 @@ private fun ReplyControlsPanel(
     var isDetailsExpanded by remember { mutableStateOf(false) }
     val replyOwnVote = social.mycelium.android.repository.VoteRepository.getOwnVote(reply.id)
     val replyVoteScore = social.mycelium.android.repository.VoteRepository.getScore(reply.id)
+    // Derive liked state from NoteCountsRepository (reactive) so heart updates after user reacts
+    val replyCounts = noteCountsByNoteId[reply.id]
+    val myPubkey = social.mycelium.android.repository.NoteCountsRepository.currentUserPubkey
+    val isLikedFromCounts = remember(replyCounts?.reactionAuthors, myPubkey) {
+        if (myPubkey == null) false
+        else replyCounts?.reactionAuthors?.values?.any { myPubkey in it } == true
+    }
+    val replyIsLiked = isLikedFromCounts || reply.isLiked
 
     AnimatedVisibility(
         visible = isControlsExpanded,
@@ -2049,7 +2096,10 @@ private fun ReplyControlsPanel(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Relay orbs — tucked into the expandable drawer
-                val replyRelayUrls = reply.relayUrls.distinct().take(6)
+                val replyRelayUrls = remember(reply.relayUrls) {
+                    val seen = mutableSetOf<String>()
+                    reply.relayUrls.filter { url -> seen.add(social.mycelium.android.utils.normalizeRelayUrl(url)) }.take(6)
+                }
                 if (replyRelayUrls.isNotEmpty()) {
                     RelayOrbs(
                         relayUrls = replyRelayUrls,
@@ -2113,11 +2163,11 @@ private fun ReplyControlsPanel(
                             if (isScrolling && showReactionMenu) showReactionMenu = false
                         }
                         CompactModernButton(
-                            icon = if (reply.isLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                            icon = if (replyIsLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
                             contentDescription = "React",
-                            isActive = reply.isLiked,
+                            isActive = replyIsLiked,
                             onClick = { showReactionMenu = true },
-                            tint = if (reply.isLiked) Color.Red else null
+                            tint = if (replyIsLiked) Color.Red else null
                         )
                         DropdownMenu(
                             expanded = showReactionMenu,
@@ -2699,92 +2749,35 @@ private fun ThreadedReplyCard(
                 }  // Row (fillMaxWidth, Top)
             }  // else (not collapsed)
         }  // Card
-        // Root-only mode: show collapsed child count badge
-        if (collapsedChildCount != null && collapsedChildCount > 0) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onReadMoreReplies(reply.id) },
-                color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f)
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.UnfoldMore,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (collapsedChildCount == 1) "1 reply in thread" else "$collapsedChildCount replies in thread",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
-                    )
-                }
-            }
-        }
-        if (!state.isCollapsed && collapsedChildCount == null) {
-            if (level >= MAX_THREAD_DEPTH && threadedReply.children.isNotEmpty()) {
-                val n = threadedReply.totalReplies
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onReadMoreReplies(reply.id) },
-                    color = MaterialTheme.colorScheme.surfaceContainerHighest
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "Read $n more replies",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Icon(
-                            imageVector = Icons.Default.ArrowForward,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                }
-            } else {
-                threadedReply.children.forEach { childReply ->
-                    ThreadedReplyCard(
-                        threadedReply = childReply,
-                        isLastRootReply = true,
-                        rootAuthorId = rootAuthorId,
-                        replyKind = replyKind,
-                        commentStates = commentStates,
-                        noteCountsByNoteId = noteCountsByNoteId,
-                        onLike = onLike,
-                        onReply = onReply,
-                        onProfileClick = onProfileClick,
-                        onRelayClick = onRelayClick,
-                        onNavigateToRelayList = onNavigateToRelayList,
-                        shouldCloseZapMenus = shouldCloseZapMenus,
-                        expandedZapMenuReplyId = expandedZapMenuReplyId,
-                        onExpandZapMenu = onExpandZapMenu,
-                        onZap = onZap,
-                        onZapSettings = onZapSettings,
-                        expandedControlsReplyId = expandedControlsReplyId,
-                        onExpandedControlsReplyChange = onExpandedControlsReplyChange,
-                        onReadMoreReplies = onReadMoreReplies,
-                        onNoteClick = onNoteClick,
-                        onReact = onReact,
-                        onVote = onVote,
-                        onImageTap = onImageTap,
-                        onVideoClick = onVideoClick,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            }
-        }
+        // Children rendering extracted to reduce JIT size
+        ThreadedReplyChildren(
+            threadedReply = threadedReply,
+            isCollapsed = state.isCollapsed,
+            collapsedChildCount = collapsedChildCount,
+            rootAuthorId = rootAuthorId,
+            replyKind = replyKind,
+            commentStates = commentStates,
+            noteCountsByNoteId = noteCountsByNoteId,
+            onLike = onLike,
+            onReply = onReply,
+            onProfileClick = onProfileClick,
+            onRelayClick = onRelayClick,
+            onNavigateToRelayList = onNavigateToRelayList,
+            shouldCloseZapMenus = shouldCloseZapMenus,
+            expandedZapMenuReplyId = expandedZapMenuReplyId,
+            onExpandZapMenu = onExpandZapMenu,
+            onZap = onZap,
+            onZapSettings = onZapSettings,
+            expandedControlsReplyId = expandedControlsReplyId,
+            onExpandedControlsReplyChange = onExpandedControlsReplyChange,
+            onReadMoreReplies = onReadMoreReplies,
+            onNoteClick = onNoteClick,
+            onReact = onReact,
+            onVote = onVote,
+            onImageTap = onImageTap,
+            onVideoClick = onVideoClick,
+            isScrolling = isScrolling,
+        )
 
         }
         }
@@ -2804,6 +2797,131 @@ private fun ThreadedReplyCard(
         }
     }
 }
+/**
+ * Extracted children rendering from ThreadedReplyCard — recursive child cards,
+ * collapsed child badge, and "Read N more replies". Splits the 7.6MB JIT.
+ */
+@Composable
+private fun ThreadedReplyChildren(
+    threadedReply: ThreadedReply,
+    isCollapsed: Boolean,
+    collapsedChildCount: Int?,
+    rootAuthorId: String?,
+    replyKind: Int,
+    commentStates: MutableMap<String, CommentState>,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    onLike: (String) -> Unit,
+    onReply: (String) -> Unit,
+    onProfileClick: (String) -> Unit,
+    onRelayClick: (String) -> Unit,
+    onNavigateToRelayList: ((List<String>) -> Unit)?,
+    shouldCloseZapMenus: Boolean,
+    expandedZapMenuReplyId: String?,
+    onExpandZapMenu: (String) -> Unit,
+    onZap: (String, Long) -> Unit,
+    onZapSettings: () -> Unit,
+    expandedControlsReplyId: String?,
+    onExpandedControlsReplyChange: (String?) -> Unit,
+    onReadMoreReplies: (String) -> Unit,
+    onNoteClick: (Note) -> Unit,
+    onReact: (Note, String) -> Unit,
+    onVote: ((String, String, Int) -> Unit)?,
+    onImageTap: (List<String>, Int) -> Unit,
+    onVideoClick: (List<String>, Int) -> Unit,
+    isScrolling: Boolean,
+) {
+    val reply = threadedReply.reply
+    val level = threadedReply.level
+
+    // Root-only mode: show collapsed child count badge
+    if (collapsedChildCount != null && collapsedChildCount > 0) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onReadMoreReplies(reply.id) },
+            color = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.6f)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.UnfoldMore,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = if (collapsedChildCount == 1) "1 reply in thread" else "$collapsedChildCount replies in thread",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                )
+            }
+        }
+    }
+    if (!isCollapsed && collapsedChildCount == null) {
+        if (level >= MAX_THREAD_DEPTH && threadedReply.children.isNotEmpty()) {
+            val n = threadedReply.totalReplies
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onReadMoreReplies(reply.id) },
+                color = MaterialTheme.colorScheme.surfaceContainerHighest
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Read $n more replies",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = Icons.Default.ArrowForward,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        } else {
+            threadedReply.children.forEach { childReply ->
+                ThreadedReplyCard(
+                    threadedReply = childReply,
+                    isLastRootReply = true,
+                    rootAuthorId = rootAuthorId,
+                    replyKind = replyKind,
+                    commentStates = commentStates,
+                    noteCountsByNoteId = noteCountsByNoteId,
+                    onLike = onLike,
+                    onReply = onReply,
+                    onProfileClick = onProfileClick,
+                    onRelayClick = onRelayClick,
+                    onNavigateToRelayList = onNavigateToRelayList,
+                    shouldCloseZapMenus = shouldCloseZapMenus,
+                    expandedZapMenuReplyId = expandedZapMenuReplyId,
+                    onExpandZapMenu = onExpandZapMenu,
+                    onZap = onZap,
+                    onZapSettings = onZapSettings,
+                    expandedControlsReplyId = expandedControlsReplyId,
+                    onExpandedControlsReplyChange = onExpandedControlsReplyChange,
+                    onReadMoreReplies = onReadMoreReplies,
+                    onNoteClick = onNoteClick,
+                    onReact = onReact,
+                    onVote = onVote,
+                    onImageTap = onImageTap,
+                    onVideoClick = onVideoClick,
+                    isScrolling = isScrolling,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
 fun createSampleCommentThreads(): List<CommentThread> {
     return listOf(
         CommentThread(

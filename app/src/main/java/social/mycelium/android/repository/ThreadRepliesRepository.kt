@@ -71,6 +71,9 @@ class ThreadRepliesRepository {
     private val _replySourceRelays = MutableStateFlow<Map<String, Set<String>>>(emptyMap())
     val replySourceRelays: StateFlow<Map<String, Set<String>>> = _replySourceRelays.asStateFlow()
 
+    /** Buffer for relay confirmations that arrived before their reply was injected. eventId → set of relay URLs. */
+    private val pendingRelayConfirmations = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+
     /**
      * Set cache relay URLs for kind-0 profile fetches (from RelayStorageManager.loadIndexerRelays).
      */
@@ -291,6 +294,8 @@ class ThreadRepliesRepository {
                 return
             }
         }
+        // Reply not yet injected — buffer for retroactive application
+        pendingRelayConfirmations.getOrPut(eventId) { java.util.Collections.synchronizedSet(mutableSetOf()) }.add(relayUrl)
     }
 
     /** Merge relay URLs for an already-displayed reply (same event from different relay). */
@@ -399,6 +404,19 @@ class ThreadRepliesRepository {
         val mediaUrls = UrlDetector.findUrls(event.content)
             .filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }
             .distinct()
+        // NIP-92: parse imeta tags for dimensions, blurhash, mimeType
+        val mediaMeta = social.mycelium.android.data.IMetaData.parseAll(event.tags)
+        for ((url, meta) in mediaMeta) {
+            if (meta.width != null && meta.height != null && meta.height > 0) {
+                social.mycelium.android.utils.MediaAspectRatioCache.add(url, meta.width, meta.height)
+            }
+        }
+
+        // Extract p-tags for reply chain tagging (Amethyst-style)
+        val mentionedPubkeys = tags
+            .filter { tag -> tag.size >= 2 && (tag[0] == "p" || tag[0] == "P") }
+            .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
+            .distinct()
 
         return ThreadReply(
             id = event.id,
@@ -411,11 +429,13 @@ class ThreadRepliesRepository {
             isLiked = false,
             hashtags = hashtags,
             mediaUrls = mediaUrls,
+            mediaMeta = mediaMeta,
             rootNoteId = rootId,
             replyToId = replyToId,
             threadLevel = threadLevel,
             relayUrls = if (relayUrl.isNotBlank()) listOf(relayUrl) else emptyList(),
-            kind = event.kind
+            kind = event.kind,
+            mentionedPubkeys = mentionedPubkeys
         )
     }
 
@@ -428,6 +448,14 @@ class ThreadRepliesRepository {
      */
     fun injectLocalReply(rootNoteId: String, event: Event) {
         handleReplyEvent(rootNoteId, event, "")
+        // Apply any buffered relay confirmations that arrived before this injection
+        val buffered = pendingRelayConfirmations.remove(event.id)
+        if (buffered != null) {
+            for (url in buffered) {
+                mergePublishRelayUrl(event.id, url)
+            }
+            Log.d(TAG, "📌 Applied ${buffered.size} buffered relay confirmations for ${event.id.take(8)}")
+        }
         Log.d(TAG, "📌 Injected local reply: ${event.id.take(8)} into thread ${rootNoteId.take(8)}")
     }
 

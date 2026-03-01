@@ -147,20 +147,20 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     init {
-        Log.d("AccountStateViewModel", "🔐 Initializing AccountStateViewModel")
+        Log.d("AccountStateViewModel", "\uD83D\uDD10 Initializing AccountStateViewModel")
 
         // Load saved accounts
         viewModelScope.launch {
             loadSavedAccounts()
 
-            // Try to restore last active account; set _accountsRestored only after current account is set
+            // Try to restore last active account; call restoreAccount directly (suspend)
+            // so we AWAIT completion before setting _accountsRestored — prevents sign-in flash.
             val currentNpub = prefs.getString(PREF_CURRENT_ACCOUNT, null)
             if (currentNpub != null) {
                 val account = _savedAccounts.value.find { it.npub == currentNpub }
                 if (account != null) {
-                    Log.d("AccountStateViewModel", "🔐 Restoring account: ${account.toShortNpub()}")
-                    switchToAccount(account)
-                    // _accountsRestored set at end of switchToAccount's launch block
+                    Log.d("AccountStateViewModel", "\uD83D\uDD10 Restoring account: ${account.toShortNpub()}")
+                    restoreAccount(account)
                 } else {
                     setGuestMode()
                     _accountsRestored.value = true
@@ -207,7 +207,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val updatedList = _savedAccounts.value.map { if (it.npub == account.npub) updatedAccount else it }
                 _savedAccounts.value = updatedList
                 saveSavedAccounts(updatedList)
-                Log.d("AccountStateViewModel", "📸 Profile updated: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
+                Log.d("AccountStateViewModel", "\uD83D\uDD0D Profile updated: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
             }
             .launchIn(viewModelScope)
 
@@ -247,14 +247,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val updatedList = _savedAccounts.value.map { if (it.npub == account.npub) updatedAccount else it }
                 _savedAccounts.value = updatedList
                 saveSavedAccounts(updatedList)
-                Log.d("AccountStateViewModel", "📸 Disk cache restored profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
+                Log.d("AccountStateViewModel", "\uD83D\uDD0D Disk cache restored profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
             }
         }
 
         // Observe Amber state changes for new logins
         viewModelScope.launch {
             amberSignerManager.state.collect { amberState ->
-                Log.d("AccountStateViewModel", "🔐 Amber state changed: $amberState")
+                Log.d("AccountStateViewModel", "\uD83D\uDD10 Amber state changed: $amberState")
 
                 when (amberState) {
                     is AmberState.LoggedIn -> {
@@ -282,13 +282,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val accounts = json.decodeFromString<List<AccountInfo>>(accountsJson)
                 // Keep accounts in the order they were added (don't sort by lastUsed)
                 _savedAccounts.value = accounts
-                Log.d("AccountStateViewModel", "📚 Loaded ${accounts.size} saved accounts")
+                Log.d("AccountStateViewModel", "\uD83D\uDD0E Loaded ${accounts.size} saved accounts")
             } catch (e: Exception) {
-                Log.e("AccountStateViewModel", "❌ Failed to load accounts: ${e.message}")
+                Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to load accounts: ${e.message}")
                 _savedAccounts.value = emptyList()
             }
         } else {
-            Log.d("AccountStateViewModel", "📚 No saved accounts found")
+            Log.d("AccountStateViewModel", "\uD83D\uDD0E No saved accounts found")
             _savedAccounts.value = emptyList()
         }
     }
@@ -300,14 +300,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 .putString(PREF_ALL_ACCOUNTS, accountsJson)
                 .apply()
             _savedAccounts.value = accounts
-            Log.d("AccountStateViewModel", "💾 Saved ${accounts.size} accounts")
+            Log.d("AccountStateViewModel", "\uD83D\uDD0E Saved ${accounts.size} accounts")
         } catch (e: Exception) {
-            Log.e("AccountStateViewModel", "❌ Failed to save accounts: ${e.message}")
+            Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to save accounts: ${e.message}")
         }
     }
 
     private fun setGuestMode() {
-        Log.d("AccountStateViewModel", "👤 Setting guest mode")
+        Log.d("AccountStateViewModel", "\uD83D\uDD1D Setting guest mode")
         _currentAccount.value = null
         NoteCountsRepository.currentUserPubkey = null
         _zappedNoteIds.value = emptySet()
@@ -323,7 +323,16 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private suspend fun handleNewAmberLogin(hexPubkey: String) {
-        Log.d("AccountStateViewModel", "✅ Handling new Amber login: ${hexPubkey.take(16)}...")
+        Log.d("AccountStateViewModel", "\uD83D\uDD10 Handling new Amber login: ${hexPubkey.take(16)}...")
+
+        // Skip if this is just a signer recovery for the already-active account —
+        // restoreAccount() already set up everything, no need to re-run (which would
+        // reset _onboardingComplete and flash the sign-in flow).
+        val currentHex = _currentAccount.value?.toHexKey()
+        if (currentHex == hexPubkey && _accountsRestored.value) {
+            Log.d("AccountStateViewModel", "Amber login matches current account — skipping re-activation")
+            return
+        }
 
         // Reset onboarding gate — will be re-evaluated after account is set
         _onboardingComplete.value = false
@@ -332,7 +341,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val npub = try {
             hexPubkey.hexToByteArray().toNpub()
         } catch (e: Exception) {
-            Log.e("AccountStateViewModel", "❌ Failed to convert to npub: ${e.message}")
+            Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to convert to npub: ${e.message}")
             return
         }
 
@@ -414,91 +423,95 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
         }
 
-        Log.d("AccountStateViewModel", "✅ Account activated: ${accountInfo.toShortNpub()}")
+        Log.d("AccountStateViewModel", "\uD83D\uDD10 Account activated: ${accountInfo.toShortNpub()}")
     }
 
     /**
      * Switch to a different saved account
      */
     fun switchToAccount(accountInfo: AccountInfo) {
-        viewModelScope.launch {
-            Log.d("AccountStateViewModel", "🔄 Switching to account: ${accountInfo.toShortNpub()}")
+        viewModelScope.launch { restoreAccount(accountInfo) }
+    }
 
-            // Reset onboarding gate — will be re-evaluated after account is set
-            _onboardingComplete.value = false
+    /** Core account restore/switch logic. Suspend so init can await it directly. */
+    private suspend fun restoreAccount(accountInfo: AccountInfo) {
+        Log.d("AccountStateViewModel", "\uD83D\uDD04 Switching to account: ${accountInfo.toShortNpub()}")
 
-            // Full teardown FIRST — disconnect relays, clear notes, NIP-42 auth, NIP-65
-            // before updating currentAccount so navigation doesn't react to stale state.
-            RelayConnectionStateMachine.getInstance().disconnectAndClearForAccountSwitch()
+        // Reset onboarding gate — will be re-evaluated after account is set
+        _onboardingComplete.value = false
 
-            // Update last used time
-            val updatedAccount = accountInfo.copy(lastUsed = System.currentTimeMillis())
+        // Full teardown FIRST — disconnect relays, clear notes, NIP-42 auth, NIP-65
+        // before updating currentAccount so navigation doesn't react to stale state.
+        RelayConnectionStateMachine.getInstance().disconnectAndClearForAccountSwitch()
 
-            val updatedAccounts = _savedAccounts.value
-                .filter { it.npub != accountInfo.npub }
-                .plus(updatedAccount)
+        // Update last used time
+        val updatedAccount = accountInfo.copy(lastUsed = System.currentTimeMillis())
 
-            saveSavedAccounts(updatedAccounts)
+        val updatedAccounts = _savedAccounts.value
+            .filter { it.npub != accountInfo.npub }
+            .plus(updatedAccount)
 
-            // Set as current
-            prefs.edit()
-                .putString(PREF_CURRENT_ACCOUNT, accountInfo.npub)
-                .apply()
+        saveSavedAccounts(updatedAccounts)
 
-            // Convert npub to hex for user profile
-            val hexPubkey = updatedAccount.toHexKey()
+        // Set as current
+        prefs.edit()
+            .putString(PREF_CURRENT_ACCOUNT, accountInfo.npub)
+            .apply()
 
-            if (hexPubkey != null) {
-                val userProfile = UserProfile(
-                    pubkey = hexPubkey,
-                    displayName = updatedAccount.displayName ?: "Nostr User",
-                    name = hexPubkey.take(8),
-                    picture = updatedAccount.picture,
-                    about = if (updatedAccount.isExternalSigner) "Signed in with Amber Signer" else "Nostr User",
-                    createdAt = System.currentTimeMillis()
-                )
+        // Convert npub to hex for user profile
+        val hexPubkey = updatedAccount.toHexKey()
 
-                _authState.value = AuthState(
-                    isAuthenticated = true,
-                    isGuest = false,
-                    userProfile = userProfile,
-                    isLoading = false,
-                    error = null
-                )
+        if (hexPubkey != null) {
+            val userProfile = UserProfile(
+                pubkey = hexPubkey,
+                displayName = updatedAccount.displayName ?: "Nostr User",
+                name = hexPubkey.take(8),
+                picture = updatedAccount.picture,
+                about = if (updatedAccount.isExternalSigner) "Signed in with Amber Signer" else "Nostr User",
+                createdAt = System.currentTimeMillis()
+            )
 
-                restoreZapState(updatedAccount.npub)
-                ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
-                NoteCountsRepository.currentUserPubkey = hexPubkey
+            _authState.value = AuthState(
+                isAuthenticated = true,
+                isGuest = false,
+                userProfile = userProfile,
+                isLoading = false,
+                error = null
+            )
 
-                // Set NIP-42 signer for new account
-                RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
+            restoreZapState(updatedAccount.npub)
+            ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
+            NoteCountsRepository.currentUserPubkey = hexPubkey
 
-                Log.d("AccountStateViewModel", "✅ Switched to account: ${updatedAccount.getDisplayNameOrNpub()}")
-            }
+            // Set NIP-42 signer for new account
+            RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
 
-            // Publish account change LAST so all teardown is complete before
-            // navigation LaunchedEffects react to the new account.
-            _currentAccount.value = updatedAccount
-            _accountsRestored.value = true
+            Log.d("AccountStateViewModel", "\u2705 Switched to account: ${updatedAccount.getDisplayNameOrNpub()}")
+        }
 
-            // Check persisted onboarding status first, then fall back to relay existence
-            if (isOnboardingPersistedFor(updatedAccount.npub)) {
-                _onboardingComplete.value = true
-                Log.d("AccountStateViewModel", "Returning user (persisted) — onboardingComplete = true")
-            } else {
-                val hex = updatedAccount.toHexKey()
-                if (hex != null) {
-                    val outbox = relayStorageManager.loadOutboxRelays(hex)
-                    val categories = relayStorageManager.loadCategories(hex)
-                    if (outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }) {
-                        _onboardingComplete.value = true
-                        // Persist for future — this account had relays before the persistence was added
-                        prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + updatedAccount.npub, true).apply()
-                        Log.d("AccountStateViewModel", "Returning user (relays exist) — onboardingComplete = true")
-                    }
+        // Resolve onboarding status BEFORE publishing accountsRestored to prevent
+        // a 1-frame flash where needsOnboarding=true shows the sign-in/onboarding UI.
+        if (isOnboardingPersistedFor(updatedAccount.npub)) {
+            _onboardingComplete.value = true
+            Log.d("AccountStateViewModel", "Returning user (persisted) — onboardingComplete = true")
+        } else {
+            val hex = updatedAccount.toHexKey()
+            if (hex != null) {
+                val outbox = relayStorageManager.loadOutboxRelays(hex)
+                val categories = relayStorageManager.loadCategories(hex)
+                if (outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }) {
+                    _onboardingComplete.value = true
+                    // Persist for future — this account had relays before the persistence was added
+                    prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + updatedAccount.npub, true).apply()
+                    Log.d("AccountStateViewModel", "Returning user (relays exist) — onboardingComplete = true")
                 }
             }
         }
+
+        // Publish account change LAST so all teardown is complete before
+        // navigation LaunchedEffects react to the new account.
+        _currentAccount.value = updatedAccount
+        _accountsRestored.value = true
     }
 
     private fun restoreZapState(accountNpub: String) {
@@ -646,9 +659,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 isLoading = false,
                 error = null
             )
-            _accountsRestored.value = true
 
-            // Check persisted onboarding status first, then fall back to relay existence
+            // Resolve onboarding status BEFORE publishing accountsRestored to prevent
+            // a 1-frame flash where needsOnboarding=true shows the sign-in/onboarding UI.
             if (isOnboardingPersistedFor(accountInfo.npub)) {
                 _onboardingComplete.value = true
                 Log.d("AccountStateViewModel", "Returning user (key, persisted) — onboardingComplete = true")
@@ -662,6 +675,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 }
             }
 
+            _accountsRestored.value = true
             Log.d("AccountStateViewModel", "Account activated via key login: ${accountInfo.toShortNpub()}")
         }
     }
@@ -923,14 +937,15 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         parentReplyId: String?,
         parentReplyPubkey: String?,
         content: String,
-        relayUrls: Set<String> = emptySet()
+        relayUrls: Set<String> = emptySet(),
+        taggedPubkeys: List<String> = emptyList()
     ): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
         viewModelScope.launch {
             val template = TopicsPublishService.buildThreadReplyEventTemplate(
-                rootThreadId, rootThreadPubkey, parentReplyId, parentReplyPubkey, content
+                rootThreadId, rootThreadPubkey, parentReplyId, parentReplyPubkey, content, taggedPubkeys
             )
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
                 is PublishResult.Success -> Log.d("AccountStateViewModel", "Thread reply published: ${result.eventId.take(8)}")
@@ -950,7 +965,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         parentId: String?,
         parentPubkey: String?,
         content: String,
-        relayUrls: Set<String> = emptySet()
+        relayUrls: Set<String> = emptySet(),
+        taggedPubkeys: List<String> = emptyList()
     ): String? {
         if (content.isBlank()) return "Reply is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
@@ -964,10 +980,15 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 if (parentId != null && parentId != rootId) {
                     add(arrayOf("e", parentId, "", "reply"))
                 }
-                // p-tags for the root author and (optionally) the parent reply author
-                add(arrayOf("p", rootPubkey))
-                if (parentPubkey != null && parentPubkey != rootPubkey) {
-                    add(arrayOf("p", parentPubkey))
+                // Amethyst-style p-tags: forward the full chain of tagged users
+                if (taggedPubkeys.isNotEmpty()) {
+                    taggedPubkeys.distinct().forEach { pk -> add(arrayOf("p", pk)) }
+                } else {
+                    // Fallback: tag root author + parent author
+                    add(arrayOf("p", rootPubkey))
+                    if (parentPubkey != null && parentPubkey != rootPubkey) {
+                        add(arrayOf("p", parentPubkey))
+                    }
                 }
             }
             when (result) {
@@ -987,7 +1008,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         rootNoteId = rootId,
                         replyToId = parentId ?: rootId,
                         mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(content).filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }.distinct(),
-                        hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] }
+                        hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] },
+                        relayUrls = relaySet.map { social.mycelium.android.utils.normalizeRelayUrl(it) }
                     )
                     social.mycelium.android.cache.ThreadReplyCache.addLocalReply(rootId, replyNote)
                 }

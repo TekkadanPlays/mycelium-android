@@ -144,6 +144,12 @@ class ProfileMetadataCache {
     private val _diskCacheRestored = MutableStateFlow(false)
     val diskCacheRestored: StateFlow<Boolean> = _diskCacheRestored.asStateFlow()
 
+    /** Monotonically increasing counter that ticks whenever any profile is updated.
+     *  Composables use this as a `remember` key so AnnotatedStrings with @mentions
+     *  rebuild when display names resolve from kind-0 fetches. */
+    private val _profileVersion = MutableStateFlow(0L)
+    val profileVersion: StateFlow<Long> = _profileVersion.asStateFlow()
+
     private val json = Json { ignoreUnknownKeys = true }
 
     private fun normalizeKey(pubkey: String): String = pubkey.lowercase()
@@ -221,6 +227,7 @@ class ProfileMetadataCache {
         scope.launch {
             _profileUpdated.emit(key)
         }
+        if (dataChanged) _profileVersion.value++
         // Only write to disk when the profile data actually changed
         if (dataChanged) scheduleDiskSave()
         return true
@@ -231,6 +238,7 @@ class ProfileMetadataCache {
         cache[key] = author
         profileCreatedAt[key] = Long.MAX_VALUE
         profileFetchedAt[key] = System.currentTimeMillis()
+        _profileVersion.value++
         scope.launch {
             _profileUpdated.emit(key)
         }

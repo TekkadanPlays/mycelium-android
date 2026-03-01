@@ -378,7 +378,11 @@ class ProfileFeedRepository(
         val isReply = Nip10ReplyDetector.isReply(event)
         val rootNoteId = Nip10ReplyDetector.getRootId(event)
         val replyToId = Nip10ReplyDetector.getReplyToId(event)
-        val quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(content)
+        val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(content)
+        val quotedEventIds = quotedRefs.map { it.eventId }
+        quotedRefs.forEach { ref ->
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+        }
 
         return Note(
             id = event.id,

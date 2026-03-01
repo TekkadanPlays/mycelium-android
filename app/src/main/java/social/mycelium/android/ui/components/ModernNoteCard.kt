@@ -291,9 +291,21 @@ private fun NoteCardContent(
             }
 
             // Body zone: only when there is text or quoted notes; otherwise embed/media only (no highlight box)
-            val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary)
+            val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
             val contentIsMarkdown = remember(note.content) { isMarkdown(note.content) }
-            val contentBlocks = remember(note.content, note.mediaUrls, note.urlPreviews) {
+            val mentionedPubkeys = remember(note.content) {
+                social.mycelium.android.utils.extractPubkeysFromContent(note.content)
+            }
+            var mentionProfileVersion by remember { mutableStateOf(0) }
+            if (mentionedPubkeys.isNotEmpty()) {
+                LaunchedEffect(mentionedPubkeys) {
+                    val pubkeySet = mentionedPubkeys.toSet()
+                    profileCache.profileUpdated
+                        .filter { it in pubkeySet }
+                        .collect { mentionProfileVersion++ }
+                }
+            }
+            val contentBlocks = remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion) {
                 buildNoteContentWithInlinePreviews(
                     note.content,
                     note.mediaUrls.toSet(),
@@ -380,7 +392,7 @@ private fun NoteCardContent(
                     }
                     if (note.quotedEventIds.isNotEmpty()) {
                         val profileCache = ProfileMetadataCache.getInstance()
-                        val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary)
+                        val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
                         val uriHandler = LocalUriHandler.current
                         var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
                         LaunchedEffect(note.quotedEventIds) {
@@ -436,9 +448,12 @@ private fun NoteCardContent(
                                                     timestamp = meta.createdAt,
                                                     likes = 0, shares = 0, comments = 0,
                                                     isLiked = false, hashtags = emptyList(),
-                                                    mediaUrls = emptyList(), isReply = false,
+                                                    mediaUrls = quotedMediaUrls.toList(),
+                                                    isReply = meta.rootNoteId != null,
+                                                    rootNoteId = meta.rootNoteId,
                                                     relayUrl = meta.relayUrl,
-                                                    relayUrls = listOfNotNull(meta.relayUrl)
+                                                    relayUrls = listOfNotNull(meta.relayUrl),
+                                                    kind = meta.kind
                                                 )
                                                 onNoteClick(quotedNote)
                                             },
@@ -511,9 +526,12 @@ private fun NoteCardContent(
                                                                                     timestamp = meta.createdAt,
                                                                                     likes = 0, shares = 0, comments = 0,
                                                                                     isLiked = false, hashtags = emptyList(),
-                                                                                    mediaUrls = emptyList(), isReply = false,
+                                                                                    mediaUrls = quotedMediaUrls.toList(),
+                                                                                    isReply = meta.rootNoteId != null,
+                                                                                    rootNoteId = meta.rootNoteId,
                                                                                     relayUrl = meta.relayUrl,
-                                                                                    relayUrls = listOfNotNull(meta.relayUrl)
+                                                                                    relayUrls = listOfNotNull(meta.relayUrl),
+                                                                                    kind = meta.kind
                                                                                 )
                                                                                 onNoteClick(quotedNote)
                                                                             }
@@ -549,7 +567,7 @@ private fun NoteCardContent(
                                                                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
-                                                                            .heightIn(max = 200.dp)
+                                                                            .heightIn(min = 80.dp, max = 240.dp)
                                                                             .clip(RoundedCornerShape(6.dp))
                                                                             .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
                                                                     )
@@ -622,15 +640,20 @@ private fun NoteCardContent(
                 // Uses cached aspect ratios if available; otherwise commits to 16:9 default.
                 // The real ratio is still written to MediaAspectRatioCache on load so NEXT
                 // time this card appears it uses the correct size from the start.
-                val mediaContainerRatio = remember(mediaList) {
+                val mediaContainerRatio = remember(mediaList, note.mediaMeta) {
                     val ratios = mediaList.map { url ->
-                        social.mycelium.android.utils.MediaAspectRatioCache.get(url)
+                        note.mediaMeta[url]?.aspectRatio()
+                            ?: social.mycelium.android.utils.MediaAspectRatioCache.get(url)
                             ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
                     }
                     val known = ratios.filterNotNull()
                     if (known.isNotEmpty()) known.min() else (16f / 9f)
                 }
-                val mediaContainerModifier = Modifier.fillMaxWidth().aspectRatio(mediaContainerRatio.coerceIn(0.3f, 3.0f))
+                val modernCompactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
+                val mediaContainerModifier = Modifier.fillMaxWidth()
+                    .then(if (modernCompactMedia) Modifier.padding(horizontal = 16.dp) else Modifier)
+                    .aspectRatio(mediaContainerRatio.coerceIn(0.3f, 3.0f))
+                    .then(if (modernCompactMedia) Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)) else Modifier)
                 Box(modifier = mediaContainerModifier) {
                     HorizontalPager(
                         state = pagerState,
@@ -665,18 +688,59 @@ private fun NoteCardContent(
                                     onFullscreenClick = { onVideoClick(mediaList, page) }
                                 )
                             } else {
-                                AsyncImage(
+                                val meta = note.mediaMeta[url]
+                                coil.compose.SubcomposeAsyncImage(
                                     model = url,
-                                    contentDescription = null,
+                                    contentDescription = meta?.alt,
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier.fillMaxSize(),
-                                    onSuccess = { state ->
-                                        // Cache the real ratio for future renders — does NOT
-                                        // resize the current container (ratio is locked).
-                                        val drawable = state.result.drawable
-                                        social.mycelium.android.utils.MediaAspectRatioCache.add(url, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                                ) {
+                                    when (painter.state) {
+                                        is coil.compose.AsyncImagePainter.State.Loading -> {
+                                            if (meta?.blurhash != null) {
+                                                DisplayBlurHash(
+                                                    blurhash = meta.blurhash,
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                )
+                                            } else {
+                                                Box(
+                                                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.15f)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    CircularProgressIndicator(
+                                                        modifier = Modifier.size(24.dp),
+                                                        strokeWidth = 2.dp,
+                                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        is coil.compose.AsyncImagePainter.State.Error -> {
+                                            Box(
+                                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Outlined.BrokenImage,
+                                                    contentDescription = "Image failed",
+                                                    tint = Color.Gray,
+                                                    modifier = Modifier.size(32.dp)
+                                                )
+                                            }
+                                        }
+                                        is coil.compose.AsyncImagePainter.State.Success -> {
+                                            androidx.compose.foundation.Image(painter = painter, contentDescription = meta?.alt, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                                            SideEffect {
+                                                val drawable = (painter.state as? coil.compose.AsyncImagePainter.State.Success)?.result?.drawable
+                                                if (drawable != null) {
+                                                    social.mycelium.android.utils.MediaAspectRatioCache.add(url, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                                                }
+                                            }
+                                        }
+                                        else -> {}
                                     }
-                                )
+                                }
                             }
                         }
                     }

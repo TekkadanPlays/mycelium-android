@@ -23,6 +23,8 @@ data class ThreadReply(
     val isLiked: Boolean = false,
     val hashtags: List<String> = emptyList(),
     val mediaUrls: List<String> = emptyList(),
+    /** NIP-92 imeta metadata keyed by media URL (dimensions, blurhash, mimeType). */
+    val mediaMeta: Map<String, IMetaData> = emptyMap(),
 
     // Thread relationship fields (NIP-22)
     val rootNoteId: String? = null,      // The original note being replied to
@@ -32,7 +34,9 @@ data class ThreadReply(
     /** Relay URLs this reply was seen on; for relay orbs in thread view. */
     val relayUrls: List<String> = emptyList(),
     /** Nostr event kind (1 or 1111). Used for NIP-25 reaction "k" tag. */
-    val kind: Int = 1111
+    val kind: Int = 1111,
+    /** Pubkeys mentioned in p-tags of this event; used to auto-tag people in reply chain. */
+    val mentionedPubkeys: List<String> = emptyList()
 ) {
     /**
      * Get short content preview (first 100 characters)
@@ -281,6 +285,7 @@ fun ThreadReply.toNote(): Note {
         mediaUrls = mediaUrls,
         relayUrl = relayUrls.firstOrNull(),
         relayUrls = relayUrls,
-        kind = kind
+        kind = kind,
+        mentionedPubkeys = mentionedPubkeys
     )
 }

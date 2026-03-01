@@ -45,6 +45,7 @@ object ThemePreferences {
     private const val PREFS_NAME = "Mycelium_theme_prefs"
     private const val KEY_THEME_MODE = "theme_mode"
     private const val KEY_ACCENT_COLOR = "accent_color"
+    private const val KEY_COMPACT_MEDIA = "compact_media"
 
     private lateinit var prefs: SharedPreferences
 
@@ -54,11 +55,15 @@ object ThemePreferences {
     private val _accentColor = MutableStateFlow(AccentColor.VIOLET)
     val accentColor: StateFlow<AccentColor> = _accentColor.asStateFlow()
 
+    private val _compactMedia = MutableStateFlow(false)
+    /** When true, media is inset to match text width instead of spanning edge-to-edge. */
+    val compactMedia: StateFlow<Boolean> = _compactMedia.asStateFlow()
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         _themeMode.value = ThemeMode.fromString(prefs.getString(KEY_THEME_MODE, ThemeMode.DARK.name) ?: ThemeMode.DARK.name)
         _accentColor.value = AccentColor.fromString(prefs.getString(KEY_ACCENT_COLOR, AccentColor.VIOLET.name) ?: AccentColor.VIOLET.name)
+        _compactMedia.value = prefs.getBoolean(KEY_COMPACT_MEDIA, false)
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -71,4 +76,8 @@ object ThemePreferences {
         prefs.edit().putString(KEY_ACCENT_COLOR, color.name).apply()
     }
 
+    fun setCompactMedia(enabled: Boolean) {
+        _compactMedia.value = enabled
+        prefs.edit().putBoolean(KEY_COMPACT_MEDIA, enabled).apply()
+    }
 }

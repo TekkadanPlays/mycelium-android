@@ -768,6 +768,16 @@ class RelayConnectionStateMachine {
      * Uses resumeSubscriptionProvider when set so the Following filter always comes from the repo (no bleed).
      * Bypasses idempotent check so connection and note aggregation resume even if params are unchanged.
      */
+    /**
+     * Disconnect all relay WebSockets and pause subscriptions.
+     * Used by [ConnectionMode.WHEN_ACTIVE] when the app goes to background.
+     */
+    fun disconnectAll() {
+        Log.d(TAG, "disconnectAll: closing all relay connections (When Active mode)")
+        stopKeepalive()
+        relayPool.disconnect()
+    }
+
     fun requestReconnectOnResume() {
         val cur = _currentSubscription.value
         val (relayUrls, kind1Filter) = resumeSubscriptionProvider?.invoke()?.takeIf { it.first.isNotEmpty() }
@@ -838,6 +848,26 @@ class RelayConnectionStateMachine {
         val subscription = relayPool.subscribe(
             relayUrls = relayUrls,
             filters = listOf(filter),
+            priority = priority,
+        ) { event, relayUrl -> onEvent(event, relayUrl) }
+        relayPool.connect()
+        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+    }
+
+    /**
+     * One-off subscription with multiple filters that passes the source relay URL to the callback.
+     */
+    fun requestTemporarySubscriptionWithRelay(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event, String) -> Unit,
+    ): TemporarySubscriptionHandle {
+        if (relayUrls.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
+        val wrappedOnEvent: (Event) -> Unit = { event -> onEvent(event, "") }
+        val subscription = relayPool.subscribe(
+            relayUrls = relayUrls,
+            filters = filters,
             priority = priority,
         ) { event, relayUrl -> onEvent(event, relayUrl) }
         relayPool.connect()

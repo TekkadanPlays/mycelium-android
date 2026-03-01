@@ -78,52 +78,6 @@ fun DmSettingsScreen(
                 onCheckedChange = { dmNotifications = it }
             )
 
-            HorizontalDivider(
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
-            )
-
-            // ── Encryption Info ──
-            DmSettingsSectionHeader("Encryption")
-
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        "NIP-17 Gift-Wrapped DMs",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        "Your messages are encrypted using NIP-44 (XChaCha20-Poly1305) " +
-                        "and wrapped in gift-wrap events signed by throwaway keys. " +
-                        "This hides metadata including sender, recipient, and timing. " +
-                        "Only the intended recipient can decrypt the message.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Protocol: ",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                        )
-                        Text(
-                            "Kind 14 (chat) → Kind 13 (seal) → Kind 1059 (gift wrap)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                        )
-                    }
-                }
-            }
-
             Spacer(Modifier.height(16.dp))
         }
     }

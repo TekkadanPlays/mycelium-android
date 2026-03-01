@@ -92,7 +92,11 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
         val mediaUrls = UrlDetector.findUrls(event.content)
             .filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }
             .distinct()
-        val quotedEventIds = Nip19QuoteParser.extractQuotedEventIds(event.content)
+        val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(event.content)
+        val quotedEventIds = quotedRefs.map { it.eventId }
+        quotedRefs.forEach { ref ->
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+        }
         val tags = event.tags.map { it.toList() }
 
         // Extract title for long-form content (kind 30023) or topics (kind 11)

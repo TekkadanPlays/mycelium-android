@@ -186,9 +186,6 @@ fun RelayManagementScreen(
         (flaggedRelays + blockedRelays).distinct().size
     }
 
-    // Input state per tab
-    var relayUrlInput by remember { mutableStateOf("") }
-    var showInputByTab by remember { mutableStateOf<Map<Int, Boolean>>(emptyMap()) }
     var fabExpanded by remember { mutableStateOf(false) }
 
     // Outbox add-relay designation picker
@@ -267,10 +264,8 @@ fun RelayManagementScreen(
     } }
     val pagerScope = rememberCoroutineScope()
 
-    // Reset input when switching pages
+    // Reset FAB when switching pages
     LaunchedEffect(pagerState.currentPage) { 
-        showInputByTab = showInputByTab - pagerState.currentPage
-        relayUrlInput = ""; 
         fabExpanded = false 
     }
 
@@ -284,8 +279,6 @@ fun RelayManagementScreen(
             toastMessage = "$normalized already exists"; showToast = true
         } else {
             onAdd(createRelayWithNip11Info(normalized, nip11Cache = nip11Cache))
-            relayUrlInput = ""; 
-            showInputByTab = showInputByTab - pagerState.currentPage
         }
     }
 
@@ -353,29 +346,13 @@ fun RelayManagementScreen(
 
                     // Primary FAB
                     FloatingActionButton(
-                        onClick = {
-                            if (isProfileTab) {
-                                fabExpanded = !fabExpanded
-                            } else {
-                                val currentTabInput = showInputByTab[pagerState.currentPage] ?: false
-                                if (currentTabInput) {
-                                    fabExpanded = !fabExpanded
-                                } else {
-                                    showInputByTab = showInputByTab + (pagerState.currentPage to true)
-                                    fabExpanded = false
-                                }
-                            }
-                        },
+                        onClick = { fabExpanded = !fabExpanded },
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary
                     ) {
                         Icon(
-                            if (fabExpanded) Icons.Default.Close
-                            else if (showInputByTab[pagerState.currentPage] == true) Icons.Default.MoreVert
-                            else Icons.Default.Add,
-                            contentDescription = if (fabExpanded) "Close menu"
-                                else if (showInputByTab[pagerState.currentPage] == true) "More options"
-                                else "Add"
+                            if (fabExpanded) Icons.Default.Close else Icons.Default.MoreVert,
+                            contentDescription = if (fabExpanded) "Close menu" else "More options"
                         )
                     }
                 }
@@ -534,10 +511,7 @@ fun RelayManagementScreen(
                         )
                         RelayTab.INDEXER -> RelayListTab(
                             relays = indexerRelays, perRelayState = perRelayState,
-                            showInput = showInputByTab[page] == true,
-                            relayUrlInput = relayUrlInput,
-                            onRelayUrlChange = { relayUrlInput = it },
-                            onAddRelay = { addRelayTo(relayUrlInput, indexerRelays) { viewModel.addIndexerRelay(it) } },
+                            onAddRelay = { url -> addRelayTo(url, indexerRelays) { viewModel.addIndexerRelay(it) } },
                             onEditRelay = { url ->
                                 val relay = indexerRelays.find { it.url == url }
                                 if (relay != null) {
@@ -570,16 +544,13 @@ fun RelayManagementScreen(
                                 outboxOnlyRelays = outboxOnlyRelays,
                                 inboxOnlyRelays = inboxOnlyRelays,
                                 perRelayState = perRelayState,
-                                showInput = showInputByTab[page] == true,
-                                relayUrlInput = relayUrlInput,
-                                onRelayUrlChange = { relayUrlInput = it },
-                                onAddRelay = {
-                                    val normalized = normalizeRelayUrl(relayUrlInput)
-                                    if (relayUrlInput.isBlank()) return@OutboxSectionedTab
+                                onAddRelay = { url ->
+                                    val normalized = normalizeRelayUrl(url)
+                                    if (url.isBlank()) return@OutboxSectionedTab
                                     if (isDuplicateRelay(normalized, allMerged)) {
                                         toastMessage = "$normalized already exists"; showToast = true
                                     } else {
-                                        pendingRelayUrl = relayUrlInput
+                                        pendingRelayUrl = url
                                         showDesignationPicker = true
                                     }
                                 },
@@ -1170,7 +1141,6 @@ fun RelayManagementScreen(
                     ) {
                         val r = createRelayWithNip11Info(normalizeRelayUrl(pendingRelayUrl), read = true, write = true, nip11Cache = nip11Cache)
                         viewModel.addOutboxRelay(r); viewModel.addInboxRelay(r)
-                        relayUrlInput = ""; showInputByTab = showInputByTab - pagerState.currentPage
                         showDesignationPicker = false; pendingRelayUrl = ""
                     }
                     DesignationOption(
@@ -1180,7 +1150,6 @@ fun RelayManagementScreen(
                     ) {
                         val r = createRelayWithNip11Info(normalizeRelayUrl(pendingRelayUrl), read = false, write = true, nip11Cache = nip11Cache)
                         viewModel.addOutboxRelay(r)
-                        relayUrlInput = ""; showInputByTab = showInputByTab - pagerState.currentPage
                         showDesignationPicker = false; pendingRelayUrl = ""
                     }
                     DesignationOption(
@@ -1190,7 +1159,6 @@ fun RelayManagementScreen(
                     ) {
                         val r = createRelayWithNip11Info(normalizeRelayUrl(pendingRelayUrl), read = true, write = false, nip11Cache = nip11Cache)
                         viewModel.addInboxRelay(r)
-                        relayUrlInput = ""; showInputByTab = showInputByTab - pagerState.currentPage
                         showDesignationPicker = false; pendingRelayUrl = ""
                     }
                 }
@@ -1274,18 +1242,6 @@ private fun SystemTabContent(
             )
         }
         if (announcementsExpanded) {
-            item(key = "announcements_input") {
-                RelayUrlInput(
-                    value = announcementInput,
-                    onValueChange = { announcementInput = it },
-                    onAdd = {
-                        if (announcementInput.isNotBlank()) {
-                            onAddAnnouncementRelay(announcementInput)
-                            announcementInput = ""
-                        }
-                    }
-                )
-            }
             if (announcementRelays.isEmpty()) {
                 item(key = "announcements_empty") {
                     Text(
@@ -1303,9 +1259,19 @@ private fun SystemTabContent(
                         connectionStatus = perRelayState[relay.url],
                         onOpenRelayLog = onOpenRelayLog,
                         onRemove = { onRemoveAnnouncementRelay(relay.url) },
-                        showDivider = idx < announcementRelays.size - 1
+                        showDivider = true
                     )
                 }
+            }
+            item(key = "announcements_add") {
+                AddRelayRow(
+                    relayUrl = announcementInput,
+                    onRelayUrlChange = { announcementInput = it },
+                    onAdd = { url ->
+                        onAddAnnouncementRelay(url)
+                        announcementInput = ""
+                    }
+                )
             }
         }
 
@@ -1320,18 +1286,6 @@ private fun SystemTabContent(
             )
         }
         if (draftsExpanded) {
-            item(key = "drafts_input") {
-                RelayUrlInput(
-                    value = draftsInput,
-                    onValueChange = { draftsInput = it },
-                    onAdd = {
-                        if (draftsInput.isNotBlank()) {
-                            onAddDraftsRelay(draftsInput)
-                            draftsInput = ""
-                        }
-                    }
-                )
-            }
             if (draftsRelays.isEmpty()) {
                 item(key = "drafts_empty") {
                     Text(
@@ -1349,9 +1303,19 @@ private fun SystemTabContent(
                         connectionStatus = perRelayState[relay.url],
                         onOpenRelayLog = onOpenRelayLog,
                         onRemove = { onRemoveDraftsRelay(relay.url) },
-                        showDivider = idx < draftsRelays.size - 1
+                        showDivider = true
                     )
                 }
+            }
+            item(key = "drafts_add") {
+                AddRelayRow(
+                    relayUrl = draftsInput,
+                    onRelayUrlChange = { draftsInput = it },
+                    onAdd = { url ->
+                        onAddDraftsRelay(url)
+                        draftsInput = ""
+                    }
+                )
             }
         }
 
@@ -1366,18 +1330,6 @@ private fun SystemTabContent(
             )
         }
         if (otherExpanded) {
-            item(key = "other_input") {
-                RelayUrlInput(
-                    value = otherInput,
-                    onValueChange = { otherInput = it },
-                    onAdd = {
-                        if (otherInput.isNotBlank()) {
-                            onAddOtherRelay(otherInput)
-                            otherInput = ""
-                        }
-                    }
-                )
-            }
             if (otherSystemRelays.isEmpty()) {
                 item(key = "other_empty") {
                     Text(
@@ -1395,9 +1347,19 @@ private fun SystemTabContent(
                         connectionStatus = perRelayState[relay.url],
                         onOpenRelayLog = onOpenRelayLog,
                         onRemove = { onRemoveOtherRelay(relay.url) },
-                        showDivider = idx < otherSystemRelays.size - 1
+                        showDivider = true
                     )
                 }
+            }
+            item(key = "other_add") {
+                AddRelayRow(
+                    relayUrl = otherInput,
+                    onRelayUrlChange = { otherInput = it },
+                    onAdd = { url ->
+                        onAddOtherRelay(url)
+                        otherInput = ""
+                    }
+                )
             }
         }
     }
@@ -1495,10 +1457,7 @@ private fun SystemRelayItem(
 private fun RelayListTab(
     relays: List<UserRelay>,
     perRelayState: Map<String, RelayEndpointStatus>,
-    showInput: Boolean,
-    relayUrlInput: String,
-    onRelayUrlChange: (String) -> Unit,
-    onAddRelay: () -> Unit,
+    onAddRelay: (String) -> Unit,
     onEditRelay: (String) -> Unit,
     onOpenRelayLog: (String) -> Unit,
     nip65Source: String?,
@@ -1507,14 +1466,12 @@ private fun RelayListTab(
     showRwTags: Boolean = false,
     modifier: Modifier = Modifier
 ) {
-    LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+    var addRelayUrl by remember { mutableStateOf("") }
+    LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
         if (nip65Source != null && relays.isNotEmpty()) {
             item(key = "source_banner") { Nip65SourceBanner(nip65Source, nip65CreatedAt) }
         }
-        if (showInput) {
-            item(key = "input") { RelayUrlInput(value = relayUrlInput, onValueChange = onRelayUrlChange, onAdd = onAddRelay) }
-        }
-        if (relays.isEmpty() && !showInput) {
+        if (relays.isEmpty()) {
             item(key = "empty") {
                 Box(Modifier.fillMaxWidth().padding(vertical = 64.dp), contentAlignment = Alignment.Center) {
                     Text(emptyMessage, style = MaterialTheme.typography.bodyMedium,
@@ -1528,9 +1485,16 @@ private fun RelayListTab(
                 RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
                     onOpenRelayLog = onOpenRelayLog,
                     onEdit = { onEditRelay(relay.url) },
-                    showDivider = idx < relays.size - 1,
+                    showDivider = true,
                     showRwTag = showRwTags)
             }
+        }
+        item(key = "add_relay") {
+            AddRelayRow(
+                relayUrl = addRelayUrl,
+                onRelayUrlChange = { addRelayUrl = it },
+                onAdd = { url -> onAddRelay(url); addRelayUrl = "" }
+            )
         }
     }
 }
@@ -1883,30 +1847,6 @@ private fun FeedCategorySection(
     }
 }
 
-//  Relay URL Input (used by fixed tabs) 
-
-@Composable
-private fun RelayUrlInput(value: String, onValueChange: (String) -> Unit, onAdd: () -> Unit) {
-    val focusRequester = remember { FocusRequester() }
-    val keyboardController = LocalSoftwareKeyboardController.current
-    val focusManager = LocalFocusManager.current
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
-    OutlinedTextField(value = value, onValueChange = onValueChange,
-        placeholder = { Text("wss://relay.example.com") }, singleLine = true,
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-        keyboardActions = KeyboardActions(onDone = {
-            if (value.isNotBlank()) { onAdd(); keyboardController?.hide(); focusManager.clearFocus() }
-        }),
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-            .focusRequester(focusRequester),
-        leadingIcon = { Icon(Icons.Outlined.Router, null) },
-        trailingIcon = {
-            if (value.isNotBlank()) {
-                IconButton(onClick = onAdd) { Icon(Icons.Default.Add, "Add") }
-            }
-        })
-}
-
 //  NIP-65 Source Banner 
 
 @Composable
@@ -2011,10 +1951,7 @@ private fun OutboxSectionedTab(
     outboxOnlyRelays: List<UserRelay>,
     inboxOnlyRelays: List<UserRelay>,
     perRelayState: Map<String, RelayEndpointStatus>,
-    showInput: Boolean,
-    relayUrlInput: String,
-    onRelayUrlChange: (String) -> Unit,
-    onAddRelay: () -> Unit,
+    onAddRelay: (String) -> Unit,
     onEditRelay: (String) -> Unit,
     onOpenRelayLog: (String) -> Unit,
     nip65Source: String?,
@@ -2023,15 +1960,13 @@ private fun OutboxSectionedTab(
     modifier: Modifier = Modifier
 ) {
     val allEmpty = bothRelays.isEmpty() && outboxOnlyRelays.isEmpty() && inboxOnlyRelays.isEmpty()
+    var addRelayUrl by remember { mutableStateOf("") }
 
-    LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+    LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
         if (nip65Source != null && !allEmpty) {
             item(key = "source_banner") { Nip65SourceBanner(nip65Source, nip65CreatedAt) }
         }
-        if (showInput) {
-            item(key = "input") { RelayUrlInput(value = relayUrlInput, onValueChange = onRelayUrlChange, onAdd = onAddRelay) }
-        }
-        if (allEmpty && !showInput) {
+        if (allEmpty) {
             item(key = "empty") {
                 Box(Modifier.fillMaxWidth().padding(vertical = 64.dp), contentAlignment = Alignment.Center) {
                     Text(emptyMessage, style = MaterialTheme.typography.bodyMedium,
@@ -2095,10 +2030,17 @@ private fun OutboxSectionedTab(
                     RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
                         onOpenRelayLog = onOpenRelayLog,
                         onEdit = { onEditRelay(relay.url) },
-                        showDivider = idx < inboxOnlyRelays.size - 1,
+                        showDivider = true,
                         showRwTag = true)
                 }
             }
+        }
+        item(key = "add_relay") {
+            AddRelayRow(
+                relayUrl = addRelayUrl,
+                onRelayUrlChange = { addRelayUrl = it },
+                onAdd = { url -> onAddRelay(url); addRelayUrl = "" }
+            )
         }
     }
 }

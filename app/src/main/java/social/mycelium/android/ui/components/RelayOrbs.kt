@@ -78,15 +78,13 @@ fun RelayOrbs(
     if (relayUrls.isEmpty()) return
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
-    var showRelayListDialog by remember { mutableStateOf(false) }
 
     val visibleUrls = relayUrls.take(MAX_VISIBLE_ORBS)
     val extraCount = (relayUrls.size - MAX_VISIBLE_ORBS).coerceAtLeast(0)
 
     Row(
         modifier = modifier.clickable {
-            if (onNavigateToRelayList != null) onNavigateToRelayList(relayUrls)
-            else showRelayListDialog = true
+            onNavigateToRelayList?.invoke(relayUrls)
         },
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -118,13 +116,6 @@ fun RelayOrbs(
         }
     }
 
-    if (showRelayListDialog) {
-        RelayListPopup(
-            relayUrls = relayUrls,
-            onRelayClick = onRelayClick,
-            onDismiss = { showRelayListDialog = false }
-        )
-    }
 }
 
 /** Single relay orb icon — shows NIP-11 icon if cached, else Router fallback. */
@@ -175,115 +166,6 @@ private fun RelayOrbFallback() {
             modifier = Modifier.size(12.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
-    }
-}
-
-/**
- * Popup dialog listing all relays a note was found on. Each row shows the relay icon,
- * name (from NIP-11), and URL. Tapping a row calls [onRelayClick] and dismisses.
- */
-@Composable
-private fun RelayListPopup(
-    relayUrls: List<String>,
-    onRelayClick: (String) -> Unit,
-    onDismiss: () -> Unit
-) {
-    val context = LocalContext.current
-    val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "Seen on ${relayUrls.size} relay${if (relayUrls.size != 1) "s" else ""}",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    IconButton(onClick = onDismiss) {
-                        Icon(Icons.Default.Close, contentDescription = "Close")
-                    }
-                }
-                Spacer(modifier = Modifier.padding(4.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                ) {
-                    relayUrls.forEach { url ->
-                        RelayListRow(
-                            relayUrl = url,
-                            nip11 = nip11,
-                            context = context,
-                            onClick = {
-                                onRelayClick(url)
-                                onDismiss()
-                            }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun RelayListRow(
-    relayUrl: String,
-    nip11: Nip11CacheManager,
-    context: android.content.Context,
-    onClick: () -> Unit
-) {
-    var info by remember(relayUrl) { mutableStateOf(nip11.getCachedRelayInfo(relayUrl)) }
-    LaunchedEffect(relayUrl) {
-        if (info == null) {
-            withContext(Dispatchers.IO) { nip11.getRelayInfo(relayUrl) }?.let { info = it }
-        }
-    }
-    val displayName = info?.name?.takeIf { it.isNotBlank() }
-        ?: relayUrl.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            modifier = Modifier.size(28.dp).clip(CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            RelayOrbIcon(relayUrl = relayUrl, nip11 = nip11, context = context)
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = displayName,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1
-            )
-            Text(
-                text = relayUrl,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
-            )
-        }
     }
 }
 

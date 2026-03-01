@@ -5,6 +5,16 @@ import com.example.cybin.nip19.NEvent
 import com.example.cybin.nip19.NNote
 
 /**
+ * A quoted event reference with its ID and optional relay hints extracted from the nevent1 TLV.
+ */
+data class QuotedEventRef(
+    val eventId: String,
+    val relayHints: List<String>,
+    val author: String? = null,
+    val kind: Int? = null
+)
+
+/**
  * Extracts quoted event IDs from note content (nostr:nevent1... / nostr:note1... per NIP-19).
  */
 object Nip19QuoteParser {
@@ -16,9 +26,18 @@ object Nip19QuoteParser {
 
     /**
      * Find all nevent1/note1 URIs in content and return their event IDs (hex).
+     * Convenience wrapper — discards relay hints.
      */
-    fun extractQuotedEventIds(content: String): List<String> {
-        val ids = mutableSetOf<String>()
+    fun extractQuotedEventIds(content: String): List<String> =
+        extractQuotedEventRefs(content).map { it.eventId }
+
+    /**
+     * Find all nevent1/note1 URIs in content and return full [QuotedEventRef] with relay hints.
+     * nevent1 carries relay hints in TLV; note1 has none.
+     */
+    fun extractQuotedEventRefs(content: String): List<QuotedEventRef> {
+        val seen = mutableSetOf<String>()
+        val refs = mutableListOf<QuotedEventRef>()
         neventNotePattern.findAll(content).forEach { match ->
             val fullUri = if (match.value.startsWith("nostr:", ignoreCase = true)) {
                 match.value
@@ -27,14 +46,29 @@ object Nip19QuoteParser {
             }
             try {
                 val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@forEach
-                val hex = when (val entity = parsed.entity) {
-                    is NEvent -> entity.hex
-                    is NNote -> entity.hex
-                    else -> null
+                when (val entity = parsed.entity) {
+                    is NEvent -> {
+                        if (entity.hex.length == 64 && seen.add(entity.hex)) {
+                            refs.add(QuotedEventRef(
+                                eventId = entity.hex,
+                                relayHints = entity.relays,
+                                author = entity.author,
+                                kind = entity.kind
+                            ))
+                        }
+                    }
+                    is NNote -> {
+                        if (entity.hex.length == 64 && seen.add(entity.hex)) {
+                            refs.add(QuotedEventRef(
+                                eventId = entity.hex,
+                                relayHints = emptyList()
+                            ))
+                        }
+                    }
+                    else -> { }
                 }
-                hex?.let { if (it.length == 64) ids.add(it) }
             } catch (_: Exception) { }
         }
-        return ids.toList()
+        return refs
     }
 }

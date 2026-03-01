@@ -465,13 +465,39 @@ fun buildRelaySections(
     myOutboxRelays: List<UserRelay> = emptyList(),
     relayCategories: List<RelayCategory> = emptyList(),
     relayProfiles: List<RelayProfile> = emptyList(),
-    noteRelayUrls: List<String> = emptyList()
+    noteRelayUrls: List<String> = emptyList(),
+    taggedUserInboxes: List<Pair<Author, List<String>>> = emptyList()
 ): List<RelaySection> {
     val sections = mutableListOf<RelaySection>()
     val allUsedUrls = mutableSetOf<String>()
 
-    // Section 1: Target user's NIP-65 inbox relays (only for replies)
-    if (targetAuthor != null) {
+    // Per-user tagged inbox sections (Amethyst-style: each tagged person gets their own section)
+    if (taggedUserInboxes.isNotEmpty()) {
+        taggedUserInboxes.forEachIndexed { index, (author, inboxRelays) ->
+            val displayName = author.displayName.ifBlank { author.username }.ifBlank { author.id.take(8) + "\u2026" }
+            val inboxSubtitle = if (inboxRelays.isEmpty()) "Inbox not found via NIP-65" else "Where $displayName reads"
+            sections.add(
+                RelaySection(
+                    id = "tagged_inbox_$index",
+                    title = "$displayName\u2019s inbox",
+                    subtitle = inboxSubtitle,
+                    icon = Icons.Outlined.Inbox,
+                    author = author,
+                    relays = inboxRelays.filter { it !in allUsedUrls }.map { url ->
+                        RelayEntry(
+                            url = url,
+                            displayName = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                            description = "NIP-65 inbox"
+                        )
+                    },
+                    initiallyExpanded = true,
+                    initiallyAllSelected = true
+                )
+            )
+            allUsedUrls.addAll(inboxRelays)
+        }
+    } else if (targetAuthor != null) {
+        // Fallback: single target user section (legacy path)
         val displayName = targetAuthor.displayName.ifBlank { "this user" }
         val inboxSubtitle = if (targetInboxRelays.isEmpty()) "Inbox not found via NIP-65" else "Where $displayName reads"
         sections.add(
@@ -535,7 +561,7 @@ fun buildRelaySections(
                             description = "Note observed here"
                         )
                     },
-                    initiallyExpanded = false,
+                    initiallyExpanded = true,
                     initiallyAllSelected = false
                 )
             )
@@ -560,7 +586,7 @@ fun buildRelaySections(
                                 description = relay.description
                             )
                         },
-                        initiallyExpanded = false,
+                        initiallyExpanded = true,
                         initiallyAllSelected = false
                     )
                 )
@@ -587,7 +613,7 @@ fun buildRelaySections(
                                     description = relay.description
                                 )
                             },
-                            initiallyExpanded = false,
+                            initiallyExpanded = true,
                             initiallyAllSelected = false
                         )
                     )

@@ -69,8 +69,8 @@ fun RelayDiscoveryScreen(
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
     // ── Filter state ──
-    // In selection mode (choosing indexers), auto-filter to Search/Indexer relays
-    var selectedTypes by remember { mutableStateOf(if (selectionMode) setOf(RelayType.SEARCH) else emptySet<RelayType>()) }
+    // No forced type filter — users can pick ANY relay as indexer (not just NIP-66 search relays)
+    var selectedTypes by remember { mutableStateOf(emptySet<RelayType>()) }
     var selectedSoftware by remember { mutableStateOf(emptySet<String>()) }
     var selectedCountries by remember { mutableStateOf(emptySet<String>()) }
     var selectedNips by remember { mutableStateOf(emptySet<Int>()) }
@@ -181,12 +181,10 @@ fun RelayDiscoveryScreen(
 
     val activeFilterCount = remember(
         selectedTypes, selectedSoftware, selectedCountries, selectedNips,
-        filterPaymentRequired, filterAuthRequired, filterHasNip11, selectionMode
+        filterPaymentRequired, filterAuthRequired, filterHasNip11
     ) {
         var count = 0
-        // In selection mode, SEARCH is the baseline — don't count it as a user filter
-        val baseTypes = if (selectionMode) setOf(RelayType.SEARCH) else emptySet<RelayType>()
-        if (selectedTypes.isNotEmpty() && selectedTypes != baseTypes) count++
+        if (selectedTypes.isNotEmpty()) count++
         if (selectedSoftware.isNotEmpty()) count++
         if (selectedCountries.isNotEmpty()) count++
         if (selectedNips.isNotEmpty()) count++
@@ -232,8 +230,7 @@ fun RelayDiscoveryScreen(
                         if (activeFilterCount > 0) {
                             FilledTonalButton(
                                 onClick = {
-                                    // In selection mode, preserve the SEARCH base filter
-                                    selectedTypes = if (selectionMode) setOf(RelayType.SEARCH) else emptySet()
+                                    selectedTypes = emptySet()
                                     selectedSoftware = emptySet()
                                     selectedCountries = emptySet()
                                     selectedNips = emptySet()
@@ -280,6 +277,43 @@ fun RelayDiscoveryScreen(
                 .padding(paddingValues),
             contentPadding = PaddingValues(bottom = 100.dp)
         ) {
+            // ── Search bar (always visible in selection mode for quick relay finding) ──
+            if (selectionMode) {
+                item(key = "search_bar") {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        placeholder = {
+                            Text(
+                                "Search by name, URL, software...",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Outlined.Search, null,
+                                Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        trailingIcon = {
+                            if (searchQuery.isNotBlank()) {
+                                IconButton(onClick = { searchQuery = "" }) {
+                                    Icon(Icons.Filled.Clear, null, Modifier.size(20.dp))
+                                }
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.bodyMedium,
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+            }
+
             // ── Summary stats ──
             item(key = "summary") {
                 Row(
@@ -308,15 +342,12 @@ fun RelayDiscoveryScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // "All" chip — hidden in selection mode (SEARCH is the locked baseline)
-                    if (!selectionMode) {
-                        item {
-                            FilterChip(
-                                selected = selectedTypes.isEmpty(),
-                                onClick = { selectedTypes = emptySet() },
-                                label = { Text("All", style = MaterialTheme.typography.labelSmall) }
-                            )
-                        }
+                    item {
+                        FilterChip(
+                            selected = selectedTypes.isEmpty(),
+                            onClick = { selectedTypes = emptySet() },
+                            label = { Text("All", style = MaterialTheme.typography.labelSmall) }
+                        )
                     }
                     items(typeOptions) { type ->
                         val count = typeCounts[type] ?: 0
@@ -324,8 +355,6 @@ fun RelayDiscoveryScreen(
                         FilterChip(
                             selected = type in selectedTypes,
                             onClick = {
-                                // In selection mode, don't allow deselecting SEARCH (it's the baseline)
-                                if (selectionMode && type == RelayType.SEARCH && type in selectedTypes) return@FilterChip
                                 selectedTypes = if (type in selectedTypes) selectedTypes - type
                                 else selectedTypes + type
                             },

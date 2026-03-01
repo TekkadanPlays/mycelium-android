@@ -16,8 +16,8 @@ android {
         applicationId = "social.mycelium.android"
         minSdk = 35
         targetSdk = 36
-        versionCode = 18
-        versionName = "0.4.24-beta"
+        versionCode = 19
+        versionName = "0.4.8-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -55,6 +55,8 @@ android {
                     "proguard-rules.pro"
             )
 
+            buildConfigField("boolean", "WALLET_DEV_MODE", "false")
+
             // Use release signing config if available, otherwise debug
             signingConfig =
                     if (keystorePropertiesFile.exists()) {
@@ -67,6 +69,7 @@ android {
             isMinifyEnabled = false
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            buildConfigField("boolean", "WALLET_DEV_MODE", "true")
         }
     }
     compileOptions {
@@ -136,6 +139,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
+
+    // WorkManager for periodic background relay checks (Adaptive connection mode)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     // HTML parsing for URL previews
     implementation("org.jsoup:jsoup:1.17.2")

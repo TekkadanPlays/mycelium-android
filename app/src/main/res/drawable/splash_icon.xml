@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Wrapper that insets the mushroom icon so it appears at a natural size
+     inside the 240dp Android 12+ splash screen icon circle. -->
+<inset xmlns:android="http://schemas.android.com/apk/res/android"
+    android:drawable="@drawable/ic_mushroom_purple"
+    android:inset="30%" />

@@ -20,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -613,11 +614,7 @@ fun OnboardingScreen(
                                         selectedIndexerUrls = urls
                                         startNip65Search(urls.toList())
                                     },
-                                    onChooseOwn = { urls ->
-                                        selectedIndexerUrls = urls
-                                        onOpenRelayDiscoverySelection(urls.toList())
-                                    },
-                                    onAddMore = { urls ->
+                                    onBrowseAll = { urls ->
                                         selectedIndexerUrls = urls
                                         onOpenRelayDiscoverySelection(urls.toList())
                                     }
@@ -731,9 +728,10 @@ fun OnboardingScreen(
     }
 }
 
-// ── Indexer Selection Card — two-group layout ──
-// Group 1: "Fastest" — top 5 by RTT (always visible, toggleable)
-// Group 2: "Your picks" — user-selected relays not in the RTT group
+// ── Indexer Selection Card — streamlined layout ──
+// Group 1: "Recommended" — top 5 by trust score (toggleable)
+// Group 2: "Your picks" — user-selected relays not in the recommended group
+// Inline manual URL input for quick adds without navigating away
 // Fixed 7 visible rows total (5 RTT + 2 user picks). Scrollable if more user picks.
 
 @Composable
@@ -742,19 +740,31 @@ private fun IndexerSelectionCard(
     initialSelectedUrls: Set<String>,
     onSelectionChanged: (Set<String>) -> Unit,
     onConfirm: (Set<String>) -> Unit,
-    onChooseOwn: (Set<String>) -> Unit,
-    onAddMore: (Set<String>) -> Unit
+    onBrowseAll: (Set<String>) -> Unit
 ) {
     // Own selection state — isolated from parent to prevent AnimatedContent recomposition
     var selectedUrls by remember(initialSelectedUrls) { mutableStateOf(initialSelectedUrls) }
 
-    // Top 5 by trust score (always shown regardless of selection state)
+    // Manual URL input state
+    var manualUrl by remember { mutableStateOf("") }
+    var showManualInput by remember { mutableStateOf(false) }
+    var manualUrlError by remember { mutableStateOf<String?>(null) }
+    val focusRequester = remember { androidx.compose.ui.focus.FocusRequester() }
+
+    // Top 5 by trust score (shown when defaults haven't been cleared)
     val topGroup = remember(allIndexers) { allIndexers.take(5) }
     val topUrls = remember(topGroup) { topGroup.map { it.url }.toSet() }
 
-    // Your Picks: selected URLs that aren't in the top group
-    val userPickUrls = remember(selectedUrls, topUrls) {
-        selectedUrls.filter { it !in topUrls }
+    // Track if user explicitly cleared defaults via "I'll add my own"
+    var defaultsCleared by remember { mutableStateOf(false) }
+
+    // Visible recommended group: hide if user cleared defaults
+    val visibleTopGroup = if (defaultsCleared) emptyList() else topGroup
+
+    // Your Picks: selected URLs that aren't in the visible top group
+    val visibleTopUrls = remember(visibleTopGroup) { visibleTopGroup.map { it.url }.toSet() }
+    val userPickUrls = remember(selectedUrls, visibleTopUrls) {
+        selectedUrls.filter { it !in visibleTopUrls }
     }
     // Resolve user pick URLs to DiscoveredRelay objects (if available)
     val userPickRelays = remember(userPickUrls, allIndexers) {
@@ -767,6 +777,35 @@ private fun IndexerSelectionCard(
         val updated = if (url in selectedUrls) selectedUrls - url else selectedUrls + url
         selectedUrls = updated
         onSelectionChanged(updated)
+    }
+
+    // Add manual URL helper
+    fun addManualUrl() {
+        val raw = manualUrl.trim()
+        if (raw.isBlank()) return
+        // Normalize: add wss:// if missing, strip trailing slash
+        val normalized = when {
+            raw.startsWith("wss://") || raw.startsWith("ws://") -> raw
+            raw.startsWith("https://") -> raw.replaceFirst("https://", "wss://")
+            raw.startsWith("http://") -> raw.replaceFirst("http://", "ws://")
+            else -> "wss://$raw"
+        }.removeSuffix("/")
+
+        // Basic validation
+        if (!normalized.startsWith("wss://") && !normalized.startsWith("ws://")) {
+            manualUrlError = "Invalid relay URL"
+            return
+        }
+        if (normalized in selectedUrls) {
+            manualUrlError = "Already added"
+            return
+        }
+
+        val updated = selectedUrls + normalized
+        selectedUrls = updated
+        onSelectionChanged(updated)
+        manualUrl = ""
+        manualUrlError = null
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -785,34 +824,40 @@ private fun IndexerSelectionCard(
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f))
-                    Text("${allIndexers.size} available",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (!defaultsCleared) {
+                        Text("${allIndexers.size} available",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
 
                 Spacer(Modifier.height(10.dp))
 
-                // ── Group 1: Recommended (trust + geo affinity) ──
-                Text("recommended",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 10.sp)
-                Spacer(Modifier.height(4.dp))
+                // ── Group 1: Recommended (trust + geo affinity) — hidden when defaults cleared ──
+                if (visibleTopGroup.isNotEmpty()) {
+                    Text("recommended",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp)
+                    Spacer(Modifier.height(4.dp))
 
-                topGroup.forEach { relay ->
-                    key(relay.url) {
-                        IndexerRelayRow(
-                            relay = relay,
-                            isSelected = relay.url in selectedUrls,
-                            onClick = { toggle(relay.url) }
-                        )
+                    visibleTopGroup.forEach { relay ->
+                        key(relay.url) {
+                            IndexerRelayRow(
+                                relay = relay,
+                                isSelected = relay.url in selectedUrls,
+                                onClick = { toggle(relay.url) }
+                            )
+                        }
                     }
                 }
 
                 // ── Group 2: Your picks (scrollable) ──
                 if (userPickRelays.isNotEmpty()) {
-                    Spacer(Modifier.height(8.dp))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    if (visibleTopGroup.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    }
                     Spacer(Modifier.height(8.dp))
 
                     Text("your picks",
@@ -837,42 +882,72 @@ private fun IndexerSelectionCard(
                                     )
                                 } else {
                                     // URL not in NIP-66 data — show raw URL with lightweight indicator
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .clickable { toggle(url) }
-                                            .padding(vertical = 4.dp, horizontal = 2.dp)
-                                    ) {
-                                        Box(
-                                            contentAlignment = Alignment.Center,
-                                            modifier = Modifier.size(20.dp)
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(18.dp)
-                                                    .background(MaterialTheme.colorScheme.primary, CircleShape),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    Icons.Filled.Check,
-                                                    contentDescription = null,
-                                                    modifier = Modifier.size(12.dp),
-                                                    tint = MaterialTheme.colorScheme.onPrimary
-                                                )
-                                            }
-                                        }
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            text = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface,
-                                            maxLines = 1, overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
+                                    ManualRelayRow(
+                                        url = url,
+                                        isSelected = true,
+                                        onClick = { toggle(url) }
+                                    )
                                 }
                             }
                         }
+                    }
+                }
+
+                // ── Inline manual URL input ──
+                if (showManualInput) {
+                    if (visibleTopGroup.isNotEmpty() || userPickRelays.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    Text("add relay",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontSize = 10.sp)
+                    Spacer(Modifier.height(4.dp))
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = manualUrl,
+                            onValueChange = {
+                                manualUrl = it
+                                manualUrlError = null
+                            },
+                            placeholder = {
+                                Text("wss://relay.example.com",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                            },
+                            isError = manualUrlError != null,
+                            supportingText = manualUrlError?.let { err -> { Text(err, fontSize = 10.sp) } },
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(focusRequester),
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodySmall,
+                            shape = RoundedCornerShape(8.dp),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { addManualUrl() })
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        FilledTonalButton(
+                            onClick = { addManualUrl() },
+                            enabled = manualUrl.isNotBlank(),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                            modifier = Modifier.height(40.dp)
+                        ) {
+                            Icon(Icons.Outlined.Add, null, Modifier.size(16.dp))
+                        }
+                    }
+
+                    // Auto-focus the text field when it appears
+                    LaunchedEffect(Unit) {
+                        delay(200)
+                        try { focusRequester.requestFocus() } catch (_: Exception) {}
                     }
                 }
             }
@@ -893,26 +968,101 @@ private fun IndexerSelectionCard(
 
         Spacer(Modifier.height(8.dp))
 
-        OutlinedButton(
-            onClick = { onAddMore(selectedUrls) },
-            modifier = Modifier.fillMaxWidth()
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Add More Indexers")
+            OutlinedButton(
+                onClick = {
+                    showManualInput = !showManualInput
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Outlined.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Add Relay", style = MaterialTheme.typography.labelMedium)
+            }
+
+            OutlinedButton(
+                onClick = { onBrowseAll(selectedUrls) },
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(Icons.Outlined.Explore, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Browse All", style = MaterialTheme.typography.labelMedium)
+            }
         }
 
         Spacer(Modifier.height(4.dp))
 
         TextButton(
-            onClick = { onChooseOwn(selectedUrls) },
+            onClick = {
+                // Clear all default selections and show manual input
+                defaultsCleared = true
+                val cleared = selectedUrls - topUrls
+                selectedUrls = cleared
+                onSelectionChanged(cleared)
+                showManualInput = true
+            },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("I'll choose my own indexers",
+            Text("I'll add my own",
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
 
         Spacer(Modifier.height(16.dp))
+    }
+}
+
+@Composable
+private fun ManualRelayRow(
+    url: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp, horizontal = 2.dp)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.size(20.dp)
+        ) {
+            if (isSelected) {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .background(MaterialTheme.colorScheme.primary, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Filled.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(18.dp)
+                        .background(
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                            CircleShape
+                        )
+                )
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

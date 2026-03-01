@@ -12,6 +12,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.repository.ProfileMetadataCache
@@ -111,14 +114,18 @@ fun ComposeNoteScreen(
                 .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
-            OutlinedTextField(
+            social.mycelium.android.ui.components.ModernTextField(
                 value = content,
                 onValueChange = { content = it },
+                placeholder = "What's on your mind?",
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
                     .padding(vertical = 16.dp),
-                placeholder = { Text("What's on your mind?") },
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    keyboardType = KeyboardType.Text
+                ),
             )
             Button(
                 onClick = { showRelayPicker = true },

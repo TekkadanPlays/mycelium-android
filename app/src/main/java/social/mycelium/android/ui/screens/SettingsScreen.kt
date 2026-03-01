@@ -77,19 +77,17 @@ fun SettingsScreen(
             SettingsSectionHeader("Your Experience")
             SettingsItem(icon = Icons.Outlined.Palette, title = "Appearance", onClick = { onNavigateTo("appearance") })
             SettingsItem(icon = Icons.Outlined.PlayCircleOutline, title = "Media", onClick = { onNavigateTo("media") })
-            SettingsItem(icon = Icons.Outlined.ElectricBolt, title = "Zaps", onClick = { onNavigateTo("zap_settings") })
             SettingsItem(icon = Icons.Outlined.Notifications, title = "Notifications", onClick = { onNavigateTo("notifications") })
 
             // ── Account ──
             SettingsSectionHeader("Account")
             SettingsItem(icon = Icons.Outlined.Person, title = "Account Preferences", onClick = { onNavigateTo("account_preferences") })
-            SettingsItem(icon = Icons.Outlined.Public, title = "Relays", onClick = { onNavigateTo("relays") })
             SettingsItem(icon = Icons.Outlined.Lock, title = "Filters & Blocks", onClick = { onNavigateTo("filters_blocks") })
             SettingsItem(icon = Icons.Outlined.Email, title = "Direct Messages", onClick = { onNavigateTo("direct_messages") })
 
-            // ── App ──
-            SettingsSectionHeader("App")
-            SettingsItem(icon = Icons.Outlined.Settings, title = "General", onClick = { onNavigateTo("general") })
+            // ── Device ──
+            SettingsSectionHeader("Device")
+            SettingsItem(icon = Icons.Outlined.BatteryChargingFull, title = "Power", onClick = { onNavigateTo("power") })
             SettingsItem(icon = Icons.Outlined.Storage, title = "Data and Storage", onClick = { onNavigateTo("data_storage") })
 
             HorizontalDivider(
@@ -200,3 +198,4 @@ fun SettingsScreenPreview() {
         SettingsScreen(onBackClick = {})
     }
 }
+

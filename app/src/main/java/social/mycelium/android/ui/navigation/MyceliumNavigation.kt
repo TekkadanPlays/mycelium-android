@@ -3313,7 +3313,7 @@ fun MyceliumNavigation(
                         onDraftClick = { draft ->
                             when (draft.type) {
                                 social.mycelium.android.data.DraftType.NOTE -> {
-                                    navController.navigate("compose?initialContent=${android.net.Uri.encode(draft.content)}&draftId=${draft.id}") {
+                                    navController.navigate("compose?initialContent=${android.net.Uri.encode(android.net.Uri.encode(draft.content))}&draftId=${draft.id}") {
                                         launchSingleTop = true
                                     }
                                 }
@@ -3325,7 +3325,7 @@ fun MyceliumNavigation(
                                 }
                                 else -> {
                                     // For reply drafts, open the compose note screen with draft content
-                                    navController.navigate("compose?initialContent=${android.net.Uri.encode(draft.content)}&draftId=${draft.id}") {
+                                    navController.navigate("compose?initialContent=${android.net.Uri.encode(android.net.Uri.encode(draft.content))}&draftId=${draft.id}") {
                                         launchSingleTop = true
                                     }
                                 }

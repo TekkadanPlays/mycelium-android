@@ -632,11 +632,11 @@ private fun DashboardFeedContent(
                     },
                     onQuote = { n ->
                         val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
-                        val encoded = android.net.Uri.encode("\nnostr:$nevent\n")
+                        val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
                         onNavigateTo("compose?initialContent=$encoded")
                     },
                     onFork = { n ->
-                        val encoded = android.net.Uri.encode(n.content)
+                        val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
                         onNavigateTo("compose?initialContent=$encoded")
                     },
                     onProfileClick = onProfileClick,

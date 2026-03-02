@@ -242,11 +242,11 @@ fun OnboardingScreen(
         addedCustomRelays = emptyList()
 
         // NIP-66 is initialized globally in MainActivity — wait for data but exit
-        // as soon as usable indexers arrive. Max 4s hard cap; most REST fetches
-        // complete in <1s so the user barely sees the spinner.
+        // as soon as usable indexers arrive. Max 15s hard cap to cover WebSocket
+        // fallback (12s) when REST API is down; most REST fetches complete in <1s.
         withContext(Dispatchers.IO) {
             var waited = 0L
-            val maxWait = 4_000L
+            val maxWait = 15_000L
             Log.d("OnboardingScreen", "Waiting for NIP-66 data (hasFetched=${Nip66RelayDiscoveryRepository.hasFetched.value}, isLoading=${Nip66RelayDiscoveryRepository.isLoading.value})")
 
             while (waited < maxWait) {
@@ -755,8 +755,12 @@ private fun IndexerSelectionCard(
     val topGroup = remember(allIndexers) { allIndexers.take(5) }
     val topUrls = remember(topGroup) { topGroup.map { it.url }.toSet() }
 
-    // Track if user explicitly cleared defaults via "I'll add my own"
-    var defaultsCleared by remember { mutableStateOf(false) }
+    // Track if user explicitly cleared defaults via "I'll add my own".
+    // Initialize from persisted selection: if none of the top URLs are selected,
+    // the user previously cleared defaults — don't re-show them.
+    var defaultsCleared by remember(topUrls, initialSelectedUrls) {
+        mutableStateOf(initialSelectedUrls.isNotEmpty() && topUrls.isNotEmpty() && initialSelectedUrls.none { it in topUrls })
+    }
 
     // Visible recommended group: hide if user cleared defaults
     val visibleTopGroup = if (defaultsCleared) emptyList() else topGroup

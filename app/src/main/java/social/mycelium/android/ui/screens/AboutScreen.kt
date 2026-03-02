@@ -198,14 +198,11 @@ fun AboutScreen(
                 )
 
                 // NIP-05 if available
-                author.nip05?.let { nip05 ->
-                    Text(
-                        text = nip05,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
+                    social.mycelium.android.ui.components.Nip05Badge(
+                        nip05 = nip05,
+                        pubkeyHex = author.id,
+                        showFullIdentifier = true
                     )
                 }
 

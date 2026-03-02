@@ -186,9 +186,37 @@ private fun NoteCardContent(
         )
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
-            // Author from note (repository updates list when profiles load); no per-card profileUpdated collector
-            val displayAuthor = note.author
+            // Reactively resolve author from profile cache so display name/avatar
+            // update when kind-0 arrives (fixes NIP-19 placeholder bug in thread view).
             val profileCache = ProfileMetadataCache.getInstance()
+            val diskCacheReady by profileCache.diskCacheRestored.collectAsState()
+            val authorPubkey = remember(note.author.id) { normalizeAuthorIdForCache(note.author.id) }
+            var profileRevision by remember { mutableIntStateOf(0) }
+            LaunchedEffect(authorPubkey) {
+                profileCache.profileUpdated
+                    .filter { it == authorPubkey }
+                    .collect { profileRevision++ }
+            }
+            val displayAuthor = remember(note.author.id, profileRevision, diskCacheReady) {
+                profileCache.getAuthor(authorPubkey) ?: note.author
+            }
+            // Trigger profile fetch if author is unknown — use note source relay as hint
+            // (like Amethyst's UserFinderFilterAssemblerSubscription pattern)
+            LaunchedEffect(authorPubkey, diskCacheReady) {
+                if (profileCache.getAuthor(authorPubkey) == null) {
+                    val cacheRelays = profileCache.getConfiguredRelayUrls()
+                    val hintRelays = buildList {
+                        // Note's source relay — most likely to have the author's kind-0
+                        note.relayUrl?.let { add(it) }
+                        note.relayUrls.forEach { add(it) }
+                        // Author's cached NIP-65 outbox relays (if we have them)
+                        addAll(profileCache.getOutboxRelays(authorPubkey))
+                    }.distinct()
+                    if (cacheRelays.isNotEmpty() || hintRelays.isNotEmpty()) {
+                        profileCache.requestProfileWithHints(listOf(authorPubkey), cacheRelays, hintRelays)
+                    }
+                }
+            }
             // Author info
             Row(
                 modifier = Modifier
@@ -305,7 +333,7 @@ private fun NoteCardContent(
                         .collect { mentionProfileVersion++ }
                 }
             }
-            val contentBlocks = remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion) {
+            val contentBlocks = remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion, diskCacheReady) {
                 buildNoteContentWithInlinePreviews(
                     note.content,
                     note.mediaUrls.toSet(),
@@ -408,7 +436,7 @@ private fun NoteCardContent(
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 quotedMetas.values.forEach { meta ->
                                     val quotedAuthor = remember(meta.authorId) { profileCache.resolveAuthor(meta.authorId) }
-                                    val quotedExpanded = QuotedNoteExpandedState.isExpanded(meta.eventId)
+                                    val quotedExpanded = QuotedNoteExpandedState.isExpanded(note.id, meta.eventId)
                                     val hasMore = meta.fullContent.length > meta.contentSnippet.length
 
                                     // Rich content blocks
@@ -546,18 +574,28 @@ private fun NoteCardContent(
                                                         if (qMediaList.isNotEmpty()) {
                                                             Spacer(modifier = Modifier.height(4.dp))
                                                             qMediaList.forEach { url ->
+                                                                // Reactive aspect ratio: cached dimensions or 16:9 default,
+                                                                // updates when video reports real dimensions.
+                                                                var mediaRatio by remember(url) {
+                                                                    mutableFloatStateOf(
+                                                                        social.mycelium.android.utils.MediaAspectRatioCache.get(url)
+                                                                            ?: (16f / 9f)
+                                                                    )
+                                                                }
                                                                 if (social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
                                                                     Box(
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
-                                                                            .heightIn(max = 180.dp)
+                                                                            .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
                                                                             .clip(RoundedCornerShape(6.dp))
+                                                                            .background(Color.Black)
                                                                     ) {
                                                                         InlineVideoPlayer(
                                                                             url = url,
-                                                                            modifier = Modifier.fillMaxWidth(),
+                                                                            modifier = Modifier.fillMaxSize(),
                                                                             isVisible = true, // Thread view: card always visible
-                                                                            onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) }
+                                                                            onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
+                                                                            onAspectRatioKnown = { ratio -> mediaRatio = ratio }
                                                                         )
                                                                     }
                                                                 } else {
@@ -567,7 +605,7 @@ private fun NoteCardContent(
                                                                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
-                                                                            .heightIn(min = 80.dp, max = 240.dp)
+                                                                            .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
                                                                             .clip(RoundedCornerShape(6.dp))
                                                                             .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
                                                                     )
@@ -606,7 +644,7 @@ private fun NoteCardContent(
                                                 Row(
                                                     modifier = Modifier
                                                         .fillMaxWidth()
-                                                        .clickable { QuotedNoteExpandedState.toggle(meta.eventId) }
+                                                        .clickable { QuotedNoteExpandedState.toggle(note.id, meta.eventId) }
                                                         .padding(top = 4.dp, bottom = 4.dp),
                                                     horizontalArrangement = Arrangement.End
                                                 ) {
@@ -636,18 +674,17 @@ private fun NoteCardContent(
                     pageCount = { mediaList.size },
                     initialPage = 0
                 )
-                // Stable container ratio: LOCKED after first composition to prevent layout shift.
-                // Uses cached aspect ratios if available; otherwise commits to 16:9 default.
-                // The real ratio is still written to MediaAspectRatioCache on load so NEXT
-                // time this card appears it uses the correct size from the start.
-                val mediaContainerRatio = remember(mediaList, note.mediaMeta) {
+                // Reactive container ratio: starts from imeta/cached dimensions or 16:9 default,
+                // then updates when the image loads real dimensions so the container always
+                // matches the actual media — no permanent scaling down with ContentScale.Fit.
+                var mediaContainerRatio by remember(mediaList, note.mediaMeta) {
                     val ratios = mediaList.map { url ->
                         note.mediaMeta[url]?.aspectRatio()
                             ?: social.mycelium.android.utils.MediaAspectRatioCache.get(url)
                             ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
                     }
                     val known = ratios.filterNotNull()
-                    if (known.isNotEmpty()) known.min() else (16f / 9f)
+                    mutableFloatStateOf(if (known.isNotEmpty()) known.min() else (16f / 9f))
                 }
                 val modernCompactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
                 val mediaContainerModifier = Modifier.fillMaxWidth()
@@ -685,7 +722,8 @@ private fun NoteCardContent(
                                     url = url,
                                     modifier = Modifier.fillMaxSize(),
                                     isVisible = isCurrentPage,
-                                    onFullscreenClick = { onVideoClick(mediaList, page) }
+                                    onFullscreenClick = { onVideoClick(mediaList, page) },
+                                    onAspectRatioKnown = { ratio -> mediaContainerRatio = ratio }
                                 )
                             } else {
                                 val meta = note.mediaMeta[url]
@@ -734,7 +772,16 @@ private fun NoteCardContent(
                                             SideEffect {
                                                 val drawable = (painter.state as? coil.compose.AsyncImagePainter.State.Success)?.result?.drawable
                                                 if (drawable != null) {
-                                                    social.mycelium.android.utils.MediaAspectRatioCache.add(url, drawable.intrinsicWidth, drawable.intrinsicHeight)
+                                                    val w = drawable.intrinsicWidth
+                                                    val h = drawable.intrinsicHeight
+                                                    if (w > 0 && h > 0) {
+                                                        social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
+                                                        // Update container to match real dimensions
+                                                        val realRatio = w.toFloat() / h.toFloat()
+                                                        if (realRatio in 0.3f..3.0f) {
+                                                            mediaContainerRatio = realRatio
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

@@ -13,12 +13,21 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import social.mycelium.android.data.Author
+import social.mycelium.android.data.IMetaData
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
+import social.mycelium.android.utils.MediaAspectRatioCache
 import social.mycelium.android.utils.Nip10ReplyDetector
+import social.mycelium.android.utils.Nip19QuoteParser
 import social.mycelium.android.utils.UrlDetector
+import social.mycelium.android.utils.extractPubkeysFromContent
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -104,7 +113,7 @@ class ProfileFeedRepository(
     // ── Internal state ──────────────────────────────────────────────────
     private var subscription: TemporarySubscriptionHandle? = null
     private var loadMoreSubscription: TemporarySubscriptionHandle? = null
-    private val pendingEvents = java.util.concurrent.ConcurrentLinkedQueue<Event>()
+    private val pendingEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
     private var flushJob: Job? = null
     private val seenIds = HashSet<String>()
     private val profileCache = ProfileMetadataCache.getInstance()
@@ -113,6 +122,12 @@ class ProfileFeedRepository(
     @Volatile private var paginationCursorMs: Long = 0L
     /** Tracks consecutive pages that added zero items to a specific tab. */
     private val tabEmptyPageCount = intArrayOf(0, 0, 0)
+
+    /** Batched kind-0 profile requests for mentioned pubkeys. */
+    private val pendingProfilePubkeys = Collections.synchronizedSet(LinkedHashSet<String>())
+    private var profileBatchJob: Job? = null
+    private val PROFILE_BATCH_DELAY_MS = 150L
+    private val PROFILE_BATCH_SIZE = 60
 
     /**
      * Start the initial subscription for the author's recent notes.
@@ -132,21 +147,21 @@ class ProfileFeedRepository(
         tabEmptyPageCount.fill(0)
 
         val filter = Filter(
-            kinds = listOf(1),
+            kinds = listOf(1, 6),
             authors = listOf(authorPubkey),
             limit = INITIAL_LOAD_SIZE
         )
 
         Log.d(TAG, "Starting profile feed for ${authorPubkey.take(8)}… on ${relayUrls.size} relays")
         val lastEventAt = AtomicLong(0L)
-        subscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscription(
+        subscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscriptionWithRelay(
             relayUrls = relayUrls,
             filter = filter,
             priority = SubscriptionPriority.HIGH,
-        ) { event ->
-            if (event.kind == 1 && event.pubKey == authorPubkey) {
+        ) { event, sourceRelayUrl ->
+            if ((event.kind == 1 || event.kind == 6) && event.pubKey == authorPubkey) {
                 lastEventAt.set(System.currentTimeMillis())
-                pendingEvents.add(event)
+                pendingEvents.add(event to sourceRelayUrl)
                 scheduleFlush()
             }
         }
@@ -240,7 +255,7 @@ class ProfileFeedRepository(
         val untilSeconds = cursorMs / 1000
 
         val filter = Filter(
-            kinds = listOf(1),
+            kinds = listOf(1, 6),
             authors = listOf(authorPubkey),
             limit = PAGE_SIZE,
             until = untilSeconds
@@ -249,14 +264,14 @@ class ProfileFeedRepository(
         Log.d(TAG, "Loading page: until=$untilSeconds (cursor=$cursorMs)")
         loadMoreSubscription?.cancel()
         val lastEventAt = AtomicLong(0L)
-        loadMoreSubscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscription(
+        loadMoreSubscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscriptionWithRelay(
             relayUrls = relayUrls,
             filter = filter,
             priority = SubscriptionPriority.HIGH,
-        ) { event ->
-            if (event.kind == 1 && event.pubKey == authorPubkey) {
+        ) { event, sourceRelayUrl ->
+            if ((event.kind == 1 || event.kind == 6) && event.pubKey == authorPubkey) {
                 lastEventAt.set(System.currentTimeMillis())
-                pendingEvents.add(event)
+                pendingEvents.add(event to sourceRelayUrl)
                 scheduleFlush()
             }
         }
@@ -322,33 +337,82 @@ class ProfileFeedRepository(
     }
 
     private fun flushEvents() {
-        val batch = mutableListOf<Event>()
+        val batch = mutableListOf<Pair<Event, String>>()
         while (true) {
-            val event = pendingEvents.poll() ?: break
-            batch.add(event)
+            val pair = pendingEvents.poll() ?: break
+            batch.add(pair)
         }
         if (batch.isEmpty()) return
 
         val newNotes = mutableListOf<Note>()
-        for (event in batch) {
+        for ((event, sourceRelayUrl) in batch) {
             if (event.id in seenIds) continue
             seenIds.add(event.id)
 
-            val note = convertEventToNote(event)
+            if (event.kind == 6) {
+                val repostNote = handleKind6Repost(event, sourceRelayUrl)
+                if (repostNote != null) {
+                    // Merge with existing repost of same original note
+                    val existingIdx = newNotes.indexOfFirst { it.id == repostNote.id }
+                    if (existingIdx >= 0) {
+                        val existing = newNotes[existingIdx]
+                        val mergedAuthors = (repostNote.repostedByAuthors + existing.repostedByAuthors).distinctBy { it.id }
+                        newNotes[existingIdx] = existing.copy(
+                            repostedByAuthors = mergedAuthors,
+                            repostTimestamp = maxOf(repostNote.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
+                        )
+                    } else {
+                        newNotes.add(repostNote)
+                    }
+                }
+                continue
+            }
+
+            val note = convertEventToNote(event, sourceRelayUrl)
             newNotes.add(note)
         }
 
         if (newNotes.isEmpty()) return
 
-        val merged = (_notes.value + newNotes)
+        // Merge with existing, dedup reposts with originals
+        val currentNotes = _notes.value.toMutableList()
+        for (note in newNotes) {
+            val existingIdx = currentNotes.indexOfFirst { it.id == note.id }
+            if (existingIdx >= 0) {
+                // Merge repost authors if both are reposts of the same note
+                val existing = currentNotes[existingIdx]
+                if (note.repostedByAuthors.isNotEmpty() || existing.repostedByAuthors.isNotEmpty()) {
+                    val mergedAuthors = (note.repostedByAuthors + existing.repostedByAuthors).distinctBy { it.id }
+                    currentNotes[existingIdx] = existing.copy(
+                        repostedByAuthors = mergedAuthors,
+                        repostTimestamp = maxOf(note.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
+                    )
+                }
+            } else {
+                // If a repost arrives and the original kind-1 is already in feed, replace it
+                val origId = note.originalNoteId
+                if (origId != null) {
+                    val origIdx = currentNotes.indexOfFirst { it.id == origId }
+                    if (origIdx >= 0) currentNotes.removeAt(origIdx)
+                }
+                currentNotes.add(note)
+            }
+        }
+
+        val merged = currentNotes
             .distinctBy { it.id }
-            .sortedByDescending { it.timestamp }
+            .sortedByDescending { it.repostTimestamp ?: it.timestamp }
 
         _notes.value = merged
         advancePaginationCursor(merged)
 
         // Detect temporal gap
         _timeGapIndex.value = social.mycelium.android.ui.screens.detectTimeGapIndex(merged)
+
+        // Schedule profile batch fetch for any uncached mentioned pubkeys
+        if (pendingProfilePubkeys.isNotEmpty()) {
+            scheduleBatchProfileRequest()
+        }
     }
 
     /** 5th-percentile cursor advancement — mirrors NotesRepository pattern. */
@@ -366,42 +430,212 @@ class ProfileFeedRepository(
         }
     }
 
-    private fun convertEventToNote(event: Event): Note {
-        val author = profileCache.resolveAuthor(event.pubKey)
-        val content = event.content
-        val urls = UrlDetector.findUrls(content)
-        val imageUrls = urls.filter { UrlDetector.isImageUrl(it) }
-        val videoUrls = urls.filter { UrlDetector.isVideoUrl(it) }
-        val hashtags = event.tags
-            .filter { it.isNotEmpty() && it[0] == "t" }
-            .mapNotNull { it.getOrNull(1) }
-        val isReply = Nip10ReplyDetector.isReply(event)
-        val rootNoteId = Nip10ReplyDetector.getRootId(event)
-        val replyToId = Nip10ReplyDetector.getReplyToId(event)
-        val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(content)
+    /**
+     * Schedule a debounced batch kind-0 profile fetch for mentioned/tagged pubkeys.
+     * Uses ProfileMetadataCache's internal batching mechanism.
+     */
+    private fun scheduleBatchProfileRequest() {
+        profileBatchJob?.cancel()
+        profileBatchJob = scope.launch {
+            delay(PROFILE_BATCH_DELAY_MS)
+            while (pendingProfilePubkeys.isNotEmpty()) {
+                val batch = synchronized(pendingProfilePubkeys) {
+                    pendingProfilePubkeys.take(PROFILE_BATCH_SIZE).also { pendingProfilePubkeys.removeAll(it.toSet()) }
+                }
+                if (batch.isEmpty()) break
+                if (relayUrls.isEmpty()) {
+                    pendingProfilePubkeys.addAll(batch)
+                    break
+                }
+                try {
+                    profileCache.requestProfiles(batch, relayUrls)
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Batch profile request failed: ${e.message}")
+                }
+                if (pendingProfilePubkeys.isNotEmpty()) delay(200)
+            }
+            profileBatchJob = null
+        }
+    }
+
+    /** Queue a pubkey for batch profile fetching if not already cached. */
+    private fun queueProfileIfMissing(pubkey: String) {
+        val hex = pubkey.lowercase()
+        if (profileCache.getAuthor(hex) == null) {
+            pendingProfilePubkeys.add(hex)
+        }
+    }
+
+    /**
+     * Convert kind-1 event to Note — full parity with NotesRepository.convertEventToNote.
+     * Extracts mentioned pubkeys, parses NIP-92 imeta, sets kind, etc.
+     */
+    private fun convertEventToNote(event: Event, sourceRelayUrl: String = ""): Note {
+        val pubkeyHex = event.pubKey
+        val author = profileCache.resolveAuthor(pubkeyHex)
+        queueProfileIfMissing(pubkeyHex)
+        // Request kind-0 for pubkeys mentioned in content (npub, nprofile, hex)
+        extractPubkeysFromContent(event.content).forEach { hex -> queueProfileIfMissing(hex) }
+
+        val hashtags = event.tags.toList()
+            .filter { tag -> tag.size >= 2 && tag[0] == "t" }
+            .mapNotNull { tag -> tag.getOrNull(1) }
+        val mediaUrls = UrlDetector.findUrls(event.content)
+            .filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }
+            .distinct()
+        // NIP-92: parse imeta tags for dimensions, blurhash, mimeType
+        val mediaMeta = IMetaData.parseAll(event.tags)
+        for ((url, meta) in mediaMeta) {
+            if (meta.width != null && meta.height != null && meta.height > 0) {
+                MediaAspectRatioCache.add(url, meta.width, meta.height)
+            }
+        }
+        val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(event.content)
         val quotedEventIds = quotedRefs.map { it.eventId }
         quotedRefs.forEach { ref ->
-            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+            if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
         }
+        val isReply = Nip10ReplyDetector.isReply(event)
+        val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(event) else null
+        val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(event) else null
+        val tags = event.tags.map { it.toList() }
+        val storedRelayUrl = sourceRelayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
 
         return Note(
             id = event.id,
             author = author,
-            content = content,
-            timestamp = event.createdAt * 1000,
+            content = event.content,
+            timestamp = event.createdAt * 1000L,
             likes = 0,
             shares = 0,
             comments = 0,
             isLiked = false,
             hashtags = hashtags,
-            mediaUrls = imageUrls + videoUrls,
+            mediaUrls = mediaUrls,
+            mediaMeta = mediaMeta,
+            quotedEventIds = quotedEventIds,
+            relayUrl = storedRelayUrl,
+            relayUrls = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList(),
             isReply = isReply,
             rootNoteId = rootNoteId,
             replyToId = replyToId,
-            tags = event.tags.toList().map { it.toList() },
-            relayUrl = null,
-            relayUrls = emptyList(),
-            quotedEventIds = quotedEventIds,
+            kind = event.kind,
+            tags = tags,
         )
+    }
+
+    /**
+     * Handle kind-6 repost: parse original note from event.content JSON.
+     * Returns a Note with repostedByAuthors populated, or null if parsing fails.
+     * For tag-only reposts (empty content), returns null — they require a relay fetch
+     * that would add complexity; the original kind-1 should already be in the feed.
+     */
+    private fun handleKind6Repost(event: Event, sourceRelayUrl: String = ""): Note? {
+        try {
+            val reposterPubkey = event.pubKey
+            val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
+            queueProfileIfMissing(reposterPubkey)
+            val repostTimestampMs = event.createdAt * 1000L
+            val content = event.content
+            val storedRelayUrl = sourceRelayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+
+            if (content.isBlank()) {
+                // Tag-only repost — skip for now; original kind-1 should appear separately
+                return null
+            }
+
+            // Content-embedded repost: parse the original note JSON
+            val jsonObj = try {
+                Json.parseToJsonElement(content) as? JsonObject
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to parse kind-6 repost JSON: ${e.message}")
+                null
+            } ?: return null
+
+            val originalNoteId = (jsonObj["id"] as? JsonPrimitive)?.content ?: return null
+            val notePubkey = (jsonObj["pubkey"] as? JsonPrimitive)?.content ?: return null
+            val noteCreatedAt = (jsonObj["created_at"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+            val noteContent = (jsonObj["content"] as? JsonPrimitive)?.content ?: ""
+
+            val noteAuthor = profileCache.resolveAuthor(notePubkey)
+            queueProfileIfMissing(notePubkey)
+            // Also queue mentioned pubkeys from the reposted content
+            extractPubkeysFromContent(noteContent).forEach { hex -> queueProfileIfMissing(hex) }
+
+            val hashtags = (jsonObj["tags"] as? JsonArray)
+                ?.mapNotNull { tag ->
+                    val arr = tag as? JsonArray ?: return@mapNotNull null
+                    if (arr.size >= 2 && (arr[0] as? JsonPrimitive)?.content == "t") {
+                        (arr[1] as? JsonPrimitive)?.content
+                    } else null
+                } ?: emptyList()
+
+            val mediaUrls = UrlDetector.findUrls(noteContent)
+                .filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }
+                .distinct()
+            // NIP-92: parse imeta from reposted note's JSON tags
+            val repostImetaTags = (jsonObj["tags"] as? JsonArray)
+                ?.mapNotNull { tag ->
+                    val arr = tag as? JsonArray ?: return@mapNotNull null
+                    if (arr.size >= 2 && (arr[0] as? JsonPrimitive)?.content == "imeta") {
+                        arr.map { (it as? JsonPrimitive)?.content ?: "" }.toTypedArray()
+                    } else null
+                } ?: emptyList()
+            val repostMediaMeta = if (repostImetaTags.isNotEmpty()) {
+                IMetaData.parseAll(repostImetaTags.toTypedArray())
+            } else emptyMap()
+            for ((mUrl, mMeta) in repostMediaMeta) {
+                if (mMeta.width != null && mMeta.height != null && mMeta.height > 0) {
+                    MediaAspectRatioCache.add(mUrl, mMeta.width, mMeta.height)
+                }
+            }
+
+            val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(noteContent)
+            val quotedEventIds = quotedRefs.map { it.eventId }
+            quotedRefs.forEach { ref ->
+                if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+            }
+
+            // Parse NIP-10 e-tags from JSON to detect if the reposted note is a reply
+            val jsonTags = jsonObj["tags"] as? JsonArray
+            val eTags = jsonTags?.mapNotNull { tag ->
+                val arr = tag as? JsonArray ?: return@mapNotNull null
+                if (arr.size >= 2 && (arr[0] as? JsonPrimitive)?.content == "e") {
+                    arr.map { (it as? JsonPrimitive)?.content ?: "" }.toTypedArray()
+                } else null
+            } ?: emptyList()
+            val repostRootId = eTags.firstOrNull { it.size >= 4 && (it.getOrNull(3) == "root" || it.getOrNull(4) == "root") }?.getOrNull(1)
+                ?: eTags.firstOrNull()?.getOrNull(1)
+            val repostReplyToId = eTags.lastOrNull { it.size >= 4 && (it.getOrNull(3) == "reply" || it.getOrNull(4) == "reply") }?.getOrNull(1)
+                ?: if (eTags.size >= 2) eTags.last().getOrNull(1) else eTags.firstOrNull()?.getOrNull(1)
+            val repostIsReply = eTags.isNotEmpty() && eTags.any { tag ->
+                when {
+                    tag.size <= 3 -> true
+                    tag.size >= 4 -> tag.getOrNull(3) == "reply" || tag.getOrNull(3) == "root" || tag.getOrNull(4) == "reply" || tag.getOrNull(4) == "root"
+                    else -> false
+                }
+            }
+
+            return Note(
+                id = "repost:$originalNoteId",
+                author = noteAuthor,
+                content = noteContent,
+                timestamp = noteCreatedAt * 1000L,
+                likes = 0, shares = 0, comments = 0, isLiked = false,
+                hashtags = hashtags, mediaUrls = mediaUrls, mediaMeta = repostMediaMeta,
+                quotedEventIds = quotedEventIds,
+                relayUrl = storedRelayUrl,
+                relayUrls = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList(),
+                isReply = repostIsReply,
+                rootNoteId = if (repostIsReply) repostRootId else null,
+                replyToId = if (repostIsReply) repostReplyToId else null,
+                originalNoteId = originalNoteId,
+                repostedByAuthors = listOf(reposterAuthor),
+                repostTimestamp = repostTimestampMs,
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "Error handling kind-6 repost: ${e.message}", e)
+            return null
+        }
     }
 }

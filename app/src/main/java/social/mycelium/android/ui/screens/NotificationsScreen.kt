@@ -187,7 +187,8 @@ fun NotificationsScreen(
             NotifTab("Mentions", { Icon(Icons.Outlined.AlternateEmail, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.MENTION },
             NotifTab("Quotes", { Icon(Icons.Default.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.QUOTE },
             NotifTab("Highlights", { Icon(Icons.Outlined.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.HIGHLIGHT },
-            NotifTab("Reports", { Icon(Icons.Outlined.Flag, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPORT }
+            NotifTab("Reports", { Icon(Icons.Outlined.Flag, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPORT },
+            NotifTab("Badges", { Icon(Icons.Default.MilitaryTech, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.BADGE_AWARD }
         )
     }
 
@@ -542,12 +543,14 @@ private fun CompactNotificationRow(
         NotificationType.LIKE -> Icons.Default.Favorite
         NotificationType.REPOST -> Icons.Default.Repeat
         NotificationType.ZAP -> Icons.Default.Bolt
+        NotificationType.BADGE_AWARD -> Icons.Default.MilitaryTech
         else -> Icons.Default.Notifications
     }
     val typeColor = when (notification.type) {
         NotificationType.LIKE -> Color(0xFFE91E63)
         NotificationType.REPOST -> Color(0xFF4CAF50)
         NotificationType.ZAP -> Color(0xFFF59E0B)
+        NotificationType.BADGE_AWARD -> Color(0xFF9C27B0)
         else -> MaterialTheme.colorScheme.primary
     }
 
@@ -558,7 +561,7 @@ private fun CompactNotificationRow(
         }
     }
     // Build display text at render time with live profile names
-    val displayText = remember(actorPubkeys, notification.type, notification.reactionEmoji, notification.zapAmountSats, profileRevision) {
+    val displayText = remember(actorPubkeys, notification.type, notification.reactionEmoji, notification.zapAmountSats, notification.badgeName, profileRevision) {
         val action = when (notification.type) {
             NotificationType.LIKE -> {
                 val emoji = notification.reactionEmoji
@@ -575,6 +578,10 @@ private fun CompactNotificationRow(
                     }
                     "zapped $label"
                 } else "zapped your post"
+            }
+            NotificationType.BADGE_AWARD -> {
+                val badgeName = notification.badgeName
+                if (badgeName != null) "awarded you the \"$badgeName\" badge" else "awarded you a badge"
             }
             else -> "interacted"
         }
@@ -679,6 +686,19 @@ private fun CompactNotificationRow(
             }
 
             Spacer(Modifier.width(8.dp))
+
+            // Badge thumbnail
+            if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
+                coil.compose.AsyncImage(
+                    model = notification.badgeImageUrl,
+                    contentDescription = notification.badgeName ?: "Badge",
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(4.dp)),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                )
+                Spacer(Modifier.width(6.dp))
+            }
 
             // Zap amount badge
             if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {

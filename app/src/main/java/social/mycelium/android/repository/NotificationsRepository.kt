@@ -45,6 +45,7 @@ object NotificationsRepository {
     private const val NOTIFICATION_KIND_REPORT = 1984
     private const val NOTIFICATION_KIND_ZAP = 9735
     private const val NOTIFICATION_KIND_HIGHLIGHT = 9802
+    private const val NOTIFICATION_KIND_BADGE_AWARD = 8
     private const val NOTIFICATION_KIND_TOPIC_REPLY = 1111
     private const val ONE_WEEK_SEC = 7 * 24 * 60 * 60L
     private const val PREFS_NAME = "notifications_seen"
@@ -300,7 +301,7 @@ object NotificationsRepository {
         val inboxFilters = listOf(
             // High-volume: text, reaction, repost, zap, topic reply — complete history
             Filter(
-                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
+                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD),
                 tags = mapOf("p" to listOf(pubkey)),
                 limit = 5000
             ),
@@ -328,7 +329,7 @@ object NotificationsRepository {
                 val sweepSince = (System.currentTimeMillis() / 1000) - ONE_WEEK_SEC
                 val sweepFilters = listOf(
                     Filter(
-                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY),
+                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD),
                         tags = mapOf("p" to listOf(pubkey)),
                         since = sweepSince,
                         limit = 200
@@ -396,7 +397,7 @@ object NotificationsRepository {
     private val ACCEPTED_KINDS = setOf(
         NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST,
         NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY,
-        NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT
+        NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT, NOTIFICATION_KIND_BADGE_AWARD
     )
 
     private fun handleEvent(event: Event) {
@@ -427,12 +428,14 @@ object NotificationsRepository {
             NOTIFICATION_KIND_ZAP -> handleZap(event, author, ts)
             NOTIFICATION_KIND_HIGHLIGHT -> handleHighlight(event, author, ts)
             NOTIFICATION_KIND_REPORT -> handleReport(event, author, ts)
+            NOTIFICATION_KIND_BADGE_AWARD -> handleBadgeAward(event, author, ts)
             else -> { }
         }
     }
 
     private fun handleLike(event: Event, author: Author, ts: Long) {
-        val eTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
+        // NIP-25: last e-tag is the reacted-to event (not first, which may be the root)
+        val eTag = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
         if (eTag == null) return
         // Parse NIP-25 reaction emoji from event content (Amethyst-style)
         val rawContent = event.content.ifBlank { "+" }
@@ -659,6 +662,75 @@ object NotificationsRepository {
         emitSorted()
     }
 
+    private fun handleBadgeAward(event: Event, author: Author, ts: Long) {
+        // Don't show our own badge awards to ourselves
+        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
+        // Extract badge definition address from a-tag: ["a", "30009:<pubkey>:<d-tag>", ...]
+        val aTagValue = event.tags.firstOrNull { it.size >= 2 && it[0] == "a" && it[1].startsWith("30009:") }?.get(1)
+        val text = "${author.displayName ?: "Someone"} awarded you a badge"
+        val data = NotificationData(
+            id = event.id,
+            type = NotificationType.BADGE_AWARD,
+            text = text,
+            author = author,
+            sortTimestamp = ts
+        )
+        notificationsById[event.id] = data
+        emitSorted()
+        fireAndroidNotification(NotificationType.BADGE_AWARD, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
+        // Asynchronously resolve badge definition for name + image
+        if (aTagValue != null && subscriptionRelayUrls.isNotEmpty()) {
+            scope.launch { resolveBadgeDefinition(event.id, aTagValue) }
+        }
+    }
+
+    /** Fetch kind 30009 badge definition from a-tag and enrich the notification with badge name/image. */
+    private suspend fun resolveBadgeDefinition(notificationId: String, aTagValue: String) {
+        try {
+            val parts = aTagValue.split(":", limit = 3)
+            if (parts.size < 3) return
+            val defAuthor = parts[1]
+            val defDTag = parts[2]
+            if (defAuthor.isBlank() || defDTag.isBlank()) return
+
+            val defFilter = Filter(
+                kinds = listOf(30009),
+                authors = listOf(defAuthor),
+                tags = mapOf("d" to listOf(defDTag)),
+                limit = 5
+            )
+            var bestEvent: Event? = null
+            val handle = RelayConnectionStateMachine.getInstance()
+                .requestTemporarySubscription(subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.LOW) { ev ->
+                    if (ev.kind == 30009 && (bestEvent == null || ev.createdAt > (bestEvent?.createdAt ?: 0))) {
+                        bestEvent = ev
+                    }
+                }
+            delay(3000)
+            handle.cancel()
+
+            val defEvent = bestEvent ?: return
+            val name = defEvent.tags.firstOrNull { it.size >= 2 && it[0] == "name" }?.get(1)
+            val thumb = defEvent.tags.firstOrNull { it.size >= 2 && it[0] == "thumb" }?.get(1)
+            val image = defEvent.tags.firstOrNull { it.size >= 2 && it[0] == "image" }?.get(1)
+            val imageUrl = thumb?.takeIf { it.isNotBlank() } ?: image?.takeIf { it.isNotBlank() }
+
+            val current = notificationsById[notificationId] ?: return
+            val enrichedText = if (name != null) {
+                "${current.author?.displayName ?: "Someone"} awarded you the \"$name\" badge"
+            } else current.text
+            notificationsById[notificationId] = current.copy(
+                text = enrichedText,
+                badgeName = name,
+                badgeImageUrl = imageUrl
+            )
+            emitSorted()
+            Log.d(TAG, "Enriched badge notification $notificationId: name=$name image=${imageUrl?.take(40)}")
+        } catch (e: Exception) {
+            Log.e(TAG, "resolveBadgeDefinition failed: ${e.message}", e)
+        }
+    }
+
     /** Update today's summary counters for the notification summary bar. */
     private fun updateTodaySummary(type: NotificationType, ts: Long, zapSats: Long) {
         val todayStart = java.util.Calendar.getInstance().apply {
@@ -709,7 +781,8 @@ object NotificationsRepository {
     private val zapByTargetId = ConcurrentHashMap<String, MutableList<Triple<String, Long, Long>>>() // pubkey, timestamp, amountSats
 
     private fun handleRepost(event: Event, author: Author, ts: Long) {
-        val repostedNoteId = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
+        // NIP-18: last e-tag is the reposted event
+        val repostedNoteId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
             ?: parseRepostedNoteIdFromContent(event.content)
         if (repostedNoteId == null) {
             val data = NotificationData(
@@ -774,7 +847,8 @@ object NotificationsRepository {
     }
 
     private fun handleZap(event: Event, author: Author, ts: Long) {
-        val eTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
+        // Last e-tag is the zapped event
+        val eTag = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
         if (eTag == null) return
         val amountSats = parseZapAmountSats(event)
         // Kind-9735 pubkey is the wallet/LNURL service (e.g. Coinos), NOT the actual zapper.

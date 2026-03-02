@@ -75,12 +75,13 @@ fun InlineVideoPlayer(
     autoPlay: Boolean = false,
     isVisible: Boolean = true,
     onFullscreenClick: () -> Unit = {},
-    onExitFullscreen: () -> Unit = {}
+    onExitFullscreen: () -> Unit = {},
+    onAspectRatioKnown: ((Float) -> Unit)? = null
 ) {
     if (autoPlay) {
         FullVideoPlayer(url = url, modifier = modifier, isVisible = isVisible, onExitFullscreen = onExitFullscreen)
     } else {
-        FeedVideoPlayer(url = url, modifier = modifier, isVisible = isVisible, onFullscreenClick = onFullscreenClick)
+        FeedVideoPlayer(url = url, modifier = modifier, isVisible = isVisible, onFullscreenClick = onFullscreenClick, onAspectRatioKnown = onAspectRatioKnown)
     }
 }
 
@@ -93,7 +94,8 @@ private fun FeedVideoPlayer(
     url: String,
     modifier: Modifier = Modifier,
     isVisible: Boolean = true,
-    onFullscreenClick: () -> Unit = {}
+    onFullscreenClick: () -> Unit = {},
+    onAspectRatioKnown: ((Float) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val prefAutoplay by MediaPreferences.autoplayVideos.collectAsState()
@@ -140,6 +142,8 @@ private fun FeedVideoPlayer(
             override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
                 if (videoSize.width > 0 && videoSize.height > 0) {
                     social.mycelium.android.utils.MediaAspectRatioCache.add(url, videoSize.width, videoSize.height)
+                    val ratio = videoSize.width.toFloat() / videoSize.height.toFloat()
+                    if (ratio in 0.3f..3.0f) onAspectRatioKnown?.invoke(ratio)
                 }
             }
         }

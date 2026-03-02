@@ -246,6 +246,21 @@ class ProfileMetadataCache {
     }
 
     /**
+     * Enhanced profile request that merges relay hints (note source relay, NIP-65 outbox relays)
+     * with the standard indexer relays. This improves discovery for profiles that aren't indexed
+     * by the user's configured relays — like Amethyst's UserFinderFilterAssemblerSubscription
+     * which subscribes to the relay where the event was seen.
+     *
+     * @param pubkeys Pubkeys to fetch.
+     * @param cacheRelayUrls Standard indexer/cache relay URLs.
+     * @param hintRelayUrls Additional relay hints (e.g. note source relay, author's outbox relays).
+     */
+    suspend fun requestProfileWithHints(pubkeys: List<String>, cacheRelayUrls: List<String>, hintRelayUrls: List<String>) {
+        val mergedRelays = (hintRelayUrls + cacheRelayUrls).distinct()
+        requestProfiles(pubkeys, mergedRelays)
+    }
+
+    /**
      * Public API: accumulate pubkeys into an internal batch and schedule a debounced fetch.
      * All callers (NotesRepository, Kind1RepliesRepository, NotificationsRepository, etc.)
      * funnel through here. The actual fetch fires once after the debounce settles via

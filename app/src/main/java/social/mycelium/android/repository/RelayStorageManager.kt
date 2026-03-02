@@ -45,6 +45,11 @@ class RelayStorageManager(val context: Context) {
 
         /** Normalize relay URL using the shared utility (lowercase, trim, strip slash/ports, ensure wss://). */
         fun normalizeRelayUrl(url: String): String = social.mycelium.android.utils.normalizeRelayUrl(url)
+
+        /** Default announcement relay — official Mycelium news relay, seeded for all users. */
+        val DEFAULT_ANNOUNCEMENT_RELAYS = listOf(
+            UserRelay(url = "wss://news.mycelium.social", read = true, write = true)
+        )
     }
 
     private fun normalizeRelay(relay: UserRelay): UserRelay = relay.copy(url = normalizeRelayUrl(relay.url))
@@ -217,12 +222,14 @@ class RelayStorageManager(val context: Context) {
 
     fun loadAnnouncementRelays(pubkey: String): List<UserRelay> {
         val key = "${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}"
-        val jsonString = prefs.getString(key, null) ?: return emptyList()
+        val jsonString = prefs.getString(key, null)
+            ?: return DEFAULT_ANNOUNCEMENT_RELAYS.toList()
         return try {
             val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
-            normalizeRelays(wrapper.relays)
+            val relays = normalizeRelays(wrapper.relays)
+            relays.ifEmpty { DEFAULT_ANNOUNCEMENT_RELAYS.toList() }
         } catch (e: Exception) {
-            emptyList()
+            DEFAULT_ANNOUNCEMENT_RELAYS.toList()
         }
     }
 

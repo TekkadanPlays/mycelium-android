@@ -125,6 +125,7 @@ fun ProfileScreen(
     timeGapIndex: Int? = null,
     perTabHasMore: Map<Int, Boolean> = emptyMap(),
     onSeeAllReactions: (Note) -> Unit = {},
+    badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     androidx.activity.compose.BackHandler { onBackClick() }
@@ -446,7 +447,8 @@ fun ProfileScreen(
                         onFollowClick = onFollowClick,
                         onMessageClick = onMessageClick,
                         bioExpanded = bioExpanded,
-                        onBioToggle = { bioExpanded = !bioExpanded }
+                        onBioToggle = { bioExpanded = !bioExpanded },
+                        badges = badges
                     )
                 }
 
@@ -861,6 +863,7 @@ private fun ProfileIdentity(
     onMessageClick: () -> Unit,
     bioExpanded: Boolean,
     onBioToggle: () -> Unit,
+    badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
 ) {
     val uriHandler = LocalUriHandler.current
     val clipboardManager = LocalClipboardManager.current
@@ -907,15 +910,22 @@ private fun ProfileIdentity(
                     }
                 }
                 // NIP-05 or @username
-                val subtitle = author.nip05?.takeIf { it.isNotBlank() } ?: "@${author.username}"
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (author.nip05 != null) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                val nip05Value = author.nip05?.takeIf { it.isNotBlank() }
+                if (nip05Value != null) {
+                    social.mycelium.android.ui.components.Nip05Badge(
+                        nip05 = nip05Value,
+                        pubkeyHex = author.id,
+                        showFullIdentifier = true
+                    )
+                } else {
+                    Text(
+                        text = "@${author.username}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             // Action buttons
@@ -1087,7 +1097,125 @@ private fun ProfileIdentity(
                 label = "Followers"
             )
         }
+
+        // ── Badges row (single line with overflow) ──
+        if (badges.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            ProfileBadgesRow(badges = badges)
+        }
+
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+// ─── Badge Row (one-line with overflow expand) ───────────────────────────────
+
+@Composable
+private fun ProfileBadgesRow(
+    badges: List<social.mycelium.android.repository.BadgeRepository.Badge>,
+) {
+    val badgeSize = 30.dp
+    val badgeSpacing = 6.dp
+    var expanded by remember { mutableStateOf(false) }
+
+    // Measure available width to determine how many badges fit in one line
+    val density = LocalDensity.current
+    var rowWidthPx by remember { mutableIntStateOf(0) }
+    val badgeSizePx = with(density) { badgeSize.toPx() }
+    val spacingPx = with(density) { badgeSpacing.toPx() }
+    // Reserve space for the "+N" overflow chip (~40dp)
+    val overflowChipWidthPx = with(density) { 40.dp.toPx() }
+
+    val maxVisible = remember(rowWidthPx, badges.size) {
+        if (rowWidthPx <= 0) badges.size
+        else {
+            val available = rowWidthPx.toFloat()
+            var count = 0
+            var used = 0f
+            for (i in badges.indices) {
+                val next = if (i == 0) badgeSizePx else spacingPx + badgeSizePx
+                // If there are more badges after this one, reserve space for overflow chip
+                val needsOverflow = i < badges.size - 1
+                val reserveForOverflow = if (needsOverflow) overflowChipWidthPx + spacingPx else 0f
+                if (used + next + reserveForOverflow <= available) {
+                    used += next
+                    count++
+                } else break
+            }
+            count.coerceAtLeast(1)
+        }
+    }
+
+    val showOverflow = !expanded && badges.size > maxVisible
+    val visibleBadges = if (expanded) badges else badges.take(maxVisible)
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { coords -> rowWidthPx = coords.size.width },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(badgeSpacing)
+    ) {
+        visibleBadges.forEach { badge ->
+            BadgeThumbnail(badge = badge, size = badgeSize)
+        }
+        if (showOverflow) {
+            val remaining = badges.size - maxVisible
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier
+                    .height(badgeSize)
+                    .clickable { expanded = true }
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                ) {
+                    Text(
+                        text = "+$remaining",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BadgeThumbnail(
+    badge: social.mycelium.android.repository.BadgeRepository.Badge,
+    size: androidx.compose.ui.unit.Dp,
+) {
+    val imageUrl = badge.displayImageUrl
+    if (imageUrl != null) {
+        AsyncImage(
+            model = imageUrl,
+            contentDescription = badge.name ?: "Badge",
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(6.dp))
+                .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f), RoundedCornerShape(6.dp)),
+            contentScale = ContentScale.Crop
+        )
+    } else {
+        // Fallback: show medal icon
+        Surface(
+            shape = RoundedCornerShape(6.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.size(size)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Default.MilitaryTech,
+                    contentDescription = badge.name ?: "Badge",
+                    modifier = Modifier.size(size * 0.6f),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
     }
 }
 

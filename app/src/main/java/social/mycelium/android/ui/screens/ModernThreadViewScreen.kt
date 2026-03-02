@@ -1339,13 +1339,17 @@ private fun ModernCommentCard(
                     val commentVideoUrls = commentMediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
                     Spacer(modifier = Modifier.height(6.dp))
                     if (commentImageUrls.size == 1 && commentVideoUrls.isEmpty()) {
+                        val commentMediaRatio = remember(commentImageUrls[0]) {
+                            social.mycelium.android.utils.MediaAspectRatioCache.get(commentImageUrls[0])
+                                ?: (16f / 9f)
+                        }
                         AsyncImage(
                             model = commentImageUrls[0],
                             contentDescription = null,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(max = 180.dp)
+                                .aspectRatio(commentMediaRatio.coerceIn(0.5f, 2.5f))
                                 .clip(RoundedCornerShape(8.dp))
                         )
                     } else {
@@ -2597,6 +2601,16 @@ private fun ThreadedReplyCard(
     }
     val displayAuthor = remember(reply.author.id, profileRevision, diskCacheReady) {
         profileCache.resolveAuthor(reply.author.id)
+    }
+    // Trigger profile fetch if author is unknown — use reply source relays as hints
+    LaunchedEffect(authorPubkey, diskCacheReady) {
+        if (profileCache.getAuthor(authorPubkey) == null) {
+            val cacheRelays = profileCache.getConfiguredRelayUrls()
+            val hintRelays = reply.relayUrls + profileCache.getOutboxRelays(authorPubkey)
+            if (cacheRelays.isNotEmpty() || hintRelays.isNotEmpty()) {
+                profileCache.requestProfileWithHints(listOf(authorPubkey), cacheRelays, hintRelays.distinct())
+            }
+        }
     }
 
     LaunchedEffect(shouldCloseZapMenus) {

@@ -181,6 +181,11 @@ class NotesRepository private constructor() {
             val currentNotes = _notes.value
             val currentIds = currentNotes.associateBy { it.id }
             val pendingIds = synchronized(pendingNotesLock) { _pendingNewNotes.map { it.id }.toSet() }
+            // Set of original note IDs that are already represented as reposts (for fast dedup)
+            val repostedOriginalIds = buildSet {
+                currentNotes.forEach { it.originalNoteId?.let(::add) }
+                synchronized(pendingNotesLock) { _pendingNewNotes.forEach { it.originalNoteId?.let(::add) } }
+            }
 
             for ((event, relayUrl) in batch) {
                 if (event.kind != 1) continue
@@ -214,9 +219,12 @@ class NotesRepository private constructor() {
                     }
                 }
 
-                // Skip if repost already exists
+                // Skip if a repost of this note already exists in the feed
+                // (the repost card already shows the note with booster attribution)
                 val repostId = "repost:${event.id}"
                 if (currentIds.containsKey(repostId) || pendingIds.contains(repostId)) continue
+                // Also skip if this note's ID is already represented as a repost's originalNoteId
+                if (event.id in repostedOriginalIds) continue
 
                 // Locally-published event echo: already in feed via injectOwnNote/injectOwnRepost.
                 // Just merge relay URL from the relay that echoed it back.

@@ -833,12 +833,16 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * The note is injected optimistically into the feed with [PublishState.Sending] immediately
      * after signing, so it appears at the top of the feed before relay confirmation.
      */
-    fun publishKind1(content: String, relayUrls: Set<String>): String? {
+    fun publishKind1(content: String, relayUrls: Set<String>, zapRaiserAmount: Long? = null): String? {
         if (content.isBlank()) return "Note is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val pubkey = currentAccount.value?.toHexKey()
         viewModelScope.launch {
-            when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1, content = content)) {
+            when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1, content = content) {
+                if (zapRaiserAmount != null && zapRaiserAmount > 0) {
+                    add(arrayOf("zapraiser", zapRaiserAmount.toString()))
+                }
+            }) {
                 is PublishResult.Success -> {
                     // Build a Note from the signed event and inject into feed optimistically
                     val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
@@ -851,7 +855,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         kind = 1,
                         mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(content).filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }.distinct(),
                         hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] },
-                        relayUrls = relayUrls.toList()
+                        relayUrls = relayUrls.toList(),
+                        tags = result.event.tags.map { it.toList() }
                     )
                     NotesRepository.getInstance().injectOwnNote(note)
                     // Mark as confirmed — progress line turns green then fades

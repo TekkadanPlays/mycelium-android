@@ -732,6 +732,15 @@ class Kind1RepliesRepository {
             .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
             .distinct()
 
+        // Quoted note references (nevent/note in content)
+        val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(event.content)
+        val quotedEventIds = quotedRefs.map { it.eventId }
+        quotedRefs.forEach { ref ->
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+        }
+
+        val tags = event.tags.map { it.toList() }
+
         return Note(
             id = event.id,
             author = author,
@@ -744,12 +753,15 @@ class Kind1RepliesRepository {
             hashtags = hashtags,
             mediaUrls = mediaUrls,
             mediaMeta = mediaMeta,
+            quotedEventIds = quotedEventIds,
             isReply = rootId != null || replyToId != null,
             rootNoteId = rootId,
             replyToId = replyToId,
             relayUrl = relayUrl.ifEmpty { null },
             relayUrls = if (relayUrl.isNotBlank()) listOf(relayUrl) else emptyList(),
-            mentionedPubkeys = mentionedPubkeys
+            mentionedPubkeys = mentionedPubkeys,
+            kind = event.kind,
+            tags = tags,
         )
     }
 

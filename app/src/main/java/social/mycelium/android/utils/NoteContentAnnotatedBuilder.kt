@@ -219,8 +219,9 @@ fun buildNoteContentAnnotatedString(
                 SEG_NPUB -> {
                     val hex = seg.data as String
                     val author = profileCache.resolveAuthor(hex)
-                    val label = if (author.displayName.endsWith("...") || author.displayName == author.username) {
-                        "@${author.id.take(8)}…"
+                    val isPlaceholder = author.displayName == author.id.take(8) + "..."
+                    val label = if (isPlaceholder) {
+                        "@${author.id.take(8)}\u2026"
                     } else {
                         "@${author.displayName}"
                     }
@@ -234,7 +235,8 @@ fun buildNoteContentAnnotatedString(
                 SEG_NPROFILE -> {
                     val hex = seg.data as String
                     val author = profileCache.resolveAuthor(hex)
-                    val label = if (author.displayName.endsWith("...") || author.displayName == author.username) {
+                    val isPlaceholder = author.displayName == author.id.take(8) + "..."
+                    val label = if (isPlaceholder) {
                         "@${author.id.take(8)}\u2026"
                     } else {
                         "@${author.displayName}"

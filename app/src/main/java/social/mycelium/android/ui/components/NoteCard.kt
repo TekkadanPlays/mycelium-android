@@ -100,16 +100,21 @@ import java.util.concurrent.TimeUnit
 /**
  * Persistent expanded state for quoted notes — survives LazyColumn recycling and
  * fullscreen navigation (e.g. video player back gesture).
- * Keyed by quoted event ID; bounded to avoid unbounded growth.
+ * Keyed by composite "parentNoteId:quotedEventId" so expanding a quote in one card
+ * does not expand the same quoted event embedded in a different card.
+ * Bounded to avoid unbounded growth.
  */
 object QuotedNoteExpandedState {
     private const val MAX_ENTRIES = 500
     private val map = mutableStateMapOf<String, Boolean>()
 
-    fun isExpanded(eventId: String): Boolean = map[eventId] ?: false
+    private fun key(parentNoteId: String, eventId: String) = "$parentNoteId:$eventId"
 
-    fun toggle(eventId: String) {
-        map[eventId] = !(map[eventId] ?: false)
+    fun isExpanded(parentNoteId: String, eventId: String): Boolean = map[key(parentNoteId, eventId)] ?: false
+
+    fun toggle(parentNoteId: String, eventId: String) {
+        val k = key(parentNoteId, eventId)
+        map[k] = !(map[k] ?: false)
         if (map.size > MAX_ENTRIES) {
             val keysToRemove = map.keys.take(map.size - MAX_ENTRIES)
             keysToRemove.forEach { map.remove(it) }
@@ -216,18 +221,28 @@ private fun QuotedNoteBody(
                 if (qMediaList.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
                     qMediaList.forEach { url ->
+                        // Reactive aspect ratio: cached dimensions or 16:9 default,
+                        // updates when video reports real dimensions.
+                        var mediaRatio by remember(url) {
+                            mutableFloatStateOf(
+                                social.mycelium.android.utils.MediaAspectRatioCache.get(url)
+                                    ?: (16f / 9f)
+                            )
+                        }
                         if (social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(max = 180.dp)
+                                    .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
                                     .clip(RoundedCornerShape(6.dp))
+                                    .background(Color.Black)
                             ) {
                                 InlineVideoPlayer(
                                     url = url,
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier.fillMaxSize(),
                                     isVisible = isVisible,
-                                    onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) }
+                                    onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
+                                    onAspectRatioKnown = { ratio -> mediaRatio = ratio }
                                 )
                             }
                         } else {
@@ -237,7 +252,7 @@ private fun QuotedNoteBody(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .heightIn(min = 80.dp, max = 240.dp)
+                                    .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
                             )
@@ -335,6 +350,7 @@ private fun QuotedNoteBody(
  */
 @Composable
 private fun QuotedNoteContent(
+    parentNoteId: String,
     meta: QuotedNoteMeta,
     quotedAuthor: social.mycelium.android.data.Author,
     quotedCounts: social.mycelium.android.repository.NoteCounts?,
@@ -347,7 +363,7 @@ private fun QuotedNoteContent(
     onOpenImageViewer: (List<String>, Int) -> Unit,
 ) {
     val uriHandler = LocalUriHandler.current
-    val quotedExpanded = QuotedNoteExpandedState.isExpanded(meta.eventId)
+    val quotedExpanded = QuotedNoteExpandedState.isExpanded(parentNoteId, meta.eventId)
     val hasMore = meta.fullContent.length > meta.contentSnippet.length
 
     val quotedDisplayContent = if (quotedExpanded) meta.fullContent else meta.contentSnippet
@@ -468,7 +484,7 @@ private fun QuotedNoteContent(
                 quotedAuthor = quotedAuthor,
                 quotedMediaUrls = quotedMediaUrls,
                 isVisible = isVisible,
-                onExpandToggle = { QuotedNoteExpandedState.toggle(meta.eventId) },
+                onExpandToggle = { QuotedNoteExpandedState.toggle(parentNoteId, meta.eventId) },
                 onProfileClick = onProfileClick,
                 onNoteClick = onNoteClick,
                 onVideoClick = onVideoClick,
@@ -511,19 +527,17 @@ private fun NoteMediaCarousel(
     LaunchedEffect(pagerState.currentPage) {
         onMediaPageChanged(pagerState.currentPage)
     }
-    // Stable container ratio: LOCKED after first composition to prevent layout shift.
-    // Uses cached aspect ratios if available; otherwise commits to 16:9 default.
-    // The real ratio is still written to MediaAspectRatioCache on load so NEXT
-    // time this card appears it uses the correct size from the start.
-    val containerRatio = remember(mediaList, mediaMeta) {
+    // Reactive container ratio: starts from imeta/cached dimensions or 16:9 default,
+    // then updates when the image loads real dimensions so the container always matches
+    // the actual media — no permanent scaling down with ContentScale.Fit.
+    var containerRatio by remember(mediaList, mediaMeta) {
         val ratios = mediaList.map { url ->
-            // Priority: 1) imeta dim tag  2) cached ratio  3) video default 16:9
             mediaMeta[url]?.aspectRatio()
                 ?: MediaAspectRatioCache.get(url)
                 ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
         }
         val known = ratios.filterNotNull()
-        if (known.isNotEmpty()) known.min() else (16f / 9f)
+        mutableFloatStateOf(if (known.isNotEmpty()) known.min() else (16f / 9f))
     }
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
     // doesn't steal vertical gestures. Only single-image carousels disable paging entirely.
@@ -576,7 +590,8 @@ private fun NoteMediaCarousel(
                         isVisible = isCurrentPage && isVisible,
                         onFullscreenClick = {
                             onVideoClick(allMediaUrls, groupStartIndex + page)
-                        }
+                        },
+                        onAspectRatioKnown = { ratio -> containerRatio = ratio }
                     )
                 } else {
                     val imageContext = LocalContext.current
@@ -641,6 +656,11 @@ private fun NoteMediaCarousel(
                                         val h = drawable.intrinsicHeight
                                         if (w > 0 && h > 0) {
                                             MediaAspectRatioCache.add(url, w, h)
+                                            // Update container to match real dimensions
+                                            val realRatio = w.toFloat() / h.toFloat()
+                                            if (realRatio in 0.3f..3.0f) {
+                                                containerRatio = realRatio
+                                            }
                                         }
                                     }
                                 }
@@ -1874,6 +1894,8 @@ fun NoteCard(
     countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     /** Called when user taps "See all" in the expanded reaction details panel. */
     onSeeAllReactions: (() -> Unit)? = null,
+    /** NIP-22: Number of moderation flags on this note (shown as badge when > 0). */
+    moderationFlagCount: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var isZapMenuExpanded by remember { mutableStateOf(false) }
@@ -2081,6 +2103,32 @@ fun NoteCard(
                 }
                 val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
                 RelayOrbs(relayUrls = relayUrlsForOrbs, onRelayClick = onRelayClick, onNavigateToRelayList = onNavigateToRelayList)
+                // NIP-22: Moderation flag badge (shown when note has flags but is below hide threshold)
+                if (moderationFlagCount > 0) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    androidx.compose.material3.Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(4.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Flag,
+                                contentDescription = "Moderation flags",
+                                modifier = Modifier.size(10.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                text = "$moderationFlagCount",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
             }
 
             val uriHandler = LocalUriHandler.current
@@ -2519,6 +2567,7 @@ fun NoteCard(
                                 profileCache.resolveAuthor(meta.authorId)
                             }
                             QuotedNoteContent(
+                                parentNoteId = note.id,
                                 meta = meta,
                                 quotedAuthor = quotedAuthor,
                                 quotedCounts = countsByNoteId[eventId],

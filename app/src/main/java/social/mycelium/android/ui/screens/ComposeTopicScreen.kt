@@ -55,6 +55,9 @@ fun ComposeTopicScreen(
         }
         onBack()
     }
+    // Intercept system back gesture to save draft before leaving
+    androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
+
     var hashtags by remember { mutableStateOf(initialHashtag ?: "") }
     var showRelayPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current

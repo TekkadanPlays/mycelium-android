@@ -5,6 +5,8 @@ import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ShowChart
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
@@ -31,6 +33,7 @@ fun ComposeNoteScreen(
     accountStateViewModel: AccountStateViewModel,
     relayCategories: List<RelayCategory>? = null,
     relayProfiles: List<RelayProfile> = emptyList(),
+    announcementRelays: List<social.mycelium.android.data.UserRelay> = emptyList(),
     initialContent: String = "",
     draftId: String? = null,
     modifier: Modifier = Modifier
@@ -51,6 +54,12 @@ fun ComposeNoteScreen(
         }
         onBack()
     }
+    // Intercept system back gesture to save draft before leaving
+    androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
+
+    var zapRaiserAmount by remember { mutableStateOf<Long?>(null) }
+    var showZapRaiser by remember { mutableStateOf(false) }
+
     var showRelayPicker by remember { mutableStateOf(false) }
     val outboxRelays = remember(currentAccount?.npub) {
         accountStateViewModel.getOutboxRelaysForPublish()
@@ -61,12 +70,13 @@ fun ComposeNoteScreen(
     val myAuthor = remember(myPubkeyHex) {
         myPubkeyHex?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
     }
-    val sections = remember(myAuthor, outboxRelays, relayCategories, relayProfiles) {
+    val sections = remember(myAuthor, outboxRelays, relayCategories, relayProfiles, announcementRelays) {
         buildRelaySections(
             myAuthor = myAuthor,
             myOutboxRelays = outboxRelays,
             relayCategories = relayCategories ?: emptyList(),
-            relayProfiles = relayProfiles
+            relayProfiles = relayProfiles,
+            announcementRelays = announcementRelays
         )
     }
 
@@ -76,7 +86,7 @@ fun ComposeNoteScreen(
             sections = sections,
             onConfirm = { selectedUrls ->
                 showRelayPicker = false
-                val err = accountStateViewModel.publishKind1(content, selectedUrls)
+                val err = accountStateViewModel.publishKind1(content, selectedUrls, zapRaiserAmount = zapRaiserAmount)
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
@@ -127,6 +137,33 @@ fun ComposeNoteScreen(
                     keyboardType = KeyboardType.Text
                 ),
             )
+            // Zapraiser toggle + input
+            Row(
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                IconButton(onClick = {
+                    showZapRaiser = !showZapRaiser
+                    if (!showZapRaiser) zapRaiserAmount = null
+                }) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ShowChart,
+                        contentDescription = "Add zapraiser",
+                        tint = if (showZapRaiser) Color(0xFFF59E0B) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (showZapRaiser) {
+                    OutlinedTextField(
+                        value = zapRaiserAmount?.toString() ?: "",
+                        onValueChange = { zapRaiserAmount = it.toLongOrNull() },
+                        label = { Text("Zap goal (sats)") },
+                        placeholder = { Text("1000") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.weight(1f).padding(start = 8.dp)
+                    )
+                }
+            }
             Button(
                 onClick = { showRelayPicker = true },
                 modifier = Modifier

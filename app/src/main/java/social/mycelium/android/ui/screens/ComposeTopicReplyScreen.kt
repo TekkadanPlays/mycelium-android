@@ -66,6 +66,9 @@ fun ComposeTopicReplyScreen(
         }
         onBack()
     }
+    // Intercept system back gesture to save draft before leaving
+    androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
+
     var isPublishing by remember { mutableStateOf(false) }
     var showRelayPicker by remember { mutableStateOf(false) }
     val scrollState = rememberScrollState()

@@ -74,6 +74,7 @@ import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
 import social.mycelium.android.ui.components.ThreadSlideBackBox
 import social.mycelium.android.ui.screens.AboutScreen
+import social.mycelium.android.ui.screens.DebugSettingsScreen
 import social.mycelium.android.ui.screens.AnnouncementsFeedScreen
 import social.mycelium.android.ui.screens.DraftsScreen
 import social.mycelium.android.ui.screens.GeneralSettingsScreen
@@ -1513,33 +1514,7 @@ fun MyceliumNavigation(
                 }
 
                 // NIP-53 Live broadcast explorer
-                composable(
-                    route = "live_explorer",
-                    enterTransition = {
-                        slideIntoContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.Start,
-                            animationSpec = tween(300)
-                        )
-                    },
-                    popEnterTransition = {
-                        slideIntoContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.End,
-                            animationSpec = tween(300)
-                        )
-                    },
-                    exitTransition = {
-                        slideOutOfContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.Start,
-                            animationSpec = tween(300)
-                        )
-                    },
-                    popExitTransition = {
-                        slideOutOfContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.End,
-                            animationSpec = tween(300)
-                        )
-                    }
-                ) {
+                composable(route = "live_explorer") {
                     LiveExplorerScreen(
                         onBackClick = { navController.popBackStack() },
                         onActivityClick = { addressableId ->
@@ -1553,31 +1528,7 @@ fun MyceliumNavigation(
                 // NIP-53 Live Stream viewer
                 composable(
                     route = "live_stream/{addressableId}",
-                    arguments = listOf(navArgument("addressableId") { type = NavType.StringType }),
-                    enterTransition = {
-                        slideIntoContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.Start,
-                            animationSpec = tween(300)
-                        )
-                    },
-                    exitTransition = {
-                        slideOutOfContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.Start,
-                            animationSpec = tween(300)
-                        )
-                    },
-                    popEnterTransition = {
-                        slideIntoContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.End,
-                            animationSpec = tween(300)
-                        )
-                    },
-                    popExitTransition = {
-                        slideOutOfContainer(
-                            towards = AnimatedContentTransitionScope.SlideDirection.End,
-                            animationSpec = tween(300)
-                        )
-                    }
+                    arguments = listOf(navArgument("addressableId") { type = NavType.StringType })
                 ) { backStackEntry ->
                     val addressableId = backStackEntry.arguments?.getString("addressableId") ?: return@composable
                     LiveStreamScreen(
@@ -1700,11 +1651,11 @@ fun MyceliumNavigation(
                         lifecycleOwner.lifecycle.addObserver(observer)
                         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
                     }
-                    // Merge: profile feed notes + dashboard notes, deduplicated, sorted by time
+                    // Merge: dashboard notes (richer: relay URLs, counts, repost info) take priority
                     val authorNotes = remember(profileFeedNotes, dashboardAuthorNotes) {
-                        (profileFeedNotes + dashboardAuthorNotes)
+                        (dashboardAuthorNotes + profileFeedNotes)
                             .distinctBy { it.id }
-                            .sortedByDescending { it.timestamp }
+                            .sortedByDescending { it.repostTimestamp ?: it.timestamp }
                     }
                     // Fetch profile counts (following/followers) from indexer relays
                     LaunchedEffect(cacheKey, profileRelayUrls) {
@@ -1712,6 +1663,11 @@ fun MyceliumNavigation(
                     }
                     val allProfileCounts by social.mycelium.android.repository.ProfileCountsRepository.countsMap.collectAsState()
                     val profileCounts = allProfileCounts[cacheKey]
+
+                    // ── Badge fetching (NIP-58) ──
+                    val profileBadges by remember(cacheKey, profileRelayUrls) {
+                        social.mycelium.android.repository.BadgeRepository.badgesFor(cacheKey, profileRelayUrls)
+                    }.collectAsState()
 
                     // ── Parent note fetching for reply context (batch via indexer relays) ──
                     val parentNotesMap = remember { androidx.compose.runtime.mutableStateMapOf<String, social.mycelium.android.data.Note>() }
@@ -1844,7 +1800,8 @@ fun MyceliumNavigation(
                                 val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
                                 appViewModel.storeReactionsData(buildReactionsData(note.id, counts, note.repostedByAuthors, note.reactions))
                                 navController.navigate("reactions/${note.id}") { launchSingleTop = true }
-                            }
+                            },
+                            badges = profileBadges
                     )
 
                     // ── Profile thread overlay (stack-based) ──────────────────────────
@@ -1863,7 +1820,7 @@ fun MyceliumNavigation(
                         exit = slideOutHorizontally(animationSpec = tween(300)) { it }
                     ) {
                         if (profileDisplayNote != null) {
-                            val profileThreadRelayUrls = profileDisplayNote.relayUrls.ifEmpty { listOfNotNull(profileDisplayNote.relayUrl) }
+                            val profileThreadRelayUrls = profileDisplayNote.relayUrls.ifEmpty { listOfNotNull(profileDisplayNote.relayUrl) }.ifEmpty { profileRelayUrls }
                             val pNoteId = profileDisplayNote.id
                             val profileThreadListState = rememberLazyListState()
                             val profileThreadTopAppBarState = rememberTopAppBarState()
@@ -2059,6 +2016,12 @@ fun MyceliumNavigation(
                             .sortedByDescending { it.timestamp }
                     }
 
+                    // ── Own-profile badge fetching (NIP-58) ──
+                    val ownProfileBadges by remember(userCacheKey, userProfileRelayUrls) {
+                        if (userCacheKey != null) social.mycelium.android.repository.BadgeRepository.badgesFor(userCacheKey, userProfileRelayUrls)
+                        else kotlinx.coroutines.flow.MutableStateFlow(emptyList<social.mycelium.android.repository.BadgeRepository.Badge>())
+                    }.collectAsState()
+
                     val userZapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
                     val userZappedIds by accountStateViewModel.zappedNoteIds.collectAsState()
                     val userZappedAmountByNoteId by accountStateViewModel.zappedAmountByNoteId.collectAsState()
@@ -2124,7 +2087,8 @@ fun MyceliumNavigation(
                                 val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
                                 appViewModel.storeReactionsData(buildReactionsData(note.id, counts, note.repostedByAuthors, note.reactions))
                                 navController.navigate("reactions/${note.id}") { launchSingleTop = true }
-                            }
+                            },
+                            badges = ownProfileBadges
                     )
                 }
 
@@ -2144,6 +2108,7 @@ fun MyceliumNavigation(
                                     "power" -> navController.navigate("settings/power") { launchSingleTop = true }
                                     "about" -> navController.navigate("settings/about") { launchSingleTop = true }
                                     "direct_messages" -> navController.navigate("settings/direct_messages") { launchSingleTop = true }
+                                    "debug" -> navController.navigate("settings/debug") { launchSingleTop = true }
                                 }
                             },
                             onBugReportClick = {
@@ -2283,6 +2248,15 @@ fun MyceliumNavigation(
                     AboutScreen(
                         onBackClick = { navController.popBackStack() },
                         onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) }
+                    )
+                }
+
+                composable("settings/debug") {
+                    DebugSettingsScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onEffectsLab = {
+                            navController.navigate("effects_lab") { launchSingleTop = true }
+                        }
                     )
                 }
 
@@ -2534,7 +2508,7 @@ fun MyceliumNavigation(
                             navController.navigate("live_explorer") { launchSingleTop = true }
                         },
                         onCompose = {
-                            navController.navigate("compose") { launchSingleTop = true }
+                            navController.navigate("compose?origin=announcements") { launchSingleTop = true }
                         },
                         draftCount = announcementsDraftsList.size,
                         onDrafts = {
@@ -3272,15 +3246,17 @@ fun MyceliumNavigation(
                 }
 
                 composable(
-                    route = "compose?initialContent={initialContent}&draftId={draftId}",
+                    route = "compose?initialContent={initialContent}&draftId={draftId}&origin={origin}",
                     arguments = listOf(
                         navArgument("initialContent") { type = NavType.StringType; defaultValue = "" },
-                        navArgument("draftId") { type = NavType.StringType; defaultValue = "" }
+                        navArgument("draftId") { type = NavType.StringType; defaultValue = "" },
+                        navArgument("origin") { type = NavType.StringType; defaultValue = "" }
                     )
                 ) { backStackEntry ->
                     val initialContent = backStackEntry.arguments?.getString("initialContent").orEmpty()
                         .let { android.net.Uri.decode(it) }
                     val draftId = backStackEntry.arguments?.getString("draftId")?.takeIf { it.isNotBlank() }
+                    val origin = backStackEntry.arguments?.getString("origin").orEmpty()
                     val composeContext = LocalContext.current
                     val composeStorageManager = remember(composeContext) { RelayStorageManager(composeContext) }
                     val currentAccountForCompose by accountStateViewModel.currentAccount.collectAsState()
@@ -3294,11 +3270,19 @@ fun MyceliumNavigation(
                             composeStorageManager.loadProfiles(pubkey)
                         } ?: emptyList()
                     }
+                    val announcementRelaysForCompose = remember(currentAccountForCompose, origin) {
+                        if (origin == "announcements") {
+                            currentAccountForCompose?.toHexKey()?.let { pubkey ->
+                                composeStorageManager.loadAnnouncementRelays(pubkey)
+                            } ?: emptyList()
+                        } else emptyList()
+                    }
                     ComposeNoteScreen(
                         onBack = { navController.popBackStack() },
                         accountStateViewModel = accountStateViewModel,
                         relayCategories = relayCategoriesForCompose,
                         relayProfiles = relayProfilesForCompose,
+                        announcementRelays = announcementRelaysForCompose,
                         initialContent = initialContent,
                         draftId = draftId
                     )

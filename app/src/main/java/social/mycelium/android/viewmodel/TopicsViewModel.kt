@@ -12,6 +12,7 @@ import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.TopicsRepository
 import social.mycelium.android.repository.TopicNote
 import social.mycelium.android.repository.HashtagStats
+import social.mycelium.android.repository.ScopedModerationRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -201,6 +202,8 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
             val list = ContactListRepository.fetchFollowList(pubkey, relayUrls, forceRefresh = false)
             followListCache = list
             repository.setFollowFilter(list, isFollowing)
+            // Wire WoT follow set into moderation repository for trust-based filtering
+            ScopedModerationRepository.getInstance().setWotFollowSet(list)
         }
     }
 

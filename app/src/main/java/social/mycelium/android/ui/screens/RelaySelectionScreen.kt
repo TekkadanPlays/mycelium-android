@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.outlined.Campaign
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Person
@@ -92,6 +93,10 @@ fun RelaySelectionScreen(
     var expandedSections by remember(sections) {
         mutableStateOf(sections.filter { it.initiallyExpanded }.map { it.id }.toSet())
     }
+
+    // Intercept system back gesture so it returns to the compose screen
+    // instead of popping the navigation stack (which would lose the draft).
+    androidx.activity.compose.BackHandler(onBack = onBack)
 
     Scaffold(
         topBar = {
@@ -360,22 +365,11 @@ private fun ProfileSectionHeader(
                     overflow = TextOverflow.Ellipsis
                 )
                 if (!author.nip05.isNullOrBlank()) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            Icons.Filled.CheckCircle,
-                            contentDescription = "Verified",
-                            modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text = author.nip05,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    social.mycelium.android.ui.components.Nip05Badge(
+                        nip05 = author.nip05,
+                        pubkeyHex = author.id,
+                        showFullIdentifier = true
+                    )
                 }
                 if (subtitle != null) {
                     Text(
@@ -466,7 +460,8 @@ fun buildRelaySections(
     relayCategories: List<RelayCategory> = emptyList(),
     relayProfiles: List<RelayProfile> = emptyList(),
     noteRelayUrls: List<String> = emptyList(),
-    taggedUserInboxes: List<Pair<Author, List<String>>> = emptyList()
+    taggedUserInboxes: List<Pair<Author, List<String>>> = emptyList(),
+    announcementRelays: List<UserRelay> = emptyList()
 ): List<RelaySection> {
     val sections = mutableListOf<RelaySection>()
     val allUsedUrls = mutableSetOf<String>()
@@ -519,6 +514,31 @@ fun buildRelaySections(
             )
         )
         allUsedUrls.addAll(targetInboxRelays)
+    }
+
+    // Announcement relays — prioritized when composing from the announcements tab
+    if (announcementRelays.isNotEmpty()) {
+        val uniqueAnnouncement = announcementRelays.filter { it.url !in allUsedUrls }
+        if (uniqueAnnouncement.isNotEmpty()) {
+            sections.add(
+                RelaySection(
+                    id = "announcement_relays",
+                    title = "Announcement relays",
+                    subtitle = "Where your news is published",
+                    icon = Icons.Outlined.Campaign,
+                    relays = uniqueAnnouncement.map { relay ->
+                        RelayEntry(
+                            url = relay.url,
+                            displayName = relay.displayName,
+                            description = relay.description
+                        )
+                    },
+                    initiallyExpanded = true,
+                    initiallyAllSelected = true
+                )
+            )
+            allUsedUrls.addAll(uniqueAnnouncement.map { it.url })
+        }
     }
 
     // Section 2: Our outbox relays

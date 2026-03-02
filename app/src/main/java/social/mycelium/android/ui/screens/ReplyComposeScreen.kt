@@ -67,6 +67,9 @@ fun ReplyComposeScreen(
         }
         onBack()
     }
+    // Intercept system back gesture to save draft before leaving
+    androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
+
     var showRelayPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val profileCache = remember { ProfileMetadataCache.getInstance() }

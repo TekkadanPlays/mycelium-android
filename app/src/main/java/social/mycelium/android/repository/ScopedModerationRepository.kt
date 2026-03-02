@@ -17,6 +17,19 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
+ * Filter mode for topic-scoped moderation.
+ * Controls how kind:1011 flags affect the topic feed.
+ */
+enum class ModerationFilterMode {
+    /** No filtering — show all notes regardless of moderation flags. */
+    OFF,
+    /** Hide notes/users that exceed a global flag-count threshold. */
+    THRESHOLD,
+    /** Only count flags from users in your follow list (Web of Trust). */
+    WOT
+}
+
+/**
  * NIP-22 Scoped Moderation Repository.
  * Collects kind:1011 events from relays and indexes them by anchor + target.
  * Persists to SharedPreferences so flags survive app restarts.
@@ -60,6 +73,28 @@ class ScopedModerationRepository private constructor() {
     private val _offTopicCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
     val offTopicCounts: StateFlow<Map<String, Int>> = _offTopicCounts.asStateFlow()
 
+    // Observable: map of (anchor#pubkey) -> exclusion count for UI badges
+    private val _userExclusionCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val userExclusionCounts: StateFlow<Map<String, Int>> = _userExclusionCounts.asStateFlow()
+
+    // Filter mode (persisted)
+    private val _filterMode = MutableStateFlow(ModerationFilterMode.THRESHOLD)
+    val filterMode: StateFlow<ModerationFilterMode> = _filterMode.asStateFlow()
+
+    // Threshold: minimum number of flags before content is hidden
+    private val _flagThreshold = MutableStateFlow(2)
+    val flagThreshold: StateFlow<Int> = _flagThreshold.asStateFlow()
+
+    // WoT follow set (pubkeys whose moderation flags we trust)
+    @Volatile private var wotFollowSet: Set<String> = emptySet()
+
+    // Show-anyway overrides: set of "anchor#noteId" or "anchor#pubkey" the user has dismissed
+    private val showAnywayOverrides = mutableSetOf<String>()
+
+    // Observable: version counter that bumps when filter config or overrides change (triggers recomposition)
+    private val _filterVersion = MutableStateFlow(0L)
+    val filterVersion: StateFlow<Long> = _filterVersion.asStateFlow()
+
     @Volatile private var appContext: Context? = null
     private var savePending = false
 
@@ -68,6 +103,10 @@ class ScopedModerationRepository private constructor() {
         private const val PREFS_NAME = "nip22_moderation_cache"
         private const val PREFS_KEY = "moderation_events"
         private const val MAX_CACHED = 500
+        private const val PREFS_KEY_FILTER_MODE = "filter_mode"
+        private const val PREFS_KEY_THRESHOLD = "flag_threshold"
+        private const val PREFS_KEY_OVERRIDES = "show_anyway_overrides"
+        private const val DEFAULT_THRESHOLD = 2
 
         @Volatile
         private var instance: ScopedModerationRepository? = null
@@ -91,7 +130,10 @@ class ScopedModerationRepository private constructor() {
     fun init(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
-        scope.launch { loadFromDisk() }
+        scope.launch {
+            loadFromDisk()
+            loadSettingsFromDisk()
+        }
     }
 
     private fun loadFromDisk() {
@@ -183,13 +225,18 @@ class ScopedModerationRepository private constructor() {
      */
     private fun rebuildObservables() {
         _moderationCount.value = allEvents.size
-        val counts = mutableMapOf<String, Int>()
+        val noteCounts = mutableMapOf<String, Int>()
+        val userCounts = mutableMapOf<String, Int>()
         synchronized(this) {
             for ((key, flaggers) in offTopicFlags) {
-                counts["${key.first}#${key.second}"] = flaggers.size
+                noteCounts["${key.first}#${key.second}"] = flaggers.size
+            }
+            for ((key, excluders) in userExclusions) {
+                userCounts["${key.first}#${key.second}"] = excluders.size
             }
         }
-        _offTopicCounts.value = counts
+        _offTopicCounts.value = noteCounts
+        _userExclusionCounts.value = userCounts
     }
 
     private fun handleModerationEvent(event: Event) {
@@ -220,6 +267,13 @@ class ScopedModerationRepository private constructor() {
             val key = "$anchor#$targetNoteId"
             val count = offTopicFlags[anchor to targetNoteId]?.size ?: 0
             _offTopicCounts.value = _offTopicCounts.value + (key to count)
+        }
+
+        // Update observable user exclusion counts
+        if (targetPubkey != null) {
+            val key = "$anchor#$targetPubkey"
+            val count = userExclusions[anchor to targetPubkey]?.size ?: 0
+            _userExclusionCounts.value = _userExclusionCounts.value + (key to count)
         }
 
         scheduleSaveToDisk()
@@ -267,5 +321,178 @@ class ScopedModerationRepository private constructor() {
      */
     fun getAllModerationEvents(): List<ModerationEvent> {
         return synchronized(this) { allEvents.values.sortedByDescending { it.timestamp } }
+    }
+
+    // ── Filter Mode & WoT ────────────────────────────────────────────────
+
+    fun setFilterMode(mode: ModerationFilterMode) {
+        _filterMode.value = mode
+        _filterVersion.value++
+        saveSettingsToDisk()
+        Log.d(TAG, "Filter mode set to $mode")
+    }
+
+    fun setFlagThreshold(threshold: Int) {
+        _flagThreshold.value = threshold.coerceAtLeast(1)
+        _filterVersion.value++
+        saveSettingsToDisk()
+    }
+
+    /**
+     * Update the WoT follow set. Call when the user's follow list is loaded/refreshed.
+     */
+    fun setWotFollowSet(pubkeys: Set<String>) {
+        wotFollowSet = pubkeys
+        _filterVersion.value++
+        Log.d(TAG, "WoT follow set updated: ${pubkeys.size} pubkeys")
+    }
+
+    // ── Show-Anyway Overrides ────────────────────────────────────────────
+
+    /**
+     * Dismiss moderation for a specific note or user within an anchor.
+     * [key] format: "anchor#noteId" or "anchor#pubkey".
+     */
+    fun addShowAnywayOverride(key: String) {
+        synchronized(this) { showAnywayOverrides.add(key) }
+        _filterVersion.value++
+        saveSettingsToDisk()
+    }
+
+    fun removeShowAnywayOverride(key: String) {
+        synchronized(this) { showAnywayOverrides.remove(key) }
+        _filterVersion.value++
+        saveSettingsToDisk()
+    }
+
+    fun hasShowAnywayOverride(key: String): Boolean {
+        return synchronized(this) { key in showAnywayOverrides }
+    }
+
+    // ── Filtering Queries ────────────────────────────────────────────────
+
+    /**
+     * Check whether a note should be hidden in the given anchor based on current filter mode.
+     * Returns true if the note should be hidden (and no show-anyway override exists).
+     */
+    fun isNoteHidden(anchor: String, noteId: String): Boolean {
+        val mode = _filterMode.value
+        if (mode == ModerationFilterMode.OFF) return false
+
+        val overrideKey = "$anchor#$noteId"
+        if (hasShowAnywayOverride(overrideKey)) return false
+
+        val flaggers = synchronized(this) { offTopicFlags[anchor to noteId] } ?: return false
+        if (flaggers.isEmpty()) return false
+
+        return when (mode) {
+            ModerationFilterMode.OFF -> false
+            ModerationFilterMode.THRESHOLD -> flaggers.size >= _flagThreshold.value
+            ModerationFilterMode.WOT -> {
+                val wot = wotFollowSet
+                if (wot.isEmpty()) false
+                else flaggers.count { it in wot } >= _flagThreshold.value
+            }
+        }
+    }
+
+    /**
+     * Check whether a user should be hidden in the given anchor based on exclusion flags.
+     */
+    fun isUserHidden(anchor: String, pubkey: String): Boolean {
+        val mode = _filterMode.value
+        if (mode == ModerationFilterMode.OFF) return false
+
+        val overrideKey = "${anchor}#user:$pubkey"
+        if (hasShowAnywayOverride(overrideKey)) return false
+
+        val excluders = synchronized(this) { userExclusions[anchor to pubkey] } ?: return false
+        if (excluders.isEmpty()) return false
+
+        return when (mode) {
+            ModerationFilterMode.OFF -> false
+            ModerationFilterMode.THRESHOLD -> excluders.size >= _flagThreshold.value
+            ModerationFilterMode.WOT -> {
+                val wot = wotFollowSet
+                if (wot.isEmpty()) false
+                else excluders.count { it in wot } >= _flagThreshold.value
+            }
+        }
+    }
+
+    /**
+     * Get the effective flag count for a note (respects WoT mode).
+     */
+    fun getEffectiveFlagCount(anchor: String, noteId: String): Int {
+        val flaggers = synchronized(this) { offTopicFlags[anchor to noteId] } ?: return 0
+        return when (_filterMode.value) {
+            ModerationFilterMode.OFF, ModerationFilterMode.THRESHOLD -> flaggers.size
+            ModerationFilterMode.WOT -> {
+                val wot = wotFollowSet
+                if (wot.isEmpty()) flaggers.size else flaggers.count { it in wot }
+            }
+        }
+    }
+
+    /**
+     * Get the effective exclusion count for a user (respects WoT mode).
+     */
+    fun getEffectiveExclusionCount(anchor: String, pubkey: String): Int {
+        val excluders = synchronized(this) { userExclusions[anchor to pubkey] } ?: return 0
+        return when (_filterMode.value) {
+            ModerationFilterMode.OFF, ModerationFilterMode.THRESHOLD -> excluders.size
+            ModerationFilterMode.WOT -> {
+                val wot = wotFollowSet
+                if (wot.isEmpty()) excluders.size else excluders.count { it in wot }
+            }
+        }
+    }
+
+    // ── Settings Persistence ─────────────────────────────────────────────
+
+    private fun loadSettingsFromDisk() {
+        val ctx = appContext ?: return
+        try {
+            val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val modeName = prefs.getString(PREFS_KEY_FILTER_MODE, ModerationFilterMode.THRESHOLD.name)
+            _filterMode.value = try {
+                ModerationFilterMode.valueOf(modeName ?: ModerationFilterMode.THRESHOLD.name)
+            } catch (_: Exception) {
+                ModerationFilterMode.THRESHOLD
+            }
+            _flagThreshold.value = prefs.getInt(PREFS_KEY_THRESHOLD, DEFAULT_THRESHOLD)
+            val overridesJson = prefs.getString(PREFS_KEY_OVERRIDES, null)
+            if (overridesJson != null) {
+                val arr = JSONArray(overridesJson)
+                synchronized(this) {
+                    showAnywayOverrides.clear()
+                    for (i in 0 until arr.length()) {
+                        showAnywayOverrides.add(arr.getString(i))
+                    }
+                }
+            }
+            Log.d(TAG, "Settings loaded: mode=${_filterMode.value} threshold=${_flagThreshold.value} overrides=${showAnywayOverrides.size}")
+        } catch (e: Exception) {
+            Log.e(TAG, "loadSettingsFromDisk failed: ${e.message}", e)
+        }
+    }
+
+    private fun saveSettingsToDisk() {
+        val ctx = appContext ?: return
+        scope.launch {
+            try {
+                val overrides = synchronized(this@ScopedModerationRepository) {
+                    JSONArray(showAnywayOverrides.toList())
+                }
+                ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(PREFS_KEY_FILTER_MODE, _filterMode.value.name)
+                    .putInt(PREFS_KEY_THRESHOLD, _flagThreshold.value)
+                    .putString(PREFS_KEY_OVERRIDES, overrides.toString())
+                    .apply()
+            } catch (e: Exception) {
+                Log.e(TAG, "saveSettingsToDisk failed: ${e.message}", e)
+            }
+        }
     }
 }

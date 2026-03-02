@@ -242,17 +242,41 @@ fun PowerSettingsScreen(
                     .fillMaxWidth()
                     .clickable {
                         try {
+                            // Primary: direct whitelist dialog for this package
                             val intent = android.content.Intent(
                                 android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
                             ).apply {
                                 data = android.net.Uri.parse("package:" + context.packageName)
                             }
-                            context.startActivity(intent)
+                            if (intent.resolveActivity(context.packageManager) != null) {
+                                context.startActivity(intent)
+                            } else {
+                                // Fallback: open battery optimization list
+                                val fallback = android.content.Intent(
+                                    android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                                )
+                                if (fallback.resolveActivity(context.packageManager) != null) {
+                                    context.startActivity(fallback)
+                                } else {
+                                    // Last resort: open app detail settings
+                                    val appSettings = android.content.Intent(
+                                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                    ).apply {
+                                        data = android.net.Uri.parse("package:" + context.packageName)
+                                    }
+                                    context.startActivity(appSettings)
+                                }
+                            }
                         } catch (_: Exception) {
-                            val intent = android.content.Intent(
-                                android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
-                            )
-                            context.startActivity(intent)
+                            // Ultimate fallback: open app detail settings
+                            try {
+                                val appSettings = android.content.Intent(
+                                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS
+                                ).apply {
+                                    data = android.net.Uri.parse("package:" + context.packageName)
+                                }
+                                context.startActivity(appSettings)
+                            } catch (_: Exception) { /* device has no settings at all */ }
                         }
                     }
                     .padding(horizontal = 16.dp, vertical = 14.dp),

@@ -36,7 +36,11 @@ data class NotificationData(
     /** Media URLs (images/videos) found in the notification note content. */
     val mediaUrls: List<String> = emptyList(),
     /** Quoted event IDs (nevent/note1 references) found in the notification note content. */
-    val quotedEventIds: List<String> = emptyList()
+    val quotedEventIds: List<String> = emptyList(),
+    /** NIP-58 badge name (from kind 30009 definition) for BADGE_AWARD notifications. */
+    val badgeName: String? = null,
+    /** NIP-58 badge image URL (thumb or image from kind 30009 definition) for BADGE_AWARD notifications. */
+    val badgeImageUrl: String? = null
 )
 
 enum class NotificationType {
@@ -49,5 +53,6 @@ enum class NotificationType {
     DM,
     HIGHLIGHT,
     REPORT,
-    QUOTE
+    QUOTE,
+    BADGE_AWARD
 }

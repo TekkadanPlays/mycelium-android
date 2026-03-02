@@ -117,6 +117,14 @@ fun SettingsScreen(
             SettingsItem(icon = Icons.Outlined.BugReport, title = "Report a Bug", onClick = onBugReportClick)
             SettingsItem(icon = Icons.Outlined.Info, title = "About", onClick = { onNavigateTo("about") })
 
+            if (BuildConfig.DEBUG) {
+                HorizontalDivider(
+                    thickness = 1.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                )
+                SettingsItem(icon = Icons.Outlined.Code, title = "Debug", onClick = { onNavigateTo("debug") })
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
         }
 

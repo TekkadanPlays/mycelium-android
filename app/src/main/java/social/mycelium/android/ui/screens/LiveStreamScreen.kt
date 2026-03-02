@@ -85,9 +85,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.ui.text.input.ImeAction
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.outlined.Router
 import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.data.LiveActivityStatus
@@ -292,20 +289,47 @@ fun LiveStreamScreen(
 
     // ── Relay orb tap navigates to relay log page via onRelayNavigate callback ──
 
-    // ── Chat relay selector: default all activity relays enabled ──
-    var chatRelayEnabled by remember(activity.relayUrls) {
-        mutableStateOf(activity.relayUrls.associateWith { true })
+    // ── Chat relay selector: default all activity relays selected ──
+    var chatSelectedRelayUrls by remember(activity.relayUrls) {
+        mutableStateOf(activity.relayUrls.toSet())
     }
-    val enabledChatRelays = chatRelayEnabled.filter { it.value }.keys
+    var showChatRelayPicker by remember { mutableStateOf(false) }
+
+    // Build relay sections for the selection screen
+    val chatRelaySections = remember(activity.relayUrls) {
+        if (activity.relayUrls.isEmpty()) emptyList()
+        else listOf(
+            RelaySection(
+                id = "live_activity_relays",
+                title = "Broadcast relays",
+                subtitle = "Relays from the live activity event",
+                icon = Icons.Outlined.Router,
+                relays = activity.relayUrls.map { url ->
+                    RelayEntry(
+                        url = url,
+                        displayName = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                        description = "NIP-53 relay"
+                    )
+                },
+                initiallyExpanded = true,
+                initiallyAllSelected = true
+            )
+        )
+    }
 
     // ── Live Chat (kind:1311) ──
     val chatRepository = remember { LiveChatRepository.getInstance() }
     val chatMessages by chatRepository.messages.collectAsState()
 
-    // Subscribe to chat messages for this activity
+    // Subscribe to chat messages for this activity using selected relays
     val activityAddress = remember(activity) { "30311:${activity.hostPubkey}:${activity.dTag}" }
-    DisposableEffect(activityAddress, activity.relayUrls) {
-        chatRepository.subscribe(activityAddress, activity.relayUrls)
+    LaunchedEffect(Unit) {
+        chatRepository.setCacheRelayUrls(activity.relayUrls)
+    }
+    DisposableEffect(activityAddress, chatSelectedRelayUrls) {
+        val relays = chatSelectedRelayUrls.toList().ifEmpty { activity.relayUrls }
+        Log.d("LiveStreamScreen", "Chat subscribe: addr=$activityAddress, relays=${relays.size}: ${relays.joinToString()}")
+        chatRepository.subscribe(activityAddress, relays)
         onDispose { chatRepository.unsubscribe() }
     }
 
@@ -323,7 +347,21 @@ fun LiveStreamScreen(
         onBackClick()
     }
 
-    BackHandler { handleBack() }
+    BackHandler { if (showChatRelayPicker) showChatRelayPicker = false else handleBack() }
+
+    // ── Chat relay picker overlay ──
+    if (showChatRelayPicker) {
+        RelaySelectionScreen(
+            title = "Chat relays",
+            sections = chatRelaySections,
+            onConfirm = { selected ->
+                chatSelectedRelayUrls = selected
+                showChatRelayPicker = false
+            },
+            onBack = { showChatRelayPicker = false }
+        )
+        return
+    }
 
     Scaffold(
         topBar = {
@@ -470,7 +508,15 @@ fun LiveStreamScreen(
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                     )
                 }
-                androidx.compose.animation.AnimatedVisibility(visible = bioExpanded) {
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = bioExpanded,
+                    enter = androidx.compose.animation.expandVertically(
+                        expandFrom = Alignment.Top
+                    ) + androidx.compose.animation.fadeIn(),
+                    exit = androidx.compose.animation.shrinkVertically(
+                        shrinkTowards = Alignment.Top
+                    ) + androidx.compose.animation.fadeOut()
+                ) {
                     Column(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 4.dp)) {
                         Text(
                             text = activity.summary,
@@ -554,16 +600,12 @@ fun LiveStreamScreen(
             LiveChatInput(
                 onSend = { text ->
                     val addr = "30311:${activity.hostPubkey}:${activity.dTag}"
-                    accountStateViewModel.publishLiveChatMessage(text, addr, enabledChatRelays)
+                    accountStateViewModel.publishLiveChatMessage(text, addr, chatSelectedRelayUrls)
                 },
                 enabled = activity.status == LiveActivityStatus.LIVE,
-                relayUrls = activity.relayUrls,
-                relayEnabled = chatRelayEnabled,
-                onRelayToggle = { url ->
-                    chatRelayEnabled = chatRelayEnabled.toMutableMap().apply {
-                        this[url] = !(this[url] ?: true)
-                    }
-                },
+                selectedRelayCount = chatSelectedRelayUrls.size,
+                totalRelayCount = activity.relayUrls.size,
+                onRelayPickerClick = { showChatRelayPicker = true },
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
             )
         }
@@ -877,75 +919,38 @@ private fun LiveChatMessageRow(
 
 /**
  * Chat input field with relay selector button (left) and send button (right).
- * The relay button opens a dropdown showing each relay with a checkbox toggle.
+ * The relay button opens the dedicated RelaySelectionScreen overlay.
  */
 @Composable
 private fun LiveChatInput(
     onSend: (String) -> Unit,
     enabled: Boolean,
-    relayUrls: List<String>,
-    relayEnabled: Map<String, Boolean>,
-    onRelayToggle: (String) -> Unit,
+    selectedRelayCount: Int,
+    totalRelayCount: Int,
+    onRelayPickerClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var text by remember { mutableStateOf("") }
-    var showRelayMenu by remember { mutableStateOf(false) }
-    val enabledCount = relayEnabled.count { it.value }
 
     Row(
         modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Relay selector button
-        Box {
-            IconButton(
-                onClick = { showRelayMenu = true },
-                enabled = enabled,
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(
-                    Icons.Outlined.Router,
-                    contentDescription = "Select relays ($enabledCount/${relayUrls.size})",
-                    tint = if (enabledCount == relayUrls.size)
-                        MaterialTheme.colorScheme.primary
-                    else
-                        MaterialTheme.colorScheme.error,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            DropdownMenu(
-                expanded = showRelayMenu,
-                onDismissRequest = { showRelayMenu = false },
-                modifier = Modifier.heightIn(max = 300.dp)
-            ) {
-                relayUrls.forEach { url ->
-                    val isEnabled = relayEnabled[url] ?: true
-                    val displayName = url
-                        .removePrefix("wss://")
-                        .removePrefix("ws://")
-                        .trimEnd('/')
-                    DropdownMenuItem(
-                        text = {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(
-                                    checked = isEnabled,
-                                    onCheckedChange = { onRelayToggle(url) },
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    text = displayName,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        },
-                        onClick = { onRelayToggle(url) }
-                    )
-                }
-            }
+        // Relay selector button — opens dedicated RelaySelectionScreen
+        IconButton(
+            onClick = onRelayPickerClick,
+            enabled = enabled,
+            modifier = Modifier.size(36.dp)
+        ) {
+            Icon(
+                Icons.Outlined.Router,
+                contentDescription = "Select relays ($selectedRelayCount/$totalRelayCount)",
+                tint = if (selectedRelayCount == totalRelayCount)
+                    MaterialTheme.colorScheme.primary
+                else
+                    MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(20.dp)
+            )
         }
 
         Spacer(Modifier.width(4.dp))
@@ -971,7 +976,7 @@ private fun LiveChatInput(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(
                 onSend = {
-                    if (text.isNotBlank() && enabledCount > 0) {
+                    if (text.isNotBlank() && selectedRelayCount > 0) {
                         onSend(text.trim())
                         text = ""
                     }
@@ -983,18 +988,18 @@ private fun LiveChatInput(
 
         IconButton(
             onClick = {
-                if (text.isNotBlank() && enabledCount > 0) {
+                if (text.isNotBlank() && selectedRelayCount > 0) {
                     onSend(text.trim())
                     text = ""
                 }
             },
-            enabled = enabled && text.isNotBlank() && enabledCount > 0,
+            enabled = enabled && text.isNotBlank() && selectedRelayCount > 0,
             modifier = Modifier.size(36.dp)
         ) {
             Icon(
                 Icons.AutoMirrored.Filled.Send,
                 contentDescription = "Send",
-                tint = if (enabled && text.isNotBlank() && enabledCount > 0)
+                tint = if (enabled && text.isNotBlank() && selectedRelayCount > 0)
                     MaterialTheme.colorScheme.primary
                 else
                     MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),

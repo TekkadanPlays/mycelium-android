@@ -84,6 +84,7 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.foundation.shape.RoundedCornerShape
 import social.mycelium.android.ui.icons.ChatBubbleOutline
+import social.mycelium.android.repository.ModerationFilterMode
 import social.mycelium.android.repository.ScopedModerationRepository
 import java.text.SimpleDateFormat
 import java.util.*
@@ -140,9 +141,12 @@ fun TopicsScreen(
         onDrawerStateChanged(drawerState.isOpen)
     }
 
-    // NIP-22: Observe scoped moderation state for off-topic badges
+    // NIP-22: Observe scoped moderation state for off-topic badges and filtering
     val moderationRepo = remember { ScopedModerationRepository.getInstance() }
     val offTopicCounts by moderationRepo.offTopicCounts.collectAsState()
+    val userExclusionCounts by moderationRepo.userExclusionCounts.collectAsState()
+    val moderationFilterMode by moderationRepo.filterMode.collectAsState()
+    val moderationFilterVersion by moderationRepo.filterVersion.collectAsState()
 
     // NIP-22: Observe anchor subscriptions (kind:30073 favorites)
     val subscribedAnchors by accountStateViewModel.getSubscribedAnchors().collectAsState()
@@ -802,61 +806,179 @@ fun TopicsScreen(
                                     }
                                 }
                             } else {
+                                // NIP-22: compute anchor from selected hashtag for moderation
+                                val anchor = "#${selectedHashtag?.lowercase() ?: ""}"
+
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier.fillMaxSize(),
                                     contentPadding = PaddingValues(top = 4.dp, bottom = 80.dp)
                                 ) {
+                                    // Moderation filter indicator chip
+                                    if (moderationFilterMode != ModerationFilterMode.OFF) {
+                                        item(key = "moderation_filter_indicator") {
+                                            val hiddenCount = remember(topicsUiState.topicsForSelectedHashtag, moderationFilterVersion) {
+                                                topicsUiState.topicsForSelectedHashtag.count { t ->
+                                                    moderationRepo.isNoteHidden(anchor, t.id) || moderationRepo.isUserHidden(anchor, t.author.id)
+                                                }
+                                            }
+                                            if (hiddenCount > 0) {
+                                                Surface(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Flag,
+                                                            contentDescription = null,
+                                                            modifier = Modifier.size(14.dp),
+                                                            tint = MaterialTheme.colorScheme.error
+                                                        )
+                                                        Spacer(Modifier.width(6.dp))
+                                                        Text(
+                                                            text = "$hiddenCount hidden by moderation",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.error
+                                                        )
+                                                        Spacer(Modifier.weight(1f))
+                                                        Text(
+                                                            text = when (moderationFilterMode) {
+                                                                ModerationFilterMode.THRESHOLD -> "Threshold"
+                                                                ModerationFilterMode.WOT -> "Web of Trust"
+                                                                else -> ""
+                                                            },
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     items(
                                         items = topicsUiState.topicsForSelectedHashtag,
                                         key = { it.id }
                                     ) { topic ->
-                                        val note = topic.toNote()
-                                        // NIP-22: compute anchor from selected hashtag for moderation
-                                        val anchor = "#${selectedHashtag?.lowercase() ?: ""}"
-                                        val moderationMenuItems = listOf<Pair<String, () -> Unit>>(
-                                            "Flag Off-Topic" to {
-                                                accountStateViewModel.publishOffTopicModeration(anchor, topic.id)
-                                                Unit
-                                            },
-                                            "Exclude User" to {
-                                                accountStateViewModel.publishUserExclusion(anchor, topic.author.id)
-                                                Unit
+                                        // NIP-22: Check moderation status for this topic
+                                        val isNoteHidden = remember(topic.id, moderationFilterVersion) {
+                                            moderationRepo.isNoteHidden(anchor, topic.id)
+                                        }
+                                        val isUserHidden = remember(topic.author.id, moderationFilterVersion) {
+                                            moderationRepo.isUserHidden(anchor, topic.author.id)
+                                        }
+                                        val isHidden = isNoteHidden || isUserHidden
+
+                                        if (isHidden) {
+                                            // Collapsed moderation placeholder with "Show anyway"
+                                            ModerationHiddenPlaceholder(
+                                                reason = when {
+                                                    isNoteHidden -> "Flagged off-topic"
+                                                    isUserHidden -> "User excluded from topic"
+                                                    else -> "Hidden by moderation"
+                                                },
+                                                flagCount = if (isNoteHidden) {
+                                                    moderationRepo.getEffectiveFlagCount(anchor, topic.id)
+                                                } else {
+                                                    moderationRepo.getEffectiveExclusionCount(anchor, topic.author.id)
+                                                },
+                                                onShowAnyway = {
+                                                    val key = if (isNoteHidden) "$anchor#${topic.id}" else "${anchor}#user:${topic.author.id}"
+                                                    moderationRepo.addShowAnywayOverride(key)
+                                                }
+                                            )
+                                        } else {
+                                            val note = topic.toNote()
+                                            val noteFlagCount = moderationRepo.getEffectiveFlagCount(anchor, topic.id)
+                                            val moderationMenuItems = listOf<Pair<String, () -> Unit>>(
+                                                "Flag Off-Topic" to {
+                                                    accountStateViewModel.publishOffTopicModeration(anchor, topic.id)
+                                                    Unit
+                                                },
+                                                "Exclude User" to {
+                                                    accountStateViewModel.publishUserExclusion(anchor, topic.author.id)
+                                                    Unit
+                                                }
+                                            )
+                                            // Show flag badge inline if note has flags but is below threshold
+                                            if (noteFlagCount > 0) {
+                                                Box {
+                                                    NoteCard(
+                                                        note = note,
+                                                        onNoteClick = {
+                                                            onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
+                                                        },
+                                                        onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                        onReact = { reactedNote, emoji ->
+                                                            accountStateViewModel.sendReaction(reactedNote, emoji)
+                                                        },
+                                                        onProfileClick = onProfileClick,
+                                                        onImageTap = { n, urls, idx ->
+                                                            onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
+                                                        },
+                                                        onZap = { noteId, amount ->
+                                                            accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                                                        },
+                                                        onCustomZapSend = { n, amount, zapType, msg ->
+                                                            accountStateViewModel.sendZap(n, amount, zapType, msg)
+                                                        },
+                                                        onVote = { noteId, authorPubkey, direction ->
+                                                            accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
+                                                        },
+                                                        ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
+                                                        voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
+                                                        shouldCloseZapMenus = shouldCloseZapMenus,
+                                                        onZapSettings = { onNavigateToZapSettings() },
+                                                        onRelayClick = onRelayClick,
+                                                        accountNpub = currentAccount?.npub,
+                                                        extraMoreMenuItems = moderationMenuItems,
+                                                        actionRowSchema = ActionRowSchema.KIND11_FEED,
+                                                        showHashtagsSection = false,
+                                                        moderationFlagCount = noteFlagCount,
+                                                        modifier = Modifier.fillMaxWidth()
+                                                    )
+                                                }
+                                            } else {
+                                                NoteCard(
+                                                    note = note,
+                                                    onNoteClick = {
+                                                        onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
+                                                    },
+                                                    onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                    onReact = { reactedNote, emoji ->
+                                                        accountStateViewModel.sendReaction(reactedNote, emoji)
+                                                    },
+                                                    onProfileClick = onProfileClick,
+                                                    onImageTap = { n, urls, idx ->
+                                                        onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
+                                                    },
+                                                    onZap = { noteId, amount ->
+                                                        accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                                                    },
+                                                    onCustomZapSend = { n, amount, zapType, msg ->
+                                                        accountStateViewModel.sendZap(n, amount, zapType, msg)
+                                                    },
+                                                    onVote = { noteId, authorPubkey, direction ->
+                                                        accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
+                                                    },
+                                                    ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
+                                                    voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
+                                                    shouldCloseZapMenus = shouldCloseZapMenus,
+                                                    onZapSettings = { onNavigateToZapSettings() },
+                                                    onRelayClick = onRelayClick,
+                                                    accountNpub = currentAccount?.npub,
+                                                    extraMoreMenuItems = moderationMenuItems,
+                                                    actionRowSchema = ActionRowSchema.KIND11_FEED,
+                                                    showHashtagsSection = false,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                )
                                             }
-                                        )
-                                        NoteCard(
-                                            note = note,
-                                            onNoteClick = {
-                                                onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
-                                            },
-                                            onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
-                                            onReact = { reactedNote, emoji ->
-                                                accountStateViewModel.sendReaction(reactedNote, emoji)
-                                            },
-                                            onProfileClick = onProfileClick,
-                                            onImageTap = { n, urls, idx ->
-                                                onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
-                                            },
-                                            onZap = { noteId, amount ->
-                                                accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
-                                            },
-                                            onCustomZapSend = { n, amount, zapType, msg ->
-                                                accountStateViewModel.sendZap(n, amount, zapType, msg)
-                                            },
-                                            onVote = { noteId, authorPubkey, direction ->
-                                                accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
-                                            },
-                                            ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
-                                            voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
-                                            shouldCloseZapMenus = shouldCloseZapMenus,
-                                            onZapSettings = { onNavigateToZapSettings() },
-                                            onRelayClick = onRelayClick,
-                                            accountNpub = currentAccount?.npub,
-                                            extraMoreMenuItems = moderationMenuItems,
-                                            actionRowSchema = ActionRowSchema.KIND11_FEED,
-                                            showHashtagsSection = false,
-                                            modifier = Modifier.fillMaxWidth()
-                                        )
+                                        }
                                     }
                                 }
                             }
@@ -892,6 +1014,65 @@ fun TopicsScreen(
 }
 
 
+
+/**
+ * Collapsed placeholder shown for notes/users hidden by NIP-22 scoped moderation.
+ * Shows reason, flag count, and a "Show anyway" text button.
+ */
+@Composable
+private fun ModerationHiddenPlaceholder(
+    reason: String,
+    flagCount: Int,
+    onShowAnyway: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+        shape = RectangleShape
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Flag,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = reason,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
+                )
+                if (flagCount > 0) {
+                    Text(
+                        text = "$flagCount flag${if (flagCount != 1) "s" else ""}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(
+                    text = "Show anyway",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable(onClick = onShowAnyway)
+                )
+            }
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                thickness = 0.5.dp
+            )
+        }
+    }
+}
 
 /**
  * Hashtag card displaying statistics - true edge-to-edge like NoteCard feed cards

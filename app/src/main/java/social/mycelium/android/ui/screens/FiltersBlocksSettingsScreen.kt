@@ -77,6 +77,83 @@ fun FiltersBlocksSettingsScreen(
 
             HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
 
+            // ── Topic Moderation (NIP-22) ──
+            FiltersBlocksSectionHeader("Topic Moderation")
+
+            val moderationRepo = remember { social.mycelium.android.repository.ScopedModerationRepository.getInstance() }
+            val currentFilterMode by moderationRepo.filterMode.collectAsState()
+            val currentThreshold by moderationRepo.flagThreshold.collectAsState()
+            val moderationCount by moderationRepo.moderationCount.collectAsState()
+
+            Text(
+                text = "Control how kind:1011 moderation flags affect topic feeds. " +
+                    "${if (moderationCount > 0) "$moderationCount moderation events collected." else "No moderation events yet."}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+
+            social.mycelium.android.repository.ModerationFilterMode.entries.forEach { mode ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = currentFilterMode == mode,
+                        onClick = { moderationRepo.setFilterMode(mode) }
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = when (mode) {
+                                social.mycelium.android.repository.ModerationFilterMode.OFF -> "Off"
+                                social.mycelium.android.repository.ModerationFilterMode.THRESHOLD -> "Threshold"
+                                social.mycelium.android.repository.ModerationFilterMode.WOT -> "Web of Trust"
+                            },
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Text(
+                            text = when (mode) {
+                                social.mycelium.android.repository.ModerationFilterMode.OFF -> "Show all notes regardless of moderation flags"
+                                social.mycelium.android.repository.ModerationFilterMode.THRESHOLD -> "Hide notes/users that exceed a flag count threshold"
+                                social.mycelium.android.repository.ModerationFilterMode.WOT -> "Only count flags from people you follow"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Threshold picker (only visible when not OFF)
+            if (currentFilterMode != social.mycelium.android.repository.ModerationFilterMode.OFF) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Flag threshold",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.weight(1f)
+                    )
+                    listOf(1, 2, 3, 5).forEach { threshold ->
+                        val selected = currentThreshold == threshold
+                        FilterChip(
+                            selected = selected,
+                            onClick = { moderationRepo.setFlagThreshold(threshold) },
+                            label = { Text("$threshold") },
+                            modifier = Modifier.padding(horizontal = 2.dp)
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
             // ── Mute Lists ──
             FiltersBlocksSectionHeader("Mute Lists")
 

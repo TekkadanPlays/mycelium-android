@@ -3,7 +3,9 @@ package social.mycelium.android.services
 import android.app.NotificationChannel
 import android.app.NotificationChannelGroup
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -173,12 +175,24 @@ object NotificationChannelManager {
         } else {
             "Keeping relay connections active"
         }
+        // PendingIntent to open the app when the notification is tapped.
+        // Also signals to the OS that this is a legitimate user-facing foreground service,
+        // preventing the process from being reclassified as oom_cached and frozen.
+        val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        val pendingIntent = if (launchIntent != null) {
+            PendingIntent.getActivity(
+                context, 0, launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        } else null
+
         return NotificationCompat.Builder(context, CHANNEL_RELAY_SERVICE)
             .setContentTitle("Mycelium is running")
             .setContentText(contentText)
             .setSmallIcon(social.mycelium.android.R.drawable.ic_notification_network)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .apply { if (pendingIntent != null) setContentIntent(pendingIntent) }
             .build()
     }
 

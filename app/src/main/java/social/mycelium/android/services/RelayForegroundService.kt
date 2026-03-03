@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.repository.NotesRepository
@@ -32,11 +33,20 @@ class RelayForegroundService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     @Volatile private var initialized = false
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onCreate() {
         super.onCreate()
         // Ensure all channels exist (idempotent)
         NotificationChannelManager.createChannels(this)
+        // Acquire a partial wake lock to prevent the CPU from sleeping.
+        // Without this, the OS freezes the process as oom_cached and
+        // WebSocket connections go silent — no events, no notifications.
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Mycelium::RelayService").apply {
+            acquire()
+        }
+        Log.d(TAG, "Wake lock acquired")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -116,11 +126,22 @@ class RelayForegroundService : Service() {
             }
         }
 
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onDestroy() {
         serviceScope.cancel()
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    Log.d(TAG, "Wake lock released")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Wake lock release failed: ${e.message}")
+        }
+        wakeLock = null
         super.onDestroy()
     }
 

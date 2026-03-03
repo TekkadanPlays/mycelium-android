@@ -557,7 +557,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000, noteId = eTag)
+        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id, eventEpochSec = ts / 1000, noteId = eTag)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
     }
@@ -896,7 +896,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000, noteId = repostedNoteId)
+        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id, eventEpochSec = ts / 1000, noteId = repostedNoteId)
         // Always fetch the reposted note so flushTargetFetchBatch can verify authorship
         // (even if we parsed it from content — content parsing doesn't verify it's OUR note)
         scope.launch { fetchAndSetTargetNote(repostedNoteId, data.id) { d -> { n -> d.copy(targetNote = n) } } }
@@ -961,7 +961,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000, noteId = eTag)
+        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id, eventEpochSec = ts / 1000, noteId = eTag)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
     }

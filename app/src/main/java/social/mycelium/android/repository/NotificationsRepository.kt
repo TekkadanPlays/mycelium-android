@@ -183,8 +183,13 @@ object NotificationsRepository {
             NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS to prefs.notifyZaps.value
             NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS to prefs.notifyReposts.value
             NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
+            NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
+            NotificationType.HIGHLIGHT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
             NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS to prefs.notifyDMs.value
-            else -> return
+            else -> {
+                Log.d(TAG, "fireNotif SKIPPED (no channel for type): type=$type suffix=${notifIdSuffix.take(8)}")
+                return
+            }
         }
         if (!allowed) {
             Log.d(TAG, "fireNotif SUPPRESSED (channel disabled): type=$type channel=$channelId suffix=${notifIdSuffix.take(8)}")

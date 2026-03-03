@@ -120,3 +120,10 @@ dev_notes/
 
 # Benchmark module (unused)
 benchmark/
+
+# External cloned repos (not part of this project)
+Player/
+Scarlet/
+nextplayer/
+outbox/
+primal-android-app/

@@ -1,0 +1,3 @@
+[submodule "cybin"]
+	path = cybin
+	url = https://github.com/tekkadanplays/cybin

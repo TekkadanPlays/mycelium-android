@@ -568,10 +568,10 @@ fun MyceliumNavigation(
             NotificationsRepository.setCacheRelayUrls(indexerUrls)
             NotificationsRepository.startSubscription(pubkey, inboxUrls, outboxUrls, categoryUrls)
             Log.d("MyceliumNav", "Notif subscription started: inbox=${inboxUrls.size}, outbox=${outboxUrls.size}, categories=${categoryUrls.size}")
-            // Enable Android push notifications after initial event replay settles (10s)
-            // so old events from relay reconnect don't spam the notification shade
+            // Enable Android push notifications after a brief delay for subscription setup.
+            // seenEventIds dedup in handleEvent prevents replayed events from re-firing.
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                kotlinx.coroutines.delay(10_000L)
+                kotlinx.coroutines.delay(2_000L)
                 NotificationsRepository.enableAndroidNotifications()
                 Log.d("MyceliumNav", "Android push notifications enabled (initial replay settled)")
             }

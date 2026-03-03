@@ -36,9 +36,9 @@ object NotificationChannelManager {
     const val CHANNEL_REPLIES = "mycelium_replies"
     const val CHANNEL_COMMENTS = "mycelium_comments"
     const val CHANNEL_MENTIONS = "mycelium_mentions"
-    const val CHANNEL_REACTIONS = "mycelium_reactions"
+    const val CHANNEL_REACTIONS = "mycelium_reactions_v2"
     const val CHANNEL_ZAPS = "mycelium_zaps"
-    const val CHANNEL_REPOSTS = "mycelium_reposts"
+    const val CHANNEL_REPOSTS = "mycelium_reposts_v2"
     const val CHANNEL_DMS = "mycelium_dms"
 
     // ── Channel Group IDs ──
@@ -114,10 +114,9 @@ object NotificationChannelManager {
             description = "When someone mentions you in a note"
         }
 
-        // Delete old LOW-importance channels so Android re-creates with updated importance
-        // (Android caches channel importance — recreating with same ID won't change it)
-        manager.deleteNotificationChannel(CHANNEL_REACTIONS)
-        manager.deleteNotificationChannel(CHANNEL_REPOSTS)
+        // Delete old LOW-importance v1 channels (Android caches importance per channel ID)
+        manager.deleteNotificationChannel("mycelium_reactions")
+        manager.deleteNotificationChannel("mycelium_reposts")
 
         val reactionsChannel = NotificationChannel(
             CHANNEL_REACTIONS,

@@ -286,11 +286,16 @@ class OutboxFeedManager private constructor() {
         }
         val selectionPool = candidateRelays.ifEmpty { relayToAuthors }
 
-        // Rank by Thompson Sampling score (delivery quality × popularity), cap at MAX_OUTBOX_RELAYS
+        // Pre-compute Thompson Sampling scores — each call is stochastic, so we must
+        // sample once and sort by the cached value. Re-evaluating inside the comparator
+        // violates TimSort's transitivity contract (different random draw each call).
+        val precomputedScores = selectionPool.entries.associate { entry ->
+            entry.key to RelayDeliveryTracker.sampleScore(entry.key, entry.value.size)
+        }
+
+        // Rank by pre-computed score (delivery quality × popularity), cap at MAX_OUTBOX_RELAYS
         val greedyRanked = selectionPool.entries
-            .sortedByDescending { entry ->
-                RelayDeliveryTracker.sampleScore(entry.key, entry.value.size)
-            }
+            .sortedByDescending { entry -> precomputedScores[entry.key] ?: 0.0 }
             .take(MAX_OUTBOX_RELAYS)
 
         // Phase 3a: Ensure per-author diversity — authors only on niche relays may be
@@ -306,7 +311,7 @@ class OutboxFeedManager private constructor() {
                 if (selectedUrls.size >= MAX_OUTBOX_RELAYS + DIVERSITY_BUDGET) break
                 val bestRelay = selectionPool.entries
                     .filter { pubkey in it.value && it.key !in selectedUrls }
-                    .maxByOrNull { RelayDeliveryTracker.sampleScore(it.key, it.value.size) }
+                    .maxByOrNull { precomputedScores[it.key] ?: 0.0 }
                 if (bestRelay != null) {
                     diversityRelays.add(bestRelay)
                     selectedUrls.add(bestRelay.key)

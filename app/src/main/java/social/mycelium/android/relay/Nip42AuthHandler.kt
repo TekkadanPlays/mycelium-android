@@ -51,16 +51,16 @@ class Nip42AuthHandler(
     val authStatusByRelay: StateFlow<Map<String, AuthStatus>> = _authStatusByRelay.asStateFlow()
 
     /** Track which challenge strings we've already responded to (avoid infinite loops). */
-    private val respondedChallenges = mutableSetOf<ChallengeKey>()
+    private val respondedChallenges = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<ChallengeKey, Boolean>())
 
     /** Track event IDs we sent for auth so we can match OK responses. */
-    private val pendingAuthEventIds = mutableSetOf<String>()
+    private val pendingAuthEventIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     /** Events awaiting auth retry, keyed by relay URL. */
-    private val pendingReplayEvents = mutableMapOf<String, MutableList<Event>>()
+    private val pendingReplayEvents = java.util.concurrent.ConcurrentHashMap<String, MutableList<Event>>()
 
     /** Recent events for lookup by event ID (30s TTL). */
-    private val recentEvents = mutableMapOf<String, Pair<Event, Long>>()
+    private val recentEvents = java.util.concurrent.ConcurrentHashMap<String, Pair<Event, Long>>()
 
     private val RECENT_EVENT_TTL_MS = 30_000L
 
@@ -104,11 +104,11 @@ class Nip42AuthHandler(
     }
 
     /** Rate-limit "no signer" warnings: last log time per relay URL. */
-    private val lastNoSignerLogMs = mutableMapOf<String, Long>()
+    private val lastNoSignerLogMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val NO_SIGNER_LOG_INTERVAL_MS = 30_000L
 
     /** Per-relay cooldown after a failed AUTH attempt to avoid spamming Amber. */
-    private val authFailCooldownMs = mutableMapOf<String, Long>()
+    private val authFailCooldownMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val AUTH_FAIL_COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
 
     private fun handleAuthChallenge(url: String, challenge: String) {
@@ -209,8 +209,8 @@ class Nip42AuthHandler(
     fun trackPublishedEvent(event: Event, relayUrls: Set<String>) {
         val now = System.currentTimeMillis()
         recentEvents[event.id] = event to now
-        // Prune expired entries
-        recentEvents.entries.removeAll { now - it.value.second > RECENT_EVENT_TTL_MS }
+        // Prune expired entries (ConcurrentHashMap iterator is weakly consistent — safe)
+        recentEvents.keys.removeAll { id -> recentEvents[id]?.let { now - it.second > RECENT_EVENT_TTL_MS } == true }
     }
 
     /**

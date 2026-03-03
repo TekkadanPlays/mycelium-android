@@ -140,7 +140,10 @@ object RelayDeliveryTracker {
         }
 
         // Combine delivery quality with popularity (log-scaled to avoid pure popularity dominance)
-        return deliveryScore * (1.0 + ln(authorCount.toDouble().coerceAtLeast(1.0)))
+        val score = deliveryScore * (1.0 + ln(authorCount.toDouble().coerceAtLeast(1.0)))
+        // Guard against NaN/Infinity — TimSort requires a total order (transitivity).
+        // NaN breaks compareTo and causes "Comparison method violates its general contract!"
+        return if (score.isFinite()) score else 0.0
     }
 
     /**

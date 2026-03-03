@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
@@ -556,11 +557,14 @@ fun AdaptiveHeader(
                     } else {
                         // Signed in - show user avatar with dropdown menu
                         var showMenu by remember { mutableStateOf(false) }
-                        // Cache the avatar bitmap across recompositions so it never flashes
-                        // back to the placeholder when navigating between pages.
-                        val avatarModel = remember(userAvatarUrl) {
-                            userAvatarUrl?.takeIf { it.isNotBlank() }
+                        // Persist the last known avatar URL across lifecycle stops so that
+                        // navigating back never flashes the letter placeholder while Coil
+                        // loads from memory cache.
+                        var savedAvatarUrl by rememberSaveable { mutableStateOf(userAvatarUrl) }
+                        if (userAvatarUrl != null && userAvatarUrl.isNotBlank()) {
+                            savedAvatarUrl = userAvatarUrl
                         }
+                        val avatarModel = savedAvatarUrl?.takeIf { it.isNotBlank() }
 
                         Box {
                             IconButton(onClick = { showMenu = true }) {

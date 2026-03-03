@@ -282,7 +282,8 @@ object NotificationsRepository {
             notificationsById.clear()
             seenEventIds.clear()
             likeByTargetId.clear()
-            likeEmojiByTargetId.clear()
+            likeEmojisByTargetId.clear()
+            likeCustomEmojiUrls.clear()
             repostByTargetId.clear()
             zapByTargetId.clear()
             myTopicIds.clear()
@@ -400,6 +401,32 @@ object NotificationsRepository {
         NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT, NOTIFICATION_KIND_BADGE_AWARD
     )
 
+    /**
+     * Public entry point for cross-pollination: other event pipelines (feed, thread replies)
+     * can forward events here so notification state stays up-to-date even when the dedicated
+     * BACKGROUND notification subscription is preempted by higher-priority relay slots.
+     *
+     * Performs a client-side relevance check before forwarding to handleEvent():
+     * - p-tag matches our pubkey (replies, reactions, zaps, reposts TO us)
+     * - E-tag matches one of our kind-11 topic IDs (kind-1111 thread replies)
+     * - q-tag matches one of our kind-1 note IDs (quote posts)
+     * This mirrors the relay-side filters used by the dedicated notification subscriptions.
+     */
+    fun ingestEvent(event: Event) {
+        if (event.kind !in ACCEPTED_KINDS) return
+        val pubkey = myPubkeyHex ?: return
+        // Skip own events — we don't notify ourselves
+        if (event.pubKey == pubkey) return
+        // Check relevance: does this event reference us?
+        val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
+        val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
+                event.tags.any { it.size >= 2 && it[0] == "E" && it[1] in myTopicIds }
+        val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
+                event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
+        if (!hasPTag && !hasETag && !hasQTag) return
+        handleEvent(event)
+    }
+
     private fun handleEvent(event: Event) {
         if (event.kind !in ACCEPTED_KINDS) return
         // Deduplicate: skip events already processed (relay reconnects replay all stored events)
@@ -454,12 +481,26 @@ object NotificationsRepository {
         synchronized(list) {
             if (list.none { it.first == event.pubKey }) list.add(event.pubKey to ts)
         }
-        // Track the emoji for this target note (use latest/most common)
-        likeEmojiByTargetId[eTag] = emoji
+        // Track all unique emojis for this target note
+        val emojis = likeEmojisByTargetId.getOrPut(eTag) { java.util.Collections.newSetFromMap(ConcurrentHashMap()) }
+        emojis.add(emoji)
+        if (customEmojiUrl != null && emoji.startsWith(":") && emoji.endsWith(":")) {
+            likeCustomEmojiUrls[emoji] = customEmojiUrl
+        }
         val actorPubkeys = list.map { it.first }.distinct()
         val latestTs = list.maxOfOrNull { it.second } ?: ts
-        val action = if (emoji == "❤️") "liked your post" else "reacted $emoji to your post"
+        val allEmojis = emojis.toList()
+        val action = when {
+            allEmojis.size == 1 && allEmojis[0] == "❤️" -> "liked your post"
+            allEmojis.size == 1 -> "reacted ${allEmojis[0]} to your post"
+            else -> "reacted ${allEmojis.joinToString("")} to your post"
+        }
         val text = buildActorText(actorPubkeys, action)
+        // Collect custom emoji URLs for all shortcodes in this notification
+        val allCustomUrls = allEmojis
+            .filter { it.startsWith(":") && it.endsWith(":") }
+            .mapNotNull { sc -> likeCustomEmojiUrls[sc]?.let { sc to it } }
+            .toMap()
         val data = NotificationData(
             id = "like:$eTag",
             type = NotificationType.LIKE,
@@ -470,7 +511,9 @@ object NotificationsRepository {
             actorPubkeys = actorPubkeys,
             sortTimestamp = latestTs,
             reactionEmoji = emoji,
-            customEmojiUrl = customEmojiUrl
+            reactionEmojis = allEmojis,
+            customEmojiUrl = customEmojiUrl,
+            customEmojiUrls = allCustomUrls
         )
         notificationsById[data.id] = data
         emitSorted()
@@ -777,7 +820,8 @@ object NotificationsRepository {
 
     private val repostByTargetId = ConcurrentHashMap<String, MutableList<Pair<String, Long>>>()
     private val likeByTargetId = ConcurrentHashMap<String, MutableList<Pair<String, Long>>>()
-    private val likeEmojiByTargetId = ConcurrentHashMap<String, String>()
+    private val likeEmojisByTargetId = ConcurrentHashMap<String, MutableSet<String>>()
+    private val likeCustomEmojiUrls = ConcurrentHashMap<String, String>()
     private val zapByTargetId = ConcurrentHashMap<String, MutableList<Triple<String, Long, Long>>>() // pubkey, timestamp, amountSats
 
     private fun handleRepost(event: Event, author: Author, ts: Long) {

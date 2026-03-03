@@ -65,6 +65,7 @@ import com.example.cybin.nip19.encodeNevent
 import social.mycelium.android.utils.NoteContentBlock
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
@@ -163,6 +164,7 @@ private fun QuotedNoteBody(
     onNoteClick: (Note) -> Unit,
     onVideoClick: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
+    onRelayClick: (String) -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
     contentBlocks.forEach { qBlock ->
@@ -186,12 +188,14 @@ private fun QuotedNoteBody(
                             style = MaterialTheme.typography.bodySmall.copy(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             ),
-                            maxLines = if (isExpanded) Int.MAX_VALUE else 3,
+                            maxLines = if (isExpanded) Int.MAX_VALUE else 6,
                             onClick = { offset ->
                                 val profile = qAnnotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                 val url = qAnnotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                val relay = qAnnotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
                                 when {
                                     profile != null -> onProfileClick(profile.item)
+                                    relay != null -> onRelayClick(relay.item)
                                     url != null -> uriHandler.openUri(url.item)
                                     else -> {
                                         val quotedNote = Note(
@@ -246,8 +250,14 @@ private fun QuotedNoteBody(
                                 )
                             }
                         } else {
-                            coil.compose.AsyncImage(
-                                model = url,
+                            val imageContext = LocalContext.current
+                            coil.compose.SubcomposeAsyncImage(
+                                model = coil.request.ImageRequest.Builder(imageContext)
+                                    .data(url)
+                                    .crossfade(true)
+                                    .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                                    .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+                                    .build(),
                                 contentDescription = null,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
@@ -255,7 +265,52 @@ private fun QuotedNoteBody(
                                     .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
-                            )
+                            ) {
+                                when (painter.state) {
+                                    is coil.compose.AsyncImagePainter.State.Loading -> {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(20.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                                            )
+                                        }
+                                    }
+                                    is coil.compose.AsyncImagePainter.State.Error -> {
+                                        Box(
+                                            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.08f)),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(Icons.Outlined.BrokenImage, null, Modifier.size(24.dp), tint = Color.Gray)
+                                        }
+                                    }
+                                    is coil.compose.AsyncImagePainter.State.Success -> {
+                                        androidx.compose.foundation.Image(
+                                            painter = painter,
+                                            contentDescription = null,
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                        SideEffect {
+                                            val success = painter.state as? coil.compose.AsyncImagePainter.State.Success
+                                            val drawable = success?.result?.drawable
+                                            if (drawable != null) {
+                                                val w = drawable.intrinsicWidth
+                                                val h = drawable.intrinsicHeight
+                                                if (w > 0 && h > 0) {
+                                                    social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
+                                                    val real = w.toFloat() / h.toFloat()
+                                                    if (real != mediaRatio) mediaRatio = real
+                                                }
+                                            }
+                                        }
+                                    }
+                                    else -> {}
+                                }
+                            }
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                     }
@@ -361,6 +416,7 @@ private fun QuotedNoteContent(
     onNoteClick: (Note) -> Unit,
     onVideoClick: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
+    onRelayClick: (String) -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
     val quotedExpanded = QuotedNoteExpandedState.isExpanded(parentNoteId, meta.eventId)
@@ -417,7 +473,11 @@ private fun QuotedNoteContent(
                     shape = RoundedCornerShape(1.5.dp)
                 )
         )
-        Column(modifier = Modifier.padding(start = 10.dp, top = 2.dp, bottom = 2.dp).weight(1f)) {
+        Column(modifier = Modifier
+            .padding(start = 10.dp, top = 2.dp, bottom = 2.dp)
+            .weight(1f)
+            .animateContentSize(animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = FastOutSlowInEasing))
+        ) {
             // ── Header row: author (left) + counters & emojis (right) ──
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -489,6 +549,7 @@ private fun QuotedNoteContent(
                 onNoteClick = onNoteClick,
                 onVideoClick = onVideoClick,
                 onOpenImageViewer = onOpenImageViewer,
+                onRelayClick = onRelayClick,
             )
         }
     }
@@ -1473,30 +1534,40 @@ private fun NoteActionRow(
 
         // Upvote / Downvote — kind-11 feed + kind-1111 replies
         if (showVoting) {
+            val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
+            val reactiveDownvotes by social.mycelium.android.repository.VoteRepository.downvoteCounts.collectAsState()
+            val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
+            val upCount = reactiveUpvotes[note.id] ?: 0
+            val downCount = reactiveDownvotes[note.id] ?: 0
+            val reactiveOwnVote = reactiveOwnVotes[note.id] ?: 0
             ActionButton(
                 icon = Icons.Outlined.ArrowUpward,
                 contentDescription = "Upvote",
-                tint = if (ownVoteValue > 0) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = if (reactiveOwnVote > 0) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { onVote?.invoke(note.id, note.author.id, 1) }
             )
-            if (voteScore != 0) {
+            if (upCount > 0) {
                 Text(
-                    text = if (voteScore > 0) "+$voteScore" else "$voteScore",
+                    text = "$upCount",
                     style = MaterialTheme.typography.labelSmall,
-                    color = when {
-                        voteScore > 0 -> Color(0xFF8FBC8F)
-                        voteScore < 0 -> Color(0xFFE57373)
-                        else -> MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.padding(horizontal = 2.dp)
+                    color = Color(0xFF8FBC8F),
+                    modifier = Modifier.padding(end = 2.dp)
                 )
             }
             ActionButton(
                 icon = Icons.Outlined.ArrowDownward,
                 contentDescription = "Downvote",
-                tint = if (ownVoteValue < 0) Color(0xFFE57373) else MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = if (reactiveOwnVote < 0) Color(0xFFE57373) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { onVote?.invoke(note.id, note.author.id, -1) }
             )
+            if (downCount > 0) {
+                Text(
+                    text = "$downCount",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE57373),
+                    modifier = Modifier.padding(end = 2.dp)
+                )
+            }
         }
 
         // Boost (Repost / Quote / Fork) — kind-1 feed + kind-11 feed
@@ -2310,17 +2381,26 @@ fun NoteCard(
             if (note.quotedEventIds.isNotEmpty()) {
                 LaunchedEffect(note.quotedEventIds) {
                     quotedLoading = true
-                    val newFailed = mutableSetOf<String>()
-                    val fetched = note.quotedEventIds.mapNotNull { id ->
+                    // Quick cache check first (no network)
+                    val cached = note.quotedEventIds.mapNotNull { id ->
                         if (id in quotedMetas) null
-                        else {
+                        else QuotedNoteCache.getCached(id)?.let { id to it }
+                    }
+                    if (cached.isNotEmpty()) quotedMetas = quotedMetas + cached.toMap()
+                    val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
+                    if (uncachedIds.isNotEmpty()) {
+                        // Debounce: wait 250ms before network fetch so rapidly scrolled-past
+                        // cards don't waste subscription slots
+                        delay(250)
+                        val newFailed = mutableSetOf<String>()
+                        val fetched = uncachedIds.mapNotNull { id ->
                             val meta = QuotedNoteCache.get(id)
                             if (meta != null) id to meta
                             else { newFailed.add(id); null }
                         }
+                        if (fetched.isNotEmpty()) quotedMetas = quotedMetas + fetched.toMap()
+                        if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
                     }
-                    if (fetched.isNotEmpty()) quotedMetas = quotedMetas + fetched.toMap()
-                    if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
                     quotedLoading = false
                 }
                 // Observe profile updates for quoted note authors
@@ -2436,8 +2516,10 @@ fun NoteCard(
                                             val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                             val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
                                             val naddr = annotated.getStringAnnotations(tag = "NADDR", start = offset, end = offset).firstOrNull()
+                                            val relay = annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
                                             when {
                                                 profile != null -> onProfileClick(profile.item)
+                                                relay != null -> onRelayClick(relay.item)
                                                 url != null -> uriHandler.openUri(url.item)
                                                 naddr != null -> uriHandler.openUri(naddr.item)
                                                 else -> onNoteClick(note)
@@ -2578,6 +2660,7 @@ fun NoteCard(
                                 onNoteClick = onNoteClick,
                                 onVideoClick = onVideoClick,
                                 onOpenImageViewer = onOpenImageViewer,
+                                onRelayClick = onRelayClick,
                             )
                         } else if (eventId in quotedFailedIds) {
                             Row(

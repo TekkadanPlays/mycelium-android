@@ -781,7 +781,7 @@ private fun DiscoveredRelayRow(
 ) {
     val rawName = relay.name
         ?: relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
-    val displayName = if (relay.paymentRequired) "$rawName  $" else rawName
+    val displayName = rawName
     val iconUrl = relay.icon
 
     val interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
@@ -867,14 +867,21 @@ private fun DiscoveredRelayRow(
 
                 Spacer(Modifier.height(3.dp))
 
-                // Metadata tags row: [Flag] [Type tags] [Software] — single line, overflow clipped
+                // Metadata tags row — single-line horizontal scroll to avoid vertical skew
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(20.dp)
-                        .clipToBounds()
+                        .horizontalScroll(rememberScrollState())
                 ) {
+                    // Payment required badge
+                    if (relay.paymentRequired) {
+                        MetadataChip("💰 Paid", MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
+                    }
+                    // Auth required badge
+                    if (relay.authRequired) {
+                        MetadataChip("🔐 Auth", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
+                    }
                     // Country flag (compact — just the flag emoji)
                     relay.countryCode?.let { cc ->
                         MetadataChip(countryCodeToFlag(cc), MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurfaceVariant)
@@ -885,10 +892,6 @@ private fun DiscoveredRelayRow(
                     }
                     if (relay.types.size > 2) {
                         MetadataChip("+${relay.types.size - 2}", MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    // Auth badge
-                    if (relay.authRequired) {
-                        MetadataChip("Auth", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
                     }
                     // Software (least important — last)
                     relay.softwareShort?.let { sw ->

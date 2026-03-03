@@ -120,6 +120,7 @@ fun TopicsScreen(
     onSidebarRelayHealthClick: () -> Unit = {},
     onSidebarRelayDiscoveryClick: () -> Unit = {},
     onNavigateToCreateTopic: (String?) -> Unit = {},
+    onNavigateToTopicDrafts: () -> Unit = {},
     onRelayClick: (String) -> Unit = {},
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
@@ -542,14 +543,23 @@ fun TopicsScreen(
                     enter = scaleIn() + fadeIn(),
                     exit = scaleOut() + fadeOut()
                 ) {
-                    FloatingActionButton(
-                        onClick = { onNavigateToCreateTopic(selectedHashtag) },
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
-                        modifier = Modifier.padding(bottom = 80.dp)
-                    ) {
-                        Icon(Icons.Filled.Edit, contentDescription = "Create topic")
+                    val allDrafts by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
+                    val topicDraftCount = remember(allDrafts, selectedHashtag) {
+                        if (selectedHashtag != null) {
+                            social.mycelium.android.repository.DraftsRepository.topicDraftsForHashtag(selectedHashtag).size
+                        } else {
+                            social.mycelium.android.repository.DraftsRepository.topicRootDrafts().size
+                        }
                     }
+                    social.mycelium.android.ui.components.HomeFab(
+                        onScrollToTop = {
+                            scope.launch { listState.scrollToItem(0) }
+                        },
+                        onCompose = { onNavigateToCreateTopic(selectedHashtag) },
+                        onDrafts = { onNavigateToTopicDrafts() },
+                        draftCount = topicDraftCount,
+                        modifier = Modifier.padding(bottom = 80.dp)
+                    )
                 }
             }
         ) { paddingValues ->
@@ -809,6 +819,8 @@ fun TopicsScreen(
                                 // NIP-22: compute anchor from selected hashtag for moderation
                                 val anchor = "#${selectedHashtag?.lowercase() ?: ""}"
 
+                                // Observe reactive vote scores so Popular sort recomposes when votes change
+                                val voteScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier.fillMaxSize(),
@@ -862,7 +874,11 @@ fun TopicsScreen(
                                     }
 
                                     items(
-                                        items = topicsUiState.topicsForSelectedHashtag,
+                                        items = when (topicsFeedState.topicsSortOrder) {
+                                            social.mycelium.android.viewmodel.TopicsSortOrder.Popular ->
+                                                topicsUiState.topicsForSelectedHashtag.sortedByDescending { voteScores[it.id] ?: 0 }
+                                            else -> topicsUiState.topicsForSelectedHashtag
+                                        },
                                         key = { it.id }
                                     ) { topic ->
                                         // NIP-22: Check moderation status for this topic

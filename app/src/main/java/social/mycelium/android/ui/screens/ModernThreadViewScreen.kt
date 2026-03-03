@@ -244,6 +244,10 @@ fun ModernThreadViewScreen(
     onSeeAllReactions: (String) -> Unit = {},
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
+    /** Reply drafts belonging to this thread; injected inline as placeholder cards. */
+    threadDrafts: List<social.mycelium.android.data.Draft> = emptyList(),
+    onEditDraft: (social.mycelium.android.data.Draft) -> Unit = {},
+    onDeleteDraft: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var isRefreshing by remember { mutableStateOf(false) }
@@ -960,6 +964,29 @@ fun ModernThreadViewScreen(
                         if (index < displayList.size - 1) {
                             Spacer(modifier = Modifier.height(4.dp))
                         }
+                    }
+                }
+
+                // ── Inline draft reply placeholders ──
+                if (threadDrafts.isNotEmpty()) {
+                    val replyLevelMap = displayList.associate { it.reply.id to it.level }
+                    items(
+                        items = threadDrafts,
+                        key = { "draft_${it.id}" }
+                    ) { draft ->
+                        val draftLevel = when {
+                            draft.parentId != null && replyLevelMap.containsKey(draft.parentId) ->
+                                (replyLevelMap[draft.parentId] ?: 0) + 1
+                            draft.parentId == note.id || draft.rootId == note.id -> 0
+                            else -> 0
+                        }
+                        social.mycelium.android.ui.components.DraftReplyCard(
+                            draft = draft,
+                            level = draftLevel,
+                            onEditClick = onEditDraft,
+                            onDeleteClick = onDeleteDraft
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
                     }
                 }
             }
@@ -2076,8 +2103,11 @@ private fun ReplyControlsPanel(
     isScrolling: Boolean = false,
 ) {
     var isDetailsExpanded by remember { mutableStateOf(false) }
-    val replyOwnVote = social.mycelium.android.repository.VoteRepository.getOwnVote(reply.id)
-    val replyVoteScore = social.mycelium.android.repository.VoteRepository.getScore(reply.id)
+    val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
+    val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
+    val reactiveDownvotes by social.mycelium.android.repository.VoteRepository.downvoteCounts.collectAsState()
+    val replyOwnVote = reactiveOwnVotes[reply.id] ?: 0
+    val replyVoteScore = (reactiveUpvotes[reply.id] ?: 0) - (reactiveDownvotes[reply.id] ?: 0)
     // Derive liked state from NoteCountsRepository (reactive) so heart updates after user reacts
     val replyCounts = noteCountsByNoteId[reply.id]
     val myPubkey = social.mycelium.android.repository.NoteCountsRepository.currentUserPubkey
@@ -2125,6 +2155,8 @@ private fun ReplyControlsPanel(
                 ) {
                     // Upvote / Downvote — kind-1111 replies only (not kind-1)
                     if (replyKind != 1) {
+                        val replyUpCount = reactiveUpvotes[reply.id] ?: 0
+                        val replyDownCount = reactiveDownvotes[reply.id] ?: 0
                         CompactModernButton(
                             icon = Icons.Outlined.ArrowUpward,
                             contentDescription = "Upvote",
@@ -2132,15 +2164,11 @@ private fun ReplyControlsPanel(
                             tint = if (replyOwnVote > 0) Color(0xFF8FBC8F) else null,
                             onClick = { onVote?.invoke(reply.id, reply.author.id, 1) }
                         )
-                        if (replyVoteScore != 0) {
+                        if (replyUpCount > 0) {
                             Text(
-                                text = if (replyVoteScore > 0) "+$replyVoteScore" else "$replyVoteScore",
+                                text = "$replyUpCount",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = when {
-                                    replyVoteScore > 0 -> Color(0xFF8FBC8F)
-                                    replyVoteScore < 0 -> Color(0xFFE57373)
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                },
+                                color = Color(0xFF8FBC8F),
                                 modifier = Modifier.padding(horizontal = 1.dp)
                             )
                         }
@@ -2151,6 +2179,14 @@ private fun ReplyControlsPanel(
                             tint = if (replyOwnVote < 0) Color(0xFFE57373) else null,
                             onClick = { onVote?.invoke(reply.id, reply.author.id, -1) }
                         )
+                        if (replyDownCount > 0) {
+                            Text(
+                                text = "$replyDownCount",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFE57373),
+                                modifier = Modifier.padding(horizontal = 1.dp)
+                            )
+                        }
                     }
                     // Lightning (Zap)
                     CompactModernButton(

@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material.icons.outlined.VolumeUp
 import androidx.compose.material3.*
@@ -23,6 +24,7 @@ fun MediaSettingsScreen(
 ) {
     val autoplayVideos by MediaPreferences.autoplayVideos.collectAsState()
     val autoplaySound by MediaPreferences.autoplaySound.collectAsState()
+    val autoPipLive by MediaPreferences.autoPipLiveActivities.collectAsState()
 
     Scaffold(
         topBar = {
@@ -131,6 +133,52 @@ fun MediaSettingsScreen(
                 Switch(
                     checked = autoplaySound,
                     onCheckedChange = { MediaPreferences.setAutoplaySound(it) }
+                )
+            }
+
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+
+            // ── Live Activities ──
+            Text(
+                text = "Live Activities",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+
+            // Auto PiP for live activities toggle
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { MediaPreferences.setAutoPipLiveActivities(!autoPipLive) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.PictureInPictureAlt,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto Picture-in-Picture",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "Automatically create a mini-player when leaving a live stream. When disabled, use the PiP button instead.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Switch(
+                    checked = autoPipLive,
+                    onCheckedChange = { MediaPreferences.setAutoPipLiveActivities(it) }
                 )
             }
 

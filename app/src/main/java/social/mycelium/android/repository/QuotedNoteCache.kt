@@ -10,6 +10,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.cancellation.CancellationException
 
 /**
  * Fetches quoted kind-1 events by id from relays and returns minimal metadata.
@@ -21,7 +23,7 @@ object QuotedNoteCache {
 
     private const val TAG = "QuotedNoteCache"
     private const val FETCH_TIMEOUT_MS = 6000L
-    private const val SNIPPET_MAX_LEN = 280
+    private const val SNIPPET_MAX_LEN = 500
     private const val MAX_ENTRIES = 200
 
     /** Size to trim to when UI is hidden. */
@@ -29,6 +31,13 @@ object QuotedNoteCache {
 
     /** Size to trim to when app is in background. */
     const val TRIM_SIZE_BACKGROUND = 50
+
+    /** IDs currently being fetched — prevents duplicate concurrent requests. */
+    private val inFlightIds = Collections.synchronizedSet(HashSet<String>())
+
+    /** IDs that failed to fetch (relay didn't have them). Cleared periodically so retries can happen. */
+    private val failedIds = ConcurrentHashMap<String, Long>()
+    private const val FAILED_TTL_MS = 60_000L
 
     // LRU map: access order, eldest evicted when over MAX_ENTRIES.
     private val memoryCache = Collections.synchronizedMap(
@@ -86,12 +95,17 @@ object QuotedNoteCache {
     suspend fun get(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
         if (eventId.isBlank() || eventId.length != 64) return null
         memoryCache[eventId]?.let { return it }
+        // Skip if already in-flight or recently failed
+        if (eventId in inFlightIds) return null
+        val failedAt = failedIds[eventId]
+        if (failedAt != null && System.currentTimeMillis() - failedAt < FAILED_TTL_MS) return null
         // Merge explicit hints with any previously registered hints from nevent1 TLV
         val allHints = (relayHints + (relayHintsCache[eventId] ?: emptyList())).distinct()
         return fetchAndCache(eventId, allHints)
     }
 
     private suspend fun fetchAndCache(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
+        if (!inFlightIds.add(eventId)) return null // Another coroutine is already fetching this
         return try {
             // Relay hints from nevent1 TLV first (most likely to have the event), then user relays as fallback
             val relays = (relayHints + userRelayUrls).distinct().filter { it.isNotBlank() }.take(8)
@@ -127,11 +141,22 @@ object QuotedNoteCache {
                     kind = e.kind
                 )
                 memoryCache[eventId] = meta
+                failedIds.remove(eventId)
                 meta
+            } ?: run {
+                failedIds[eventId] = System.currentTimeMillis()
+                null
             }
+        } catch (e: CancellationException) {
+            // Normal: composable left composition while fetch was in-flight. Don't mark as failed.
+            Log.d(TAG, "Quoted note fetch cancelled for ${eventId.take(8)} (scrolled away)")
+            null
         } catch (e: Exception) {
             Log.e(TAG, "Quoted note fetch failed for ${eventId.take(8)}: ${e.message}")
+            failedIds[eventId] = System.currentTimeMillis()
             null
+        } finally {
+            inFlightIds.remove(eventId)
         }
     }
 
@@ -161,6 +186,8 @@ object QuotedNoteCache {
     fun clear() {
         memoryCache.clear()
         relayHintsCache.clear()
+        inFlightIds.clear()
+        failedIds.clear()
     }
 
     /**

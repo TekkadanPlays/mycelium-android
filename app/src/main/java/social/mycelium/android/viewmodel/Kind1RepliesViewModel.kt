@@ -134,10 +134,14 @@ class Kind1RepliesViewModel : ViewModel() {
             Log.d(TAG, "Cleared previous thread ${previousNoteId.take(8)} before loading new one")
         }
 
-        // Always clear replies when switching notes to prevent stale comments from
-        // lingering. The repository will re-emit cached replies (if any) synchronously
-        // in fetchRepliesForNote before the WebSocket fetch begins.
-        _uiState.update { it.copy(note = note, replies = emptyList(), threadedReplies = emptyList(), totalReplyCount = 0, isLoading = true, error = null) }
+        // Only wipe replies when switching to a different note.
+        // When reloading the same note (e.g. relay URLs enriched), keep existing replies
+        // visible so the UI doesn't flash empty.
+        if (previousNoteId != note.id) {
+            _uiState.update { it.copy(note = note, replies = emptyList(), threadedReplies = emptyList(), totalReplyCount = 0, isLoading = true, error = null) }
+        } else {
+            _uiState.update { it.copy(note = note, isLoading = true, error = null) }
+        }
 
         viewModelScope.launch {
             try {

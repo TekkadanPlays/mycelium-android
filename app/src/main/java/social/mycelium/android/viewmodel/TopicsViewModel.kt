@@ -43,6 +43,7 @@ enum class HashtagSortOrder {
     MOST_TOPICS,      // Sort by topic count
     MOST_ACTIVE,      // Sort by latest activity
     MOST_REPLIES,     // Sort by total reply count
+    MOST_POPULAR,     // Sort by aggregate vote score (upvotes - downvotes)
     ALPHABETICAL      // Sort alphabetically
 }
 
@@ -269,6 +270,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
             HashtagSortOrder.MOST_TOPICS -> stats.sortedByDescending { it.topicCount }
             HashtagSortOrder.MOST_ACTIVE -> stats.sortedByDescending { it.latestActivity }
             HashtagSortOrder.MOST_REPLIES -> stats.sortedByDescending { it.totalReplies }
+            HashtagSortOrder.MOST_POPULAR -> stats.sortedByDescending { social.mycelium.android.repository.VoteRepository.getTotalScore(it.topicIds) }
             HashtagSortOrder.ALPHABETICAL -> stats.sortedBy { it.hashtag.lowercase() }
         }
     }

@@ -156,9 +156,16 @@ class ThreadRepliesViewModel : ViewModel() {
             Log.d(TAG, "Cleared previous thread ${previousNoteId.take(8)} before loading new one")
         }
 
-        _optimisticReplies.value = emptyList()
-        _lastRepoReplies = emptyList()
-        _uiState.update { it.copy(note = note, replies = emptyList(), threadedReplies = emptyList(), totalReplyCount = 0, isLoading = true, error = null) }
+        // Only wipe replies when switching to a different note.
+        // When reloading the same note (e.g. relay URLs enriched), keep existing replies
+        // visible so the UI doesn't flash empty.
+        if (previousNoteId != note.id) {
+            _optimisticReplies.value = emptyList()
+            _lastRepoReplies = emptyList()
+            _uiState.update { it.copy(note = note, replies = emptyList(), threadedReplies = emptyList(), totalReplyCount = 0, isLoading = true, error = null) }
+        } else {
+            _uiState.update { it.copy(note = note, isLoading = true, error = null) }
+        }
 
         viewModelScope.launch {
             try {

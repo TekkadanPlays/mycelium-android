@@ -265,7 +265,8 @@ fun Note.toThreadReplyForThread(): ThreadReply = ThreadReply(
     replyToId = replyToId,
     threadLevel = 0,
     relayUrls = relayUrls.ifEmpty { listOfNotNull(relayUrl) },
-    kind = kind
+    kind = kind,
+    mentionedPubkeys = mentionedPubkeys
 )
 
 /**

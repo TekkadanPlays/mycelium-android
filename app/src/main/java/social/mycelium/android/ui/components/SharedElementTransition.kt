@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -52,11 +53,28 @@ fun ProfilePicture(
 ) {
     val density = LocalDensity.current
     val sizePx = remember(size) { with(density) { size.roundToPx() } }
+    // Deterministic hue from pubkey so each user gets a unique, consistent fallback color
+    val fallbackHue = remember(author.id) {
+        (author.id.hashCode() and 0x7FFFFFFF) % 360
+    }
+    val fallbackBg = remember(fallbackHue) {
+        Color.hsl(fallbackHue.toFloat(), 0.45f, 0.25f)
+    }
+    val fallbackFg = remember(fallbackHue) {
+        Color.hsl(fallbackHue.toFloat(), 0.55f, 0.82f)
+    }
+    // Detect if displayName is a real name or a hex pubkey placeholder
+    val isHexPlaceholder = remember(author.displayName) {
+        author.displayName.isBlank() ||
+                author.displayName.all { it.isLetterOrDigit() || it == '.' } &&
+                author.displayName.length >= 8 &&
+                author.displayName.endsWith("...")
+    }
     Box(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
+            .background(if (author.avatarUrl != null) MaterialTheme.colorScheme.primary.copy(alpha = 0.1f) else fallbackBg)
             .then(
                 if (onClick != null) {
                     Modifier.clickable { onClick() }
@@ -86,12 +104,24 @@ fun ProfilePicture(
                     .clip(CircleShape),
                 contentScale = ContentScale.Crop
             )
+        } else if (isHexPlaceholder) {
+            // No real name — show person silhouette icon, scaled to container
+            Icon(
+                imageVector = Icons.Filled.Person,
+                contentDescription = "Unknown user",
+                tint = fallbackFg,
+                modifier = Modifier.size(size * 0.55f)
+            )
         } else {
+            // Real display name — show initial, scaled proportionally to container
+            val fontSize = with(density) { (size * 0.45f).toSp() }
             Text(
                 text = author.displayName.take(1).uppercase(),
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                    fontSize = fontSize,
+                    lineHeight = fontSize,
+                    color = fallbackFg
                 )
             )
         }

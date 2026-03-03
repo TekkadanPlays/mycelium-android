@@ -49,6 +49,9 @@ object MyceliumHttpClient {
                     readTimeout(30, TimeUnit.SECONDS)
                     writeTimeout(10, TimeUnit.SECONDS)
                     retryOnConnectionFailure(true)
+                    // OkHttp-level WebSocket ping: detects dead sockets after idle/background.
+                    // Ktor's WebSockets.pingIntervalMillis is ignored by the OkHttp engine.
+                    pingInterval(30, TimeUnit.SECONDS)
                 }
             }
 

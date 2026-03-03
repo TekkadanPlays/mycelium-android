@@ -831,18 +831,36 @@ private fun ProfileBanner(
                     contentScale = ContentScale.Crop
                 )
             } else {
+                val hue = remember(author.id) { (author.id.hashCode() and 0x7FFFFFFF) % 360 }
+                val bg = remember(hue) { Color.hsl(hue.toFloat(), 0.45f, 0.25f) }
+                val fg = remember(hue) { Color.hsl(hue.toFloat(), 0.55f, 0.82f) }
+                val isHex = remember(author.displayName) {
+                    author.displayName.isBlank() ||
+                            author.displayName.all { it.isLetterOrDigit() || it == '.' } &&
+                            author.displayName.length >= 8 &&
+                            author.displayName.endsWith("...")
+                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                        .background(bg),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        text = author.displayName.take(1).uppercase(),
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    if (isHex) {
+                        Icon(
+                            imageVector = androidx.compose.material.icons.Icons.Filled.Person,
+                            contentDescription = "Unknown user",
+                            tint = fg,
+                            modifier = Modifier.size(44.dp)
+                        )
+                    } else {
+                        Text(
+                            text = author.displayName.take(1).uppercase(),
+                            style = MaterialTheme.typography.headlineMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = fg
+                        )
+                    }
                 }
             }
         }

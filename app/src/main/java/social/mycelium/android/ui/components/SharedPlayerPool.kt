@@ -43,6 +43,9 @@ object SharedPlayerPool {
         if (existing != null) {
             existing.ownerCount++
             existing.lastAccessTime = System.nanoTime()
+            // Clear video surface so the previous PlayerView loses rendering.
+            // The new caller's PlayerView will re-attach in its update block.
+            existing.player.clearVideoSurface()
             return existing.player
         }
 

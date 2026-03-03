@@ -19,6 +19,29 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.87",
+      "versionCode": 24,
+      "releaseDate": "2026-03-02",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.87/Mycelium-v0.4.87.apk",
+      "changelog": "Smart profile fetching with outbox fallback, payment/auth relay filtering, relay badges, tappable wss:// URLs in notes, improved quoted notes (longer snippets, smooth animation, stable media).",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Smart profile fetching: indexers first, outbox fallback for missing",
+        "Payment-required and auth-required relays filtered from subscriptions",
+        "Paid and Auth badges on relay discovery and health screens",
+        "Tappable wss:// relay URLs in note content",
+        "Quoted notes: longer snippets, more visible lines, smooth expand/collapse",
+        "Quoted note media no longer resets on scroll",
+        "Relay list layout fixes (no more vertical skew)"
+      ]
+    },
+    {
       "version": "0.4.23",
       "versionCode": 17,
       "releaseDate": "2026-02-28",

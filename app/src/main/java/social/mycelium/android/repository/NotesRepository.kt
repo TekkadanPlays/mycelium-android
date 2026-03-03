@@ -671,6 +671,7 @@ class NotesRepository private constructor() {
         if (allUserRelayUrls.sorted() == subscriptionRelays.sorted()) return
         Log.d(TAG, "Subscription relays set: ${allUserRelayUrls.size} relays (stay connected to all)")
         subscriptionRelays = allUserRelayUrls
+        profileCache.setFallbackRelayUrls(allUserRelayUrls)
         relayStateMachine.resumeSubscriptionProvider = { getSubscriptionForResume() }
         // Only reset to Idle when no notes exist (first load). When notes are already
         // present (e.g. user added a relay), keep the current session state so the
@@ -1834,17 +1835,10 @@ class NotesRepository private constructor() {
         }
     }
 
-    /** Cached merged relay URLs for profile fetches; invalidated when cacheRelayUrls or subscriptionRelays change. */
-    @Volatile private var cachedProfileRelayUrls: List<String> = emptyList()
-    @Volatile private var cachedProfileRelayUrlsKey: Pair<List<String>, List<String>> = emptyList<String>() to emptyList()
-
     private fun getProfileRelayUrls(): List<String> {
-        val key = cacheRelayUrls to subscriptionRelays
-        if (key != cachedProfileRelayUrlsKey) {
-            cachedProfileRelayUrls = (cacheRelayUrls + subscriptionRelays).distinct().filter { it.isNotBlank() }
-            cachedProfileRelayUrlsKey = key
-        }
-        return cachedProfileRelayUrls
+        // Use indexer relays only for kind-0 profile fetches — indexers can serve all
+        // profiles without overwhelming outbox/subscription relays with extra subs.
+        return cacheRelayUrls.filter { it.isNotBlank() }
     }
 
     private fun convertEventToNote(event: Event, relayUrl: String): Note {
@@ -1918,7 +1912,11 @@ class NotesRepository private constructor() {
             rootNoteId = rootNoteId,
             replyToId = replyToId,
             kind = event.kind,
-            tags = tags
+            tags = tags,
+            mentionedPubkeys = event.tags
+                .filter { tag -> tag.size >= 2 && tag[0] == "p" }
+                .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
+                .distinct()
         )
         android.os.Trace.endSection()
         return note
@@ -2004,12 +2002,14 @@ class NotesRepository private constructor() {
     suspend fun fetchNoteById(noteId: String, relayUrls: List<String>): Note? {
         if (relayUrls.isEmpty()) return null
         val filter = Filter(ids = listOf(noteId), limit = 1)
-        var fetched: Note? = null
+        val result = kotlinx.coroutines.CompletableDeferred<Note?>()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val handle = stateMachine.requestTemporarySubscriptionWithRelay(relayUrls, filter, priority = SubscriptionPriority.HIGH) { ev, actualRelayUrl ->
-            fetched = convertEventToNote(ev, actualRelayUrl)
+            val note = convertEventToNote(ev, actualRelayUrl)
+            result.complete(note)
         }
-        delay(5000)
+        // Return immediately when found, or timeout after 5 seconds
+        val fetched = kotlinx.coroutines.withTimeoutOrNull(5000L) { result.await() }
         handle.cancel()
         return fetched
     }

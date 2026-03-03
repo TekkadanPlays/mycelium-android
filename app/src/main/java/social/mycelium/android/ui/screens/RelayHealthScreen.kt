@@ -18,7 +18,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
@@ -1891,7 +1893,10 @@ private fun RelayDirectoryRow(
                     )
                     Spacer(Modifier.width(12.dp))
                     Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)
+                        ) {
                             Text(
                                 text = displayName,
                                 style = MaterialTheme.typography.bodyMedium,
@@ -1902,6 +1907,15 @@ private fun RelayDirectoryRow(
                                 modifier = Modifier.weight(1f, fill = false)
                             )
                             Spacer(Modifier.width(6.dp))
+                            // Restriction badges (payment / auth)
+                            if (relayInfo?.limitation?.payment_required == true) {
+                                StatusBadge(text = "💰 Paid", color = MaterialTheme.colorScheme.error)
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            if (relayInfo?.limitation?.auth_required == true) {
+                                StatusBadge(text = "🔐 Auth", color = MaterialTheme.colorScheme.tertiary)
+                                Spacer(Modifier.width(4.dp))
+                            }
                             // Purpose badges
                             if (isMyOutbox) {
                                 StatusBadge(text = "outbox", color = MaterialTheme.colorScheme.primary)
@@ -1913,8 +1927,11 @@ private fun RelayDirectoryRow(
                             }
                         }
                         Spacer(Modifier.height(3.dp))
-                        // Metrics row
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        // Metrics row — horizontally scrollable to prevent vertical skew
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState())
+                        ) {
                             if (totalUsers > 0) {
                                 MetricLabel(
                                     icon = Icons.Outlined.People,

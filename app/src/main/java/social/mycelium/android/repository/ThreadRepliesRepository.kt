@@ -150,6 +150,7 @@ class ThreadRepliesRepository {
         _isLoading.value = true
         _error.value = null
         initialLoadComplete = false
+        profileCache.resetBackoff()
         replyCutoffTimestampMs = 0L
         clearPendingReplies()
 
@@ -220,6 +221,8 @@ class ThreadRepliesRepository {
      */
     private fun handleReplyEvent(noteId: String, event: Event, relayUrl: String = "") {
         try {
+            // Cross-pollinate to notifications so badge updates even while viewing the thread
+            NotificationsRepository.ingestEvent(event)
             // Accept kind-1111 always; accept kind-1 when root is a kind-11 topic or kind-1 note
             if (event.kind == 1111 || (event.kind == 1 && noteId in kind1RootIds)) {
                 val reply = convertEventToThreadReply(event, relayUrl).let { r ->

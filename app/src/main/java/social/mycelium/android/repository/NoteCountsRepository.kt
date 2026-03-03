@@ -124,6 +124,8 @@ object NoteCountsRepository {
      * @param noteRelays map of noteId → list of relay URLs where that note was seen
      */
     fun setNoteIdsOfInterest(noteRelays: Map<String, List<String>>) {
+        // Skip if the note ID set is unchanged (avoids redundant debounce cycles on recomposition)
+        if (noteRelays.size == feedNoteRelays.size && noteRelays.keys == feedNoteRelays.keys) return
         Log.d(TAG, "setNoteIdsOfInterest: ${noteRelays.size} feed notes")
         feedNoteRelays = noteRelays
         scheduleSubscriptionUpdate()
@@ -271,22 +273,24 @@ object NoteCountsRepository {
         )
     }
 
-    /** Phase 2 filters: kind-6 reposts + kind-7 reactions + kind-9735 zaps (enrichment). */
+    /** Phase 2 filters: kind-6 reposts + kind-7 reactions + kind-9735 zaps + kind-30011 votes (enrichment). */
     private fun buildPhase2Filters(noteIds: List<String>): List<Filter> {
         return listOf(
             Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
             Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200)
+            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200),
+            Filter(kinds = listOf(30011), tags = mapOf("e" to noteIds), limit = 500)
         )
     }
 
-    /** All-kinds filters: kind-1 + kind-6 + kind-7 + kind-9735 in one subscription. */
+    /** All-kinds filters: kind-1 + kind-6 + kind-7 + kind-9735 + kind-30011 in one subscription. */
     private fun buildAllKindsFilters(noteIds: List<String>): List<Filter> {
         return listOf(
             Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
             Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
             Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200)
+            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200),
+            Filter(kinds = listOf(30011), tags = mapOf("e" to noteIds), limit = 500)
         )
     }
 
@@ -309,7 +313,7 @@ object NoteCountsRepository {
     fun onCountsEvent(event: Event) {
         // Dedup across relays
         if (!processedEventIds.add(event.id)) return
-        if (event.kind != 1 && event.kind != 6 && event.kind != 7 && event.kind != 9735) return
+        if (event.kind != 1 && event.kind != 6 && event.kind != 7 && event.kind != 9735 && event.kind != 30011) return
         pendingCountEvents.add(event)
         if (firstPendingEventTs == 0L) firstPendingEventTs = System.currentTimeMillis()
         scheduleCountsFlush()
@@ -358,6 +362,7 @@ object NoteCountsRepository {
                 6 -> applyKind6Repost(event, snapshot)
                 7 -> applyKind7(event, snapshot)
                 9735 -> applyKind9735(event, snapshot)
+                30011 -> applyKind30011Vote(event)
             }
         }
 
@@ -475,6 +480,17 @@ object NoteCountsRepository {
             zapAuthors = authors,
             zapAmountByAuthor = amountMap
         )
+    }
+
+    /**
+     * Process a kind-30011 vote event: extract target note ID, voter pubkey, and vote value,
+     * then delegate to VoteRepository for aggregation.
+     */
+    private fun applyKind30011Vote(event: Event) {
+        val noteId = event.tags.firstOrNull { it.getOrNull(0) == "e" }?.getOrNull(1) ?: return
+        val voterPubkey = event.pubKey
+        val voteValue = event.content.trim().toIntOrNull() ?: return
+        VoteRepository.applyVoteEvent(noteId, voterPubkey, voteValue, currentUserPubkey)
     }
 
     /**

@@ -46,6 +46,7 @@ import social.mycelium.android.data.SampleData
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.normalizeAuthorIdForCache
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import social.mycelium.android.repository.QuotedNoteCache
 import social.mycelium.android.ui.theme.NoteBodyTextStyle
@@ -424,8 +425,18 @@ private fun NoteCardContent(
                         val uriHandler = LocalUriHandler.current
                         var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
                         LaunchedEffect(note.quotedEventIds) {
+                            // Quick cache check first (no network)
                             note.quotedEventIds.forEach { id ->
                                 if (id !in quotedMetas) {
+                                    val cached = QuotedNoteCache.getCached(id)
+                                    if (cached != null) quotedMetas = quotedMetas + (id to cached)
+                                }
+                            }
+                            val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
+                            if (uncachedIds.isNotEmpty()) {
+                                // Debounce: wait 250ms so rapidly scrolled-past cards don't waste slots
+                                delay(250)
+                                uncachedIds.forEach { id ->
                                     val meta = QuotedNoteCache.get(id)
                                     if (meta != null) quotedMetas = quotedMetas + (id to meta)
                                 }

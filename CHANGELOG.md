@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.87-beta (2026-03-02)
+- **Smart profile fetching** — Kind-0 profiles fetched from indexer relays first; missing profiles automatically retried on outbox relays
+- **Relay filtering** — Payment-required and auth-required relays skipped in subscription routing (no wasted slots)
+- **Relay badges** — Paid and Auth labels shown on relay discovery and health screens
+- **Tappable relay URLs** — `wss://` URLs in notes are now clickable links to relay info
+- **Quoted note improvements** — Longer snippets (500 chars), 6 visible lines, smooth expand/collapse animation
+- **Quoted note media stability** — Images in quoted notes no longer reset on scroll (aspect ratio cached globally)
+- **Layout fixes** — Relay discovery and health screens no longer skew vertically from long tags/names
+
 ## v0.4.24-beta (2026-02-28)
 - **Optimistic UI updates** — Reactions, boosts, and relay orbs now reflect immediately in thread view after publishing, without waiting for relay echo
 - **Video gesture controls** — Fullscreen player gains horizontal swipe seek, vertical volume/brightness, double-tap ±10s, long-press 2× speed, and pinch-to-zoom (ported from NextPlayer)

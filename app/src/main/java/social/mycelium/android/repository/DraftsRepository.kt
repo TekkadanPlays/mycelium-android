@@ -89,6 +89,29 @@ object DraftsRepository {
 
     val draftCount: Int get() = _drafts.value.size
 
+    /** Kind-1 root note drafts (not replies). */
+    fun kind1RootDrafts(): List<Draft> =
+        _drafts.value.filter { it.type == DraftType.NOTE }
+
+    /** Kind-11 topic root drafts (not replies). */
+    fun topicRootDrafts(): List<Draft> =
+        _drafts.value.filter { it.type == DraftType.TOPIC }
+
+    /** Topic root drafts that include a specific hashtag. */
+    fun topicDraftsForHashtag(hashtag: String): List<Draft> {
+        val lower = hashtag.lowercase().removePrefix("#")
+        return _drafts.value.filter { draft ->
+            draft.type == DraftType.TOPIC && draft.hashtags.any { it.lowercase().removePrefix("#") == lower }
+        }
+    }
+
+    /** Reply drafts whose parentId or rootId matches the given note ID. For inline thread injection. */
+    fun replyDraftsForThread(noteId: String): List<Draft> =
+        _drafts.value.filter { draft ->
+            (draft.type == DraftType.REPLY_KIND1 || draft.type == DraftType.REPLY_KIND1111 || draft.type == DraftType.TOPIC_REPLY) &&
+                (draft.rootId == noteId || draft.parentId == noteId)
+        }
+
     private fun persistLocally(pubkey: String) {
         val key = "$KEY_PREFIX$pubkey"
         val jsonString = json.encodeToString(_drafts.value)

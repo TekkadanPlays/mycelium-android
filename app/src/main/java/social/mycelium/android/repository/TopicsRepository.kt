@@ -447,7 +447,7 @@ class TopicsRepository private constructor(context: Context) {
                 pendingProfilePubkeys.removeAll(batch.toSet())
             }
             if (batch.isNotEmpty()) {
-                val relayUrls = (cacheRelayUrls + subscriptionRelays).distinct().filter { it.isNotBlank() }
+                val relayUrls = cacheRelayUrls.filter { it.isNotBlank() }
                 if (relayUrls.isNotEmpty()) {
                     profileCache.requestProfiles(batch, relayUrls)
                 }

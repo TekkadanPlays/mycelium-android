@@ -42,9 +42,12 @@ private const val SEG_EMBEDDED_MEDIA = 3
 private const val SEG_NADDR = 4
 private const val SEG_NPROFILE = 5
 private const val SEG_HASHTAG = 6
+private const val SEG_RELAY = 7
 
 // Hashtag pattern: # followed by word characters (letters, digits, underscore), at least 1 char
 private val hashtagPattern = Regex("(?<=\\s|^)#(\\w+)", RegexOption.IGNORE_CASE)
+// Relay URL pattern: wss:// or ws:// followed by domain (+ optional path)
+private val relayUrlPattern = Regex("wss?://[a-zA-Z0-9._~:/?#\\[\\]@!$&'()*+,;=-]+", RegexOption.IGNORE_CASE)
 
 /**
  * Builds AnnotatedString for note content: clickable URLs (excluding embedded media),
@@ -149,6 +152,12 @@ fun buildNoteContentAnnotatedString(
         segments.add(Segment(match.range.first, match.range.last + 1, SEG_HASHTAG, match.value))
     }
 
+    // Relay URLs (wss:// / ws://) — tappable to open relay info page
+    relayUrlPattern.findAll(content).forEach { match ->
+        val relayUrl = match.value.trimEnd('.', ',', ')', ']', ';', '!', '?') // strip trailing punctuation
+        segments.add(Segment(match.range.first, match.range.first + relayUrl.length, SEG_RELAY, relayUrl))
+    }
+
     // Deduplicate overlapping segments: NIP-19 types take priority over generic URLs
     val nip19Types = setOf(SEG_NPUB, SEG_NEVENT, SEG_NPROFILE, SEG_NADDR, SEG_EMBEDDED_MEDIA)
     val nip19Ranges = segments.filter { it.type in nip19Types }.map { it.start..it.end }
@@ -174,14 +183,26 @@ fun buildNoteContentAnnotatedString(
             while (newStart > 0 && content[newStart - 1].let { it == ' ' || it == '\t' }) newStart--
             if (newStart > 0 && content[newStart - 1] == '\n') newStart-- // eat one leading newline
         }
-        // Same for trailing: eat all blank lines after, but if there's text after, keep boundary
+        // Trailing: eat horizontal whitespace + the URL's own line break, then only eat
+        // truly blank lines. Preserve the first newline before a line that has real text.
         newEnd = seg.end
         while (newEnd < content.length && content[newEnd].let { it == ' ' || it == '\t' }) newEnd++
-        // Consume all trailing newlines (blank lines after the URL)
-        while (newEnd < content.length && content[newEnd].let { it == '\n' || it == '\r' }) {
-            newEnd++
-            // Also eat whitespace on the next line if it's another blank line
-            while (newEnd < content.length && content[newEnd].let { it == ' ' || it == '\t' }) newEnd++
+        // Eat the URL's own trailing newline (one \r?\n)
+        if (newEnd < content.length && content[newEnd] == '\r') newEnd++
+        if (newEnd < content.length && content[newEnd] == '\n') newEnd++
+        // Now eat additional blank lines only (lines that are entirely whitespace)
+        while (newEnd < content.length) {
+            var lineEnd = newEnd
+            while (lineEnd < content.length && content[lineEnd].let { it == ' ' || it == '\t' }) lineEnd++
+            // If this position is a newline, the line was blank → consume it
+            if (lineEnd < content.length && (content[lineEnd] == '\n' || content[lineEnd] == '\r')) {
+                if (content[lineEnd] == '\r') lineEnd++
+                if (lineEnd < content.length && content[lineEnd] == '\n') lineEnd++
+                newEnd = lineEnd
+            } else {
+                // Non-blank line ahead — stop, preserve the paragraph break
+                break
+            }
         }
         return Segment(newStart, newEnd, seg.type, seg.data)
     }
@@ -258,6 +279,12 @@ fun buildNoteContentAnnotatedString(
                     val tag = seg.data as String
                     pushStringAnnotation("HASHTAG", tag)
                     withStyle(hashtagStyle) { append(tag) }
+                    pop()
+                }
+                SEG_RELAY -> {
+                    val relayUrl = seg.data as String
+                    pushStringAnnotation("RELAY", relayUrl)
+                    withStyle(linkStyle) { append(relayUrl) }
                     pop()
                 }
             }

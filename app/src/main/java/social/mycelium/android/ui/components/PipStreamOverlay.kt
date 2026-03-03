@@ -69,6 +69,7 @@ import kotlin.math.roundToInt
 @Composable
 fun PipStreamOverlay(
     onTapToReturn: (String) -> Unit,
+    onVideoTapToReturn: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val pipState by PipStreamManager.pipState.collectAsState()
@@ -236,7 +237,11 @@ fun PipStreamOverlay(
                                 }
                             } else {
                                 // No drag — treat as tap
-                                onTapToReturn(state.addressableId)
+                                if (state.isVideo) {
+                                    state.videoUrl?.let { onVideoTapToReturn(it) }
+                                } else {
+                                    onTapToReturn(state.addressableId)
+                                }
                             }
                         }
                     }

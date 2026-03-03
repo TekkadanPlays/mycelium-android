@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -54,6 +55,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 
 /**
  * Inline video player for feed content.
@@ -179,6 +184,20 @@ private fun FeedVideoPlayer(
         }
     }
 
+    // Resume playback when app returns from background (ON_STOP pauses all players)
+    val feedLifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(feedLifecycleOwner, url) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                player?.let { p ->
+                    if (isActuallyPlaying && isVisible) p.play()
+                }
+            }
+        }
+        feedLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { feedLifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     DisposableEffect(url) {
         onDispose {
             player?.let {
@@ -270,6 +289,8 @@ private fun FeedVideoPlayer(
                         VideoPositionCache.set(url, p.currentPosition)
                         VideoMuteCache.set(url, isMuted)
                         goingFullscreen = true
+                        // Immediately detach surface so fullscreen player can claim it
+                        stablePlayerView.value?.player = null
                         SharedPlayerPool.detach(url)
                         player = null
                         onFullscreenClick()
@@ -284,6 +305,15 @@ private fun FeedVideoPlayer(
                         val seekMs = (frac * p.duration).toLong()
                         p.seekTo(seekMs)
                         isSeeking = false
+                    },
+                    onPipClick = {
+                        VideoPositionCache.set(url, p.currentPosition)
+                        VideoMuteCache.set(url, isMuted)
+                        p.volume = 1f // Unmute for PiP
+                        goingFullscreen = true // Prevent release on dispose
+                        stablePlayerView.value?.player = null
+                        player = null
+                        PipStreamManager.startVideoPip(p, url)
                     }
                 )
             }
@@ -381,6 +411,20 @@ private fun FullVideoPlayer(
     // Reset zoom when switching videos
     LaunchedEffect(url) { zoomState.reset() }
 
+    // Resume playback when app returns from background (ON_STOP pauses all players)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, url) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                player?.let { p ->
+                    if (isActuallyPlaying && isVisible) p.play()
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     DisposableEffect(url) {
         onDispose {
             player?.let { p ->
@@ -457,7 +501,7 @@ private fun FullVideoPlayer(
                 visible = showControls && !isGestureSeeking,
                 enter = fadeIn(),
                 exit = fadeOut(),
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding()
             ) {
                 VideoControlsPill(
                     isMuted = isMuted,
@@ -488,6 +532,14 @@ private fun FullVideoPlayer(
                         val seekMs = (frac * p.duration).toLong()
                         p.seekTo(seekMs)
                         isSeeking = false
+                    },
+                    onPipClick = {
+                        VideoPositionCache.set(url, p.currentPosition)
+                        VideoMuteCache.set(url, isMuted)
+                        stablePlayerView.value?.player = null
+                        player = null
+                        PipStreamManager.startVideoPip(p, url)
+                        onExitFullscreen()
                     }
                 )
             }
@@ -511,7 +563,8 @@ private fun VideoControlsPill(
     position: Long = 0L,
     onSeekStart: () -> Unit = {},
     onSeek: (Float) -> Unit = {},
-    onSeekEnd: (Float) -> Unit = {}
+    onSeekEnd: (Float) -> Unit = {},
+    onPipClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -565,6 +618,16 @@ private fun VideoControlsPill(
                 tint = Color.White,
                 modifier = Modifier.size(20.dp)
             )
+        }
+        if (onPipClick != null) {
+            IconButton(onClick = onPipClick, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    imageVector = Icons.Default.PictureInPictureAlt,
+                    contentDescription = "Picture in picture",
+                    tint = Color.White,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
         }
         IconButton(onClick = onScreenToggle, modifier = Modifier.size(36.dp)) {
             Icon(

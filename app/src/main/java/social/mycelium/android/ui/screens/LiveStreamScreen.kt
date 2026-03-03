@@ -30,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Videocam
+import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -333,9 +334,10 @@ fun LiveStreamScreen(
         onDispose { chatRepository.unsubscribe() }
     }
 
-    // Back handler: hand off player to PiP if stream is playing, then navigate back
+    // Back handler: hand off player to PiP if stream is playing AND auto-PiP is enabled
+    val autoPipEnabled by social.mycelium.android.ui.settings.MediaPreferences.autoPipLiveActivities.collectAsState()
     val handleBack = {
-        if (player != null && hasReceivedVideo && !showUnavailable) {
+        if (player != null && hasReceivedVideo && !showUnavailable && autoPipEnabled) {
             handedOffToPip = true
             PipStreamManager.startPip(
                 player = player,
@@ -383,7 +385,26 @@ fun LiveStreamScreen(
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
                         }
                     },
-                    actions = { },
+                    actions = {
+                        // Show manual PiP button when auto-PiP on back is disabled
+                        if (!autoPipEnabled && player != null && hasReceivedVideo && !showUnavailable) {
+                            IconButton(onClick = {
+                                handedOffToPip = true
+                                PipStreamManager.startPip(
+                                    player = player,
+                                    addressableId = decodedId,
+                                    title = activity.title,
+                                    hostName = activity.hostAuthor?.username ?: activity.hostPubkey.take(8)
+                                )
+                                onBackClick()
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.PictureInPictureAlt,
+                                    contentDescription = "Picture in picture"
+                                )
+                            }
+                        }
+                    },
                     windowInsets = WindowInsets(0),
                     colors = TopAppBarDefaults.topAppBarColors(
                         containerColor = MaterialTheme.colorScheme.surface

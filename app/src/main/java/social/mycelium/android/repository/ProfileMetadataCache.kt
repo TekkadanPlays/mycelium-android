@@ -84,6 +84,11 @@ class ProfileMetadataCache {
     // ── Internal batching: accumulate pubkeys from all callers into one batch ──
     private val internalPendingPubkeys = Collections.synchronizedSet(HashSet<String>())
     private var internalPendingRelays = listOf<String>()
+    /** Outbox / subscription relays used as fallback when indexers miss profiles. */
+    @Volatile private var fallbackRelayUrls = listOf<String>()
+
+    /** Set outbox/subscription relay URLs to use as fallback for profiles not found on indexers. */
+    fun setFallbackRelayUrls(urls: List<String>) { fallbackRelayUrls = urls }
 
     /** Returns the relay URLs currently configured for profile fetching. */
     fun getConfiguredRelayUrls(): List<String> = internalPendingRelays
@@ -95,6 +100,15 @@ class ProfileMetadataCache {
     private val poolReceived = AtomicInteger(0)
     /** Consecutive early-out failures — drives exponential backoff to avoid retry spam. */
     private var consecutiveEarlyOuts = 0
+
+    /**
+     * Reset the backoff circuit breaker so profile fetching can resume.
+     * Call when entering a new context (e.g. navigating to a new thread)
+     * or when relay configuration changes.
+     */
+    fun resetBackoff() {
+        consecutiveEarlyOuts = 0
+    }
 
     /** Application context for SharedPreferences persistence. Set via [init]. */
     @Volatile private var appContext: Context? = null
@@ -276,7 +290,13 @@ class ProfileMetadataCache {
         if (needed.isEmpty()) return
 
         internalPendingPubkeys.addAll(needed.map { normalizeKey(it) })
-        if (cacheRelayUrls.isNotEmpty()) internalPendingRelays = cacheRelayUrls
+        if (cacheRelayUrls.isNotEmpty()) {
+            // If relay list changed, reset backoff — new relays may be reachable
+            if (cacheRelayUrls != internalPendingRelays) {
+                consecutiveEarlyOuts = 0
+            }
+            internalPendingRelays = cacheRelayUrls
+        }
 
         scheduleInternalBatch()
     }
@@ -286,6 +306,11 @@ class ProfileMetadataCache {
      * If a fetch IS in-flight, just let pubkeys accumulate — the while loop will pick them up.
      */
     private fun scheduleInternalBatch() {
+        // If backoff tripped but was just reset, cancel the stale fetch job so we can start fresh
+        if (internalBatchFetchJob != null && consecutiveEarlyOuts == 0) {
+            internalBatchFetchJob?.cancel()
+            internalBatchFetchJob = null
+        }
         // If a fetch is already running, pubkeys will be picked up by its while loop — no need to schedule
         if (internalBatchFetchJob != null) return
         internalBatchScheduleJob?.cancel()
@@ -386,6 +411,32 @@ class ProfileMetadataCache {
 
         handle.cancel()
         Log.d(TAG, "Kind-0 fetch done: ${batchReceived.get()}/${uncached.size} profiles from ${allRelays.size} relays")
+
+        // ── Fallback: retry missing profiles on outbox/subscription relays ──
+        val stillMissing = uncached.filter { cache[normalizeKey(it)] == null }
+        val fallback = fallbackRelayUrls.filter { it.isNotBlank() && it !in allRelays }
+        if (stillMissing.isNotEmpty() && fallback.isNotEmpty()) {
+            Log.d(TAG, "Kind-0 fallback: ${stillMissing.size} missing, trying ${fallback.size} outbox relays")
+            val fbFilter = Filter(kinds = listOf(0), authors = stillMissing, limit = stillMissing.size)
+            val fbReceived = AtomicInteger(0)
+            val fbHandle = RelayConnectionStateMachine.getInstance()
+                .requestTemporarySubscription(fallback, fbFilter, priority = SubscriptionPriority.LOW) { event: Event ->
+                    if (event.kind == 0) {
+                        val pk = event.pubKey
+                        val ct = event.content
+                        if (pk.isNotBlank() && ct.isNotBlank()) {
+                            val author = parseKind0Content(pk, ct)
+                            if (author != null && putProfileIfNewer(pk, author, event.createdAt)) {
+                                fbReceived.incrementAndGet()
+                                poolReceived.incrementAndGet()
+                            }
+                        }
+                    }
+                }
+            delay(KIND0_FETCH_TIMEOUT_MS)
+            fbHandle.cancel()
+            Log.d(TAG, "Kind-0 fallback done: ${fbReceived.get()}/${stillMissing.size} from ${fallback.size} outbox relays")
+        }
     }
 
     /**

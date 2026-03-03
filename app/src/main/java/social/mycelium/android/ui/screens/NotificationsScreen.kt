@@ -48,9 +48,6 @@ import social.mycelium.android.repository.NotificationsRepository
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ProfilePicture
 import social.mycelium.android.utils.normalizeAuthorIdForCache
-import social.mycelium.android.utils.buildNoteContentAnnotatedString
-import social.mycelium.android.utils.NoteContentBlock
-import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.platform.LocalUriHandler
 import kotlinx.coroutines.delay
@@ -505,7 +502,45 @@ fun NotificationsScreen(
     }
 }
 
-// ─── Compact row for likes / zaps / reposts ──────────────────────────────────
+// ─── Shared card shell (unseen accent bar, background, divider) ──────────────
+
+@Composable
+private fun NotificationCardShell(
+    isSeen: Boolean,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    val accentColor = MaterialTheme.colorScheme.primary
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .then(
+                if (!isSeen) Modifier.drawBehind {
+                    drawRect(
+                        color = accentColor,
+                        topLeft = androidx.compose.ui.geometry.Offset.Zero,
+                        size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)
+                    )
+                } else Modifier
+            ),
+        color = if (!isSeen) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.10f) else Color.Transparent
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp)
+        ) {
+            content()
+        }
+    }
+    HorizontalDivider(
+        thickness = 0.5.dp,
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+    )
+}
+
+// ─── Horizontal avatar row (shared across all card types) ────────────────────
 
 private val placeholderAuthor = Author(
     id = "",
@@ -514,6 +549,39 @@ private val placeholderAuthor = Author(
     avatarUrl = null,
     isVerified = false
 )
+
+@Composable
+private fun AvatarRow(
+    authors: List<Author>,
+    totalCount: Int,
+    onProfileClick: (String) -> Unit,
+    avatarSize: Int = 28
+) {
+    if (authors.isEmpty()) return
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy((-6).dp)
+    ) {
+        authors.take(6).forEach { author ->
+            ProfilePicture(
+                author = author,
+                size = avatarSize.dp,
+                onClick = { onProfileClick(author.id) }
+            )
+        }
+        if (totalCount > 6) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "+${totalCount - 6}",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+// ─── Compact row for likes / zaps / reposts ──────────────────────────────────
 
 @Composable
 private fun CompactNotificationRow(
@@ -526,7 +594,7 @@ private fun CompactNotificationRow(
     val profileCache = ProfileMetadataCache.getInstance()
     val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)
 
-    // Live profile resolution: re-compose when a relevant actor profile updates
+    // Live profile resolution
     var profileRevision by remember { mutableIntStateOf(0) }
     val actorPubkeys = notification.actorPubkeys
     val actorPubkeySet = remember(actorPubkeys) { actorPubkeys.map { normalizeAuthorIdForCache(it) }.toSet() }
@@ -537,8 +605,8 @@ private fun CompactNotificationRow(
     }
     @Suppress("UNUSED_EXPRESSION") profileRevision
 
-    val reactionEmoji = notification.reactionEmoji
-    val hasCustomEmoji = notification.type == NotificationType.LIKE && reactionEmoji != null && reactionEmoji != "❤️" && reactionEmoji != "+"
+    val allEmojis = notification.reactionEmojis.ifEmpty { listOfNotNull(notification.reactionEmoji) }
+    val hasEmojis = notification.type == NotificationType.LIKE && allEmojis.any { it != "❤️" && it != "+" }
     val typeIcon = when (notification.type) {
         NotificationType.LIKE -> Icons.Default.Favorite
         NotificationType.REPOST -> Icons.Default.Repeat
@@ -555,83 +623,69 @@ private fun CompactNotificationRow(
     }
 
     val actorAuthors = remember(actorPubkeys, profileRevision) {
-        actorPubkeys.take(3).map { pk ->
+        actorPubkeys.take(6).map { pk ->
             profileCache.getAuthor(normalizeAuthorIdForCache(pk))
                 ?: placeholderAuthor.copy(id = pk, displayName = pk.take(8) + "…")
         }
     }
-    // Build display text at render time with live profile names
-    val displayText = remember(actorPubkeys, notification.type, notification.reactionEmoji, notification.zapAmountSats, notification.badgeName, profileRevision) {
-        val action = when (notification.type) {
-            NotificationType.LIKE -> {
-                val emoji = notification.reactionEmoji
-                if (emoji != null && emoji != "❤️" && emoji != "+") "reacted $emoji to your post" else "liked your post"
-            }
+
+    // Action text (no names — names are in the avatar row)
+    val actionText = remember(notification.type, notification.reactionEmoji, notification.zapAmountSats, notification.badgeName) {
+        when (notification.type) {
+            NotificationType.LIKE -> "liked your post"
             NotificationType.REPOST -> "reposted your post"
             NotificationType.ZAP -> {
-                if (notification.zapAmountSats > 0) {
-                    val sats = notification.zapAmountSats
-                    val label = when {
-                        sats >= 1_000_000 -> "${sats / 1_000_000}.${(sats % 1_000_000) / 100_000}M sats"
-                        sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K sats"
-                        else -> "$sats sats"
-                    }
-                    "zapped $label"
-                } else "zapped your post"
+                if (notification.zapAmountSats > 0) "zapped ${formatSatsCompact(notification.zapAmountSats)} sats"
+                else "zapped your post"
             }
             NotificationType.BADGE_AWARD -> {
-                val badgeName = notification.badgeName
-                if (badgeName != null) "awarded you the \"$badgeName\" badge" else "awarded you a badge"
+                val bn = notification.badgeName
+                if (bn != null) "awarded \"$bn\" badge" else "awarded a badge"
             }
             else -> "interacted"
         }
-        val names = actorPubkeys.take(2).map { pk ->
+    }
+
+    // Names text
+    val namesText = remember(actorPubkeys, profileRevision) {
+        val names = actorPubkeys.take(3).map { pk ->
             val a = profileCache.getAuthor(normalizeAuthorIdForCache(pk))
             a?.displayName?.takeIf { it.isNotBlank() && !it.endsWith("...") } ?: pk.take(8) + "…"
         }
         when (actorPubkeys.size) {
-            1 -> "${names[0]} $action"
-            2 -> "${names[0]} and ${names[1]} $action"
-            else -> "${names[0]}, ${names[1]}, and ${actorPubkeys.size - 2} others $action"
+            1 -> names[0]
+            2 -> "${names[0]} and ${names[1]}"
+            3 -> "${names[0]}, ${names[1]}, and ${names[2]}"
+            else -> "${names[0]}, ${names[1]}, and ${actorPubkeys.size - 2} others"
         }
     }
 
-    val compactAccentColor = MaterialTheme.colorScheme.primary
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .then(
-                if (!isSeen) Modifier.drawBehind {
-                    drawRect(
-                        color = compactAccentColor,
-                        topLeft = androidx.compose.ui.geometry.Offset.Zero,
-                        size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)
-                    )
-                } else Modifier
-            ),
-        color = if (!isSeen) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.18f) else Color.Transparent
-    ) {
+    NotificationCardShell(isSeen = isSeen, onClick = onClick) {
+        // Row 1: type icon/emojis + action + extras + timestamp
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Type icon or custom emoji (NIP-30 custom emoji with image URL support)
-            if (hasCustomEmoji) {
-                val emojiUrls = remember(reactionEmoji, notification.customEmojiUrl) {
-                    if (notification.customEmojiUrl != null && reactionEmoji != null) {
-                        mapOf(reactionEmoji to notification.customEmojiUrl)
-                    } else emptyMap()
+            // Type icon or reaction emojis
+            if (hasEmojis) {
+                val emojiUrls = remember(notification.customEmojiUrls, notification.customEmojiUrl, notification.reactionEmoji) {
+                    val urls = notification.customEmojiUrls.toMutableMap()
+                    if (notification.customEmojiUrl != null && notification.reactionEmoji != null) {
+                        urls[notification.reactionEmoji] = notification.customEmojiUrl
+                    }
+                    urls.toMap()
                 }
-                social.mycelium.android.ui.components.ReactionEmoji(
-                    emoji = reactionEmoji!!,
-                    customEmojiUrls = emojiUrls,
-                    fontSize = 18.sp,
-                    imageSize = 22.dp,
-                    modifier = Modifier.widthIn(min = 22.dp)
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    allEmojis.take(8).forEach { em ->
+                        social.mycelium.android.ui.components.ReactionEmoji(
+                            emoji = em,
+                            customEmojiUrls = emojiUrls,
+                            fontSize = 16.sp,
+                            imageSize = 20.dp,
+                            modifier = Modifier.widthIn(min = 20.dp)
+                        )
+                    }
+                }
             } else {
                 Icon(
                     imageVector = typeIcon,
@@ -640,66 +694,14 @@ private fun CompactNotificationRow(
                     tint = typeColor
                 )
             }
-            Spacer(Modifier.width(10.dp))
-
-            // Stacked avatars
-            Box(modifier = Modifier.width(if (actorAuthors.size > 1) (20 + (actorAuthors.size - 1) * 14).dp else 24.dp)) {
-                actorAuthors.forEachIndexed { i, author ->
-                    Box(modifier = Modifier.offset(x = (i * 14).dp)) {
-                        ProfilePicture(
-                            author = author,
-                            size = 24.dp,
-                            onClick = { onProfileClick(author.id) }
-                        )
-                    }
-                }
-            }
-            Spacer(Modifier.width(10.dp))
-
-            // Text
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = displayText,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = if (!isSeen) FontWeight.Medium else FontWeight.Normal,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 18.sp
-                )
-                // Show target note preview snippet (strip nostr: bech32 references for clean display)
-                val rawPreview = notification.targetNote?.content ?: notification.note?.content
-                val previewText = remember(rawPreview) {
-                    rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
-                        ?.replace(Regex("\\s+"), " ")?.trim()
-                }
-                if (!previewText.isNullOrBlank()) {
-                    Text(
-                        text = previewText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 16.sp
-                    )
-                }
-            }
-
             Spacer(Modifier.width(8.dp))
-
-            // Badge thumbnail
-            if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
-                coil.compose.AsyncImage(
-                    model = notification.badgeImageUrl,
-                    contentDescription = notification.badgeName ?: "Badge",
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(RoundedCornerShape(4.dp)),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                )
-                Spacer(Modifier.width(6.dp))
-            }
-
+            Text(
+                text = actionText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
             // Zap amount badge
             if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {
                 Surface(
@@ -710,12 +712,7 @@ private fun CompactNotificationRow(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Bolt,
-                            contentDescription = null,
-                            modifier = Modifier.size(12.dp),
-                            tint = Color(0xFFF59E0B)
-                        )
+                        Icon(Icons.Default.Bolt, null, Modifier.size(12.dp), tint = Color(0xFFF59E0B))
                         Spacer(Modifier.width(2.dp))
                         Text(
                             text = formatSatsCompact(notification.zapAmountSats),
@@ -727,21 +724,62 @@ private fun CompactNotificationRow(
                 }
                 Spacer(Modifier.width(6.dp))
             }
-
-            // Timestamp
+            // Badge thumbnail
+            if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
+                coil.compose.AsyncImage(
+                    model = notification.badgeImageUrl,
+                    contentDescription = notification.badgeName ?: "Badge",
+                    modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp)),
+                    contentScale = ContentScale.Crop
+                )
+                Spacer(Modifier.width(6.dp))
+            }
             Text(
                 text = timeAgo,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline
             )
         }
-    }
 
-    // Thin divider
-    HorizontalDivider(
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
-    )
+        Spacer(Modifier.height(6.dp))
+
+        // Row 2: avatar row + names
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AvatarRow(
+                authors = actorAuthors,
+                totalCount = actorPubkeys.size,
+                onProfileClick = onProfileClick,
+                avatarSize = 24
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = namesText,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        // Row 3: target note preview (full width)
+        val rawPreview = notification.targetNote?.content ?: notification.note?.content
+        val previewText = remember(rawPreview) {
+            rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
+                ?.replace(Regex("\\s+"), " ")?.trim()
+        }
+        if (!previewText.isNullOrBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = previewText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                lineHeight = 16.sp
+            )
+        }
+    }
 }
 
 // ─── Full card for replies / mentions ────────────────────────────────────────
@@ -794,123 +832,100 @@ private fun FullNotificationCard(
     val linkColor = MaterialTheme.colorScheme.primary
     val linkStyle = remember(linkColor) { SpanStyle(color = linkColor, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline) }
 
-    val accentColor = MaterialTheme.colorScheme.primary
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .then(
-                if (!isSeen) Modifier.drawBehind {
-                    drawRect(
-                        color = accentColor,
-                        topLeft = androidx.compose.ui.geometry.Offset.Zero,
-                        size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height)
-                    )
-                } else Modifier
-            ),
-        color = if (!isSeen) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.18f) else Color.Transparent
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-        ) {
-            // Header row: type label + timestamp
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = when (notification.type) {
-                        NotificationType.REPLY -> Icons.AutoMirrored.Outlined.Reply
-                        NotificationType.HIGHLIGHT -> Icons.Outlined.FormatQuote
-                        NotificationType.REPORT -> Icons.Outlined.Flag
-                        else -> Icons.Outlined.AlternateEmail
-                    },
-                    contentDescription = null,
-                    modifier = Modifier.size(16.dp),
-                    tint = typeColor
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = when (notification.type) {
-                        NotificationType.REPLY -> when (notification.replyKind) {
-                            11 -> "Thread reply"
-                            1111 -> "Comment"
-                            else -> "Reply"
-                        }
-                        NotificationType.HIGHLIGHT -> "Highlight"
-                        NotificationType.REPORT -> "Report"
-                        else -> "Mention"
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = typeColor
-                )
-                Spacer(Modifier.weight(1f))
-                Text(
-                    text = timeAgo,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline
-                )
-            }
-
-            // Original content first — gives context before showing the reply
-            notification.targetNote?.let { target ->
-                Spacer(Modifier.height(6.dp))
-                NotificationTargetPreview(
-                    target = target,
-                    profileCache = profileCache,
-                    profileRevision = profileRevision,
-                    linkStyle = linkStyle,
-                    onProfileClick = onProfileClick,
-                )
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            // Replier: compact single-line "Name replied"
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ProfilePicture(
-                    author = displayAuthor,
-                    size = 22.dp,
-                    onClick = { notification.author?.id?.let { onProfileClick(it) } }
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = buildString {
-                        append(displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" })
-                        append(" replied")
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-
-            // Inline reply content
-            notification.note?.let { replyNote ->
-                NotificationReplyContent(
-                    replyNote = replyNote,
-                    profileCache = profileCache,
-                    onProfileClick = onProfileClick,
-                    onClick = onClick,
-                )
-            }
+    val typeLabel = when (notification.type) {
+        NotificationType.REPLY -> when (notification.replyKind) {
+            11 -> "replied to your thread"
+            1111 -> "commented"
+            else -> "replied"
         }
+        NotificationType.QUOTE -> "quoted your note"
+        NotificationType.HIGHLIGHT -> "highlighted"
+        NotificationType.REPORT -> "reported"
+        else -> "mentioned you"
+    }
+    val typeIcon = when (notification.type) {
+        NotificationType.REPLY -> Icons.AutoMirrored.Outlined.Reply
+        NotificationType.QUOTE -> Icons.Default.FormatQuote
+        NotificationType.HIGHLIGHT -> Icons.Outlined.FormatQuote
+        NotificationType.REPORT -> Icons.Outlined.Flag
+        else -> Icons.Outlined.AlternateEmail
     }
 
-    HorizontalDivider(
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
-    )
+    NotificationCardShell(isSeen = isSeen, onClick = onClick) {
+        // Row 1: type icon + action text + timestamp (same pattern as compact)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = typeIcon,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = typeColor
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = typeLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = timeAgo,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // Row 2: author avatar + name (full width, no indent on content below)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ProfilePicture(
+                author = displayAuthor,
+                size = 24.dp,
+                onClick = { notification.author?.id?.let { onProfileClick(it) } }
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" },
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+
+        // Row 3: reply/quote content — FULL WIDTH, no indentation
+        notification.note?.let { replyNote ->
+            NotificationReplyContent(
+                replyNote = replyNote,
+                profileCache = profileCache,
+                onProfileClick = onProfileClick,
+                onClick = onClick,
+            )
+        }
+
+        // Row 4: target note context — FULL WIDTH
+        notification.targetNote?.let { target ->
+            Spacer(Modifier.height(6.dp))
+            NotificationTargetPreview(
+                target = target,
+                profileCache = profileCache,
+                profileRevision = profileRevision,
+                linkStyle = linkStyle,
+                onProfileClick = onProfileClick,
+            )
+        }
+    }
 }
 
 /**
- * Extracted inline reply content: annotated text + embedded media + hashtags.
- * Splits ~100 lines from FullNotificationCard to reduce 6.5MB JIT.
+ * Rich inline reply/quote content: uses the same buildNoteContentWithInlinePreviews pipeline
+ * as the feed, producing interleaved text, media groups, quoted note references, and link previews.
+ * Supports markdown rendering and preserves line breaks.
  */
 @Composable
 private fun NotificationReplyContent(
@@ -922,103 +937,163 @@ private fun NotificationReplyContent(
     if (replyNote.content.isBlank() && replyNote.mediaUrls.isEmpty()) return
 
     val uriHandler = LocalUriHandler.current
-    val imageUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
-    val videoUrls = replyNote.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
     val mediaUrlSet = remember(replyNote.mediaUrls) { replyNote.mediaUrls.toSet() }
     val linkColor = MaterialTheme.colorScheme.primary
     val linkStyle = remember(linkColor) { SpanStyle(color = linkColor, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline) }
-    val annotatedContent = remember(replyNote.content, mediaUrlSet, linkStyle) {
-        buildNoteContentAnnotatedString(
+
+    // Use the full rich content pipeline (same as feed cards)
+    val contentIsMarkdown = remember(replyNote.content) { social.mycelium.android.ui.components.isMarkdown(replyNote.content) }
+    val contentBlocks = remember(replyNote.content, mediaUrlSet, linkStyle) {
+        social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
             content = replyNote.content,
             mediaUrls = mediaUrlSet,
+            urlPreviews = replyNote.urlPreviews,
             linkStyle = linkStyle,
             profileCache = profileCache
         )
     }
-    Spacer(Modifier.height(8.dp))
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-        shape = RoundedCornerShape(8.dp)
-    ) {
-        Column {
-            if (annotatedContent.text.isNotBlank()) {
-                social.mycelium.android.ui.components.ClickableNoteContent(
-                    text = annotatedContent,
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        color = MaterialTheme.colorScheme.onSurface,
-                        lineHeight = 18.sp
-                    ),
-                    maxLines = 4,
-                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 10.dp),
-                    onClick = { offset ->
-                        val profile = annotatedContent.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                        val url = annotatedContent.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                        when {
-                            profile != null -> onProfileClick(profile.item)
-                            url != null -> uriHandler.openUri(url.item)
-                            else -> onClick()
-                        }
-                    }
-                )
-            }
-            // Embedded media
-            if (imageUrls.size == 1 && videoUrls.isEmpty()) {
-                if (annotatedContent.text.isNotBlank()) Spacer(Modifier.height(6.dp))
-                AsyncImage(
-                    model = imageUrls[0],
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 160.dp)
-                )
-            } else if (imageUrls.isNotEmpty() || videoUrls.isNotEmpty()) {
-                if (annotatedContent.text.isNotBlank()) Spacer(Modifier.height(6.dp))
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    modifier = Modifier.padding(horizontal = 10.dp)
-                ) {
-                    imageUrls.take(3).forEach { url ->
-                        AsyncImage(
-                            model = url,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                        )
-                    }
-                    videoUrls.take(2).forEach { _ ->
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = "Video",
-                                modifier = Modifier.size(24.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+
+    Spacer(Modifier.height(4.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        contentBlocks.forEach { block ->
+            when (block) {
+                is social.mycelium.android.utils.NoteContentBlock.Content -> {
+                    val annotated = block.annotated
+                    if (annotated.isNotEmpty()) {
+                        if (contentIsMarkdown) {
+                            social.mycelium.android.ui.components.MarkdownNoteContent(
+                                content = annotated.text,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    lineHeight = 20.sp
+                                ),
+                                onProfileClick = onProfileClick,
+                                onNoteClick = { onClick() },
+                                onUrlClick = { url -> uriHandler.openUri(url) }
+                            )
+                        } else {
+                            social.mycelium.android.ui.components.ClickableNoteContent(
+                                text = annotated,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    lineHeight = 20.sp
+                                ),
+                                maxLines = 12,
+                                modifier = Modifier,
+                                onClick = { offset ->
+                                    val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                                    val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                    val naddr = annotated.getStringAnnotations(tag = "NADDR", start = offset, end = offset).firstOrNull()
+                                    when {
+                                        profile != null -> onProfileClick(profile.item)
+                                        url != null -> uriHandler.openUri(url.item)
+                                        naddr != null -> uriHandler.openUri(naddr.item)
+                                        else -> onClick()
+                                    }
+                                }
                             )
                         }
                     }
                 }
+                is social.mycelium.android.utils.NoteContentBlock.MediaGroup -> {
+                    val mediaList = block.urls.take(4)
+                    if (mediaList.isNotEmpty()) {
+                        mediaList.forEach { url ->
+                            if (social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
+                                // Video thumbnail placeholder
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 180.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "Video",
+                                        modifier = Modifier.size(32.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else {
+                                val ratio = remember(url) {
+                                    social.mycelium.android.utils.MediaAspectRatioCache.get(url) ?: (16f / 9f)
+                                }
+                                AsyncImage(
+                                    model = url,
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(ratio.coerceIn(0.5f, 2.5f))
+                                        .heightIn(max = 220.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                )
+                            }
+                        }
+                    }
+                }
+                is social.mycelium.android.utils.NoteContentBlock.Preview -> {
+                    social.mycelium.android.ui.components.UrlPreviewCard(
+                        previewInfo = block.previewInfo,
+                        onUrlClick = { url -> uriHandler.openUri(url) },
+                        onUrlLongClick = { }
+                    )
+                }
+                is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
+                    // Inline quoted note reference — compact clickable link
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { onClick() }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.FormatQuote,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = "View quoted note \u203A",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
+                    Row(
+                        modifier = Modifier.padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.PlayCircle,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = "Live event \u203A",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
             }
-            // Hashtags
-            if (replyNote.hashtags.isNotEmpty()) {
-                Text(
-                    text = replyNote.hashtags.joinToString(" ") { "#$it" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF8FBC8F),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = 10.dp, end = 10.dp, top = 4.dp)
-                )
-            }
-            Spacer(Modifier.height(10.dp))
+        }
+        // Hashtags (if not already captured in content annotations)
+        if (replyNote.hashtags.isNotEmpty()) {
+            Text(
+                text = replyNote.hashtags.joinToString(" ") { "#$it" },
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF8FBC8F),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -1035,94 +1110,170 @@ private fun NotificationTargetPreview(
     linkStyle: SpanStyle,
     onProfileClick: (String) -> Unit,
 ) {
-    val imageUrls = remember(target.mediaUrls) {
-        target.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
+    val uriHandler = LocalUriHandler.current
+    val targetAuthorId = remember(target.author.id) { normalizeAuthorIdForCache(target.author.id) }
+    val targetAuthor = remember(targetAuthorId, profileRevision) {
+        profileCache.getAuthor(targetAuthorId) ?: target.author
     }
-    val videoUrls = remember(target.mediaUrls) {
-        target.mediaUrls.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
-    }
-    Spacer(Modifier.height(6.dp))
-    Row(
-        verticalAlignment = Alignment.Top,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Box(
-            modifier = Modifier
-                .width(2.dp)
-                .defaultMinSize(minHeight = 36.dp)
-                .background(
-                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-                    RoundedCornerShape(1.dp)
-                )
+    val targetMediaSet = remember(target.mediaUrls) { target.mediaUrls.toSet() }
+
+    // Rich content pipeline — same as feed
+    val contentIsMarkdown = remember(target.content) { social.mycelium.android.ui.components.isMarkdown(target.content) }
+    val contentBlocks = remember(target.content, targetMediaSet, linkStyle) {
+        social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
+            content = target.content,
+            mediaUrls = targetMediaSet,
+            urlPreviews = target.urlPreviews,
+            linkStyle = linkStyle,
+            profileCache = profileCache
         )
-        Spacer(Modifier.width(8.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            val targetAuthorId = remember(target.author.id) { normalizeAuthorIdForCache(target.author.id) }
-            val targetAuthor = remember(targetAuthorId, profileRevision) {
-                profileCache.getAuthor(targetAuthorId) ?: target.author
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ProfilePicture(
-                    author = targetAuthor,
-                    size = 16.dp,
-                    onClick = { onProfileClick(target.author.id) }
-                )
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = targetAuthor.displayName.ifBlank { targetAuthor.id.take(8) + "…" },
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-            val targetMediaSet = remember(target.mediaUrls) { target.mediaUrls.toSet() }
-            val targetAnnotated = remember(target.content, targetMediaSet, linkStyle) {
-                buildNoteContentAnnotatedString(
-                    content = target.content,
-                    mediaUrls = targetMediaSet,
-                    linkStyle = linkStyle,
-                    profileCache = profileCache
-                )
-            }
-            if (targetAnnotated.text.isNotBlank()) {
-                Text(
-                    text = targetAnnotated,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 16.sp
-                )
-            }
-            // Embedded media thumbnails for the target note
-            if (imageUrls.isNotEmpty() || videoUrls.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    imageUrls.take(3).forEach { url ->
-                        AsyncImage(
-                            model = url,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                        )
-                    }
-                    videoUrls.take(1).forEach { _ ->
-                        Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(6.dp))
-                                .background(MaterialTheme.colorScheme.surfaceVariant),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = "Video",
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    // Subtle surface with left accent bar — visually distinct "referenced note"
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+    ) {
+        Row(
+            modifier = Modifier.height(androidx.compose.foundation.layout.IntrinsicSize.Min)
+        ) {
+            // Quote accent bar
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .background(
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp)
+                    )
+            )
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp)
+            ) {
+                // Author row
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    ProfilePicture(
+                        author = targetAuthor,
+                        size = 16.dp,
+                        onClick = { onProfileClick(target.author.id) }
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        text = targetAuthor.displayName.ifBlank { targetAuthor.id.take(8) + "…" },
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                // Rich content blocks
+                val contentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                contentBlocks.forEach { block ->
+                    when (block) {
+                        is social.mycelium.android.utils.NoteContentBlock.Content -> {
+                            val annotated = block.annotated
+                            if (annotated.isNotEmpty()) {
+                                if (contentIsMarkdown) {
+                                    social.mycelium.android.ui.components.MarkdownNoteContent(
+                                        content = annotated.text,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = contentColor,
+                                            lineHeight = 17.sp
+                                        ),
+                                        onProfileClick = onProfileClick,
+                                        onNoteClick = { },
+                                        onUrlClick = { url -> uriHandler.openUri(url) }
+                                    )
+                                } else {
+                                    social.mycelium.android.ui.components.ClickableNoteContent(
+                                        text = annotated,
+                                        style = MaterialTheme.typography.bodySmall.copy(
+                                            color = contentColor,
+                                            lineHeight = 17.sp
+                                        ),
+                                        maxLines = 4,
+                                        onClick = { offset ->
+                                            val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                                            val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                            when {
+                                                profile != null -> onProfileClick(profile.item)
+                                                url != null -> uriHandler.openUri(url.item)
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        is social.mycelium.android.utils.NoteContentBlock.MediaGroup -> {
+                            val mediaList = block.urls.take(3)
+                            if (mediaList.isNotEmpty()) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    mediaList.forEach { url ->
+                                        if (social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(52.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PlayArrow,
+                                                    contentDescription = "Video",
+                                                    modifier = Modifier.size(18.dp),
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        } else {
+                                            AsyncImage(
+                                                model = url,
+                                                contentDescription = null,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier
+                                                    .size(52.dp)
+                                                    .clip(RoundedCornerShape(4.dp))
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        is social.mycelium.android.utils.NoteContentBlock.Preview -> {
+                            social.mycelium.android.ui.components.UrlPreviewCard(
+                                previewInfo = block.previewInfo,
+                                onUrlClick = { url -> uriHandler.openUri(url) },
+                                onUrlLongClick = { }
+                            )
+                        }
+                        is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
+                            Row(
+                                modifier = Modifier.padding(vertical = 1.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    Icons.Outlined.FormatQuote,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                )
+                                Text(
+                                    text = "Quoted note",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                                )
+                            }
+                        }
+                        is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
+                            Text(
+                                text = "Live event",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
                             )
                         }
                     }
@@ -1185,162 +1336,87 @@ private fun ThreadSummaryCard(
     onClick: () -> Unit,
 ) {
     val hasUnseen = summary.allNotifIds.any { it !in seenIds }
-    val accentColor = MaterialTheme.colorScheme.primary
 
-    Surface(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth(),
-        color = if (hasUnseen)
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.06f)
-        else
-            MaterialTheme.colorScheme.surface
-    ) {
-        Row(modifier = Modifier.fillMaxWidth()) {
-            // Unseen accent bar (left edge)
-            if (hasUnseen) {
-                Box(
-                    modifier = Modifier
-                        .width(3.dp)
-                        .fillMaxHeight()
-                        .background(accentColor)
-                )
-            }
+    NotificationCardShell(isSeen = !hasUnseen, onClick = onClick) {
+        // Row 1: type icon + reply count + timestamp (same pattern as all cards)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Forum,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.secondary
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "${summary.replyCount} ${if (summary.replyCount == 1) "reply" else "replies"} in thread",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = formatTimeAgo(summary.latestTimestamp, timeTick),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
 
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.Top
-            ) {
-                // Lead avatar — latest replier or thread icon fallback
-                val leadAuthor = summary.replierAuthors.firstOrNull()
-                if (leadAuthor != null) {
-                    ProfilePicture(
-                        author = leadAuthor,
-                        size = 40.dp,
-                        onClick = { onProfileClick(leadAuthor.id) }
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.secondaryContainer),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Forum,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
-                }
+        Spacer(Modifier.height(6.dp))
 
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    // Top row: replier names + time
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val names = summary.replierAuthors.take(3).joinToString(", ") {
-                            it.displayName.ifBlank { it.username.ifBlank { it.id.take(8) + "…" } }
-                        }
-                        val extra = if (summary.replierAuthors.size > 3) " +${summary.replierAuthors.size - 3}" else ""
-                        Text(
-                            text = names + extra,
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = if (hasUnseen) FontWeight.Bold else FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f, fill = false)
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = formatTimeAgo(summary.latestTimestamp, timeTick),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+        // Row 2: avatar row + names
+        val names = summary.replierAuthors.take(3).joinToString(", ") {
+            it.displayName.ifBlank { it.username.ifBlank { it.id.take(8) + "…" } }
+        }
+        val extra = if (summary.replierAuthors.size > 3) " +${summary.replierAuthors.size - 3}" else ""
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            AvatarRow(
+                authors = summary.replierAuthors,
+                totalCount = summary.replierAuthors.size,
+                onProfileClick = onProfileClick,
+                avatarSize = 24
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = names + extra,
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
 
-                    // Thread root preview (what the thread is about)
-                    val threadTitle = summary.targetNote?.content
-                        ?: summary.targetNoteFromAny?.content
-                    if (threadTitle != null) {
-                        Text(
-                            text = threadTitle.take(100).replace('\n', ' '),
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+        // Row 3: thread root preview (full width)
+        val threadTitle = summary.targetNote?.content
+            ?: summary.targetNoteFromAny?.content
+        if (threadTitle != null) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = threadTitle.take(120).replace('\n', ' '),
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+            )
+        }
 
-                    // Latest reply preview
-                    val latestContent = summary.latestReply.note?.content
-                    if (latestContent != null && latestContent != threadTitle) {
-                        Text(
-                            text = latestContent.take(140).replace('\n', ' '),
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-                        )
-                    }
-
-                    // Bottom row: reply count + additional avatars
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Forum,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "${summary.replyCount} ${if (summary.replyCount == 1) "reply" else "replies"}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        // Additional avatars (skip first since it's the lead)
-                        if (summary.replierAuthors.size > 1) {
-                            Spacer(Modifier.width(2.dp))
-                            Box(modifier = Modifier.height(20.dp)) {
-                                summary.replierAuthors.drop(1).take(3).forEachIndexed { idx, author ->
-                                    Box(
-                                        modifier = Modifier
-                                            .offset(x = (idx * 14).dp)
-                                            .size(20.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.surfaceVariant)
-                                    ) {
-                                        ProfilePicture(
-                                            author = author,
-                                            size = 20.dp,
-                                            onClick = { onProfileClick(author.id) }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // Row 4: latest reply preview (full width)
+        val latestContent = summary.latestReply.note?.content
+        if (latestContent != null && latestContent != threadTitle) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = latestContent.take(160).replace('\n', ' '),
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f),
+                lineHeight = 18.sp
+            )
         }
     }
-    HorizontalDivider(
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-    )
 }
 
 @Preview(showBackground = true)

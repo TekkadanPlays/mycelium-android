@@ -45,6 +45,10 @@ object VoteRepository {
     /** Current user's vote per note: noteId → +1, -1, or 0 (no vote). */
     private val ownVoteByNoteId = ConcurrentHashMap<String, Int>()
 
+    /** Reactive own-vote map for Compose observation. */
+    private val _ownVotes = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val ownVotes: StateFlow<Map<String, Int>> = _ownVotes.asStateFlow()
+
     /** Aggregate vote score per note: noteId → net score (sum of all votes). */
     private val _scoreByNoteId = MutableStateFlow<Map<String, Int>>(emptyMap())
     val scoreByNoteId: StateFlow<Map<String, Int>> = _scoreByNoteId.asStateFlow()
@@ -52,6 +56,14 @@ object VoteRepository {
     /** Per-note vote counts: noteId → (upvotes, downvotes). */
     private val upvotesByNoteId = ConcurrentHashMap<String, Int>()
     private val downvotesByNoteId = ConcurrentHashMap<String, Int>()
+
+    /** Reactive per-note upvote counts for Compose observation. */
+    private val _upvotesByNoteId = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val upvoteCounts: StateFlow<Map<String, Int>> = _upvotesByNoteId.asStateFlow()
+
+    /** Reactive per-note downvote counts for Compose observation. */
+    private val _downvotesByNoteId = MutableStateFlow<Map<String, Int>>(emptyMap())
+    val downvoteCounts: StateFlow<Map<String, Int>> = _downvotesByNoteId.asStateFlow()
 
     // ── Query ───────────────────────────────────────────────────────────
 
@@ -64,6 +76,21 @@ object VoteRepository {
         val down = downvotesByNoteId[noteId] ?: 0
         return up - down
     }
+
+    /** Get total upvotes for a note. */
+    fun getUpvotes(noteId: String): Int = upvotesByNoteId[noteId] ?: 0
+
+    /** Get total downvotes for a note. */
+    fun getDownvotes(noteId: String): Int = downvotesByNoteId[noteId] ?: 0
+
+    /** Sum of upvotes across multiple notes (e.g. all notes in a topic). */
+    fun getTotalUpvotes(noteIds: List<String>): Int = noteIds.sumOf { upvotesByNoteId[it] ?: 0 }
+
+    /** Sum of downvotes across multiple notes (e.g. all notes in a topic). */
+    fun getTotalDownvotes(noteIds: List<String>): Int = noteIds.sumOf { downvotesByNoteId[it] ?: 0 }
+
+    /** Net score across multiple notes (total upvotes - total downvotes). */
+    fun getTotalScore(noteIds: List<String>): Int = getTotalUpvotes(noteIds) - getTotalDownvotes(noteIds)
 
     // ── Vote toggle logic ───────────────────────────────────────────────
 
@@ -164,5 +191,8 @@ object VoteRepository {
             scores[id] = (upvotesByNoteId[id] ?: 0) - (downvotesByNoteId[id] ?: 0)
         }
         _scoreByNoteId.value = scores
+        _upvotesByNoteId.value = upvotesByNoteId.toMap()
+        _downvotesByNoteId.value = downvotesByNoteId.toMap()
+        _ownVotes.value = ownVoteByNoteId.toMap()
     }
 }

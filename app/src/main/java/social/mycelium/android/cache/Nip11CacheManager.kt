@@ -41,6 +41,10 @@ class Nip11CacheManager(private val context: Context) {
             instance ?: synchronized(this) {
                 instance ?: Nip11CacheManager(context.applicationContext).also { instance = it }
             }
+
+        /** Return the already-initialized singleton, or null if not yet created.
+         *  Safe for use from non-Context code paths like RelayConnectionStateMachine. */
+        fun getInstanceOrNull(): Nip11CacheManager? = instance
     }
 
     private val sharedPrefs: SharedPreferences = context.getSharedPreferences(CACHE_PREFS, Context.MODE_PRIVATE)
@@ -228,6 +232,35 @@ class Nip11CacheManager(private val context: Context) {
         }
     }
     
+    /**
+     * Check if a relay requires payment (from cached NIP-11 data).
+     * Returns true only if we have cached data confirming payment_required = true.
+     * Returns false if unknown (no cached data) — we don't block relays we haven't checked.
+     */
+    fun isPaymentRequired(url: String): Boolean {
+        val normalizedUrl = normalizeRelayUrl(url)
+        return memoryCache[normalizedUrl]?.info?.limitation?.payment_required == true
+    }
+
+    /**
+     * Check if a relay requires authentication (from cached NIP-11 data).
+     * Returns true only if we have cached data confirming auth_required = true.
+     */
+    fun isAuthRequired(url: String): Boolean {
+        val normalizedUrl = normalizeRelayUrl(url)
+        return memoryCache[normalizedUrl]?.info?.limitation?.auth_required == true
+    }
+
+    /**
+     * Check if a relay should be skipped for general-purpose subscriptions
+     * (payment required or auth required without signer).
+     */
+    fun shouldSkipRelay(url: String): Boolean {
+        val normalizedUrl = normalizeRelayUrl(url)
+        val info = memoryCache[normalizedUrl]?.info ?: return false
+        return info.limitation?.payment_required == true || info.limitation?.auth_required == true
+    }
+
     /**
      * Clear only the in-memory cache to free RAM. Disk state is unchanged; data can be
      * reloaded from storage on next access. Call from trim coordinator on memory pressure.

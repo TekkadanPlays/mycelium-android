@@ -1577,13 +1577,14 @@ fun DashboardScreen(
                     exit = scaleOut() + fadeOut()
                 ) {
                     val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
+                    val kind1RootDrafts = remember(draftsList) { draftsList.filter { it.type == social.mycelium.android.data.DraftType.NOTE } }
                     social.mycelium.android.ui.components.HomeFab(
                         onScrollToTop = {
                             scope.launch { listState.scrollToItem(0) }
                         },
                         onCompose = { onNavigateTo("compose") },
                         onDrafts = { onNavigateTo("drafts") },
-                        draftCount = draftsList.size,
+                        draftCount = kind1RootDrafts.size,
                         modifier = Modifier.padding(bottom = 80.dp)
                     )
                 }

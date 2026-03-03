@@ -133,35 +133,42 @@ object NotificationPreferences {
     fun setNotifyReactions(enabled: Boolean) {
         _notifyReactions.value = enabled
         prefs.edit().putBoolean(KEY_NOTIFY_REACTIONS, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyZaps(enabled: Boolean) {
         _notifyZaps.value = enabled
         prefs.edit().putBoolean(KEY_NOTIFY_ZAPS, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyReposts(enabled: Boolean) {
         _notifyReposts.value = enabled
         prefs.edit().putBoolean(KEY_NOTIFY_REPOSTS, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyMentions(enabled: Boolean) {
         _notifyMentions.value = enabled
         prefs.edit().putBoolean(KEY_NOTIFY_MENTIONS, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyReplies(enabled: Boolean) {
         _notifyReplies.value = enabled
         prefs.edit().putBoolean(KEY_NOTIFY_REPLIES, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyDMs(enabled: Boolean) {
         _notifyDMs.value = enabled
         prefs.edit().putBoolean(KEY_NOTIFY_DMS, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setMuteStrangers(enabled: Boolean) {
         _muteStrangers.value = enabled
         prefs.edit().putBoolean(KEY_MUTE_STRANGERS, enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 }

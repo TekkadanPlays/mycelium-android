@@ -31,8 +31,12 @@ data class NotificationData(
     val zapAmountSats: Long = 0L,
     /** NIP-25 reaction emoji for LIKE type (e.g. "❤️", "🔥", "👍", or "+" for default like). */
     val reactionEmoji: String? = null,
+    /** All unique reaction emojis for this consolidated like notification (e.g. ["❤️", "🔥", "👍"]). */
+    val reactionEmojis: List<String> = emptyList(),
     /** NIP-30 custom emoji URL for :shortcode: reactions (from "emoji" tag in kind-7 event). */
     val customEmojiUrl: String? = null,
+    /** NIP-30 custom emoji URLs keyed by :shortcode: for all reactions in this consolidated notification. */
+    val customEmojiUrls: Map<String, String> = emptyMap(),
     /** Media URLs (images/videos) found in the notification note content. */
     val mediaUrls: List<String> = emptyList(),
     /** Quoted event IDs (nevent/note1 references) found in the notification note content. */

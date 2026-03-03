@@ -320,6 +320,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         )
         // Full teardown: disconnect relays, clear NIP-42 auth, reset NIP-65
         RelayConnectionStateMachine.getInstance().disconnectAndClearForAccountSwitch()
+        // Clear settings sync callback
+        social.mycelium.android.repository.SettingsSyncManager.clearPublishCallback()
     }
 
     private suspend fun handleNewAmberLogin(hexPubkey: String) {
@@ -424,6 +426,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         }
 
         Log.d("AccountStateViewModel", "\uD83D\uDD10 Account activated: ${accountInfo.toShortNpub()}")
+
+        // Sync settings via NIP-78 (kind 30078)
+        initSettingsSync(hexPubkey)
     }
 
     /**
@@ -512,6 +517,31 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // navigation LaunchedEffects react to the new account.
         _currentAccount.value = updatedAccount
         _accountsRestored.value = true
+
+        // Sync settings via NIP-78 (kind 30078)
+        updatedAccount.toHexKey()?.let { initSettingsSync(it) }
+    }
+
+    /**
+     * Register the settings sync publish callback and fetch remote settings from relays.
+     * Called after account activation (Amber login or session restore).
+     */
+    private fun initSettingsSync(hexPubkey: String) {
+        val signer = getCurrentSigner() ?: return
+        val context = getApplication<android.app.Application>()
+        val relayUrls = getPublishRelayUrlSet()
+
+        // Register callback so preference setters trigger debounced publish
+        social.mycelium.android.repository.SettingsSyncManager.registerPublishCallback {
+            social.mycelium.android.repository.SettingsSyncManager.publishSettings(
+                context, signer, hexPubkey, relayUrls
+            )
+        }
+
+        // Fetch and apply remote settings (one-shot on login)
+        social.mycelium.android.repository.SettingsSyncManager.fetchAndApplySettings(
+            signer, hexPubkey, relayUrls.toList()
+        )
     }
 
     private fun restoreZapState(accountNpub: String) {

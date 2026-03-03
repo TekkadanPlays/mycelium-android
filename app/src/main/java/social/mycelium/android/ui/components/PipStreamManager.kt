@@ -21,8 +21,12 @@ object PipStreamManager {
         val player: ExoPlayer,
         val addressableId: String,
         val title: String?,
-        val hostName: String?
-    )
+        val hostName: String?,
+        /** Non-null when PiP is for a regular video (not a live stream). */
+        val videoUrl: String? = null
+    ) {
+        val isVideo: Boolean get() = videoUrl != null
+    }
 
     private val _pipState = MutableStateFlow<PipState?>(null)
     val pipState: StateFlow<PipState?> = _pipState.asStateFlow()
@@ -38,14 +42,29 @@ object PipStreamManager {
     /** Start PiP — called by LiveStreamScreen when the user navigates back. */
     fun startPip(player: ExoPlayer, addressableId: String, title: String?, hostName: String?) {
         // Release any existing PiP player first
+        killCurrentPip()
+        _pipState.value = PipState(player, addressableId, title, hostName)
+        Log.d(TAG, "PiP started for live stream $addressableId")
+    }
+
+    /** Start PiP for a regular video URL. The player stays in SharedPlayerPool. */
+    fun startVideoPip(player: ExoPlayer, url: String) {
+        killCurrentPip()
+        _pipState.value = PipState(player, addressableId = url, title = null, hostName = null, videoUrl = url)
+        Log.d(TAG, "PiP started for video $url")
+    }
+
+    private fun killCurrentPip() {
         _pipState.value?.let { old ->
-            if (old.player !== player) {
-                Log.d(TAG, "Releasing previous PiP player for ${old.addressableId}")
+            Log.d(TAG, "Releasing previous PiP for ${old.addressableId}")
+            if (old.isVideo) {
+                // Video PiP: detach from pool (don't release — pool manages lifecycle)
+                old.videoUrl?.let { SharedPlayerPool.detach(it) }
+            } else {
                 old.player.release()
             }
         }
-        _pipState.value = PipState(player, addressableId, title, hostName)
-        Log.d(TAG, "PiP started for $addressableId")
+        _pipState.value = null
     }
 
     /** Reclaim the player when the user taps PiP to return to the stream screen. */
@@ -60,7 +79,11 @@ object PipStreamManager {
     fun dismiss() {
         _pipState.value?.let {
             Log.d(TAG, "PiP dismissed for ${it.addressableId}")
-            it.player.release()
+            if (it.isVideo) {
+                it.videoUrl?.let { url -> SharedPlayerPool.release(url) }
+            } else {
+                it.player.release()
+            }
         }
         _pipState.value = null
     }
@@ -101,6 +124,10 @@ object PipStreamManager {
     /** Check if PiP is active for a given addressableId. */
     fun isActiveFor(addressableId: String): Boolean =
         _pipState.value?.addressableId == addressableId
+
+    /** Check if PiP is active for a given video URL. */
+    fun isVideoFor(url: String): Boolean =
+        _pipState.value?.videoUrl == url
 
     /** Whether PiP is currently active at all. */
     val isActive: Boolean get() = _pipState.value != null

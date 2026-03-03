@@ -228,6 +228,7 @@ class Kind1RepliesRepository {
 
         _isLoading.value = true
         _error.value = null
+        profileCache.resetBackoff()
 
         // Clear all other notes from the replies map so only the current thread is tracked.
         // This prevents stale replies from lingering when navigating between threads.
@@ -246,8 +247,9 @@ class Kind1RepliesRepository {
             _isLoading.value = false
             Log.d(TAG, "Emitted ${sorted.size} cached replies for note ${noteId.take(8)}... (instant)")
             scheduleFetchMissingParents(noteId)
-        } else {
-            // Emit an empty entry so the ViewModel collector fires and clears stale UI
+        } else if (noteId !in _replies.value || _replies.value[noteId].isNullOrEmpty()) {
+            // Emit an empty entry so the ViewModel collector fires and clears stale UI,
+            // but only if we don't already have replies for this note (same-note reload).
             _replies.value = mapOf(noteId to emptyList())
         }
 
@@ -274,6 +276,7 @@ class Kind1RepliesRepository {
                 relayUrls = allRelays,
                 filter = replyFilter,
                 onEvent = { event, relayUrl ->
+                    NotificationsRepository.ingestEvent(event)
                     NoteCountsRepository.onLiveEvent(event)
                     if (event.kind == 1) handleReplyEvent(noteId, event, relayUrl)
                 },
@@ -283,7 +286,10 @@ class Kind1RepliesRepository {
             rsm.requestTemporarySubscription(
                 relayUrls = allRelays,
                 filters = listOf(countsFilter),
-                onEvent = { event -> NoteCountsRepository.onLiveEvent(event) },
+                onEvent = { event ->
+                    NotificationsRepository.ingestEvent(event)
+                    NoteCountsRepository.onLiveEvent(event)
+                },
                 priority = SubscriptionPriority.HIGH,
             )
 

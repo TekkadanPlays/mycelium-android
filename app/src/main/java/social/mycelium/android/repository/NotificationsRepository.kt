@@ -152,7 +152,10 @@ object NotificationsRepository {
      * Each notification type maps to a specific Android notification channel so the user
      * can independently configure sounds, vibration, and visibility in system settings.
      */
-    private fun fireAndroidNotification(type: NotificationType, title: String, body: String, notifIdSuffix: String, eventEpochSec: Long = 0L) {
+    private fun fireAndroidNotification(
+        type: NotificationType, title: String, body: String, notifIdSuffix: String,
+        eventEpochSec: Long = 0L, noteId: String? = null, rootNoteId: String? = null
+    ) {
         // Suppress historical replay: only fire for events created after session start
         if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) return
         if (sessionStartEpochSec == Long.MAX_VALUE) return // not yet enabled
@@ -173,7 +176,10 @@ object NotificationsRepository {
         }
         if (!allowed) return
         val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
-        social.mycelium.android.services.NotificationChannelManager.postSocialNotification(ctx, channelId, notifId, title, body)
+        social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
+            ctx, channelId, notifId, title, body,
+            noteId = noteId, rootNoteId = rootNoteId, notifType = type.name
+        )
     }
 
     private fun loadSeenIds() {
@@ -517,7 +523,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000)
+        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000, noteId = eTag)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
     }
@@ -549,7 +555,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
+        fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = rootId)
         if (rootId != null) {
             // Fetch the direct parent to verify the reply is TO one of our notes.
             // If the parent note author isn't us AND we're not cited in content,
@@ -577,7 +583,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
+        fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = quotedNoteId)
         // Fetch the quoted note for display
         scope.launch { fetchAndSetTargetNote(quotedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
     }
@@ -668,7 +674,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.COMMENT, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
+        fireAndroidNotification(NotificationType.COMMENT, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = rootId)
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         updateTodaySummary(NotificationType.REPLY, ts, 0L)
     }
@@ -720,7 +726,7 @@ object NotificationsRepository {
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.BADGE_AWARD, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000)
+        fireAndroidNotification(NotificationType.BADGE_AWARD, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id)
         // Asynchronously resolve badge definition for name + image
         if (aTagValue != null && subscriptionRelayUrls.isNotEmpty()) {
             scope.launch { resolveBadgeDefinition(event.id, aTagValue) }
@@ -863,7 +869,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000)
+        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000, noteId = repostedNoteId)
         // Always fetch the reposted note so flushTargetFetchBatch can verify authorship
         // (even if we parsed it from content — content parsing doesn't verify it's OUR note)
         scope.launch { fetchAndSetTargetNote(repostedNoteId, data.id) { d -> { n -> d.copy(targetNote = n) } } }
@@ -928,7 +934,7 @@ object NotificationsRepository {
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000)
+        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id, eventEpochSec = latestTs / 1000, noteId = eTag)
         scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
     }

@@ -12,6 +12,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/** Deep-link target from tapping an Android notification. */
+data class PendingNotificationNav(
+    val noteId: String,
+    val rootNoteId: String? = null,
+    val notifType: String? = null
+)
+
 /** Holds reaction/zap/boost data for the dedicated ReactionsScreen. */
 data class ReactionsData(
     val noteId: String,
@@ -111,6 +118,20 @@ class AppViewModel : ViewModel() {
 
     fun clearVideoViewer() {
         _appState.update { it.copy(videoViewerUrls = null, videoViewerInitialIndex = 0) }
+    }
+
+    /** Pending navigation from tapping an Android notification. */
+    private val _pendingNotificationNav = MutableStateFlow<PendingNotificationNav?>(null)
+    val pendingNotificationNav: StateFlow<PendingNotificationNav?> = _pendingNotificationNav.asStateFlow()
+
+    fun setPendingNotificationNav(nav: PendingNotificationNav?) {
+        _pendingNotificationNav.value = nav
+    }
+
+    fun consumePendingNotificationNav(): PendingNotificationNav? {
+        val nav = _pendingNotificationNav.value
+        _pendingNotificationNav.value = null
+        return nav
     }
 
     /** Store the current album page for a note so it persists across feed/thread/viewer. */

@@ -33,6 +33,7 @@ import social.mycelium.android.BuildConfig
 import social.mycelium.android.utils.AppMemoryTrimmer
 import social.mycelium.android.viewmodel.AppViewModel
 import social.mycelium.android.viewmodel.AccountStateViewModel
+import social.mycelium.android.viewmodel.PendingNotificationNav
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -212,6 +213,9 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // Initialize NotificationsRepository with context for Android push notifications
         social.mycelium.android.repository.NotificationsRepository.init(applicationContext)
 
+        // Handle deep-link from notification tap on cold start
+        handleNotificationIntent(intent)
+
         setContent {
             MyceliumTheme {
                 Surface(
@@ -219,6 +223,14 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     val appViewModel: AppViewModel = viewModel()
+
+                    // Process any pending notification deep-link (cold start or onNewIntent)
+                    LaunchedEffect(Unit) {
+                        pendingNotificationNav?.let { nav ->
+                            appViewModel.setPendingNotificationNav(nav)
+                            pendingNotificationNav = null
+                        }
+                    }
                     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
 
                     // Set up login result handler
@@ -281,18 +293,16 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             accountStateViewModel.clearAmberActivityContext()
         }
         networkMonitor?.stop()
-        if (isFinishing) {
-            // User explicitly closed the app — stop service and keepalive
+        val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
+        if (mode == social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
+            // ALWAYS_ON: keep the foreground service running even when the user
+            // swipes the app from recents. The service manages its own keepalive
+            // and wake lock — that's the whole point of this mode.
+        } else {
+            // Non-ALWAYS_ON: stop everything — no service, no keepalive.
             RelayConnectionStateMachine.getInstance().stopKeepalive()
-            stopRelayForegroundService()
-        }
-        // When system reclaims the activity (backgrounding) in ALWAYS_ON mode,
-        // keep the foreground service running — it manages its own keepalive.
-        // In other modes, stop keepalive since the process will be frozen.
-        if (!isFinishing) {
-            val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
-            if (mode != social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
-                RelayConnectionStateMachine.getInstance().stopKeepalive()
+            if (isFinishing) {
+                stopRelayForegroundService()
             }
         }
         super.onDestroy()
@@ -310,6 +320,37 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         } catch (e: Throwable) {
             android.util.Log.w("MainActivity", "onTrimMemory trim failed", e)
         }
+    }
+
+    /** Pending notification nav from intent extras, consumed by LaunchedEffect above. */
+    private var pendingNotificationNav: PendingNotificationNav? = null
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleNotificationIntent(intent)
+        // If the activity is already running, push directly to the ViewModel
+        pendingNotificationNav?.let { nav ->
+            val vm = ViewModelProvider(this)[AppViewModel::class.java]
+            vm.setPendingNotificationNav(nav)
+            pendingNotificationNav = null
+        }
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        val noteId = intent?.getStringExtra(
+            social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTE_ID
+        ) ?: return
+        val rootNoteId = intent.getStringExtra(
+            social.mycelium.android.services.NotificationChannelManager.EXTRA_ROOT_NOTE_ID
+        )
+        val notifType = intent.getStringExtra(
+            social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTIF_TYPE
+        )
+        pendingNotificationNav = PendingNotificationNav(noteId, rootNoteId, notifType)
+        // Clear the extras so re-launch from recents doesn't re-navigate
+        intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTE_ID)
+        intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_ROOT_NOTE_ID)
+        intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTIF_TYPE)
     }
 
     private fun startRelayForegroundService() {

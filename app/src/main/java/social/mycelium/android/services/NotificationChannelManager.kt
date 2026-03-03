@@ -196,9 +196,18 @@ object NotificationChannelManager {
             .build()
     }
 
+    /** Intent extra keys for deep-linking from notification tap. */
+    const val EXTRA_NOTE_ID = "mycelium_note_id"
+    const val EXTRA_ROOT_NOTE_ID = "mycelium_root_note_id"
+    const val EXTRA_NOTIF_TYPE = "mycelium_notif_type"
+
     /**
      * Post a social notification (reply, mention, zap, etc.).
      * Respects the channel — user can mute individual channels in system settings.
+     *
+     * @param noteId The event ID that triggered this notification (used for highlight)
+     * @param rootNoteId The root note ID for thread navigation (null = noteId is the root)
+     * @param notifType Notification type string for routing (e.g. "REPLY", "ZAP")
      */
     fun postSocialNotification(
         context: Context,
@@ -206,8 +215,25 @@ object NotificationChannelManager {
         notificationId: Int,
         title: String,
         body: String,
+        noteId: String? = null,
+        rootNoteId: String? = null,
+        notifType: String? = null,
         autoCancel: Boolean = true
     ) {
+        // Build a deep-link PendingIntent so tapping opens the specific thread/note
+        val tapIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            if (noteId != null) putExtra(EXTRA_NOTE_ID, noteId)
+            if (rootNoteId != null) putExtra(EXTRA_ROOT_NOTE_ID, rootNoteId)
+            if (notifType != null) putExtra(EXTRA_NOTIF_TYPE, notifType)
+        }
+        val pendingIntent = if (tapIntent != null) {
+            PendingIntent.getActivity(
+                context, notificationId, tapIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+        } else null
+
         val notification = NotificationCompat.Builder(context, channelId)
             .setContentTitle(title)
             .setContentText(body)
@@ -221,6 +247,7 @@ object NotificationChannelManager {
                     else -> NotificationCompat.PRIORITY_LOW
                 }
             )
+            .apply { if (pendingIntent != null) setContentIntent(pendingIntent) }
             .build()
 
         try {

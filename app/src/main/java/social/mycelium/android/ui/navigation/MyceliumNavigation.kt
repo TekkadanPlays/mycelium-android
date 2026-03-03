@@ -233,6 +233,30 @@ fun MyceliumNavigation(
         { msg: String -> coroutineScope.launch { snackbarHostState.showSnackbar(msg, duration = androidx.compose.material3.SnackbarDuration.Short) } }
     }
 
+    // Handle deep-link navigation from tapping an Android notification
+    val pendingNav by appViewModel.pendingNotificationNav.collectAsState()
+    LaunchedEffect(pendingNav) {
+        val nav = appViewModel.consumePendingNotificationNav() ?: return@LaunchedEffect
+        // Build a stub Note so the thread composable has something to start with.
+        // The thread screen's root walk-up will fetch the full note from relays.
+        val targetNoteId = nav.rootNoteId ?: nav.noteId
+        val highlightReplyId = if (nav.rootNoteId != null) nav.noteId else null
+        val stubNote = social.mycelium.android.data.Note(
+            id = targetNoteId,
+            author = social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
+            content = "",
+            timestamp = 0L
+        )
+        appViewModel.storeNoteForThread(stubNote)
+        val route = if (highlightReplyId != null) {
+            "thread/$targetNoteId?replyKind=1&highlightReplyId=$highlightReplyId"
+        } else {
+            "thread/$targetNoteId?replyKind=1"
+        }
+        navController.navigate(route) { launchSingleTop = true }
+        Log.d("MyceliumNav", "Deep-link from notification: route=$route type=${nav.notifType}")
+    }
+
     // Observe async toast messages (e.g. reaction failures, publish results)
     val toastMsg by accountStateViewModel.toastMessage.collectAsState()
     LaunchedEffect(toastMsg) {

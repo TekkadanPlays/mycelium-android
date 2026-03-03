@@ -67,6 +67,8 @@ class RelayForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        Log.d(TAG, "Foreground service started (ALWAYS_ON mode)")
+
         // Ensure relay connection is active when the service starts
         RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
         // Start keepalive health check to detect stale WebSocket connections while backgrounded

@@ -258,8 +258,11 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         if (shouldRunRelayService && mode == social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
             maybeStartRelayForegroundService()
         }
-        // Start keepalive health check to detect stale WebSocket connections (all modes while foregrounded)
-        RelayConnectionStateMachine.getInstance().startKeepalive()
+        // Start keepalive while foregrounded for ADAPTIVE and WHEN_ACTIVE modes.
+        // In ALWAYS_ON mode, the foreground service manages its own keepalive.
+        if (mode != social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
+            RelayConnectionStateMachine.getInstance().startKeepalive()
+        }
         // Schedule or cancel WorkManager based on connection mode
         applyConnectionModeScheduling(mode)
     }
@@ -267,6 +270,13 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
     override fun onPause() {
         super.onPause()
         isInForeground = false
+        // Stop keepalive when backgrounding in non-ALWAYS_ON modes.
+        // The process will be frozen by Android anyway; no point running keepalive.
+        // In ALWAYS_ON, the foreground service's keepalive handles background health checks.
+        val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
+        if (mode != social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
+            RelayConnectionStateMachine.getInstance().stopKeepalive()
+        }
     }
 
     override fun onDestroy() {
@@ -279,8 +289,15 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             RelayConnectionStateMachine.getInstance().stopKeepalive()
             stopRelayForegroundService()
         }
-        // When system reclaims the activity (backgrounding), keep the foreground
-        // service running so the process stays alive and relay connections persist.
+        // When system reclaims the activity (backgrounding) in ALWAYS_ON mode,
+        // keep the foreground service running — it manages its own keepalive.
+        // In other modes, stop keepalive since the process will be frozen.
+        if (!isFinishing) {
+            val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
+            if (mode != social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
+                RelayConnectionStateMachine.getInstance().stopKeepalive()
+            }
+        }
         super.onDestroy()
     }
 
@@ -333,14 +350,17 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         when (mode) {
             social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON -> {
                 social.mycelium.android.services.RelayCheckWorker.cancel(this)
+                maybeStartRelayForegroundService()
             }
             social.mycelium.android.ui.settings.ConnectionMode.ADAPTIVE -> {
                 stopRelayForegroundService()
+                RelayConnectionStateMachine.getInstance().stopKeepalive()
                 val interval = social.mycelium.android.ui.settings.NotificationPreferences.adaptiveCheckIntervalMinutes.value
                 social.mycelium.android.services.RelayCheckWorker.schedule(this, interval)
             }
             social.mycelium.android.ui.settings.ConnectionMode.WHEN_ACTIVE -> {
                 stopRelayForegroundService()
+                RelayConnectionStateMachine.getInstance().stopKeepalive()
                 social.mycelium.android.services.RelayCheckWorker.cancel(this)
             }
         }

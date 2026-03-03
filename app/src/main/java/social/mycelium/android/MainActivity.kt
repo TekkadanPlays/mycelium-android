@@ -255,9 +255,6 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             accountStateViewModel.setAmberActivityContext(this)
         }
         val mode = social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value
-        if (shouldRunRelayService && mode == social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {
-            maybeStartRelayForegroundService()
-        }
         // Start keepalive while foregrounded for ADAPTIVE and WHEN_ACTIVE modes.
         // In ALWAYS_ON mode, the foreground service manages its own keepalive.
         if (mode != social.mycelium.android.ui.settings.ConnectionMode.ALWAYS_ON) {

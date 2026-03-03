@@ -31,6 +31,7 @@ class RelayForegroundService : Service() {
     }
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    @Volatile private var initialized = false
 
     override fun onCreate() {
         super.onCreate()
@@ -46,6 +47,7 @@ class RelayForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        // startForeground is idempotent — safe to call on every onStartCommand
         try {
             val notification = NotificationChannelManager.buildRelayServiceNotification(this, 0)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -67,12 +69,28 @@ class RelayForegroundService : Service() {
             return START_NOT_STICKY
         }
 
+        // These are safe to call multiple times (idempotent / cancel-and-restart)
+        RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
+        RelayConnectionStateMachine.getInstance().startKeepalive()
+
+        // Only launch coroutines once — duplicate startForegroundService() calls
+        // (e.g. from onResume + applyConnectionModeScheduling) must not spawn extra collectors.
+        if (initialized) {
+            Log.d(TAG, "Foreground service already initialized, skipping coroutine setup")
+            return START_NOT_STICKY
+        }
+        initialized = true
         Log.d(TAG, "Foreground service started (ALWAYS_ON mode)")
 
-        // Ensure relay connection is active when the service starts
-        RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
-        // Start keepalive health check to detect stale WebSocket connections while backgrounded
-        RelayConnectionStateMachine.getInstance().startKeepalive()
+        // Enable Android push notifications after relay replay settles.
+        // startSubscription() resets the push gate to Long.MAX_VALUE to suppress
+        // historical replay. We must re-enable it here so events arriving while
+        // the app is backgrounded actually fire Android notifications.
+        serviceScope.launch {
+            kotlinx.coroutines.delay(12_000L)
+            social.mycelium.android.repository.NotificationsRepository.enableAndroidNotifications()
+            Log.d(TAG, "Push notifications enabled from foreground service")
+        }
 
         // Observe new note counts and update the service notification
         serviceScope.launch {

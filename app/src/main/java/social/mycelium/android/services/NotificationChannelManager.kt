@@ -114,14 +114,18 @@ object NotificationChannelManager {
             description = "When someone mentions you in a note"
         }
 
+        // Delete old LOW-importance channels so Android re-creates with updated importance
+        // (Android caches channel importance — recreating with same ID won't change it)
+        manager.deleteNotificationChannel(CHANNEL_REACTIONS)
+        manager.deleteNotificationChannel(CHANNEL_REPOSTS)
+
         val reactionsChannel = NotificationChannel(
             CHANNEL_REACTIONS,
             "Reactions",
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
             group = GROUP_SOCIAL
             description = "Likes and emoji reactions on your notes"
-            setShowBadge(false)
         }
 
         val zapsChannel = NotificationChannel(
@@ -136,11 +140,10 @@ object NotificationChannelManager {
         val repostsChannel = NotificationChannel(
             CHANNEL_REPOSTS,
             "Reposts",
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_DEFAULT
         ).apply {
             group = GROUP_SOCIAL
             description = "When someone reposts your note"
-            setShowBadge(false)
         }
 
         val dmsChannel = NotificationChannel(

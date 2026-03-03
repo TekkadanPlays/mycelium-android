@@ -237,24 +237,62 @@ fun MyceliumNavigation(
     val pendingNav by appViewModel.pendingNotificationNav.collectAsState()
     LaunchedEffect(pendingNav) {
         val nav = appViewModel.consumePendingNotificationNav() ?: return@LaunchedEffect
-        // Build a stub Note so the thread composable has something to start with.
-        // The thread screen's root walk-up will fetch the full note from relays.
         val targetNoteId = nav.rootNoteId ?: nav.noteId
         val highlightReplyId = if (nav.rootNoteId != null) nav.noteId else null
-        val stubNote = social.mycelium.android.data.Note(
-            id = targetNoteId,
-            author = social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
-            content = "",
-            timestamp = 0L
-        )
-        appViewModel.storeNoteForThread(stubNote)
+
+        // Look up real data from NotificationsRepository (already ingested the event)
+        val notifData = NotificationsRepository.findNotificationByNoteId(nav.noteId)
+
+        // Mark the notification as read so it doesn't show as unread in the notifications view
+        if (notifData != null) {
+            NotificationsRepository.markAsSeen(notifData.id)
+        }
+
+        // Try to get a real Note with author metadata + relay URLs:
+        // 1) From the notification's embedded note
+        // 2) From the notification's targetNote (for likes/zaps/reposts)
+        // 3) From NotesRepository cache (the event was already ingested)
+        // 4) Fall back to a minimal stub (thread composable will fetch from relays)
+        val realNote = notifData?.note
+            ?: notifData?.targetNote
+            ?: NotesRepository.getInstance().getNoteFromCache(targetNoteId)
+        val noteForThread = if (realNote != null) {
+            // If we have a rootNoteId that differs from the note id, try to get the root too
+            if (targetNoteId != realNote.id) {
+                NotesRepository.getInstance().getNoteFromCache(targetNoteId) ?: social.mycelium.android.data.Note(
+                    id = targetNoteId,
+                    author = notifData?.author?.let { a ->
+                        social.mycelium.android.data.Author(id = a.id, username = a.username, displayName = a.displayName ?: "", avatarUrl = a.avatarUrl, isVerified = false)
+                    } ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
+                    content = "",
+                    timestamp = 0L,
+                    isReply = false,
+                    relayUrls = realNote.relayUrls
+                )
+            } else {
+                realNote
+            }
+        } else {
+            // Absolute fallback: stub note. Thread composable will fetch from relays.
+            social.mycelium.android.data.Note(
+                id = targetNoteId,
+                author = social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
+                content = "",
+                timestamp = 0L
+            )
+        }
+        appViewModel.storeNoteForThread(noteForThread)
+        // Also store the reply note if different from the root (for highlight scroll)
+        if (highlightReplyId != null && notifData?.note != null && notifData.note.id == highlightReplyId) {
+            appViewModel.storeNoteForThread(notifData.note)
+        }
         val route = if (highlightReplyId != null) {
             "thread/$targetNoteId?replyKind=1&highlightReplyId=$highlightReplyId"
         } else {
             "thread/$targetNoteId?replyKind=1"
         }
         navController.navigate(route) { launchSingleTop = true }
-        Log.d("MyceliumNav", "Deep-link from notification: route=$route type=${nav.notifType}")
+        Log.d("MyceliumNav", "Deep-link from notification: route=$route type=${nav.notifType} notifFound=${notifData != null} realNote=${realNote != null}")
     }
 
     // Observe async toast messages (e.g. reaction failures, publish results)

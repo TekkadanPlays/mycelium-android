@@ -157,13 +157,25 @@ object NotificationsRepository {
         eventEpochSec: Long = 0L, noteId: String? = null, rootNoteId: String? = null
     ) {
         // Suppress historical replay: only fire for events created after session start
-        if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) return
-        if (sessionStartEpochSec == Long.MAX_VALUE) return // not yet enabled
+        if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) {
+            Log.d(TAG, "fireNotif SUPPRESSED (historical): type=$type epoch=$eventEpochSec < session=$sessionStartEpochSec suffix=${notifIdSuffix.take(8)}")
+            return
+        }
+        if (sessionStartEpochSec == Long.MAX_VALUE) {
+            Log.d(TAG, "fireNotif SUPPRESSED (not enabled yet): type=$type suffix=${notifIdSuffix.take(8)}")
+            return
+        }
         // Don't re-fire for events the user has already seen/read
-        if (notifIdSuffix in _seenIds.value) return
+        if (notifIdSuffix in _seenIds.value) {
+            Log.d(TAG, "fireNotif SUPPRESSED (already seen): type=$type suffix=${notifIdSuffix.take(8)}")
+            return
+        }
         val ctx = appContext ?: return
         val prefs = social.mycelium.android.ui.settings.NotificationPreferences
-        if (!prefs.pushEnabled.value) return
+        if (!prefs.pushEnabled.value) {
+            Log.d(TAG, "fireNotif SUPPRESSED (push disabled): type=$type suffix=${notifIdSuffix.take(8)}")
+            return
+        }
         val (channelId, allowed) = when (type) {
             NotificationType.REPLY -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPLIES to prefs.notifyReplies.value
             NotificationType.COMMENT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_COMMENTS to prefs.notifyReplies.value
@@ -174,8 +186,12 @@ object NotificationsRepository {
             NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS to prefs.notifyDMs.value
             else -> return
         }
-        if (!allowed) return
+        if (!allowed) {
+            Log.d(TAG, "fireNotif SUPPRESSED (channel disabled): type=$type channel=$channelId suffix=${notifIdSuffix.take(8)}")
+            return
+        }
         val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+        Log.d(TAG, "fireNotif POSTING: type=$type channel=$channelId id=$notifId noteId=${noteId?.take(8)} title=$title")
         social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
             ctx, channelId, notifId, title, body,
             noteId = noteId, rootNoteId = rootNoteId, notifType = type.name
@@ -211,6 +227,17 @@ object NotificationsRepository {
         persistSeenIds()
         scope.launch(Dispatchers.IO) { prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply() }
         Log.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
+    }
+
+    /** Look up a NotificationData by the event/note ID (used for deep-link navigation from notification tap). */
+    fun findNotificationByNoteId(noteId: String): NotificationData? {
+        // Direct lookup by notification ID (for replies/quotes/comments, id == event.id)
+        notificationsById[noteId]?.let { return it }
+        // For aggregated notifications (likes, zaps, reposts), the id is "like:$eTag" etc.
+        // Search by noteId matching the notification's note ID, targetNoteId, or replyNoteId
+        return notificationsById.values.firstOrNull { data ->
+            data.note?.id == noteId || data.targetNoteId == noteId || data.replyNoteId == noteId
+        }
     }
 
     /** Mark one notification as seen (e.g. when user taps it to open thread). */

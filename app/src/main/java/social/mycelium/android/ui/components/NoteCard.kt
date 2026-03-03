@@ -588,18 +588,19 @@ private fun NoteMediaCarousel(
     LaunchedEffect(pagerState.currentPage) {
         onMediaPageChanged(pagerState.currentPage)
     }
-    // Reactive container ratio: starts from imeta/cached dimensions or 16:9 default,
-    // then updates when the image loads real dimensions so the container always matches
-    // the actual media — no permanent scaling down with ContentScale.Fit.
-    var containerRatio by remember(mediaList, mediaMeta) {
-        val ratios = mediaList.map { url ->
-            mediaMeta[url]?.aspectRatio()
+    // Per-page aspect ratios: each page tracks its own ratio independently.
+    // containerRatio is derived from the CURRENT page only, preventing adjacent
+    // pages with different ratios (tall vs wide) from fighting over the container
+    // size and causing infinite recomposition flicker.
+    val pageRatios = remember(mediaList, mediaMeta) {
+        val initial = mediaList.mapIndexed { index, url ->
+            index to (mediaMeta[url]?.aspectRatio()
                 ?: MediaAspectRatioCache.get(url)
-                ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
-        }
-        val known = ratios.filterNotNull()
-        mutableFloatStateOf(if (known.isNotEmpty()) known.min() else (16f / 9f))
+                ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null)
+        }.toMap().toMutableMap()
+        mutableStateMapOf<Int, Float?>().apply { putAll(initial) }
     }
+    val containerRatio = pageRatios[pagerState.currentPage] ?: (16f / 9f)
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
     // doesn't steal vertical gestures. Only single-image carousels disable paging entirely.
     val verticalPassthrough = remember {
@@ -652,7 +653,7 @@ private fun NoteMediaCarousel(
                         onFullscreenClick = {
                             onVideoClick(allMediaUrls, groupStartIndex + page)
                         },
-                        onAspectRatioKnown = { ratio -> containerRatio = ratio }
+                        onAspectRatioKnown = { ratio -> pageRatios[page] = ratio }
                     )
                 } else {
                     val imageContext = LocalContext.current
@@ -717,10 +718,10 @@ private fun NoteMediaCarousel(
                                         val h = drawable.intrinsicHeight
                                         if (w > 0 && h > 0) {
                                             MediaAspectRatioCache.add(url, w, h)
-                                            // Update container to match real dimensions
+                                            // Update THIS page's ratio only — never touch other pages
                                             val realRatio = w.toFloat() / h.toFloat()
                                             if (realRatio in 0.3f..3.0f) {
-                                                containerRatio = realRatio
+                                                pageRatios[page] = realRatio
                                             }
                                         }
                                     }

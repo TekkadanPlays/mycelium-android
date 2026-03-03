@@ -102,18 +102,15 @@ class RelayCheckWorker(
         }
 
         val storageManager = RelayStorageManager(applicationContext)
-        // Use inbox + outbox relays for notification check
-        val inboxRelays = storageManager.loadInboxRelays(hexPubkey).map { it.url }
-        val outboxRelays = storageManager.loadOutboxRelays(hexPubkey).map { it.url }
-        val categoryRelays = storageManager.loadCategories(hexPubkey)
-            .flatMap { it.relays }
-            .map { it.url }
-        val allRelayUrls = (inboxRelays + outboxRelays + categoryRelays)
-            .map { social.mycelium.android.utils.normalizeRelayUrl(it) }
+        // Only connect to inbox relays — events addressed to this user land there.
+        // Outbox/category relays are for publishing and feed, not needed for background checks.
+        // Missing profiles from fetched events will be populated when the app resumes.
+        val inboxRelays = storageManager.loadInboxRelays(hexPubkey)
+            .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
             .distinct()
 
-        if (allRelayUrls.isEmpty()) {
-            Log.d(TAG, "No relays configured, skipping")
+        if (inboxRelays.isEmpty()) {
+            Log.d(TAG, "No inbox relays configured, skipping")
             return Result.success()
         }
 
@@ -123,10 +120,10 @@ class RelayCheckWorker(
             (System.currentTimeMillis() / 1000) - 1800
         }
 
-        Log.d(TAG, "Checking ${allRelayUrls.size} relays for events since $sinceTimestamp (${hexPubkey.take(8)}...)")
+        Log.d(TAG, "Checking ${inboxRelays.size} inbox relays for events since $sinceTimestamp (${hexPubkey.take(8)}...)")
 
         try {
-            val events = fetchNotificationEvents(allRelayUrls, hexPubkey, sinceTimestamp)
+            val events = fetchNotificationEvents(inboxRelays, hexPubkey, sinceTimestamp)
             if (events.isNotEmpty()) {
                 Log.d(TAG, "Found ${events.size} new notification events")
                 dispatchNotifications(events, hexPubkey)

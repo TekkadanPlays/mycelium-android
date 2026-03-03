@@ -567,28 +567,55 @@ class RelayConnectionStateMachine {
     /** Timestamp of last event received from any relay. Used by keepalive to detect stale connections. */
     @Volatile private var lastEventReceivedAt: Long = System.currentTimeMillis()
     private var keepaliveJob: kotlinx.coroutines.Job? = null
-    private val KEEPALIVE_INTERVAL_MS = 120_000L  // Check every 2 minutes
-    private val STALE_THRESHOLD_MS = 300_000L     // Consider stale if no events in 5 minutes
+    private val KEEPALIVE_CHECK_INTERVAL_MS = 120_000L   // Check every 2 minutes
+    private val STALE_FALLBACK_THRESHOLD_MS = 1_800_000L // Last-resort: full reconnect if no events in 30 minutes
 
     /** Call when any event is received to reset the keepalive timer. */
     fun markEventReceived() {
         lastEventReceivedAt = System.currentTimeMillis()
     }
 
-    /** Start periodic keepalive that detects stale connections and forces reconnect. */
+    /**
+     * Start periodic keepalive that monitors actual WebSocket connection state.
+     *
+     * Strategy:
+     * 1. Every 2 min: check which subscription relays have dead sockets → reconnect only those.
+     *    OkHttp's 30s ping/pong already detects most dead sockets, but this catches any that
+     *    slipped through (e.g. pool-level reconnect attempts exhausted).
+     * 2. Every 30 min (no events at all): full reconnect as last-resort fallback for half-open
+     *    sockets that OkHttp ping didn't detect.
+     *
+     * This avoids the old behavior of tearing down all connections every 5 minutes
+     * just because nobody posted (e.g. overnight), which wasted battery and relay goodwill.
+     */
     fun startKeepalive() {
         keepaliveJob?.cancel()
         keepaliveJob = scope.launch {
             while (true) {
-                delay(KEEPALIVE_INTERVAL_MS)
-                val elapsed = System.currentTimeMillis() - lastEventReceivedAt
+                delay(KEEPALIVE_CHECK_INTERVAL_MS)
                 val currentState = _state.value
                 val hasRelays = currentSubscriptionRelayUrls.isNotEmpty()
-                if (elapsed > STALE_THRESHOLD_MS && hasRelays && currentState is RelayState.Subscribed) {
-                    Log.w(TAG, "Keepalive: no events in ${elapsed / 1000}s, forcing reconnect to ${currentSubscriptionRelayUrls.size} relays")
-                    // Reset timer so we don't keep firing every interval after reconnect
+                if (!hasRelays || currentState !is RelayState.Subscribed) continue
+
+                // --- Check 1: Are any subscription relays disconnected? ---
+                val disconnected = relayPool.getDisconnectedSubscriptionRelays()
+                val connectedCount = relayPool.getConnectedCount()
+                if (disconnected.isNotEmpty()) {
+                    Log.d(TAG, "Keepalive: $connectedCount connected, ${disconnected.size} disconnected with active subs — reconnecting dead relays")
+                    // Clear reconnect state for dead relays so they get a fresh attempt
+                    relayPool.clearReconnectState()
+                    relayPool.connect()
+                    continue
+                }
+
+                // --- Check 2: Last-resort full reconnect if no events for a long time ---
+                val elapsed = System.currentTimeMillis() - lastEventReceivedAt
+                if (elapsed > STALE_FALLBACK_THRESHOLD_MS) {
+                    Log.w(TAG, "Keepalive: no events in ${elapsed / 1000}s with $connectedCount connected relays — forcing full reconnect (possible half-open sockets)")
                     lastEventReceivedAt = System.currentTimeMillis()
                     requestReconnectOnResume()
+                } else {
+                    Log.d(TAG, "Keepalive: $connectedCount relays connected, last event ${elapsed / 1000}s ago — OK")
                 }
             }
         }

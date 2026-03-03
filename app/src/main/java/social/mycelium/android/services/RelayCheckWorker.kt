@@ -41,7 +41,7 @@ class RelayCheckWorker(
         private const val UNIQUE_WORK_NAME = "relay_inbox_check"
         private const val PREFS_NAME = "relay_check_worker"
         private const val KEY_LAST_CHECK_TIMESTAMP = "last_check_timestamp"
-        private const val ACCOUNT_PREFS_NAME = "AccountStateViewModel"
+        private const val ACCOUNT_PREFS_NAME = "Mycelium_accounts"
         private const val PREF_CURRENT_ACCOUNT = "current_account_npub"
         private const val PREF_ALL_ACCOUNTS = "all_accounts_json"
 

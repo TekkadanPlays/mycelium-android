@@ -233,6 +233,7 @@ object NotificationsRepository {
         markAllSeenEpochMs = System.currentTimeMillis()
         persistSeenIds()
         scope.launch(Dispatchers.IO) { prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply() }
+        cancelAllSystemNotifications()
         Log.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
     }
 
@@ -251,6 +252,7 @@ object NotificationsRepository {
     fun markAsSeen(notificationId: String) {
         _seenIds.value = _seenIds.value + notificationId
         persistSeenIds()
+        cancelSystemNotification(notificationId)
     }
 
     /** Mark all notifications of a specific type as seen (e.g. when user switches to that tab). */
@@ -259,6 +261,27 @@ object NotificationsRepository {
         if (idsForType.isNotEmpty()) {
             _seenIds.value = _seenIds.value + idsForType
             persistSeenIds()
+            idsForType.forEach { cancelSystemNotification(it) }
+        }
+    }
+
+    /** Cancel a single Android system notification by its notification ID suffix. */
+    private fun cancelSystemNotification(notifIdSuffix: String) {
+        val ctx = appContext ?: return
+        val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager ?: return
+        val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+        mgr.cancel(notifId)
+    }
+
+    /** Cancel all social Android system notifications (IDs in the social range). */
+    private fun cancelAllSystemNotifications() {
+        val ctx = appContext ?: return
+        val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager ?: return
+        // Cancel all active notifications from our app except the foreground service notification
+        mgr.activeNotifications.forEach { sbn ->
+            if (sbn.id != social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_RELAY_SERVICE) {
+                mgr.cancel(sbn.id)
+            }
         }
     }
 
@@ -982,7 +1005,10 @@ object NotificationsRepository {
         val bolt11 = event.tags.firstOrNull { it.size >= 2 && it[0] == "bolt11" }?.get(1)
         if (bolt11 != null) {
             val sats = decodeBolt11Amount(bolt11)
+            Log.d(TAG, "parseZapAmount: bolt11 prefix=${bolt11.take(30)} decoded=$sats sats")
             if (sats > 0) return sats
+        } else {
+            Log.d(TAG, "parseZapAmount: no bolt11 tag found, tags=${event.tags.map { it.firstOrNull() }}")
         }
         // Try description tag (zap request JSON) which may contain amount
         val descTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }?.get(1)
@@ -990,9 +1016,11 @@ object NotificationsRepository {
             try {
                 val amountMatch = Regex(""""amount"\s*:\s*"?(\d+)"?""").find(descTag)
                 val milliSats = amountMatch?.groupValues?.get(1)?.toLongOrNull()
+                Log.d(TAG, "parseZapAmount: description amount match=$milliSats (milliSats)")
                 if (milliSats != null && milliSats > 0) return milliSats / 1000
             } catch (_: Exception) { }
         }
+        Log.d(TAG, "parseZapAmount: returning 0 for event ${event.id.take(8)}")
         return 0L
     }
 

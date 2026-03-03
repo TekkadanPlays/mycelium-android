@@ -344,11 +344,6 @@ object NotificationsRepository {
         if (isNewUser) {
             notificationsById.clear()
             seenEventIds.clear()
-            likeByTargetId.clear()
-            likeEmojisByTargetId.clear()
-            likeCustomEmojiUrls.clear()
-            repostByTargetId.clear()
-            zapByTargetId.clear()
             myTopicIds.clear()
             myNoteIds.clear()
             _notifications.value = emptyList()
@@ -540,48 +535,30 @@ object NotificationsRepository {
             val shortcode = emoji.removePrefix(":").removeSuffix(":")
             event.tags.firstOrNull { it.size >= 3 && it[0] == "emoji" && it[1] == shortcode }?.get(2)
         } else null
-        val list = likeByTargetId.getOrPut(eTag) { mutableListOf() }
-        synchronized(list) {
-            if (list.none { it.first == event.pubKey }) list.add(event.pubKey to ts)
-        }
-        // Track all unique emojis for this target note
-        val emojis = likeEmojisByTargetId.getOrPut(eTag) { java.util.Collections.newSetFromMap(ConcurrentHashMap()) }
-        emojis.add(emoji)
-        if (customEmojiUrl != null && emoji.startsWith(":") && emoji.endsWith(":")) {
-            likeCustomEmojiUrls[emoji] = customEmojiUrl
-        }
-        val actorPubkeys = list.map { it.first }.distinct()
-        val latestTs = list.maxOfOrNull { it.second } ?: ts
-        val allEmojis = emojis.toList()
+        val customUrls = if (customEmojiUrl != null && emoji.startsWith(":") && emoji.endsWith(":"))
+            mapOf(emoji to customEmojiUrl) else emptyMap()
         val action = when {
-            allEmojis.size == 1 && allEmojis[0] == "❤️" -> "liked your post"
-            allEmojis.size == 1 -> "reacted ${allEmojis[0]} to your post"
-            else -> "reacted ${allEmojis.joinToString("")} to your post"
+            emoji == "❤️" -> "liked your post"
+            else -> "reacted $emoji to your post"
         }
-        val text = buildActorText(actorPubkeys, action)
-        // Collect custom emoji URLs for all shortcodes in this notification
-        val allCustomUrls = allEmojis
-            .filter { it.startsWith(":") && it.endsWith(":") }
-            .mapNotNull { sc -> likeCustomEmojiUrls[sc]?.let { sc to it } }
-            .toMap()
+        val text = "${author.displayName ?: "Someone"} $action"
         val data = NotificationData(
-            id = "like:$eTag",
+            id = event.id,
             type = NotificationType.LIKE,
             text = text,
             note = null,
             author = author,
             targetNoteId = eTag,
-            actorPubkeys = actorPubkeys,
-            sortTimestamp = latestTs,
+            sortTimestamp = ts,
             reactionEmoji = emoji,
-            reactionEmojis = allEmojis,
+            reactionEmojis = listOf(emoji),
             customEmojiUrl = customEmojiUrl,
-            customEmojiUrls = allCustomUrls
+            customEmojiUrls = customUrls
         )
         notificationsById[data.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, data.id, eventEpochSec = ts / 1000, noteId = eTag)
-        scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
+        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = eTag)
+        scope.launch { fetchAndSetTargetNote(eTag, event.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
     }
 
@@ -874,55 +851,29 @@ object NotificationsRepository {
         return if (eTags.size > 1) eTags.last().getOrNull(1) else eTags.first().getOrNull(1)
     }
 
-    private val repostByTargetId = ConcurrentHashMap<String, MutableList<Pair<String, Long>>>()
-    private val likeByTargetId = ConcurrentHashMap<String, MutableList<Pair<String, Long>>>()
-    private val likeEmojisByTargetId = ConcurrentHashMap<String, MutableSet<String>>()
-    private val likeCustomEmojiUrls = ConcurrentHashMap<String, String>()
-    private val zapByTargetId = ConcurrentHashMap<String, MutableList<Triple<String, Long, Long>>>() // pubkey, timestamp, amountSats
 
     private fun handleRepost(event: Event, author: Author, ts: Long) {
         // NIP-18: last e-tag is the reposted event
         val repostedNoteId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
             ?: parseRepostedNoteIdFromContent(event.content)
-        if (repostedNoteId == null) {
-            val data = NotificationData(
-                id = event.id,
-                type = NotificationType.REPOST,
-                text = "${author.displayName} reposted",
-                note = null,
-                author = author,
-                sortTimestamp = ts
-            )
-            notificationsById[event.id] = data
-            emitSorted()
-            return
-        }
-        val list = repostByTargetId.getOrPut(repostedNoteId) { mutableListOf() }
-        synchronized(list) {
-            if (list.none { it.first == event.pubKey }) list.add(event.pubKey to ts)
-        }
-        val reposterPubkeys = list.map { it.first }.distinct()
-        val latestTs = list.maxOfOrNull { it.second } ?: ts
-        val targetNote = parseRepostedNoteFromContent(event.content)
-        val text = buildActorText(reposterPubkeys, "reposted your post")
+        val targetNote = if (repostedNoteId != null) parseRepostedNoteFromContent(event.content) else null
+        val text = "${author.displayName ?: "Someone"} reposted your post"
         val data = NotificationData(
-            id = "repost:$repostedNoteId",
+            id = event.id,
             type = NotificationType.REPOST,
             text = text,
             note = null,
             author = author,
             targetNote = targetNote,
             targetNoteId = if (targetNote == null) repostedNoteId else null,
-            reposterPubkeys = reposterPubkeys,
-            actorPubkeys = reposterPubkeys,
-            sortTimestamp = latestTs
+            sortTimestamp = ts
         )
-        notificationsById[data.id] = data
+        notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, data.id, eventEpochSec = ts / 1000, noteId = repostedNoteId)
-        // Always fetch the reposted note so flushTargetFetchBatch can verify authorship
-        // (even if we parsed it from content — content parsing doesn't verify it's OUR note)
-        scope.launch { fetchAndSetTargetNote(repostedNoteId, data.id) { d -> { n -> d.copy(targetNote = n) } } }
+        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = repostedNoteId)
+        if (repostedNoteId != null) {
+            scope.launch { fetchAndSetTargetNote(repostedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
+        }
         updateTodaySummary(NotificationType.REPOST, ts, 0L)
     }
 
@@ -954,7 +905,6 @@ object NotificationsRepository {
         // Kind-9735 pubkey is the wallet/LNURL service (e.g. Coinos), NOT the actual zapper.
         // The real zapper's pubkey is inside the "description" tag which contains the kind-9734 zap request JSON.
         val realZapperPubkey = parseZapSenderPubkey(event)
-        val zapperPubkey = realZapperPubkey ?: event.pubKey
         val zapperAuthor = if (realZapperPubkey != null) {
             val resolved = profileCache.resolveAuthor(realZapperPubkey)
             if (profileCache.getAuthor(realZapperPubkey) == null && cacheRelayUrls.isNotEmpty()) {
@@ -962,30 +912,22 @@ object NotificationsRepository {
             }
             resolved
         } else author
-        val list = zapByTargetId.getOrPut(eTag) { mutableListOf() }
-        synchronized(list) {
-            if (list.none { it.first == zapperPubkey }) list.add(Triple(zapperPubkey, ts, amountSats))
-        }
-        val actorPubkeys = list.map { it.first }.distinct()
-        val latestTs = list.maxOfOrNull { it.second } ?: ts
-        val totalSats = list.sumOf { it.third }
-        val satsLabel = if (totalSats > 0) formatSats(totalSats) else ""
-        val text = buildActorText(actorPubkeys, if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post")
+        val satsLabel = if (amountSats > 0) formatSats(amountSats) else ""
+        val text = "${zapperAuthor.displayName ?: "Someone"} ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
         val data = NotificationData(
-            id = "zap:$eTag",
+            id = event.id,
             type = NotificationType.ZAP,
             text = text,
             note = null,
             author = zapperAuthor,
             targetNoteId = eTag,
-            actorPubkeys = actorPubkeys,
-            sortTimestamp = latestTs,
-            zapAmountSats = totalSats
+            sortTimestamp = ts,
+            zapAmountSats = amountSats
         )
-        notificationsById[data.id] = data
+        notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, data.id, eventEpochSec = ts / 1000, noteId = eTag)
-        scope.launch { fetchAndSetTargetNote(eTag, data.id) { d -> { note -> d.copy(targetNote = note) } } }
+        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = eTag)
+        scope.launch { fetchAndSetTargetNote(eTag, event.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
     }
 
@@ -1191,8 +1133,6 @@ object NotificationsRepository {
                 // Kind-6/16 (repost): only show if the reposted note is authored by us
                 if (current.type == NotificationType.REPOST && !isOurNote) {
                     notificationsById.remove(pending.notificationId)
-                    // Also clean up the repostByTargetId aggregation entry
-                    repostByTargetId.remove(noteId)
                     removedCount++
                     continue
                 }

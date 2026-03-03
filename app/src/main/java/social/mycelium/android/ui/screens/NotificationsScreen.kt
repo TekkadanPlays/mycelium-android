@@ -594,19 +594,21 @@ private fun CompactNotificationRow(
     val profileCache = ProfileMetadataCache.getInstance()
     val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)
 
-    // Live profile resolution
-    var profileRevision by remember { mutableIntStateOf(0) }
-    val actorPubkeys = notification.actorPubkeys
-    val actorPubkeySet = remember(actorPubkeys) { actorPubkeys.map { normalizeAuthorIdForCache(it) }.toSet() }
-    LaunchedEffect(actorPubkeySet) {
-        profileCache.profileUpdated
-            .filter { it in actorPubkeySet }
-            .collect { profileRevision++ }
+    // Live profile resolution for single author
+    val authorId = notification.author?.id ?: ""
+    val cacheKey = remember(authorId) { normalizeAuthorIdForCache(authorId) }
+    var displayAuthor by remember(authorId) {
+        mutableStateOf(profileCache.getAuthor(cacheKey) ?: notification.author ?: placeholderAuthor)
     }
-    @Suppress("UNUSED_EXPRESSION") profileRevision
+    LaunchedEffect(cacheKey) {
+        if (cacheKey.isBlank()) return@LaunchedEffect
+        profileCache.profileUpdated
+            .filter { it == cacheKey }
+            .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+    }
 
-    val allEmojis = notification.reactionEmojis.ifEmpty { listOfNotNull(notification.reactionEmoji) }
-    val hasEmojis = notification.type == NotificationType.LIKE && allEmojis.any { it != "❤️" && it != "+" }
+    val emoji = notification.reactionEmoji
+    val isCustomEmoji = emoji != null && emoji != "❤️" && emoji != "+"
     val typeIcon = when (notification.type) {
         NotificationType.LIKE -> Icons.Default.Favorite
         NotificationType.REPOST -> Icons.Default.Repeat
@@ -622,17 +624,12 @@ private fun CompactNotificationRow(
         else -> MaterialTheme.colorScheme.primary
     }
 
-    val actorAuthors = remember(actorPubkeys, profileRevision) {
-        actorPubkeys.take(6).map { pk ->
-            profileCache.getAuthor(normalizeAuthorIdForCache(pk))
-                ?: placeholderAuthor.copy(id = pk, displayName = pk.take(8) + "…")
-        }
-    }
-
-    // Action text (no names — names are in the avatar row)
     val actionText = remember(notification.type, notification.reactionEmoji, notification.zapAmountSats, notification.badgeName) {
         when (notification.type) {
-            NotificationType.LIKE -> "liked your post"
+            NotificationType.LIKE -> when {
+                emoji == "❤️" || emoji == "+" || emoji == null -> "liked your post"
+                else -> "reacted $emoji to your post"
+            }
             NotificationType.REPOST -> "reposted your post"
             NotificationType.ZAP -> {
                 if (notification.zapAmountSats > 0) "zapped ${formatSatsCompact(notification.zapAmountSats)} sats"
@@ -646,62 +643,79 @@ private fun CompactNotificationRow(
         }
     }
 
-    // Names text
-    val namesText = remember(actorPubkeys, profileRevision) {
-        val names = actorPubkeys.take(3).map { pk ->
-            val a = profileCache.getAuthor(normalizeAuthorIdForCache(pk))
-            a?.displayName?.takeIf { it.isNotBlank() && !it.endsWith("...") } ?: pk.take(8) + "…"
-        }
-        when (actorPubkeys.size) {
-            1 -> names[0]
-            2 -> "${names[0]} and ${names[1]}"
-            3 -> "${names[0]}, ${names[1]}, and ${names[2]}"
-            else -> "${names[0]}, ${names[1]}, and ${actorPubkeys.size - 2} others"
-        }
-    }
-
     NotificationCardShell(isSeen = isSeen, onClick = onClick) {
-        // Row 1: type icon/emojis + action + extras + timestamp
+        // Single row: avatar + name + action icon/emoji + action text + zap badge + timestamp
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Type icon or reaction emojis
-            if (hasEmojis) {
-                val emojiUrls = remember(notification.customEmojiUrls, notification.customEmojiUrl, notification.reactionEmoji) {
-                    val urls = notification.customEmojiUrls.toMutableMap()
-                    if (notification.customEmojiUrl != null && notification.reactionEmoji != null) {
-                        urls[notification.reactionEmoji] = notification.customEmojiUrl
-                    }
-                    urls.toMap()
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    allEmojis.take(8).forEach { em ->
+            ProfilePicture(
+                author = displayAuthor,
+                size = 32.dp,
+                onClick = { notification.author?.id?.let { onProfileClick(it) } }
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                // Name + action
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" },
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    // Type icon or emoji
+                    if (isCustomEmoji && emoji != null) {
+                        val emojiUrls = remember(notification.customEmojiUrls, notification.customEmojiUrl, emoji) {
+                            val urls = notification.customEmojiUrls.toMutableMap()
+                            if (notification.customEmojiUrl != null) urls[emoji] = notification.customEmojiUrl
+                            urls.toMap()
+                        }
                         social.mycelium.android.ui.components.ReactionEmoji(
-                            emoji = em,
+                            emoji = emoji,
                             customEmojiUrls = emojiUrls,
-                            fontSize = 16.sp,
-                            imageSize = 20.dp,
-                            modifier = Modifier.widthIn(min = 20.dp)
+                            fontSize = 14.sp,
+                            imageSize = 16.dp,
+                            modifier = Modifier.widthIn(min = 16.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = typeIcon,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = typeColor
                         )
                     }
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = actionText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1
+                    )
                 }
-            } else {
-                Icon(
-                    imageVector = typeIcon,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    tint = typeColor
-                )
+                // Note preview snippet
+                val rawPreview = notification.targetNote?.content ?: notification.note?.content
+                val previewText = remember(rawPreview) {
+                    rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
+                        ?.replace(Regex("\\s+"), " ")?.trim()
+                }
+                if (!previewText.isNullOrBlank()) {
+                    Text(
+                        text = previewText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        lineHeight = 16.sp
+                    )
+                }
             }
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = actionText,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
-            )
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(6.dp))
             // Zap amount badge
             if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {
                 Surface(
@@ -738,45 +752,6 @@ private fun CompactNotificationRow(
                 text = timeAgo,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.outline
-            )
-        }
-
-        Spacer(Modifier.height(6.dp))
-
-        // Row 2: avatar row + names
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            AvatarRow(
-                authors = actorAuthors,
-                totalCount = actorPubkeys.size,
-                onProfileClick = onProfileClick,
-                avatarSize = 24
-            )
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = namesText,
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        // Row 3: target note preview (full width)
-        val rawPreview = notification.targetNote?.content ?: notification.note?.content
-        val previewText = remember(rawPreview) {
-            rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
-                ?.replace(Regex("\\s+"), " ")?.trim()
-        }
-        if (!previewText.isNullOrBlank()) {
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = previewText,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                lineHeight = 16.sp
             )
         }
     }

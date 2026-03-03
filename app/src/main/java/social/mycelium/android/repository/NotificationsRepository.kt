@@ -165,11 +165,13 @@ object NotificationsRepository {
             Log.d(TAG, "fireNotif SUPPRESSED (not enabled yet): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
-        // Don't re-fire for events the user has already seen/read
-        if (notifIdSuffix in _seenIds.value) {
-            Log.d(TAG, "fireNotif SUPPRESSED (already seen): type=$type suffix=${notifIdSuffix.take(8)}")
-            return
-        }
+        // NOTE: We intentionally do NOT gate on _seenIds here. seenIds tracks which
+        // notifications the user has "read" in the UI (for badge count). For aggregated
+        // types (zaps, likes, reposts), the notification ID stays the same (e.g. "zap:$eTag")
+        // even when new events arrive — so gating on seenIds would permanently silence
+        // all future zaps/likes on notes the user has already viewed in the notification list.
+        // The historical replay gate (sessionStartEpochSec) and event-level dedup (seenEventIds
+        // in handleEvent) already prevent spam.
         val ctx = appContext ?: return
         val prefs = social.mycelium.android.ui.settings.NotificationPreferences
         if (!prefs.pushEnabled.value) {

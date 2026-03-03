@@ -563,8 +563,6 @@ object NotificationsRepository {
     }
 
     private fun handleReply(event: Event, author: Author, ts: Long) {
-        // Don't show notifications for our own replies
-        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
         val rootId = getReplyRootNoteId(event)
         val replyToId = getReplyToNoteId(event)
         // Check if user is directly cited in content (nostr:npub1... / nostr:nprofile1...)
@@ -603,7 +601,6 @@ object NotificationsRepository {
 
     /** Handle a kind-1 event that quotes one of our notes (q-tag). */
     private fun handleQuote(event: Event, author: Author, ts: Long, quotedNoteId: String) {
-        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
         val note = eventToNote(event)
         val text = "${author.displayName} quoted your note"
         val data = NotificationData(
@@ -685,7 +682,6 @@ object NotificationsRepository {
     }
 
     private fun handleTopicReply(event: Event, author: Author, ts: Long) {
-        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
         val rootId = getTopicReplyRootNoteId(event) ?: return
         // Accept if user is p-tagged; otherwise still create the notification and verify
         // via fetchAndSetTargetNote (which removes it if root author isn't us)
@@ -714,7 +710,6 @@ object NotificationsRepository {
     }
 
     private fun handleHighlight(event: Event, author: Author, ts: Long) {
-        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
         val highlightedContent = event.content.take(200)
         val data = NotificationData(
             id = event.id,
@@ -746,8 +741,6 @@ object NotificationsRepository {
     }
 
     private fun handleBadgeAward(event: Event, author: Author, ts: Long) {
-        // Don't show our own badge awards to ourselves
-        if (myPubkeyHex != null && normalizeAuthorIdForCache(author.id) == myPubkeyHex) return
         // Extract badge definition address from a-tag: ["a", "30009:<pubkey>:<d-tag>", ...]
         val aTagValue = event.tags.firstOrNull { it.size >= 2 && it[0] == "a" && it[1].startsWith("30009:") }?.get(1)
         val text = "${author.displayName ?: "Someone"} awarded you a badge"

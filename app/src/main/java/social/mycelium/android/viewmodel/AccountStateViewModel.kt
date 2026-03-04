@@ -310,6 +310,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         Log.d("AccountStateViewModel", "\uD83D\uDD1D Setting guest mode")
         _currentAccount.value = null
         NoteCountsRepository.currentUserPubkey = null
+        social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(null)
         _zappedNoteIds.value = emptySet()
         _zappedAmountByNoteId.value = emptyMap()
         _authState.value = AuthState(
@@ -403,6 +404,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         restoreZapState(accountInfo.npub)
         ReactionsRepository.loadForAccount(getApplication(), accountInfo.npub)
         NoteCountsRepository.currentUserPubkey = hexPubkey
+        social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
 
         // Set NIP-42 signer for new account
         RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
@@ -487,6 +489,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             restoreZapState(updatedAccount.npub)
             ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
             NoteCountsRepository.currentUserPubkey = hexPubkey
+            social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
 
             // Set NIP-42 signer for new account
             RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())

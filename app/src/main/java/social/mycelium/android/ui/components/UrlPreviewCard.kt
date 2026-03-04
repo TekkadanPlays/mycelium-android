@@ -139,9 +139,9 @@ fun Kind1LinkEmbedBlock(
             Surface(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 0.dp),
+                    .padding(horizontal = 16.dp),
                 color = Color.Transparent,
-                shape = RectangleShape,
+                shape = RoundedCornerShape(6.dp),
                 border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
             ) {
                 Column(modifier = Modifier.padding(10.dp)) {

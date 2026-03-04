@@ -162,6 +162,9 @@ fun MarkdownNoteContent(
                         color = quoteBarColor
                     )
                 }
+                is MdBlock.BlankLine -> {
+                    Spacer(modifier = Modifier.padding(vertical = 4.dp))
+                }
             }
         }
     }
@@ -176,6 +179,7 @@ internal sealed class MdBlock {
     data class CodeBlock(val code: String) : MdBlock()
     data class ListItem(val bullet: String, val text: String) : MdBlock()
     data object HorizontalRule : MdBlock()
+    data object BlankLine : MdBlock()
 }
 
 private val headingRegex = Regex("^(#{1,6})\\s+(.*)")
@@ -269,8 +273,12 @@ internal fun parseMarkdownBlocks(content: String): List<MdBlock> {
             continue
         }
 
-        // Blank line — skip
+        // Blank line — emit spacer so paragraph breaks are preserved
         if (line.isBlank()) {
+            // Avoid duplicate spacers (multiple consecutive blank lines → one spacer)
+            if (blocks.lastOrNull() !is MdBlock.BlankLine) {
+                blocks.add(MdBlock.BlankLine)
+            }
             i++
             continue
         }

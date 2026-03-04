@@ -225,19 +225,24 @@ private fun QuotedNoteBody(
                 if (qMediaList.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
                     qMediaList.forEach { url ->
-                        // Reactive aspect ratio: cached dimensions or 16:9 default,
-                        // updates when video reports real dimensions.
-                        var mediaRatio by remember(url) {
-                            mutableFloatStateOf(
-                                social.mycelium.android.utils.MediaAspectRatioCache.get(url)
-                                    ?: (16f / 9f)
-                            )
-                        }
-                        if (social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
+                        val isQVideo = social.mycelium.android.utils.UrlDetector.isVideoUrl(url)
+                        // Cached/imeta ratio — null if truly unknown
+                        val knownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(url)
+                        if (isQVideo) {
+                            // Videos: allow ONE reactive update from default→real if ratio unknown.
+                            // Once the cache has a ratio (from player or previous session), it's stable.
+                            var videoRatio by remember(url) {
+                                mutableFloatStateOf(knownRatio ?: (16f / 9f))
+                            }
+                            // If cache was populated since last composition (e.g. fullscreen played it),
+                            // adopt the cached value immediately.
+                            if (knownRatio != null && knownRatio != videoRatio) {
+                                videoRatio = knownRatio
+                            }
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
+                                    .aspectRatio(videoRatio.coerceIn(0.5f, 2.5f))
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(Color.Black)
                             ) {
@@ -246,15 +251,17 @@ private fun QuotedNoteBody(
                                     modifier = Modifier.fillMaxSize(),
                                     isVisible = isVisible,
                                     onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
-                                    onAspectRatioKnown = { ratio -> mediaRatio = ratio }
+                                    onAspectRatioKnown = if (knownRatio == null) { ratio -> videoRatio = ratio } else null
                                 )
                             }
                         } else {
+                            // Images: fully stable — cache is populated from SideEffect on first load.
+                            val stableRatio = (knownRatio ?: (16f / 9f)).coerceIn(0.5f, 2.5f)
                             val imageContext = LocalContext.current
                             coil.compose.SubcomposeAsyncImage(
                                 model = coil.request.ImageRequest.Builder(imageContext)
                                     .data(url)
-                                    .crossfade(true)
+                                    .crossfade(knownRatio == null)
                                     .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                     .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                                     .build(),
@@ -262,7 +269,7 @@ private fun QuotedNoteBody(
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
+                                    .aspectRatio(stableRatio)
                                     .clip(RoundedCornerShape(6.dp))
                                     .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
                             ) {
@@ -302,8 +309,6 @@ private fun QuotedNoteBody(
                                                 val h = drawable.intrinsicHeight
                                                 if (w > 0 && h > 0) {
                                                     social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
-                                                    val real = w.toFloat() / h.toFloat()
-                                                    if (real != mediaRatio) mediaRatio = real
                                                 }
                                             }
                                         }
@@ -588,19 +593,20 @@ private fun NoteMediaCarousel(
     LaunchedEffect(pagerState.currentPage) {
         onMediaPageChanged(pagerState.currentPage)
     }
-    // Per-page aspect ratios: each page tracks its own ratio independently.
-    // containerRatio is derived from the CURRENT page only, preventing adjacent
-    // pages with different ratios (tall vs wide) from fighting over the container
-    // size and causing infinite recomposition flicker.
-    val pageRatios = remember(mediaList, mediaMeta) {
-        val initial = mediaList.mapIndexed { index, url ->
-            index to (mediaMeta[url]?.aspectRatio()
-                ?: MediaAspectRatioCache.get(url)
-                ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null)
-        }.toMap().toMutableMap()
-        mutableStateMapOf<Int, Float?>().apply { putAll(initial) }
+    // Container ratio: prefers imeta/cache for stability. For videos with unknown
+    // dimensions, allows ONE reactive update when the player reports real dimensions.
+    // Once the cache has a ratio, subsequent renders use it directly (locked).
+    val currentUrl = mediaList.getOrNull(pagerState.currentPage)
+    val knownContainerRatio = if (currentUrl != null) {
+        mediaMeta[currentUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(currentUrl)
+    } else null
+    var containerRatio by remember(mediaList, mediaMeta) {
+        mutableFloatStateOf(knownContainerRatio ?: (16f / 9f))
     }
-    val containerRatio = pageRatios[pagerState.currentPage] ?: (16f / 9f)
+    // Sync with cache if it was populated externally (fullscreen, re-scroll)
+    if (knownContainerRatio != null && knownContainerRatio != containerRatio) {
+        containerRatio = knownContainerRatio
+    }
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
     // doesn't steal vertical gestures. Only single-image carousels disable paging entirely.
     val verticalPassthrough = remember {
@@ -646,6 +652,7 @@ private fun NoteMediaCarousel(
                     )
             ) {
                 if (isVideo) {
+                    val videoKnown = mediaMeta[url]?.aspectRatio() ?: MediaAspectRatioCache.get(url)
                     InlineVideoPlayer(
                         url = url,
                         modifier = Modifier.fillMaxSize(),
@@ -653,15 +660,16 @@ private fun NoteMediaCarousel(
                         onFullscreenClick = {
                             onVideoClick(allMediaUrls, groupStartIndex + page)
                         },
-                        onAspectRatioKnown = { ratio -> pageRatios[page] = ratio }
+                        onAspectRatioKnown = if (videoKnown == null) { ratio -> containerRatio = ratio } else null
                     )
                 } else {
                     val imageContext = LocalContext.current
                     val meta = mediaMeta[url]
+                    val hasCachedRatio = MediaAspectRatioCache.get(url) != null || mediaMeta[url]?.aspectRatio() != null
                     SubcomposeAsyncImage(
                         model = ImageRequest.Builder(imageContext)
                             .data(url)
-                            .crossfade(true)
+                            .crossfade(!hasCachedRatio)
                             .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                             .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                             .build(),
@@ -718,11 +726,6 @@ private fun NoteMediaCarousel(
                                         val h = drawable.intrinsicHeight
                                         if (w > 0 && h > 0) {
                                             MediaAspectRatioCache.add(url, w, h)
-                                            // Update THIS page's ratio only — never touch other pages
-                                            val realRatio = w.toFloat() / h.toFloat()
-                                            if (realRatio in 0.3f..3.0f) {
-                                                pageRatios[page] = realRatio
-                                            }
                                         }
                                     }
                                 }
@@ -2503,7 +2506,7 @@ fun NoteCard(
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                                         onProfileClick = onProfileClick,
                                         onNoteClick = { onNoteClick(note) },
-                                        onUrlClick = { url -> uriHandler.openUri(url) },
+                                        onUrlClick = { _ -> onNoteClick(note) },
                                         onHashtagClick = { /* TODO: hashtag navigation */ }
                                     )
                                 } else {
@@ -2515,14 +2518,10 @@ fun NoteCard(
                                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                                         onClick = { offset ->
                                             val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                            val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                            val naddr = annotated.getStringAnnotations(tag = "NADDR", start = offset, end = offset).firstOrNull()
                                             val relay = annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
                                             when {
                                                 profile != null -> onProfileClick(profile.item)
                                                 relay != null -> onRelayClick(relay.item)
-                                                url != null -> uriHandler.openUri(url.item)
-                                                naddr != null -> uriHandler.openUri(naddr.item)
                                                 else -> onNoteClick(note)
                                             }
                                         }

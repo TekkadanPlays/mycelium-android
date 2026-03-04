@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -106,6 +108,10 @@ fun LiveExplorerScreen(
         }
     }
 
+    // Count live vs total for the header
+    val liveCount = remember(allActivities) { allActivities.count { it.status == LiveActivityStatus.LIVE } }
+    val plannedCount = remember(allActivities) { allActivities.count { it.status == LiveActivityStatus.PLANNED } }
+
     Scaffold(
         topBar = {
             Column(
@@ -115,13 +121,31 @@ fun LiveExplorerScreen(
             ) {
                 TopAppBar(
                     title = {
-                        Text(
-                            "Live",
-                            style = MaterialTheme.typography.headlineSmall.copy(
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "Live",
+                                style = MaterialTheme.typography.headlineSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
                             )
-                        )
+                            if (liveCount > 0) {
+                                Spacer(Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .background(Color(0xFFEF4444), androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = "$liveCount live",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                            }
+                        }
                     },
                     navigationIcon = {
                         IconButton(onClick = onBackClick) {
@@ -148,21 +172,22 @@ fun LiveExplorerScreen(
                     Icon(
                         Icons.Default.VideocamOff,
                         contentDescription = null,
-                        modifier = Modifier.size(48.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        modifier = Modifier.size(56.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                     )
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(16.dp))
                     Text(
                         "No live broadcasts",
-                        style = MaterialTheme.typography.bodyLarge,
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Medium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "Live streams will appear here when available",
+                        "Live streams will appear here when\nsomeone starts broadcasting",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
                     )
                 }
             }
@@ -170,15 +195,17 @@ fun LiveExplorerScreen(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(padding)
+                    .padding(padding),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp)
             ) {
                 // ── Section: From People You Follow ──
                 if (followedHostActivities.isNotEmpty()) {
                     item(key = "header_followed") {
                         LiveSectionHeader(
-                            title = "From People You Follow",
+                            title = "Following",
                             count = followedHostActivities.size,
-                            color = Color(0xFF4CAF50)
+                            liveCount = followedHostActivities.count { it.status == LiveActivityStatus.LIVE },
+                            isFollowSection = true
                         )
                     }
                     items(
@@ -197,15 +224,19 @@ fun LiveExplorerScreen(
                             followedViewerAvatars = viewers
                         )
                     }
+                    item(key = "spacer_between") {
+                        Spacer(Modifier.height(8.dp))
+                    }
                 }
 
                 // ── Section: Discover ──
                 if (otherActivities.isNotEmpty()) {
                     item(key = "header_discover") {
                         LiveSectionHeader(
-                            title = if (followedHostActivities.isNotEmpty()) "Discover" else "Live Broadcasts",
+                            title = if (followedHostActivities.isNotEmpty()) "Discover" else "Broadcasts",
                             count = otherActivities.size,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            liveCount = otherActivities.count { it.status == LiveActivityStatus.LIVE },
+                            isFollowSection = false
                         )
                     }
                     items(
@@ -225,6 +256,10 @@ fun LiveExplorerScreen(
                         )
                     }
                 }
+
+                item(key = "bottom_spacer") {
+                    Spacer(Modifier.height(16.dp))
+                }
             }
         }
     }
@@ -234,16 +269,42 @@ fun LiveExplorerScreen(
 private fun LiveSectionHeader(
     title: String,
     count: Int,
-    color: Color
+    liveCount: Int,
+    isFollowSection: Boolean
 ) {
-    Text(
-        text = "$title ($count)",
-        style = MaterialTheme.typography.labelMedium,
-        fontWeight = FontWeight.SemiBold,
-        color = color,
-        fontSize = 12.sp,
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 10.dp)
-    )
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
+            color = if (isFollowSection) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "$count",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        )
+        if (liveCount > 0) {
+            Spacer(Modifier.width(6.dp))
+            Box(
+                modifier = Modifier
+                    .background(Color(0xFFEF4444).copy(alpha = 0.15f), androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 1.dp)
+            ) {
+                Text(
+                    text = "$liveCount live",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFFEF4444),
+                    fontSize = 10.sp
+                )
+            }
+        }
+    }
 }

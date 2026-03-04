@@ -201,6 +201,12 @@ fun ModernThreadViewScreen(
     onOpenImageViewer: (List<String>, Int) -> Unit = { _, _ -> },
     onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
     onReact: (Note, String) -> Unit = { _, _ -> },
+    /** Boost (kind-6 repost): republish the note as-is. */
+    onBoost: ((Note) -> Unit)? = null,
+    /** Quote: open compose with this note quoted (nostr:nevent1…). */
+    onQuote: ((Note) -> Unit)? = null,
+    /** Fork: open compose pre-filled with this note's content for editing. */
+    onFork: ((Note) -> Unit)? = null,
     onCustomZapSend: ((Note, Long, ZapType, String) -> Unit)? = null,
     /** When user taps a zap amount chip; (noteId, amount). */
     onZap: (String, Long) -> Unit = { _, _ -> },
@@ -604,6 +610,9 @@ fun ModernThreadViewScreen(
                         onShare = onShare,
                         onComment = effectiveOnComment,
                         onReact = onReact,
+                        onBoost = onBoost,
+                        onQuote = onQuote,
+                        onFork = onFork,
                         onProfileClick = onProfileClick,
                         onNoteClick = { clickedNote ->
                             // Prevent opening a duplicate thread of the current root note
@@ -2195,20 +2204,39 @@ private fun ReplyControlsPanel(
                         isActive = false,
                         onClick = { onExpandZapMenu(reply.id) }
                     )
-                    // Likes / React button — heart icon, tap opens emoji picker
+                    // Likes / React button — shows actual emoji when user has reacted
                     Box {
                         var showReactionMenu by remember { mutableStateOf(false) }
+                        var selectedEmoji by remember(reply.id) {
+                            mutableStateOf(social.mycelium.android.repository.ReactionsRepository.getLastReaction(reply.id))
+                        }
+                        val hasReacted = replyIsLiked || selectedEmoji != null
                         // Close reaction menu on scroll
                         LaunchedEffect(isScrolling) {
                             if (isScrolling && showReactionMenu) showReactionMenu = false
                         }
-                        CompactModernButton(
-                            icon = if (replyIsLiked) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                            contentDescription = "React",
-                            isActive = replyIsLiked,
-                            onClick = { showReactionMenu = true },
-                            tint = if (replyIsLiked) Color.Red else null
-                        )
+                        if (selectedEmoji != null) {
+                            // Show the actual emoji the user reacted with
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clickable { showReactionMenu = true },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = selectedEmoji!!,
+                                    fontSize = 16.sp
+                                )
+                            }
+                        } else {
+                            CompactModernButton(
+                                icon = if (hasReacted) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                                contentDescription = "React",
+                                isActive = hasReacted,
+                                onClick = { showReactionMenu = true },
+                                tint = if (hasReacted) Color.Red else null
+                            )
+                        }
                         DropdownMenu(
                             expanded = showReactionMenu,
                             onDismissRequest = { showReactionMenu = false }
@@ -2225,6 +2253,7 @@ private fun ReplyControlsPanel(
                                         modifier = Modifier
                                             .clickable {
                                                 showReactionMenu = false
+                                                selectedEmoji = emoji
                                                 onReact(reply.toNote(), emoji)
                                             }
                                             .padding(4.dp)

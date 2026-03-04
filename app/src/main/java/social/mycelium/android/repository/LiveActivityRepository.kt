@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Repository for NIP-53 Live Activities (kind:30311).
@@ -27,8 +28,11 @@ class LiveActivityRepository {
     private val profileCache = ProfileMetadataCache.getInstance()
     private val relayStateMachine = social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
 
-    /** All known live activities keyed by addressable id (kind:pubkey:dTag). */
-    private val activitiesById = mutableMapOf<String, LiveActivity>()
+    /** All known live activities keyed by addressable id (kind:pubkey:dTag). Thread-safe. */
+    private val activitiesById = ConcurrentHashMap<String, LiveActivity>()
+
+    /** Event-level dedup: skip re-processing the same event from multiple relays. */
+    private val seenEventIds = ConcurrentHashMap.newKeySet<String>()
 
     /** Live activities with status=LIVE, sorted by participant count desc then createdAt desc. */
     private val _liveActivities = MutableStateFlow<List<LiveActivity>>(emptyList())
@@ -100,36 +104,51 @@ class LiveActivityRepository {
     fun handleLiveActivityEvent(event: Event, relayUrl: String = "") {
         if (event.kind != 30311) return
         try {
-            val activity = parseEvent(event, relayUrl)
             val addressableId = addressableId(event)
 
-            val existing = activitiesById[addressableId]
-            // Only accept if newer (addressable events are replaceable)
-            if (existing != null && existing.createdAt >= activity.createdAt) {
-                // Accumulate relay URL if from a different relay
-                if (relayUrl.isNotEmpty() && relayUrl !in (existing.relayUrls)) {
-                    val updated = existing.copy(relayUrls = existing.relayUrls + relayUrl)
-                    activitiesById[addressableId] = updated
-                    emitUpdate()
+            // Fast event-level dedup: if we've already processed this exact event,
+            // just accumulate the relay URL and skip full parsing.
+            if (!seenEventIds.add(event.id)) {
+                if (relayUrl.isNotEmpty()) {
+                    val existing = activitiesById[addressableId]
+                    if (existing != null && relayUrl !in existing.relayUrls) {
+                        activitiesById[addressableId] = existing.copy(relayUrls = existing.relayUrls + relayUrl)
+                        emitUpdate()
+                    }
                 }
                 return
             }
 
-            // Resolve host profile
-            val hostAuthor = profileCache.resolveAuthor(activity.hostPubkey)
-            val withAuthor = activity.copy(hostAuthor = hostAuthor)
+            val activity = parseEvent(event, relayUrl)
 
-            // Request profile if unknown
-            if (profileCache.getAuthor(activity.hostPubkey) == null) {
-                scope.launch {
-                    val cacheRelays = getCacheRelayUrls()
-                    if (cacheRelays.isNotEmpty()) {
-                        profileCache.requestProfiles(listOf(activity.hostPubkey), cacheRelays)
+            synchronized(activitiesById) {
+                val existing = activitiesById[addressableId]
+                // Only accept if newer (addressable events are replaceable)
+                if (existing != null && existing.createdAt >= activity.createdAt) {
+                    // Accumulate relay URL if from a different relay
+                    if (relayUrl.isNotEmpty() && relayUrl !in existing.relayUrls) {
+                        activitiesById[addressableId] = existing.copy(relayUrls = existing.relayUrls + relayUrl)
+                        emitUpdate()
+                    }
+                    return
+                }
+
+                // Resolve host profile
+                val hostAuthor = profileCache.resolveAuthor(activity.hostPubkey)
+                val withAuthor = activity.copy(hostAuthor = hostAuthor)
+
+                // Request profile if unknown
+                if (profileCache.getAuthor(activity.hostPubkey) == null) {
+                    scope.launch {
+                        val cacheRelays = getCacheRelayUrls()
+                        if (cacheRelays.isNotEmpty()) {
+                            profileCache.requestProfiles(listOf(activity.hostPubkey), cacheRelays)
+                        }
                     }
                 }
-            }
 
-            activitiesById[addressableId] = withAuthor
+                activitiesById[addressableId] = withAuthor
+            }
             emitUpdate()
 
             Log.d(TAG, "Live activity ${activity.status}: \"${activity.title}\" by ${activity.hostPubkey.take(8)} (${activitiesById.size} total)")
@@ -237,13 +256,15 @@ class LiveActivityRepository {
                 delay(EXPIRY_SWEEP_INTERVAL_MS)
                 val nowSecs = System.currentTimeMillis() / 1000
                 var changed = false
-                activitiesById.entries.forEach { (key, activity) ->
-                    if (activity.status == LiveActivityStatus.LIVE &&
-                        activity.createdAt < nowSecs - STALE_LIVE_THRESHOLD_SECS
-                    ) {
-                        activitiesById[key] = activity.copy(status = LiveActivityStatus.ENDED)
-                        changed = true
-                        Log.d(TAG, "Auto-expired stale live activity: \"${activity.title}\"")
+                synchronized(activitiesById) {
+                    activitiesById.entries.forEach { (key, activity) ->
+                        if (activity.status == LiveActivityStatus.LIVE &&
+                            activity.createdAt < nowSecs - STALE_LIVE_THRESHOLD_SECS
+                        ) {
+                            activitiesById[key] = activity.copy(status = LiveActivityStatus.ENDED)
+                            changed = true
+                            Log.d(TAG, "Auto-expired stale live activity: \"${activity.title}\"")
+                        }
                     }
                 }
                 if (changed) emitUpdate()
@@ -257,10 +278,12 @@ class LiveActivityRepository {
     private fun updateHostAuthor(pubkey: String) {
         val author = profileCache.getAuthor(pubkey) ?: return
         var changed = false
-        activitiesById.entries.forEach { (key, activity) ->
-            if (activity.hostPubkey.equals(pubkey, ignoreCase = true)) {
-                activitiesById[key] = activity.copy(hostAuthor = author)
-                changed = true
+        synchronized(activitiesById) {
+            activitiesById.entries.forEach { (key, activity) ->
+                if (activity.hostPubkey.equals(pubkey, ignoreCase = true)) {
+                    activitiesById[key] = activity.copy(hostAuthor = author)
+                    changed = true
+                }
             }
         }
         if (changed) emitUpdate()
@@ -268,7 +291,10 @@ class LiveActivityRepository {
 
     /** Clear all activities (e.g. on logout). */
     fun clear() {
-        activitiesById.clear()
+        synchronized(activitiesById) {
+            activitiesById.clear()
+            seenEventIds.clear()
+        }
         _liveActivities.value = emptyList()
         _allActivities.value = emptyList()
     }

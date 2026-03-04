@@ -167,43 +167,48 @@ fun buildNoteContentAnnotatedString(
 
     // Expand hidden segments (embedded media + nevent) to consume surrounding whitespace/newlines
     // so that removing the URL text doesn't leave blank lines or dead space.
+    // IMPORTANT: preserve at least one \n so text before/after the URL doesn't merge.
     fun expandToConsumeWhitespace(seg: Segment): Segment {
         if (seg.type != SEG_EMBEDDED_MEDIA && seg.type != SEG_NEVENT) return seg
+
+        // ── Leading side: eat horizontal whitespace + at most one newline ──
         var newStart = seg.start
+        while (newStart > 0 && content[newStart - 1].let { it == ' ' || it == '\t' }) newStart--
+        if (newStart > 0 && content[newStart - 1] == '\n') newStart-- // eat one \n
+        if (newStart > 0 && content[newStart - 1] == '\r') newStart-- // eat preceding \r if any
+
+        // ── Trailing side: eat horizontal whitespace + the URL's own line break ──
         var newEnd = seg.end
-        // Consume all whitespace (spaces/tabs/newlines) before the URL
-        while (newStart > 0 && content[newStart - 1].let { it == ' ' || it == '\t' || it == '\n' || it == '\r' }) newStart--
-        // Consume all whitespace (spaces/tabs/newlines) after the URL
-        while (newEnd < content.length && content[newEnd].let { it == ' ' || it == '\t' || it == '\n' || it == '\r' }) newEnd++
-        // If we consumed everything before, keep start at 0; otherwise restore one newline
-        // so the preceding text block ends cleanly (don't merge two paragraphs)
-        if (newStart > 0) {
-            // Re-add one newline boundary so preceding text doesn't merge with following text
-            newStart = seg.start
-            while (newStart > 0 && content[newStart - 1].let { it == ' ' || it == '\t' }) newStart--
-            if (newStart > 0 && content[newStart - 1] == '\n') newStart-- // eat one leading newline
-        }
-        // Trailing: eat horizontal whitespace + the URL's own line break, then only eat
-        // truly blank lines. Preserve the first newline before a line that has real text.
-        newEnd = seg.end
         while (newEnd < content.length && content[newEnd].let { it == ' ' || it == '\t' }) newEnd++
         // Eat the URL's own trailing newline (one \r?\n)
         if (newEnd < content.length && content[newEnd] == '\r') newEnd++
         if (newEnd < content.length && content[newEnd] == '\n') newEnd++
-        // Now eat additional blank lines only (lines that are entirely whitespace)
+        // Eat additional truly-blank lines (lines that are entirely whitespace)
         while (newEnd < content.length) {
             var lineEnd = newEnd
             while (lineEnd < content.length && content[lineEnd].let { it == ' ' || it == '\t' }) lineEnd++
-            // If this position is a newline, the line was blank → consume it
             if (lineEnd < content.length && (content[lineEnd] == '\n' || content[lineEnd] == '\r')) {
                 if (content[lineEnd] == '\r') lineEnd++
                 if (lineEnd < content.length && content[lineEnd] == '\n') lineEnd++
                 newEnd = lineEnd
             } else {
-                // Non-blank line ahead — stop, preserve the paragraph break
                 break
             }
         }
+
+        // If there was text both before and after the URL, ensure at least one \n
+        // survives so paragraphs don't merge into run-on text.
+        val hasTextBefore = newStart > 0 && content[newStart - 1].let { it != '\n' && it != '\r' }
+        val hasTextAfter = newEnd < content.length && content[newEnd].let { it != '\n' && it != '\r' }
+        if (hasTextBefore && hasTextAfter) {
+            // Pull newStart forward to keep a \n at the boundary
+            val origStart = newStart
+            // Find the first \n in the consumed leading region and keep it
+            for (k in origStart until seg.start) {
+                if (content[k] == '\n') { newStart = k; break }
+            }
+        }
+
         return Segment(newStart, newEnd, seg.type, seg.data)
     }
     val expandedSegments = segments.map { expandToConsumeWhitespace(it) }

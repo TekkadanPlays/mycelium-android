@@ -290,7 +290,7 @@ private fun NoteCardContent(
                     expandDescriptionInThread = expandLinkPreviewInThread,
                     inThreadView = expandLinkPreviewInThread,
                     onUrlClick = { url -> uriHandler.openUri(url) },
-                    modifier = if (expandLinkPreviewInThread) Modifier.padding(horizontal = 16.dp) else Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(4.dp))
             }
@@ -585,19 +585,20 @@ private fun NoteCardContent(
                                                         if (qMediaList.isNotEmpty()) {
                                                             Spacer(modifier = Modifier.height(4.dp))
                                                             qMediaList.forEach { url ->
-                                                                // Reactive aspect ratio: cached dimensions or 16:9 default,
-                                                                // updates when video reports real dimensions.
-                                                                var mediaRatio by remember(url) {
-                                                                    mutableFloatStateOf(
-                                                                        social.mycelium.android.utils.MediaAspectRatioCache.get(url)
-                                                                            ?: (16f / 9f)
-                                                                    )
-                                                                }
-                                                                if (social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
+                                                                val isQVideo = social.mycelium.android.utils.UrlDetector.isVideoUrl(url)
+                                                                val qKnownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(url)
+                                                                if (isQVideo) {
+                                                                    // Videos: allow ONE reactive update from default→real
+                                                                    var qVideoRatio by remember(url) {
+                                                                        mutableFloatStateOf(qKnownRatio ?: (16f / 9f))
+                                                                    }
+                                                                    if (qKnownRatio != null && qKnownRatio != qVideoRatio) {
+                                                                        qVideoRatio = qKnownRatio
+                                                                    }
                                                                     Box(
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
-                                                                            .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
+                                                                            .aspectRatio(qVideoRatio.coerceIn(0.5f, 2.5f))
                                                                             .clip(RoundedCornerShape(6.dp))
                                                                             .background(Color.Black)
                                                                     ) {
@@ -606,17 +607,19 @@ private fun NoteCardContent(
                                                                             modifier = Modifier.fillMaxSize(),
                                                                             isVisible = true, // Thread view: card always visible
                                                                             onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
-                                                                            onAspectRatioKnown = { ratio -> mediaRatio = ratio }
+                                                                            onAspectRatioKnown = if (qKnownRatio == null) { ratio -> qVideoRatio = ratio } else null
                                                                         )
                                                                     }
                                                                 } else {
+                                                                    // Images: stable ratio from cache
+                                                                    val qImgRatio = (qKnownRatio ?: (16f / 9f)).coerceIn(0.5f, 2.5f)
                                                                     coil.compose.AsyncImage(
                                                                         model = url,
                                                                         contentDescription = null,
                                                                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
-                                                                            .aspectRatio(mediaRatio.coerceIn(0.5f, 2.5f))
+                                                                            .aspectRatio(qImgRatio)
                                                                             .clip(RoundedCornerShape(6.dp))
                                                                             .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
                                                                     )
@@ -685,17 +688,19 @@ private fun NoteCardContent(
                     pageCount = { mediaList.size },
                     initialPage = 0
                 )
-                // Reactive container ratio: starts from imeta/cached dimensions or 16:9 default,
-                // then updates when the image loads real dimensions so the container always
-                // matches the actual media — no permanent scaling down with ContentScale.Fit.
+                // Container ratio: prefers imeta/cache for stability. For videos with
+                // unknown dimensions, allows ONE reactive update when the player reports.
+                val currentMediaUrl = mediaList.getOrNull(pagerState.currentPage)
+                val knownMediaRatio = if (currentMediaUrl != null) {
+                    note.mediaMeta[currentMediaUrl]?.aspectRatio()
+                        ?: social.mycelium.android.utils.MediaAspectRatioCache.get(currentMediaUrl)
+                } else null
                 var mediaContainerRatio by remember(mediaList, note.mediaMeta) {
-                    val ratios = mediaList.map { url ->
-                        note.mediaMeta[url]?.aspectRatio()
-                            ?: social.mycelium.android.utils.MediaAspectRatioCache.get(url)
-                            ?: if (UrlDetector.isVideoUrl(url)) 16f / 9f else null
-                    }
-                    val known = ratios.filterNotNull()
-                    mutableFloatStateOf(if (known.isNotEmpty()) known.min() else (16f / 9f))
+                    mutableFloatStateOf(knownMediaRatio ?: (16f / 9f))
+                }
+                // Sync with cache if populated externally (fullscreen, re-scroll)
+                if (knownMediaRatio != null && knownMediaRatio != mediaContainerRatio) {
+                    mediaContainerRatio = knownMediaRatio
                 }
                 val modernCompactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
                 val mediaContainerModifier = Modifier.fillMaxWidth()
@@ -729,12 +734,14 @@ private fun NoteCardContent(
                                 )
                         ) {
                             if (isVideo) {
+                                val modernVideoKnown = note.mediaMeta[url]?.aspectRatio()
+                                    ?: social.mycelium.android.utils.MediaAspectRatioCache.get(url)
                                 InlineVideoPlayer(
                                     url = url,
                                     modifier = Modifier.fillMaxSize(),
                                     isVisible = isCurrentPage,
                                     onFullscreenClick = { onVideoClick(mediaList, page) },
-                                    onAspectRatioKnown = { ratio -> mediaContainerRatio = ratio }
+                                    onAspectRatioKnown = if (modernVideoKnown == null) { ratio -> mediaContainerRatio = ratio } else null
                                 )
                             } else {
                                 val meta = note.mediaMeta[url]
@@ -787,11 +794,6 @@ private fun NoteCardContent(
                                                     val h = drawable.intrinsicHeight
                                                     if (w > 0 && h > 0) {
                                                         social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
-                                                        // Update container to match real dimensions
-                                                        val realRatio = w.toFloat() / h.toFloat()
-                                                        if (realRatio in 0.3f..3.0f) {
-                                                            mediaContainerRatio = realRatio
-                                                        }
                                                     }
                                                 }
                                             }

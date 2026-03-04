@@ -259,24 +259,36 @@ fun MyceliumNavigation(
         val noteForThread = if (realNote != null) {
             // If we have a rootNoteId that differs from the note id, try to get the root too
             if (targetNoteId != realNote.id) {
-                NotesRepository.getInstance().getNoteFromCache(targetNoteId) ?: social.mycelium.android.data.Note(
-                    id = targetNoteId,
-                    author = notifData?.author?.let { a ->
-                        social.mycelium.android.data.Author(id = a.id, username = a.username, displayName = a.displayName ?: "", avatarUrl = a.avatarUrl, isVerified = false)
-                    } ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
-                    content = "",
-                    timestamp = 0L,
-                    isReply = false,
-                    relayUrls = realNote.relayUrls
-                )
+                NotesRepository.getInstance().getNoteFromCache(targetNoteId) ?: run {
+                    // Prefer the targetNote's author (the actual parent/root) over the
+                    // notification's author (the replier). Fall back to resolveAuthor from
+                    // the reply's first p-tag (typically the root author).
+                    val rootAuthor = notifData?.targetNote?.author
+                        ?: realNote.tags.firstOrNull { it.size >= 2 && it[0] == "p" }
+                            ?.getOrNull(1)?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                        ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false)
+                    social.mycelium.android.data.Note(
+                        id = targetNoteId,
+                        author = rootAuthor,
+                        content = "",
+                        timestamp = 0L,
+                        isReply = false,
+                        relayUrls = realNote.relayUrls
+                    )
+                }
             } else {
                 realNote
             }
         } else {
             // Absolute fallback: stub note. Thread composable will fetch from relays.
+            // Try to resolve root author from notification's targetNote or p-tags
+            val fallbackAuthor = notifData?.targetNote?.author
+                ?: notifData?.note?.tags?.firstOrNull { it.size >= 2 && it[0] == "p" }
+                    ?.getOrNull(1)?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false)
             social.mycelium.android.data.Note(
                 id = targetNoteId,
-                author = social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
+                author = fallbackAuthor,
                 content = "",
                 timestamp = 0L
             )
@@ -1011,6 +1023,19 @@ fun MyceliumNavigation(
                                             val error = accountStateViewModel.sendReaction(note, emoji)
                                             if (error != null) showSnackbar(error)
                                         },
+                                        onBoost = { n ->
+                                            val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
+                                            if (err != null) showSnackbar(err)
+                                        },
+                                        onQuote = { n ->
+                                            val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                                            val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+                                            navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+                                        },
+                                        onFork = { n ->
+                                            val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+                                            navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+                                        },
                                         onCustomZapSend = { note, amount, zapType, msg ->
                                             val err = accountStateViewModel.sendZap(note, amount, zapType, msg)
                                             if (err != null) showSnackbar(err)
@@ -1485,6 +1510,19 @@ fun MyceliumNavigation(
                             onReact = { note, emoji ->
                                 val error = accountStateViewModel.sendReaction(note, emoji)
                                 if (error != null) showSnackbar(error)
+                            },
+                            onBoost = { n ->
+                                val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
+                                if (err != null) showSnackbar(err)
+                            },
+                            onQuote = { n ->
+                                val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                                val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+                                navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+                            },
+                            onFork = { n ->
+                                val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+                                navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
                             },
                             onCustomZapSend = { note, amount, zapType, msg ->
                                 val err = accountStateViewModel.sendZap(note, amount, zapType, msg)
@@ -2038,6 +2076,19 @@ fun MyceliumNavigation(
                                     onReact = { reactNote, emoji ->
                                         val error = accountStateViewModel.sendReaction(reactNote, emoji)
                                         if (error != null) showSnackbar(error)
+                                    },
+                                    onBoost = { n ->
+                                        val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
+                                        if (err != null) showSnackbar(err)
+                                    },
+                                    onQuote = { n ->
+                                        val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                                        val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+                                        navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+                                    },
+                                    onFork = { n ->
+                                        val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+                                        navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
                                     },
                                     onCustomZapSend = { zapNote, amount, zapType, msg ->
                                         val err = accountStateViewModel.sendZap(zapNote, amount, zapType, msg)
@@ -2982,13 +3033,20 @@ fun MyceliumNavigation(
                                 val overlayNote = if (targetNote != null && targetNote.id == rootNoteId) targetNote
                                     else NotesRepository.getInstance().getNoteFromCache(rootNoteId)
                                         ?: if (targetNote != null) buildRootStubNote(rootNoteId, targetNote, notifFallbackRelayUrls)
-                                        else social.mycelium.android.data.Note(
-                                            id = rootNoteId,
-                                            author = social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false),
-                                            content = "",
-                                            timestamp = 0L,
-                                            relayUrls = notifFallbackRelayUrls
-                                        )
+                                        else {
+                                            // No targetNote and root not cached — try resolving own profile
+                                            // (most notification threads originate from the user's own notes)
+                                            val ownPubkey = currentAccount?.toHexKey()
+                                            val fallbackAuthor = if (!ownPubkey.isNullOrBlank()) ProfileMetadataCache.getInstance().resolveAuthor(ownPubkey)
+                                                else social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false)
+                                            social.mycelium.android.data.Note(
+                                                id = rootNoteId,
+                                                author = fallbackAuthor,
+                                                content = "",
+                                                timestamp = 0L,
+                                                relayUrls = notifFallbackRelayUrls
+                                            )
+                                        }
                                 overlayNotifThreadStack.clear()
                                 overlayNotifReplyKinds.clear()
                                 overlayNotifThreadStack.add(overlayNote)
@@ -3126,6 +3184,19 @@ fun MyceliumNavigation(
                                     onReact = { reactNote, emoji ->
                                         val error = accountStateViewModel.sendReaction(reactNote, emoji)
                                         if (error != null) showSnackbar(error)
+                                    },
+                                    onBoost = { n ->
+                                        val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
+                                        if (err != null) showSnackbar(err)
+                                    },
+                                    onQuote = { n ->
+                                        val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                                        val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+                                        navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+                                    },
+                                    onFork = { n ->
+                                        val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+                                        navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
                                     },
                                     onCustomZapSend = { zapNote, amount, zapType, msg ->
                                         val err = accountStateViewModel.sendZap(zapNote, amount, zapType, msg)
@@ -3411,6 +3482,19 @@ fun MyceliumNavigation(
                                         onReact = { note, emoji ->
                                             val error = accountStateViewModel.sendReaction(note, emoji)
                                             if (error != null) showSnackbar(error)
+                                        },
+                                        onBoost = { n ->
+                                            val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
+                                            if (err != null) showSnackbar(err)
+                                        },
+                                        onQuote = { n ->
+                                            val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                                            val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+                                            navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+                                        },
+                                        onFork = { n ->
+                                            val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+                                            navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
                                         },
                                         onCustomZapSend = { note, amount, zapType, msg ->
                                             val err = accountStateViewModel.sendZap(note, amount, zapType, msg)

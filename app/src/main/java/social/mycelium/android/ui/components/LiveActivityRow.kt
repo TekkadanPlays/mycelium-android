@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -150,14 +152,9 @@ fun LiveActivityChip(
 }
 
 /**
- * Full-width live activity card for vertical lists (e.g. LiveExplorerScreen).
- * Shows host avatar, title, participant count, status, and — when friends are
- * watching — a row of profile orbs for followed viewers below the main row.
- *
- * @param isFollowedHost  True when the host is someone we follow (green badge on avatar)
- * @param followedViewerAvatars  Avatar URLs (or null) for followed friends who are
- *                               participants/viewers of this broadcast (excluding the host).
- *                               Drives the green person icon on the right and the orb row.
+ * Modern live activity card for vertical lists (e.g. LiveExplorerScreen).
+ * Features a thumbnail image with status pill overlay, host info row,
+ * viewer count badge, and followed-friend indicators.
  */
 @Composable
 fun LiveActivityCard(
@@ -172,127 +169,251 @@ fun LiveActivityCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
             .clickable(onClick = onClick)
     ) {
-        Row(
+        // ── Thumbnail with status pill overlay ──
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .height(160.dp)
+                .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+                .background(Color.Black.copy(alpha = 0.8f))
         ) {
-            // Live status dot
-            LiveStatusDot(status = activity.status)
-
-            Spacer(Modifier.width(8.dp))
-
-            // Host avatar
-            if (activity.hostAuthor?.avatarUrl != null) {
+            if (activity.imageUrl != null) {
                 AsyncImage(
-                    model = activity.hostAuthor.avatarUrl,
-                    contentDescription = "Host avatar",
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clip(CircleShape),
+                    model = activity.imageUrl,
+                    contentDescription = "Stream preview",
+                    modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
+                // Gradient scrim at bottom for text legibility
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(60.dp)
+                        .align(Alignment.BottomCenter)
+                        .background(
+                            brush = androidx.compose.ui.graphics.Brush.verticalGradient(
+                                colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.7f))
+                            )
+                        )
+                )
             } else {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = "Host",
-                    modifier = Modifier.size(24.dp),
-                    tint = if (isFollowedHost) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
+                // No thumbnail — show a dark placeholder with icon
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Videocam,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = Color.White.copy(alpha = 0.2f)
+                    )
+                }
+            }
+
+            // Status pill — top-left
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(8.dp)
+                    .background(
+                        color = when (activity.status) {
+                            LiveActivityStatus.LIVE -> Color(0xFFEF4444)
+                            LiveActivityStatus.PLANNED -> Color(0xFFF59E0B)
+                            LiveActivityStatus.ENDED -> Color(0xFF6B7280)
+                        },
+                        shape = RoundedCornerShape(4.dp)
+                    )
+                    .padding(horizontal = 8.dp, vertical = 3.dp)
+            ) {
+                Text(
+                    text = when (activity.status) {
+                        LiveActivityStatus.LIVE -> "LIVE"
+                        LiveActivityStatus.PLANNED -> "SCHEDULED"
+                        LiveActivityStatus.ENDED -> "ENDED"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    letterSpacing = 0.5.sp
                 )
             }
 
-            // Green person badge for followed hosts (shown even when avatar is present)
-            if (isFollowedHost && activity.hostAuthor?.avatarUrl != null) {
-                Icon(
-                    imageVector = Icons.Default.Person,
-                    contentDescription = "Followed host",
-                    modifier = Modifier.size(14.dp),
-                    tint = Color(0xFF4CAF50)
-                )
-            }
-
-            Spacer(Modifier.width(8.dp))
-
-            // Title
-            Text(
-                text = activity.title ?: activity.hostAuthor?.displayName ?: activity.hostPubkey.take(8),
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f, fill = false)
-            )
-
-            // Participant count — person icon is green when friends are watching
+            // Viewer count pill — top-right
             activity.currentParticipants?.let { count ->
                 if (count > 0) {
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = "$count",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.width(2.dp))
-                    Icon(
-                        imageVector = Icons.Default.Person,
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp),
-                        tint = if (hasFriendViewers) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .background(
+                                color = Color.Black.copy(alpha = 0.6f),
+                                shape = RoundedCornerShape(4.dp)
+                            )
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = null,
+                            modifier = Modifier.size(10.dp),
+                            tint = if (hasFriendViewers) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.9f)
+                        )
+                        Text(
+                            text = formatViewerCount(count),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White.copy(alpha = 0.9f),
+                            fontSize = 10.sp
+                        )
+                    }
                 }
             }
 
-            Spacer(Modifier.width(8.dp))
-
-            // Status label
+            // Title overlaid on bottom of thumbnail
             Text(
-                text = when (activity.status) {
-                    LiveActivityStatus.LIVE -> "LIVE"
-                    LiveActivityStatus.PLANNED -> "Planned"
-                    LiveActivityStatus.ENDED -> "Ended"
-                },
-                style = MaterialTheme.typography.labelSmall,
+                text = activity.title ?: "Untitled Stream",
+                style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold,
-                color = when (activity.status) {
-                    LiveActivityStatus.LIVE -> Color(0xFFEF4444)
-                    LiveActivityStatus.PLANNED -> Color(0xFFF59E0B)
-                    LiveActivityStatus.ENDED -> MaterialTheme.colorScheme.outline
-                }
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+                    .fillMaxWidth(0.85f)
             )
         }
 
-        // Followed viewer orbs — show profile pics of friends watching this broadcast
+        // ── Host info row ──
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Host avatar with optional follow ring
+            Box {
+                if (activity.hostAuthor?.avatarUrl != null) {
+                    AsyncImage(
+                        model = activity.hostAuthor.avatarUrl,
+                        contentDescription = "Host avatar",
+                        modifier = Modifier
+                            .size(32.dp)
+                            .then(
+                                if (isFollowedHost) Modifier
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF4CAF50))
+                                    .padding(1.5.dp)
+                                else Modifier
+                            )
+                            .clip(CircleShape),
+                        contentScale = ContentScale.Crop
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(32.dp)
+                            .clip(CircleShape)
+                            .background(
+                                if (isFollowedHost) Color(0xFF4CAF50).copy(alpha = 0.2f)
+                                else MaterialTheme.colorScheme.surfaceVariant
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Person,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = if (isFollowedHost) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = activity.hostAuthor?.displayName
+                            ?: activity.hostAuthor?.username
+                            ?: activity.hostPubkey.take(12) + "…",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (isFollowedHost) {
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = "Following",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF4CAF50),
+                            fontSize = 10.sp
+                        )
+                    }
+                }
+                if (activity.summary != null) {
+                    Text(
+                        text = activity.summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontSize = 11.sp
+                    )
+                } else if (activity.hashtags.isNotEmpty()) {
+                    Text(
+                        text = activity.hashtags.take(3).joinToString(" ") { "#$it" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
+        // ── Friends watching row ──
         if (hasFriendViewers) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 36.dp, end = 12.dp, bottom = 8.dp),
+                    .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy((-4).dp)
+                horizontalArrangement = Arrangement.spacedBy((-6).dp)
             ) {
-                // Show up to 8 orbs, then "+N" overflow
-                val visible = followedViewerAvatars.take(8)
+                val visible = followedViewerAvatars.take(6)
                 val overflow = followedViewerAvatars.size - visible.size
 
-                visible.forEach { (pubkey, avatarUrl) ->
+                visible.forEach { (_, avatarUrl) ->
                     if (avatarUrl != null) {
                         AsyncImage(
                             model = avatarUrl,
                             contentDescription = "Friend watching",
                             modifier = Modifier
-                                .size(20.dp)
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surface, CircleShape)
+                                .padding(1.dp)
                                 .clip(CircleShape),
                             contentScale = ContentScale.Crop
                         )
                     } else {
                         Box(
                             modifier = Modifier
-                                .size(20.dp)
-                                .background(Color(0xFF4CAF50).copy(alpha = 0.3f), CircleShape),
+                                .size(22.dp)
+                                .background(Color(0xFF4CAF50).copy(alpha = 0.2f), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
@@ -305,35 +426,30 @@ fun LiveActivityCard(
                     }
                 }
 
-                if (overflow > 0) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = "+$overflow",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF4CAF50),
-                        fontSize = 10.sp
-                    )
-                }
-
-                Spacer(Modifier.width(6.dp))
+                Spacer(Modifier.width(10.dp))
                 Text(
-                    text = if (followedViewerAvatars.size == 1) "friend watching"
-                           else "${followedViewerAvatars.size} friends watching",
+                    text = buildString {
+                        if (overflow > 0) append("+$overflow · ")
+                        append(
+                            if (followedViewerAvatars.size == 1) "1 friend watching"
+                            else "${followedViewerAvatars.size} friends watching"
+                        )
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    fontSize = 10.sp
+                    color = Color(0xFF4CAF50).copy(alpha = 0.8f),
+                    fontSize = 11.sp
                 )
             }
         }
-
-        // Divider
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(0.5.dp)
-                .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-        )
     }
+}
+
+/** Format viewer count: 1.2k, 15k, etc. */
+private fun formatViewerCount(count: Int): String = when {
+    count >= 1_000_000 -> "${count / 1_000_000}.${(count % 1_000_000) / 100_000}M"
+    count >= 10_000 -> "${count / 1000}k"
+    count >= 1_000 -> "${count / 1000}.${(count % 1000) / 100}k"
+    else -> count.toString()
 }
 
 /**

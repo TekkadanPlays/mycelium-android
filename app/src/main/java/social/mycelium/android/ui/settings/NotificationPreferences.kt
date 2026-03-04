@@ -34,10 +34,12 @@ enum class ConnectionMode {
  */
 object NotificationPreferences {
     private const val PREFS_NAME = "Mycelium_notification_prefs"
+    // ── Global (device-level) keys — NOT account-bound ──
     private const val KEY_PUSH_ENABLED = "push_enabled"
     private const val KEY_BACKGROUND_SERVICE = "background_service_enabled" // legacy, migrated to connection_mode
     private const val KEY_CONNECTION_MODE = "connection_mode"
     private const val KEY_ADAPTIVE_CHECK_INTERVAL = "adaptive_check_interval_minutes"
+    // ── Per-account keys (prefixed with hex pubkey at runtime) ──
     private const val KEY_NOTIFY_REACTIONS = "notify_reactions"
     private const val KEY_NOTIFY_ZAPS = "notify_zaps"
     private const val KEY_NOTIFY_REPOSTS = "notify_reposts"
@@ -45,6 +47,15 @@ object NotificationPreferences {
     private const val KEY_NOTIFY_REPLIES = "notify_replies"
     private const val KEY_NOTIFY_DMS = "notify_dms"
     private const val KEY_MUTE_STRANGERS = "mute_strangers"
+
+    /** Active account hex pubkey (lowercase). Null = guest / no account. */
+    @Volatile private var activeAccountHex: String? = null
+
+    /** Returns the per-account key by prefixing with the active account hex pubkey. */
+    private fun acctKey(base: String): String {
+        val hex = activeAccountHex
+        return if (hex.isNullOrBlank()) base else "${hex}:${base}"
+    }
 
     /** Default adaptive check interval in minutes. */
     const val DEFAULT_ADAPTIVE_INTERVAL_MINUTES = 15L
@@ -87,6 +98,7 @@ object NotificationPreferences {
 
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // ── Global (device-level) settings ──
         _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, true)
 
         // Migration: old boolean toggle → new ConnectionMode enum
@@ -106,13 +118,35 @@ object NotificationPreferences {
         }
 
         _adaptiveCheckIntervalMinutes.value = prefs.getLong(KEY_ADAPTIVE_CHECK_INTERVAL, DEFAULT_ADAPTIVE_INTERVAL_MINUTES)
-        _notifyReactions.value = prefs.getBoolean(KEY_NOTIFY_REACTIONS, true)
-        _notifyZaps.value = prefs.getBoolean(KEY_NOTIFY_ZAPS, true)
-        _notifyReposts.value = prefs.getBoolean(KEY_NOTIFY_REPOSTS, true)
-        _notifyMentions.value = prefs.getBoolean(KEY_NOTIFY_MENTIONS, true)
-        _notifyReplies.value = prefs.getBoolean(KEY_NOTIFY_REPLIES, true)
-        _notifyDMs.value = prefs.getBoolean(KEY_NOTIFY_DMS, true)
-        _muteStrangers.value = prefs.getBoolean(KEY_MUTE_STRANGERS, false)
+        // ── Per-account settings (loaded with default account — no prefix until setActiveAccount) ──
+        loadAccountSettings()
+    }
+
+    /**
+     * Switch to a different account's notification preferences.
+     * Call when the active account changes (login, account switch).
+     * Power settings (connectionMode, pushEnabled, adaptiveInterval) are NOT affected.
+     */
+    fun setActiveAccount(hexPubkey: String?) {
+        activeAccountHex = hexPubkey?.lowercase()?.takeIf { it.isNotBlank() }
+        if (::prefs.isInitialized) loadAccountSettings()
+    }
+
+    /** Reload per-account notification toggle settings from SharedPreferences. */
+    private fun loadAccountSettings() {
+        // Migrate: if per-account keys don't exist yet, fall back to legacy global keys
+        fun getAccountBool(base: String, default: Boolean): Boolean {
+            val key = acctKey(base)
+            return if (prefs.contains(key)) prefs.getBoolean(key, default)
+            else prefs.getBoolean(base, default) // legacy global fallback
+        }
+        _notifyReactions.value = getAccountBool(KEY_NOTIFY_REACTIONS, true)
+        _notifyZaps.value = getAccountBool(KEY_NOTIFY_ZAPS, true)
+        _notifyReposts.value = getAccountBool(KEY_NOTIFY_REPOSTS, true)
+        _notifyMentions.value = getAccountBool(KEY_NOTIFY_MENTIONS, true)
+        _notifyReplies.value = getAccountBool(KEY_NOTIFY_REPLIES, true)
+        _notifyDMs.value = getAccountBool(KEY_NOTIFY_DMS, true)
+        _muteStrangers.value = getAccountBool(KEY_MUTE_STRANGERS, false)
     }
 
     fun setPushEnabled(enabled: Boolean) {
@@ -132,43 +166,43 @@ object NotificationPreferences {
 
     fun setNotifyReactions(enabled: Boolean) {
         _notifyReactions.value = enabled
-        prefs.edit().putBoolean(KEY_NOTIFY_REACTIONS, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_REACTIONS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyZaps(enabled: Boolean) {
         _notifyZaps.value = enabled
-        prefs.edit().putBoolean(KEY_NOTIFY_ZAPS, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_ZAPS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyReposts(enabled: Boolean) {
         _notifyReposts.value = enabled
-        prefs.edit().putBoolean(KEY_NOTIFY_REPOSTS, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_REPOSTS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyMentions(enabled: Boolean) {
         _notifyMentions.value = enabled
-        prefs.edit().putBoolean(KEY_NOTIFY_MENTIONS, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_MENTIONS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyReplies(enabled: Boolean) {
         _notifyReplies.value = enabled
-        prefs.edit().putBoolean(KEY_NOTIFY_REPLIES, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_REPLIES), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyDMs(enabled: Boolean) {
         _notifyDMs.value = enabled
-        prefs.edit().putBoolean(KEY_NOTIFY_DMS, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_DMS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setMuteStrangers(enabled: Boolean) {
         _muteStrangers.value = enabled
-        prefs.edit().putBoolean(KEY_MUTE_STRANGERS, enabled).apply()
+        prefs.edit().putBoolean(acctKey(KEY_MUTE_STRANGERS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 }

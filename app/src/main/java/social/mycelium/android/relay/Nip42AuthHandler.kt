@@ -180,15 +180,15 @@ class Nip42AuthHandler(
                 add(arrayOf("relay", url))
                 add(arrayOf("challenge", challenge))
             }
-            // Background-only signing — AUTH must be invisible (no Amber UI popup).
-            // If kind-22242 isn't pre-approved in Amber, this returns null and we
-            // silently skip. The user can re-login to Amber to grant the permission.
-            val signed = currentSigner.signBackgroundOnly(template)
-            if (signed == null || signed.sig.isBlank()) {
-                Log.w(TAG, "AUTH[$url] Background signing unavailable — skipping (re-login to Amber to grant kind-22242)")
+            // Try background (ContentProvider) first, then foreground (Amber activity)
+            // — matching Amethyst's approach. If kind-22242 isn't pre-approved in Amber's
+            // ContentProvider, the foreground fallback lets the user approve it once,
+            // after which Amber remembers it for future background signing.
+            val signed = currentSigner.sign(template)
+            if (signed.sig.isBlank()) {
+                Log.w(TAG, "AUTH[$url] Signing returned empty signature")
                 updateStatus(url, AuthStatus.FAILED)
                 respondedChallenges.remove(key)
-                // No cooldown — retry immediately on next challenge
                 return
             }
             Log.d(TAG, "AUTH[$url] signed id=${signed.id.take(8)} pubKey=${signed.pubKey.take(16)}")

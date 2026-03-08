@@ -213,6 +213,8 @@ private fun OverlayThreadPanel(
     overlayThreadHighlightIds: androidx.compose.runtime.snapshots.SnapshotStateList<String?>,
     onAmberLogin: (android.content.Intent) -> Unit,
     showSnackbar: (String) -> Unit,
+    onPopOverlay: () -> Unit,
+    onPushOverlay: () -> Unit,
 ) {
     val noteId = note.id
     val savedScrollState = threadStateHolder.getScrollState(noteId)
@@ -241,7 +243,7 @@ private fun OverlayThreadPanel(
         androidx.lifecycle.viewmodel.compose.viewModel(key = "threadReplies_$noteId")
     val layerKind1RepliesVm: social.mycelium.android.viewmodel.Kind1RepliesViewModel =
         androidx.lifecycle.viewmodel.compose.viewModel(key = "kind1Replies_$noteId")
-    ThreadSlideBackBox(onBack = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() }) {
+    ThreadSlideBackBox(onBack = onPopOverlay) {
         ModernThreadViewScreen(
             note = note,
             comments = emptyList(),
@@ -260,7 +262,7 @@ private fun OverlayThreadPanel(
             highlightReplyId = highlightReplyId,
             relayUrls = relayUrls,
             cacheRelayUrls = cacheRelayUrls,
-            onBackClick = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() },
+            onBackClick = onPopOverlay,
             onProfileClick = { navController.navigateToProfile(it) },
             onNoteClick = { clickedNote ->
                 val threadNote = if (clickedNote.originalNoteId != null) clickedNote.copy(id = clickedNote.originalNoteId) else clickedNote
@@ -270,6 +272,7 @@ private fun OverlayThreadPanel(
                     val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote)
                     overlayThreadStack.add(overlayNote)
                     overlayThreadHighlightIds.add(threadNote.id)
+                    onPushOverlay()
                     if (rootFromCache == null) {
                         coroutineScope.launch(Dispatchers.IO) {
                             val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
@@ -287,8 +290,30 @@ private fun OverlayThreadPanel(
                         }
                     }
                 } else {
-                    overlayThreadStack.add(threadNote)
+                    // Try cache first for full author/content data; fall back to the clicked note.
+                    val cachedNote = NotesRepository.getInstance().getNoteFromCache(threadNote.id)
+                    val pushNote = cachedNote ?: threadNote
+                    overlayThreadStack.add(pushNote)
                     overlayThreadHighlightIds.add(null)
+                    onPushOverlay()
+                    // If we only have stub data (no cache hit), async-fetch the full note
+                    // so author profile resolves properly (fixes ".." display name).
+                    if (cachedNote == null && (threadNote.author.displayName.length <= 10 || threadNote.content.isBlank())) {
+                        coroutineScope.launch(Dispatchers.IO) {
+                            val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
+                                noteId = threadNote.id,
+                                userRelayUrls = threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) } +
+                                    NotesRepository.getInstance().INDEXER_RELAYS,
+                                authorPubkey = threadNote.author.id.takeIf { it.isNotBlank() }
+                            )
+                            if (fetched != null) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    val idx = overlayThreadStack.indexOfFirst { it.id == threadNote.id }
+                                    if (idx >= 0) overlayThreadStack[idx] = fetched
+                                }
+                            }
+                        }
+                    }
                 }
             },
             onImageTap = { _, urls, idx ->
@@ -592,6 +617,13 @@ fun MyceliumNavigation(
     // Overlay thread stacks – each context maintains a stack of notes for chained thread exploration.
     // The top of the stack is the currently displayed thread. Back pops. onNoteClick pushes.
     val overlayThreadStack = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
+    // Animation tracking — lives outside NavHost so it survives image_viewer/video_viewer nav.
+    // pushGeneration: monotonic counter incremented on every push. Used as LaunchedEffect key
+    // so the slide-in animation always fires, even when re-opening the same note ID.
+    var overlayPushGeneration by remember { mutableIntStateOf(0) }
+    // lastPoppedOverlayNote: holds the note that was just popped, so its AnimatedVisibility
+    // can animate out (visible=false → slide-out) before being cleaned up.
+    var lastPoppedOverlayNote by remember { mutableStateOf<Pair<Int, social.mycelium.android.data.Note>?>(null) }
     val overlayTopicThreadStack = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
     val overlayProfileThreadStack = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
     val overlayNotifThreadStack = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
@@ -630,6 +662,7 @@ fun MyceliumNavigation(
         if (!preserveDashboardOverlay) {
             overlayThreadStack.clear()
             overlayThreadHighlightIds.clear()
+            lastPoppedOverlayNote = null
         }
         val preserveTopicOverlay = route == "topics" || route in overlayPreserveRoutes
                 || route.startsWith("profile/")
@@ -1031,8 +1064,10 @@ fun MyceliumNavigation(
                                     appViewModel.markThreadViewed(note.id)
                                     overlayThreadStack.clear()
                                     overlayThreadHighlightIds.clear()
+                                    lastPoppedOverlayNote = null
                                     overlayThreadStack.add(overlayNote)
                                     overlayThreadHighlightIds.add(threadNote.id) // scroll to the quoted reply
+                                    overlayPushGeneration++
                                     // Async-fetch the root note so thread view has full data
                                     if (rootFromCache == null) {
                                         coroutineScope.launch(Dispatchers.IO) {
@@ -1056,8 +1091,10 @@ fun MyceliumNavigation(
                                     appViewModel.markThreadViewed(note.id)
                                     overlayThreadStack.clear()
                                     overlayThreadHighlightIds.clear()
+                                    lastPoppedOverlayNote = null
                                     overlayThreadStack.add(threadNote)
                                     overlayThreadHighlightIds.add(null) // no highlight for non-reply
+                                    overlayPushGeneration++
                                 }
                             },
                             onImageTap = { note, _, _ ->
@@ -1069,8 +1106,10 @@ fun MyceliumNavigation(
                                 appViewModel.markThreadViewed(note.id)
                                 overlayThreadStack.clear()
                                 overlayThreadHighlightIds.clear()
+                                lastPoppedOverlayNote = null
                                 overlayThreadStack.add(threadNote)
                                 overlayThreadHighlightIds.add(null)
+                                overlayPushGeneration++
                             },
                             onOpenImageViewer = { urls, index ->
                                 appViewModel.openImageViewer(urls, index)
@@ -1131,61 +1170,37 @@ fun MyceliumNavigation(
 
                         // Intercept system back gesture when overlay thread is showing
                         BackHandler(enabled = overlayThreadStack.isNotEmpty()) {
-                            overlayThreadStack.removeLastOrNull()
+                            val popped = overlayThreadStack.removeLastOrNull()
+                            val poppedIdx = overlayThreadStack.size // index it was at
                             overlayThreadHighlightIds.removeLastOrNull()
+                            if (popped != null) {
+                                lastPoppedOverlayNote = poppedIdx to popped
+                            }
                         }
 
-                        // Thread overlay stack: each entry gets its own AnimatedVisibility slide-in/out.
-                        // Layer 0 = feed→thread (identical to original). Layers 1+ = thread→thread stacking.
-                        // Each layer stays rendered underneath so slide-back reveals the previous thread.
+                        // Thread overlay stack: each entry gets its own AnimatedVisibility.
+                        // Layer 0 = feed→thread. Layers 1+ = thread→thread stacking.
                         //
-                        // We track a "seen notes" list to keep exit animations working: when a note is
-                        // removed from the stack, it stays in seenNotes so its AnimatedVisibility can
-                        // animate out (visible=false) before being cleaned up.
-                        val seenStackNotes = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
-                        // Track note IDs that have already animated in, so returning from
-                        // image_viewer/video_viewer doesn't replay the slide-in animation.
-                        val alreadyAnimatedIds = remember { mutableSetOf<String>() }
-                        // Sync seenStackNotes with actual stack SYNCHRONOUSLY during composition.
-                        // New entries are added here so AnimatedVisibility sees them on the FIRST
-                        // frame with visible=true, having been absent the frame before → slide-in fires.
-                        // We do NOT add entries inside LaunchedEffect (async) because that would
-                        // cause AnimatedVisibility to start already-visible, skipping the animation.
-                        val currentStackSize = overlayThreadStack.size
-                        overlayThreadStack.forEachIndexed { idx, note ->
-                            if (seenStackNotes.getOrNull(idx)?.id != note.id) {
-                                if (idx < seenStackNotes.size) seenStackNotes[idx] = note
-                                else seenStackNotes.add(note)
-                            }
-                        }
-                        // Delayed cleanup: after exit animation, remove stale seen entries
-                        // and clear their animated-in status so re-push gets a fresh slide-in.
-                        if (seenStackNotes.size > currentStackSize) {
-                            LaunchedEffect(currentStackSize) {
-                                kotlinx.coroutines.delay(350)
-                                while (seenStackNotes.size > overlayThreadStack.size) {
-                                    val removed = seenStackNotes.removeLastOrNull()
-                                    if (removed != null) alreadyAnimatedIds.remove(removed.id)
-                                }
-                            }
-                        }
+                        // Design:
+                        // - Render directly from overlayThreadStack (no shadow list).
+                        // - Each layer uses overlayPushGeneration as LaunchedEffect key so the
+                        //   slide-in animation ALWAYS fires on push, even for the same note ID.
+                        // - overlayPushGeneration lives outside NavHost → survives image_viewer nav.
+                        // - lastPoppedOverlayNote renders one extra layer with visible=false for
+                        //   the slide-out exit animation, then cleans itself up after 350ms.
 
-                        for (layerIndex in 0 until seenStackNotes.size) {
-                            val layerNote = seenStackNotes[layerIndex]
-                            val isInStack = layerIndex < overlayThreadStack.size &&
-                                overlayThreadStack.getOrNull(layerIndex)?.id == layerNote.id
+                        // Render active stack layers (visible=true, slide-in on push)
+                        val stackSnapshot = overlayThreadStack.toList()
+                        for (layerIndex in stackSnapshot.indices) {
+                            val layerNote = stackSnapshot[layerIndex]
                             key(layerNote.id, layerIndex) {
-                                // If this note has already animated in (e.g. returning from
-                                // image_viewer), start visible immediately — no re-slide.
-                                // Only truly new pushes start invisible and get the slide-in.
-                                val wasAlreadyAnimated = layerNote.id in alreadyAnimatedIds
-                                var appeared by remember { mutableStateOf(wasAlreadyAnimated) }
-                                LaunchedEffect(Unit) {
-                                    appeared = true
-                                    alreadyAnimatedIds.add(layerNote.id)
-                                }
+                                // On first composition of this key, start invisible.
+                                // overlayPushGeneration guarantees LaunchedEffect re-fires
+                                // on every push but NOT on recomposition from image_viewer return.
+                                var visible by remember { mutableStateOf(false) }
+                                LaunchedEffect(overlayPushGeneration) { visible = true }
                                 AnimatedVisibility(
-                                    visible = isInStack && appeared,
+                                    visible = visible,
                                     enter = slideInHorizontally(
                                         animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
                                     ) { fullWidth -> fullWidth },
@@ -1211,7 +1226,58 @@ fun MyceliumNavigation(
                                         overlayThreadHighlightIds = overlayThreadHighlightIds,
                                         onAmberLogin = onAmberLogin,
                                         showSnackbar = { msg -> showSnackbar(msg) },
+                                        onPopOverlay = {
+                                            val pop = overlayThreadStack.removeLastOrNull()
+                                            val popIdx = overlayThreadStack.size
+                                            overlayThreadHighlightIds.removeLastOrNull()
+                                            if (pop != null) lastPoppedOverlayNote = popIdx to pop
+                                        },
+                                        onPushOverlay = { overlayPushGeneration++ },
                                     )
+                                }
+                            }
+                        }
+
+                        // Render the just-popped layer (visible=false → slide-out, then cleanup)
+                        val popped = lastPoppedOverlayNote
+                        if (popped != null) {
+                            val (poppedIndex, poppedNote) = popped
+                            key("popped_${poppedNote.id}", poppedIndex) {
+                                AnimatedVisibility(
+                                    visible = false,
+                                    enter = slideInHorizontally(
+                                        animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
+                                    ) { fullWidth -> fullWidth },
+                                    exit = slideOutHorizontally(
+                                        animationSpec = tween(300, easing = MaterialMotion.EasingStandardAccelerate)
+                                    ) { fullWidth -> fullWidth }
+                                ) {
+                                    val layerRelayUrls = (poppedNote.relayUrls.ifEmpty { listOfNotNull(poppedNote.relayUrl) } + fallbackRelayUrls).distinct()
+                                    OverlayThreadPanel(
+                                        note = poppedNote,
+                                        highlightReplyId = null,
+                                        relayUrls = layerRelayUrls,
+                                        cacheRelayUrls = cacheRelayUrls,
+                                        threadStateHolder = threadStateHolder,
+                                        topAppBarState = topAppBarState,
+                                        accountStateViewModel = accountStateViewModel,
+                                        appViewModel = appViewModel,
+                                        navController = navController,
+                                        accountNpub = currentAccount?.npub,
+                                        accountHexKey = currentAccount?.toHexKey(),
+                                        coroutineScope = coroutineScope,
+                                        overlayThreadStack = overlayThreadStack,
+                                        overlayThreadHighlightIds = overlayThreadHighlightIds,
+                                        onAmberLogin = onAmberLogin,
+                                        showSnackbar = { msg -> showSnackbar(msg) },
+                                        onPopOverlay = { /* popped layer — no further pop */ },
+                                        onPushOverlay = { overlayPushGeneration++ },
+                                    )
+                                }
+                                // Clean up after exit animation completes
+                                LaunchedEffect(Unit) {
+                                    kotlinx.coroutines.delay(350)
+                                    lastPoppedOverlayNote = null
                                 }
                             }
                         }

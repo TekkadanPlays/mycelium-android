@@ -522,6 +522,20 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 amberSignerManager.switchToAccount(hexPubkey)
             }
 
+            // Set NIP-42 signer IMMEDIATELY after Amber switch — before any relay
+            // operations can trigger AUTH challenges. Previously this was set ~40 lines
+            // later, creating a window where relays reconnect with signer=null.
+            val nip42Signer: com.example.cybin.signer.NostrSigner? = when {
+                updatedAccount.isExternalSigner -> amberSignerManager.getCurrentSigner()
+                updatedAccount.hasPrivateKey -> {
+                    val pk = nsecPrivKeyByHex[hexPubkey]
+                    if (pk != null) com.example.cybin.signer.NostrSignerInternal(com.example.cybin.crypto.KeyPair(privKey = pk)) else null
+                }
+                else -> null
+            }
+            RelayConnectionStateMachine.getInstance().setNip42Signer(nip42Signer)
+            Log.d("AccountStateViewModel", "NIP-42 signer set: ${nip42Signer?.let { it::class.simpleName } ?: "null"}")
+
             val userProfile = UserProfile(
                 pubkey = hexPubkey,
                 displayName = updatedAccount.displayName ?: "Nostr User",
@@ -545,20 +559,6 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
             // Restore persisted kind-3 before any relay fetch can overwrite with stale data
             ContactListRepository.restorePersistedKind3(hexPubkey)
-
-            // Set NIP-42 signer for new account.
-            // NOTE: Cannot use getCurrentSigner() here because _currentAccount.value
-            // is still null at this point (set later at line ~572). Resolve directly.
-            val nip42Signer: com.example.cybin.signer.NostrSigner? = when {
-                updatedAccount.isExternalSigner -> amberSignerManager.getCurrentSigner()
-                updatedAccount.hasPrivateKey -> {
-                    val pk = nsecPrivKeyByHex[hexPubkey]
-                    if (pk != null) com.example.cybin.signer.NostrSignerInternal(com.example.cybin.crypto.KeyPair(privKey = pk)) else null
-                }
-                else -> null
-            }
-            RelayConnectionStateMachine.getInstance().setNip42Signer(nip42Signer)
-            Log.d("AccountStateViewModel", "NIP-42 signer set: ${nip42Signer?.let { it::class.simpleName } ?: "null"}")
 
             Log.d("AccountStateViewModel", "\u2705 Switched to account: ${updatedAccount.getDisplayNameOrNpub()}")
         }

@@ -3713,12 +3713,24 @@ fun MyceliumNavigation(
                             } ?: emptyList()
                         } else emptyList()
                     }
+                    val blossomServersForCompose = remember(currentAccountForCompose) {
+                        currentAccountForCompose?.toHexKey()?.let { pubkey ->
+                            composeStorageManager.loadBlossomServers(pubkey)
+                        } ?: social.mycelium.android.data.DefaultMediaServers.BLOSSOM_SERVERS
+                    }
+                    val nip96ServersForCompose = remember(currentAccountForCompose) {
+                        currentAccountForCompose?.toHexKey()?.let { pubkey ->
+                            composeStorageManager.loadNip96Servers(pubkey)
+                        } ?: social.mycelium.android.data.DefaultMediaServers.NIP96_SERVERS
+                    }
                     ComposeNoteScreen(
                         onBack = { navController.popBackStack() },
                         accountStateViewModel = accountStateViewModel,
                         relayCategories = relayCategoriesForCompose,
                         relayProfiles = relayProfilesForCompose,
                         announcementRelays = announcementRelaysForCompose,
+                        blossomServers = blossomServersForCompose,
+                        nip96Servers = nip96ServersForCompose,
                         initialContent = initialContent,
                         draftId = draftId
                     )
@@ -3787,12 +3799,24 @@ fun MyceliumNavigation(
                     val topicMyAuthor = remember(topicMyPubkeyHex) {
                         topicMyPubkeyHex?.let { social.mycelium.android.repository.ProfileMetadataCache.getInstance().resolveAuthor(it) }
                     }
+                    val topicBlossomServers = remember(currentAccountForTopic) {
+                        currentAccountForTopic?.toHexKey()?.let { pubkey ->
+                            topicStorageManager.loadBlossomServers(pubkey)
+                        } ?: social.mycelium.android.data.DefaultMediaServers.BLOSSOM_SERVERS
+                    }
+                    val topicNip96Servers = remember(currentAccountForTopic) {
+                        currentAccountForTopic?.toHexKey()?.let { pubkey ->
+                            topicStorageManager.loadNip96Servers(pubkey)
+                        } ?: social.mycelium.android.data.DefaultMediaServers.NIP96_SERVERS
+                    }
                     ComposeTopicScreen(
                         initialHashtag = initialHashtag,
                         outboxRelays = outboxRelays,
                         relayCategories = topicRelayCategories,
                         relayProfiles = topicRelayProfiles,
                         myAuthor = topicMyAuthor,
+                        blossomServers = topicBlossomServers,
+                        nip96Servers = topicNip96Servers,
                         onPublish = { title, content, tags, relayUrls ->
                             accountStateViewModel.publishTopic(title, content, tags, relayUrls)
                         },

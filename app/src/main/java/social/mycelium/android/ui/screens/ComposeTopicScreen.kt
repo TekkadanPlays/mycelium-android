@@ -17,14 +17,18 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import social.mycelium.android.data.Author
+import social.mycelium.android.data.DefaultMediaServers
+import social.mycelium.android.data.MediaServer
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
+import social.mycelium.android.ui.components.ComposeToolbar
 
 /**
  * Dedicated screen for creating a Kind 11 topic (like compose for home feed).
  * Title, content, and comma-separated hashtags; optional initial hashtag prefill.
  * Publish button opens relay selection screen before signing and sending.
+ * Includes compose toolbar with media server picker, markdown toggle, and schedule.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,6 +38,8 @@ fun ComposeTopicScreen(
     relayCategories: List<RelayCategory>? = null,
     relayProfiles: List<RelayProfile> = emptyList(),
     myAuthor: Author? = null,
+    blossomServers: List<MediaServer> = DefaultMediaServers.BLOSSOM_SERVERS,
+    nip96Servers: List<MediaServer> = DefaultMediaServers.NIP96_SERVERS,
     onPublish: (title: String, content: String, hashtags: List<String>, relayUrls: Set<String>) -> String?,
     onBack: () -> Unit,
     draftId: String? = null,
@@ -60,6 +66,9 @@ fun ComposeTopicScreen(
 
     var hashtags by remember { mutableStateOf(initialHashtag ?: "") }
     var showRelayPicker by remember { mutableStateOf(false) }
+    var markdownEnabled by remember { mutableStateOf(false) }
+    var showZapRaiser by remember { mutableStateOf(false) }
+    var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
     val context = LocalContext.current
 
     LaunchedEffect(initialHashtag) {
@@ -152,12 +161,27 @@ fun ComposeTopicScreen(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
-            Spacer(modifier = Modifier.height(12.dp))
+            ComposeToolbar(
+                blossomServers = blossomServers,
+                nip96Servers = nip96Servers,
+                selectedServer = selectedMediaServer,
+                onServerSelected = { selectedMediaServer = it },
+                onAttachMedia = {
+                    Toast.makeText(context, "Media upload coming soon", Toast.LENGTH_SHORT).show()
+                },
+                markdownEnabled = markdownEnabled,
+                onToggleMarkdown = { markdownEnabled = it },
+                showZapRaiser = showZapRaiser,
+                onToggleZapRaiser = { showZapRaiser = it },
+                onScheduleClick = {
+                    Toast.makeText(context, "Topic scheduling coming soon", Toast.LENGTH_SHORT).show()
+                }
+            )
             Button(
                 onClick = { showRelayPicker = true },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 16.dp),
+                    .padding(top = 8.dp, bottom = 16.dp),
                 enabled = title.isNotBlank()
             ) {
                 Text("Publish")

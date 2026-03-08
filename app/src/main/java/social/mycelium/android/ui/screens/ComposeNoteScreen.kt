@@ -1,15 +1,15 @@
 package social.mycelium.android.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ShowChart
-import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -17,14 +17,18 @@ import android.widget.Toast
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import social.mycelium.android.data.DefaultMediaServers
+import social.mycelium.android.data.MediaServer
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.ui.components.ComposeToolbar
 import social.mycelium.android.viewmodel.AccountStateViewModel
 
 /**
  * Note composition screen. User types content and taps Publish to open relay selection.
  * Outbox relays are selected by default; after confirming, the kind-1 note is signed and sent.
+ * Includes compose toolbar with media server picker, markdown toggle, zapraiser, and schedule.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -34,6 +38,8 @@ fun ComposeNoteScreen(
     relayCategories: List<RelayCategory>? = null,
     relayProfiles: List<RelayProfile> = emptyList(),
     announcementRelays: List<social.mycelium.android.data.UserRelay> = emptyList(),
+    blossomServers: List<MediaServer> = DefaultMediaServers.BLOSSOM_SERVERS,
+    nip96Servers: List<MediaServer> = DefaultMediaServers.NIP96_SERVERS,
     initialContent: String = "",
     draftId: String? = null,
     modifier: Modifier = Modifier
@@ -59,6 +65,8 @@ fun ComposeNoteScreen(
 
     var zapRaiserAmount by remember { mutableStateOf<Long?>(null) }
     var showZapRaiser by remember { mutableStateOf(false) }
+    var markdownEnabled by remember { mutableStateOf(false) }
+    var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
 
     var showRelayPicker by remember { mutableStateOf(false) }
     val outboxRelays = remember(currentAccount?.npub) {
@@ -137,33 +145,40 @@ fun ComposeNoteScreen(
                     keyboardType = KeyboardType.Text
                 ),
             )
-            // Zapraiser toggle + input
-            Row(
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                IconButton(onClick = {
-                    showZapRaiser = !showZapRaiser
-                    if (!showZapRaiser) zapRaiserAmount = null
-                }) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ShowChart,
-                        contentDescription = "Add zapraiser",
-                        tint = if (showZapRaiser) Color(0xFFF59E0B) else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (showZapRaiser) {
-                    OutlinedTextField(
-                        value = zapRaiserAmount?.toString() ?: "",
-                        onValueChange = { zapRaiserAmount = it.toLongOrNull() },
-                        label = { Text("Zap goal (sats)") },
-                        placeholder = { Text("1000") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        modifier = Modifier.weight(1f).padding(start = 8.dp)
-                    )
-                }
+            // Zapraiser input (shown when toggled from toolbar)
+            AnimatedVisibility(visible = showZapRaiser) {
+                OutlinedTextField(
+                    value = zapRaiserAmount?.toString() ?: "",
+                    onValueChange = { zapRaiserAmount = it.toLongOrNull() },
+                    label = { Text("Zap goal (sats)") },
+                    placeholder = { Text("1000") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                )
             }
+            // Compose toolbar with media server picker, markdown toggle, zapraiser, schedule
+            ComposeToolbar(
+                blossomServers = blossomServers,
+                nip96Servers = nip96Servers,
+                selectedServer = selectedMediaServer,
+                onServerSelected = { selectedMediaServer = it },
+                onAttachMedia = {
+                    // TODO: Launch image picker → strip metadata → upload via BlossomClient → insert URL
+                    Toast.makeText(context, "Media upload coming soon", Toast.LENGTH_SHORT).show()
+                },
+                markdownEnabled = markdownEnabled,
+                onToggleMarkdown = { markdownEnabled = it },
+                showZapRaiser = showZapRaiser,
+                onToggleZapRaiser = { enabled ->
+                    showZapRaiser = enabled
+                    if (!enabled) zapRaiserAmount = null
+                },
+                onScheduleClick = {
+                    // TODO: Show date/time picker → sign event → store in draft → schedule alarm
+                    Toast.makeText(context, "Note scheduling coming soon", Toast.LENGTH_SHORT).show()
+                }
+            )
             Button(
                 onClick = { showRelayPicker = true },
                 modifier = Modifier

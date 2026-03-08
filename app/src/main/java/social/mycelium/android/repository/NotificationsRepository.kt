@@ -117,6 +117,7 @@ object NotificationsRepository {
         val noteId: String,
         val notificationId: String,
         val update: (NotificationData) -> (Note?) -> NotificationData,
+        val retryCount: Int = 0,
     )
     /** Buffer of pending target note fetches waiting to be flushed as one subscription.
      *  Keyed by parent noteId → list of notifications that need that parent verified. */
@@ -124,6 +125,9 @@ object NotificationsRepository {
     /** Debounce job for batched target note flush. */
     private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
     private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
+    private const val TARGET_FETCH_TIMEOUT_MS = 4000L
+    private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 6000L
+    private const val MAX_TARGET_FETCH_RETRIES = 1
 
     /** Call once from Application or Activity to enable persistent seen IDs. */
     fun init(context: Context) {
@@ -724,14 +728,29 @@ object NotificationsRepository {
     }
 
     private fun handleReport(event: Event, author: Author, ts: Long) {
-        // Reports are informational — show them so the user is aware
+        // NIP-56: kind-1984 reports. Only show if we are the DIRECT target:
+        // - The report's p-tag with a report-type marker names us as the reported user, OR
+        // - The report's e-tag references one of our known note IDs.
+        // Without this check, relay-side filter leaks (e.g. our pubkey in a
+        // secondary p-tag for threading context) cause spurious "X reported you" noise.
+        val pubkey = myPubkeyHex ?: return
+        val reportedPubkey = event.tags.firstOrNull { it.size >= 2 && it[0] == "p" }?.getOrNull(1)
+        val reportedNoteId = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+        val targetsUs = reportedPubkey == pubkey
+        val targetsOurNote = reportedNoteId != null && reportedNoteId in myNoteIds
+        if (!targetsUs && !targetsOurNote) {
+            Log.d(TAG, "Dropping irrelevant report ${event.id.take(8)}: p=${reportedPubkey?.take(8)}, e=${reportedNoteId?.take(8)}, us=${pubkey.take(8)}")
+            return
+        }
         val reportType = event.tags.firstOrNull { it.size >= 3 && it[0] == "report" }?.get(2)
-            ?: event.tags.firstOrNull { it.size >= 3 && it[0] == "p" }?.getOrNull(2)
+            ?: event.tags.firstOrNull { it.size >= 3 && it[0] == "p" && it[1] == pubkey }?.getOrNull(2)
             ?: "unknown"
+        val text = if (targetsOurNote) "${author.displayName} reported your post ($reportType)"
+                   else "${author.displayName} reported you ($reportType)"
         val data = NotificationData(
             id = event.id,
             type = NotificationType.REPORT,
-            text = "${author.displayName} reported you ($reportType)",
+            text = text,
             note = eventToNote(event),
             author = author,
             sortTimestamp = ts
@@ -1098,7 +1117,9 @@ object NotificationsRepository {
         pendingTargetFetches.clear()
 
         val allNoteIds = batch.keys.toList()
-        Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (was ${allNoteIds.size} individual subs)")
+        val maxRetry = batch.values.flatten().maxOfOrNull { it.retryCount } ?: 0
+        val timeoutMs = if (maxRetry > 0) TARGET_FETCH_RETRY_TIMEOUT_MS else TARGET_FETCH_TIMEOUT_MS
+        Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (retry=$maxRetry, timeout=${timeoutMs}ms)")
 
         // No kinds restriction: kind-1111 comments can target ANY event kind
         val filter = Filter(ids = allNoteIds, limit = allNoteIds.size)
@@ -1107,18 +1128,32 @@ object NotificationsRepository {
         val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.LOW) { ev ->
             fetched[ev.id] = eventToNote(ev)
         }
-        delay(2500)
+        delay(timeoutMs)
         handle.cancel()
         // Apply fetched notes to their notifications; verify replies are actually TO us
         var removedCount = 0
+        val retryQueue = mutableListOf<PendingTargetFetch>()
         for ((noteId, pendingList) in batch) {
             val note = fetched[noteId]
             for (pending in pendingList) {
                 val current = notificationsById[pending.notificationId] ?: continue
-                // If parent note wasn't fetched, skip enrichment but keep the notification.
-                // We can't verify authorship without the target, but removing creates false negatives
-                // (legitimate replies vanish when the relay is slow or doesn't carry the parent).
                 if (note == null) {
+                    // Parent note not fetched. For reactions/reposts we MUST verify the target
+                    // is ours — without the parent we can't, so retry or remove.
+                    val needsVerification = current.type == NotificationType.LIKE ||
+                        current.type == NotificationType.REPOST
+                    if (needsVerification && pending.retryCount < MAX_TARGET_FETCH_RETRIES) {
+                        // Schedule a retry with longer timeout
+                        retryQueue.add(pending.copy(retryCount = pending.retryCount + 1))
+                        Log.d(TAG, "Re-queuing ${current.type} ${pending.notificationId.take(8)} for retry (attempt ${pending.retryCount + 1})")
+                    } else if (needsVerification) {
+                        // Max retries exhausted — remove unverifiable reaction/repost
+                        notificationsById.remove(pending.notificationId)
+                        removedCount++
+                        Log.d(TAG, "Removing unverifiable ${current.type} ${pending.notificationId.take(8)} after ${pending.retryCount} retries")
+                    }
+                    // For replies/mentions/other types, keep the notification even without
+                    // the parent — removing creates false negatives for slow relays.
                     continue
                 }
                 val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
@@ -1165,6 +1200,14 @@ object NotificationsRepository {
         }
         if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
         emitSorted()
+        // Re-queue unfetched reactions/reposts for a retry with longer timeout
+        if (retryQueue.isNotEmpty()) {
+            Log.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")
+            for (pending in retryQueue) {
+                pendingTargetFetches.getOrPut(pending.noteId) { mutableListOf() }.add(pending)
+            }
+            scheduleTargetFetchFlush()
+        }
     }
 
     private fun eventToNote(event: Event): Note {

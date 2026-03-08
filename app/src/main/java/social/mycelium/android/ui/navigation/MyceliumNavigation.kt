@@ -235,12 +235,20 @@ private fun OverlayThreadPanel(
             threadStateHolder.setExpandedReplyControls(noteId, expandedControlsReplyId)
         }
     }
+    // Unique keyed ViewModels per note so each stack layer has independent reply state.
+    // Without this, all layers share the same VM and replies bleed across threads.
+    val layerThreadRepliesVm: social.mycelium.android.viewmodel.ThreadRepliesViewModel =
+        androidx.lifecycle.viewmodel.compose.viewModel(key = "threadReplies_$noteId")
+    val layerKind1RepliesVm: social.mycelium.android.viewmodel.Kind1RepliesViewModel =
+        androidx.lifecycle.viewmodel.compose.viewModel(key = "kind1Replies_$noteId")
     ThreadSlideBackBox(onBack = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() }) {
         ModernThreadViewScreen(
             note = note,
             comments = emptyList(),
             listState = threadListState,
             commentStates = commentStates,
+            threadRepliesViewModel = layerThreadRepliesVm,
+            kind1RepliesViewModel = layerKind1RepliesVm,
             expandedControlsCommentId = expandedControlsCommentId,
             onExpandedControlsChange = { expandedControlsCommentId = if (expandedControlsCommentId == it) null else it },
             expandedControlsReplyId = expandedControlsReplyId,
@@ -1135,6 +1143,9 @@ fun MyceliumNavigation(
                         // removed from the stack, it stays in seenNotes so its AnimatedVisibility can
                         // animate out (visible=false) before being cleaned up.
                         val seenStackNotes = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
+                        // Track note IDs that have already animated in, so returning from
+                        // image_viewer/video_viewer doesn't replay the slide-in animation.
+                        val alreadyAnimatedIds = remember { mutableSetOf<String>() }
                         // Sync seenStackNotes with actual stack SYNCHRONOUSLY during composition.
                         // New entries are added here so AnimatedVisibility sees them on the FIRST
                         // frame with visible=true, having been absent the frame before → slide-in fires.
@@ -1148,11 +1159,13 @@ fun MyceliumNavigation(
                             }
                         }
                         // Delayed cleanup: after exit animation, remove stale seen entries
+                        // and clear their animated-in status so re-push gets a fresh slide-in.
                         if (seenStackNotes.size > currentStackSize) {
                             LaunchedEffect(currentStackSize) {
                                 kotlinx.coroutines.delay(350)
                                 while (seenStackNotes.size > overlayThreadStack.size) {
-                                    seenStackNotes.removeLastOrNull()
+                                    val removed = seenStackNotes.removeLastOrNull()
+                                    if (removed != null) alreadyAnimatedIds.remove(removed.id)
                                 }
                             }
                         }
@@ -1162,10 +1175,15 @@ fun MyceliumNavigation(
                             val isInStack = layerIndex < overlayThreadStack.size &&
                                 overlayThreadStack.getOrNull(layerIndex)?.id == layerNote.id
                             key(layerNote.id, layerIndex) {
-                                // Start invisible on first frame so AnimatedVisibility
-                                // sees a false→true transition and plays the slide-in.
-                                var appeared by remember { mutableStateOf(false) }
-                                LaunchedEffect(Unit) { appeared = true }
+                                // If this note has already animated in (e.g. returning from
+                                // image_viewer), start visible immediately — no re-slide.
+                                // Only truly new pushes start invisible and get the slide-in.
+                                val wasAlreadyAnimated = layerNote.id in alreadyAnimatedIds
+                                var appeared by remember { mutableStateOf(wasAlreadyAnimated) }
+                                LaunchedEffect(Unit) {
+                                    appeared = true
+                                    alreadyAnimatedIds.add(layerNote.id)
+                                }
                                 AnimatedVisibility(
                                     visible = isInStack && appeared,
                                     enter = slideInHorizontally(

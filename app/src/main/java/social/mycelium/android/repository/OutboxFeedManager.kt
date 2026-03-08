@@ -383,19 +383,17 @@ class OutboxFeedManager private constructor() {
             return
         }
 
-        outboxHandle = relayStateMachine.requestTemporarySubscriptionPerRelay(
+        outboxHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
             relayFilters = relayFilters.mapValues { it.value },
             priority = SubscriptionPriority.LOW,
-        ) { event ->
+        ) { event, relayUrl ->
             if (event.kind == 1) {
                 _outboxNotesReceived.value = _outboxNotesReceived.value + 1
                 // Track which authors delivered events (for relay attribution)
                 deliveredAuthors.add(event.pubKey)
-                // Inject into NotesRepository's existing pipeline.
-                // Per-relay subscription doesn't expose source relay URL, so pass empty.
-                // convertEventToNote treats empty relayUrl as null (no relay attribution).
-                // The note's relayUrls will be enriched from NIP-65 outbox cache instead.
-                callback(event, "")
+                // Inject into NotesRepository's existing pipeline with the actual
+                // source relay URL so relay orbs display correctly.
+                callback(event, relayUrl)
             }
         }
 

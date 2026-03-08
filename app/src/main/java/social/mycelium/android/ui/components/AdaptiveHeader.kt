@@ -36,6 +36,7 @@ import coil.request.CachePolicy
 import androidx.compose.ui.platform.LocalContext
 import social.mycelium.android.viewmodel.HomeSortOrder
 import social.mycelium.android.viewmodel.TopicsSortOrder
+import social.mycelium.android.viewmodel.HashtagSortOrder
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +76,11 @@ fun AdaptiveHeader(
     onTopicsFollowingFilterChange: ((Boolean) -> Unit)? = null,
     topicsSortOrder: TopicsSortOrder = TopicsSortOrder.Latest,
     onTopicsSortOrderChange: ((TopicsSortOrder) -> Unit)? = null,
+    // Topics explorer sort (hashtag list): Most Topics, Most Active, Most Popular, Alphabetical
+    explorerSortOrder: HashtagSortOrder = HashtagSortOrder.MOST_TOPICS,
+    onExplorerSortOrderChange: ((HashtagSortOrder) -> Unit)? = null,
+    // True when viewing a #hashtag feed (not the explorer list)
+    isViewingHashtagFeed: Boolean = false,
     // Topics favorites filter (kind:30073 anchor subscriptions)
     isTopicsFavoritesFilter: Boolean = false,
     onTopicsFavoritesFilterChange: ((Boolean) -> Unit)? = null,
@@ -401,12 +407,16 @@ fun AdaptiveHeader(
                         )
                     }
 
-                    // Feed engagement filter (Replies, Likes, Zaps)
-                    if (!showBackArrow) {
+                    // Feed engagement filter / sort
+                    if (!showBackArrow || onTopicsSortOrderChange != null) {
                         var filterMenuExpanded by remember { mutableStateOf(false) }
                         Box {
                             val filterActive = if (onTopicsSortOrderChange != null) {
-                                topicsSortOrder != TopicsSortOrder.Latest || isTopicsFavoritesFilter
+                                if (isViewingHashtagFeed) {
+                                    topicsSortOrder != TopicsSortOrder.Latest
+                                } else {
+                                    explorerSortOrder != HashtagSortOrder.MOST_TOPICS || isTopicsFavoritesFilter
+                                }
                             } else {
                                 activeEngagementFilter != null || homeSortOrder != HomeSortOrder.Latest
                             }
@@ -425,8 +435,8 @@ fun AdaptiveHeader(
                                 onDismissRequest = { filterMenuExpanded = false },
                                 offset = DpOffset(x = (-8).dp, y = 8.dp)
                             ) {
-                                if (onTopicsSortOrderChange != null) {
-                                    // ── Topics screen filter menu ──
+                                if (onTopicsSortOrderChange != null && isViewingHashtagFeed) {
+                                    // ── Topic feed filter menu (Latest / Popular) ──
                                     DropdownMenuItem(
                                         text = {
                                             Text("Latest", color = if (topicsSortOrder == TopicsSortOrder.Latest) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
@@ -449,6 +459,56 @@ fun AdaptiveHeader(
                                         },
                                         leadingIcon = {
                                             Icon(Icons.Outlined.TrendingUp, contentDescription = null, tint = if (topicsSortOrder == TopicsSortOrder.Popular) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    )
+                                } else if (onExplorerSortOrderChange != null && !isViewingHashtagFeed) {
+                                    // ── Topics explorer filter menu (hashtag list sort) ──
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("Most Topics", color = if (explorerSortOrder == HashtagSortOrder.MOST_TOPICS) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                        },
+                                        onClick = {
+                                            filterMenuExpanded = false
+                                            onExplorerSortOrderChange(HashtagSortOrder.MOST_TOPICS)
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.Tag, contentDescription = null, tint = if (explorerSortOrder == HashtagSortOrder.MOST_TOPICS) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("Most Active", color = if (explorerSortOrder == HashtagSortOrder.MOST_ACTIVE) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                        },
+                                        onClick = {
+                                            filterMenuExpanded = false
+                                            onExplorerSortOrderChange(HashtagSortOrder.MOST_ACTIVE)
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.Schedule, contentDescription = null, tint = if (explorerSortOrder == HashtagSortOrder.MOST_ACTIVE) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("Most Popular", color = if (explorerSortOrder == HashtagSortOrder.MOST_POPULAR) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                        },
+                                        onClick = {
+                                            filterMenuExpanded = false
+                                            onExplorerSortOrderChange(HashtagSortOrder.MOST_POPULAR)
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.TrendingUp, contentDescription = null, tint = if (explorerSortOrder == HashtagSortOrder.MOST_POPULAR) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text("Alphabetical", color = if (explorerSortOrder == HashtagSortOrder.ALPHABETICAL) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                        },
+                                        onClick = {
+                                            filterMenuExpanded = false
+                                            onExplorerSortOrderChange(HashtagSortOrder.ALPHABETICAL)
+                                        },
+                                        leadingIcon = {
+                                            Icon(Icons.Outlined.SortByAlpha, contentDescription = null, tint = if (explorerSortOrder == HashtagSortOrder.ALPHABETICAL) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                     )
                                     if (onTopicsFavoritesFilterChange != null) {

@@ -19,6 +19,27 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.90",
+      "versionCode": 27,
+      "releaseDate": "2026-03-08",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.90/Mycelium-v0.4.90.apk",
+      "changelog": "Quoted note media galleries, recursive nested quotes, thread stacking with slide animation, matched media controls to main feed.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Quoted note media renders as swipeable carousel with page indicators",
+        "Recursive nested quotes up to depth 2 with side-by-side accent bars",
+        "Thread stacking: quoted notes open as layered slide-in panels",
+        "Quoted media fullscreen button and indicators match main feed exactly",
+        "Image tap in quoted notes navigates to thread, magnifier for fullscreen"
+      ]
+    },
+    {
       "version": "0.4.89",
       "versionCode": 26,
       "releaseDate": "2026-03-08",

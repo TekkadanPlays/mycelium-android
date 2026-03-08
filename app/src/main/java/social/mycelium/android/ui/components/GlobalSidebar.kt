@@ -484,31 +484,36 @@ private fun ActiveProfileSection(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onToggleCategory(category.id) }
                     .padding(horizontal = 28.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Main row body: tap = filter by this collection's relays
                 Row(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onCategoryClick(category.id) },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Default.Folder,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = if (category.isSubscribed) MaterialTheme.colorScheme.onSurfaceVariant
+                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
                         text = category.name,
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Medium,
-                        color = MaterialTheme.colorScheme.onSurface
+                        color = if (category.isSubscribed) MaterialTheme.colorScheme.onSurface
+                               else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                     )
                     if (category.relays.isNotEmpty()) {
                         Spacer(Modifier.width(8.dp))
                         val dotColor = when {
+                            !category.isSubscribed -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
                             connectedCount == category.relays.size -> MaterialTheme.colorScheme.primary
                             connectedCount > 0 -> MaterialTheme.colorScheme.tertiary
                             else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
@@ -526,7 +531,7 @@ private fun ActiveProfileSection(
                         )
                     }
                 }
-                // Subscription toggle
+                // Connectivity toggle (active/inactive)
                 Switch(
                     checked = category.isSubscribed,
                     onCheckedChange = { onToggleCategorySubscription(category.id) },
@@ -539,10 +544,13 @@ private fun ActiveProfileSection(
                     )
                 )
                 Spacer(Modifier.width(8.dp))
+                // Chevron: tap = expand/collapse relay list
                 Icon(
                     imageVector = if (isExpanded) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
                     contentDescription = if (isExpanded) "Collapse" else "Expand",
-                    modifier = Modifier.size(20.dp),
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable { onToggleCategory(category.id) },
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }

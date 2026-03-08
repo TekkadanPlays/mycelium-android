@@ -1330,6 +1330,36 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
+     * Remove the current user's off-topic flag by publishing a Kind 5 deletion event
+     * referencing the original Kind 1011 event, then removing from local state.
+     */
+    fun removeOffTopicModeration(anchor: String, noteId: String): String? {
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No relays configured"
+        val userPubkey = _currentAccount.value?.toHexKey() ?: return "No account"
+        val moderationRepo = social.mycelium.android.repository.ScopedModerationRepository.getInstance()
+        val flagEventId = moderationRepo.getOwnFlagEventId(anchor, noteId, userPubkey) ?: return "No flag found"
+        // Optimistic local removal
+        moderationRepo.removeOwnFlag(anchor, noteId, userPubkey)
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                getApplication(), signer, relaySet,
+                kind = 5,
+                content = "remove off-topic flag"
+            ) {
+                add(arrayOf("e", flagEventId))
+                add(arrayOf("k", "1011"))
+            }
+            when (result) {
+                is PublishResult.Success -> _toastMessage.value = "Flag removed"
+                is PublishResult.Error -> _toastMessage.value = "Remove flag failed: ${result.message}"
+            }
+        }
+        return null
+    }
+
+    /**
      * Publish a Kind 1011 scoped moderation event: exclude a user from a hashtag anchor.
      */
     fun publishUserExclusion(anchor: String, pubkey: String, reason: String = "removed from topic"): String? {

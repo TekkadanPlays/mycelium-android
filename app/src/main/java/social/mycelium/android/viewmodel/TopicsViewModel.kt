@@ -69,9 +69,22 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
     init {
         observeRepositoryFlows()
         observeRelayState()
+        observeVoteScores()
         ProfileMetadataCache.getInstance().profileUpdated
             .onEach { pubkey -> repository.updateAuthorInTopics(pubkey) }
             .launchIn(viewModelScope)
+    }
+
+    /** Re-sort hashtags when vote scores change and MOST_POPULAR is the active sort order. */
+    private fun observeVoteScores() {
+        viewModelScope.launch {
+            social.mycelium.android.repository.VoteRepository.scoreByNoteId.collect { _ ->
+                if (_uiState.value.sortOrder == HashtagSortOrder.MOST_POPULAR) {
+                    val resorted = sortHashtagStats(_uiState.value.hashtagStats, HashtagSortOrder.MOST_POPULAR)
+                    _uiState.update { it.copy(hashtagStats = resorted) }
+                }
+            }
+        }
     }
 
     private fun observeRelayState() {
@@ -133,6 +146,16 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
                 if (selectedHashtag != null) {
                     val topicsForHashtag = repository.getTopicsForHashtag(selectedHashtag)
                     _uiState.update { it.copy(topicsForSelectedHashtag = topicsForHashtag) }
+                }
+
+                // Register topic note IDs with NoteCountsRepository so kind-30011 vote
+                // subscriptions fire. Without this, votes never load for topic cards.
+                val noteRelayMap = allTopics.take(150).associate { topic ->
+                    val relays = topic.relayUrls.ifEmpty { listOfNotNull(topic.relayUrl.takeIf { it.isNotBlank() }) }
+                    topic.id to relays
+                }
+                if (noteRelayMap.isNotEmpty()) {
+                    social.mycelium.android.repository.NoteCountsRepository.setTopicNoteIdsOfInterest(noteRelayMap)
                 }
             }
         }

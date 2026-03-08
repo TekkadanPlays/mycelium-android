@@ -143,6 +143,8 @@ object NoteCountsRepository {
      * Set note IDs from the topic feed.
      */
     fun setTopicNoteIdsOfInterest(noteRelays: Map<String, List<String>>) {
+        if (noteRelays.size == topicNoteRelays.size && noteRelays.keys == topicNoteRelays.keys) return
+        Log.d(TAG, "setTopicNoteIdsOfInterest: ${noteRelays.size} topic notes")
         topicNoteRelays = noteRelays
         scheduleSubscriptionUpdate()
     }

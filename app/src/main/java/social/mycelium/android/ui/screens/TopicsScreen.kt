@@ -86,6 +86,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import social.mycelium.android.ui.icons.ChatBubbleOutline
 import social.mycelium.android.repository.ModerationFilterMode
 import social.mycelium.android.repository.ScopedModerationRepository
+import social.mycelium.android.utils.normalizeRelayUrl
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
@@ -160,6 +161,18 @@ fun TopicsScreen(
     // Real per-relay connection counts from state machine for sidebar "Connected X/Y"
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().perRelayState.collectAsState()
     val relayStateMachineState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().state.collectAsState()
+
+    // Real per-relay connection status for sidebar dots (same derivation as DashboardScreen)
+    val liveConnectionStatus = remember(perRelayState) {
+        perRelayState.mapKeys { (url, _) -> normalizeRelayUrl(url) }
+            .mapValues { (_, status) ->
+                when (status) {
+                    social.mycelium.android.relay.RelayEndpointStatus.Connected -> social.mycelium.android.data.RelayConnectionStatus.CONNECTED
+                    social.mycelium.android.relay.RelayEndpointStatus.Connecting -> social.mycelium.android.data.RelayConnectionStatus.CONNECTING
+                    social.mycelium.android.relay.RelayEndpointStatus.Failed -> social.mycelium.android.data.RelayConnectionStatus.ERROR
+                }
+            }
+    }
 
     // Relay management
     val storageManager = remember { RelayStorageManager(context) }
@@ -237,7 +250,8 @@ fun TopicsScreen(
 
         // Prefer ViewModel categories (has sidebar selection info), fall back to sync storage
         val allUserRelayUrls = run {
-            val categoryUrls = relayCategories.flatMap { it.relays }.map { it.url }
+            // Only subscribed (active) categories contribute to the live subscription
+            val categoryUrls = relayCategories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url }
             val outboxUrls = relayUiState.outboxRelays.map { it.url }
             val inboxUrls = relayUiState.inboxRelays.map { it.url }
             val combined = (categoryUrls + outboxUrls + inboxUrls).distinct()
@@ -386,14 +400,18 @@ fun TopicsScreen(
         onIndexerClick = { onNavigateTo("relays?tab=indexer") },
         onRelayHealthClick = { onSidebarRelayHealthClick() },
         onRelayDiscoveryClick = { onSidebarRelayDiscoveryClick() },
+        connectionStatus = liveConnectionStatus,
         troubleRelayCount = troubleRelayCount,
+        onToggleCategorySubscription = { categoryId ->
+            relayViewModel?.toggleCategorySubscription(categoryId)
+        },
         onItemClick = { itemId ->
             when {
                 itemId == "global" -> {
                     feedStateViewModel.setTopicsGlobal()
                     feedStateViewModel.setHomeGlobal()
-                    val allUrls = relayCategories.flatMap { it.relays }.map { it.url }.distinct()
-                    if (allUrls.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(allUrls)
+                    val subscribedUrls = relayCategories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url }.distinct()
+                    if (subscribedUrls.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(subscribedUrls)
                 }
                 itemId.startsWith("relay_category:") -> {
                     val categoryId = itemId.removePrefix("relay_category:")
@@ -523,6 +541,12 @@ fun TopicsScreen(
                             scope.launch { listState.scrollToItem(0) }
                             feedStateViewModel.setTopicsSortOrder(it)
                         },
+                        explorerSortOrder = topicsUiState.sortOrder,
+                        onExplorerSortOrderChange = {
+                            scope.launch { listState.scrollToItem(0) }
+                            topicsViewModel.setSortOrder(it)
+                        },
+                        isViewingHashtagFeed = isViewingHashtagFeed,
                         isTopicsFavoritesFilter = showFavoritesOnly,
                         onTopicsFavoritesFilterChange = {
                             scope.launch { listState.scrollToItem(0) }
@@ -928,9 +952,15 @@ fun TopicsScreen(
                                         } else {
                                             val note = topic.toNote()
                                             val noteFlagCount = moderationRepo.getEffectiveFlagCount(anchor, topic.id)
+                                            val userPubkey = currentAccount?.toHexKey()
+                                            val hasOwnFlag = userPubkey != null && moderationRepo.hasModeratorFlagged(anchor, topic.id, userPubkey)
                                             val moderationMenuItems = listOf<Pair<String, () -> Unit>>(
-                                                "Flag Off-Topic" to {
-                                                    accountStateViewModel.publishOffTopicModeration(anchor, topic.id)
+                                                (if (hasOwnFlag) "Remove Flag" else "Flag Off-Topic") to {
+                                                    if (hasOwnFlag) {
+                                                        accountStateViewModel.removeOffTopicModeration(anchor, topic.id)
+                                                    } else {
+                                                        accountStateViewModel.publishOffTopicModeration(anchor, topic.id)
+                                                    }
                                                     Unit
                                                 },
                                                 "Exclude User" to {
@@ -1202,6 +1232,19 @@ private fun HashtagCard(
                             modifier = Modifier.size(12.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        // Cumulative vote score across all topics in this hashtag
+                        val voteScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+                        val netScore = remember(voteScores, stats.topicIds) {
+                            stats.topicIds.sumOf { voteScores[it] ?: 0 }
+                        }
+                        if (netScore != 0) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                text = if (netScore > 0) "▲ ${kotlin.math.abs(netScore)}" else "▼ ${kotlin.math.abs(netScore)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (netScore > 0) Color(0xFF8FBC8F) else Color(0xFFE57373)
+                            )
+                        }
                         Spacer(Modifier.width(8.dp))
                         Text(
                             text = formatHashtagTimestamp(stats.latestActivity),
@@ -1284,6 +1327,7 @@ private fun Kind11TopicCard(
     offTopicCount: Int = 0,
     onFlagOffTopic: (() -> Unit)? = null,
     onExcludeUser: (() -> Unit)? = null,
+    hasOwnFlag: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -1390,7 +1434,7 @@ private fun Kind11TopicCard(
                         ) {
                             if (onFlagOffTopic != null) {
                                 DropdownMenuItem(
-                                    text = { Text("Flag as off-topic") },
+                                    text = { Text(if (hasOwnFlag) "Remove flag" else "Flag as off-topic") },
                                     onClick = {
                                         showMenu = false
                                         onFlagOffTopic()
@@ -1399,7 +1443,7 @@ private fun Kind11TopicCard(
                                         Icon(
                                             imageVector = Icons.Default.Flag,
                                             contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.error
+                                            tint = if (hasOwnFlag) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
                                         )
                                     }
                                 )

@@ -165,6 +165,8 @@ private fun QuotedNoteBody(
     onVideoClick: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
     onRelayClick: (String) -> Unit = {},
+    navigateToQuotedNote: () -> Unit = {},
+    depth: Int = 0,
 ) {
     val uriHandler = LocalUriHandler.current
     contentBlocks.forEach { qBlock ->
@@ -221,101 +223,163 @@ private fun QuotedNoteBody(
                 }
             }
             is NoteContentBlock.MediaGroup -> {
-                val qMediaList = qBlock.urls.take(4)
+                val qMediaList = qBlock.urls.take(6)
                 if (qMediaList.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
-                    qMediaList.forEach { url ->
-                        val isQVideo = social.mycelium.android.utils.UrlDetector.isVideoUrl(url)
-                        // Cached/imeta ratio — null if truly unknown
-                        val knownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(url)
-                        if (isQVideo) {
-                            // Videos: allow ONE reactive update from default→real if ratio unknown.
-                            // Once the cache has a ratio (from player or previous session), it's stable.
-                            var videoRatio by remember(url) {
-                                mutableFloatStateOf(knownRatio ?: (16f / 9f))
-                            }
-                            // If cache was populated since last composition (e.g. fullscreen played it),
-                            // adopt the cached value immediately.
-                            if (knownRatio != null && knownRatio != videoRatio) {
-                                videoRatio = knownRatio
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(videoRatio.coerceIn(0.5f, 2.5f))
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(Color.Black)
-                            ) {
-                                InlineVideoPlayer(
-                                    url = url,
-                                    modifier = Modifier.fillMaxSize(),
-                                    isVisible = isVisible,
-                                    onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
-                                    onAspectRatioKnown = if (knownRatio == null) { ratio -> videoRatio = ratio } else null
-                                )
-                            }
-                        } else {
-                            // Images: fully stable — cache is populated from SideEffect on first load.
-                            val stableRatio = (knownRatio ?: (16f / 9f)).coerceIn(0.5f, 2.5f)
-                            val imageContext = LocalContext.current
-                            coil.compose.SubcomposeAsyncImage(
-                                model = coil.request.ImageRequest.Builder(imageContext)
-                                    .data(url)
-                                    .crossfade(knownRatio == null)
-                                    .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
-                                    .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                    .build(),
-                                contentDescription = null,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .aspectRatio(stableRatio)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
-                            ) {
-                                when (painter.state) {
-                                    is coil.compose.AsyncImagePainter.State.Loading -> {
-                                        Box(
-                                            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(20.dp),
-                                                strokeWidth = 2.dp,
-                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                    // Separate images and videos
+                    val qImageUrls = qMediaList.filter { !social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+                    val qVideoUrls = qMediaList.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+
+                    // ── Image carousel (swipeable pager) ──
+                    if (qImageUrls.isNotEmpty()) {
+                        val qPagerState = rememberPagerState(pageCount = { qImageUrls.size })
+                        val currentImgUrl = qImageUrls.getOrNull(qPagerState.currentPage)
+                        val knownImgRatio = currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
+                        val imgRatio = (knownImgRatio ?: (16f / 9f)).coerceIn(0.5f, 2.0f)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(imgRatio)
+                                .clip(RoundedCornerShape(6.dp))
+                        ) {
+                            HorizontalPager(
+                                state = qPagerState,
+                                modifier = Modifier.fillMaxSize()
+                            ) { page ->
+                                val imgUrl = qImageUrls[page]
+                                val imageContext = LocalContext.current
+                                coil.compose.SubcomposeAsyncImage(
+                                    model = coil.request.ImageRequest.Builder(imageContext)
+                                        .data(imgUrl)
+                                        .crossfade(true)
+                                        .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                                        .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+                                        .build(),
+                                    contentDescription = null,
+                                    contentScale = ContentScale.Fit,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clickable { navigateToQuotedNote() }
+                                ) {
+                                    when (painter.state) {
+                                        is coil.compose.AsyncImagePainter.State.Loading -> {
+                                            Box(
+                                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(20.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
+                                                )
+                                            }
+                                        }
+                                        is coil.compose.AsyncImagePainter.State.Error -> {
+                                            Box(
+                                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.08f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(Icons.Outlined.BrokenImage, null, Modifier.size(24.dp), tint = Color.Gray)
+                                            }
+                                        }
+                                        is coil.compose.AsyncImagePainter.State.Success -> {
+                                            androidx.compose.foundation.Image(
+                                                painter = painter,
+                                                contentDescription = null,
+                                                contentScale = ContentScale.Crop,
+                                                modifier = Modifier.fillMaxSize()
                                             )
-                                        }
-                                    }
-                                    is coil.compose.AsyncImagePainter.State.Error -> {
-                                        Box(
-                                            modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.08f)),
-                                            contentAlignment = Alignment.Center
-                                        ) {
-                                            Icon(Icons.Outlined.BrokenImage, null, Modifier.size(24.dp), tint = Color.Gray)
-                                        }
-                                    }
-                                    is coil.compose.AsyncImagePainter.State.Success -> {
-                                        androidx.compose.foundation.Image(
-                                            painter = painter,
-                                            contentDescription = null,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize()
-                                        )
-                                        SideEffect {
-                                            val success = painter.state as? coil.compose.AsyncImagePainter.State.Success
-                                            val drawable = success?.result?.drawable
-                                            if (drawable != null) {
-                                                val w = drawable.intrinsicWidth
-                                                val h = drawable.intrinsicHeight
-                                                if (w > 0 && h > 0) {
-                                                    social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
+                                            SideEffect {
+                                                val success = painter.state as? coil.compose.AsyncImagePainter.State.Success
+                                                val drawable = success?.result?.drawable
+                                                if (drawable != null) {
+                                                    val w = drawable.intrinsicWidth
+                                                    val h = drawable.intrinsicHeight
+                                                    if (w > 0 && h > 0) {
+                                                        social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, w, h)
+                                                    }
                                                 }
                                             }
                                         }
+                                        else -> {}
                                     }
-                                    else -> {}
                                 }
                             }
+                            // Fullscreen magnifier — same as NoteMediaCarousel (BottomEnd)
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(8.dp)
+                                    .size(30.dp)
+                                    .clip(CircleShape)
+                                    .background(Color.Black.copy(alpha = 0.45f))
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                                    ) {
+                                        onOpenImageViewer(qImageUrls, qPagerState.currentPage)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Fullscreen,
+                                    contentDescription = "View fullscreen",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = Color.White
+                                )
+                            }
+                            // Page indicator — same as NoteMediaCarousel (BottomCenter)
+                            if (qImageUrls.size > 1) {
+                                Row(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .padding(bottom = 8.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    repeat(qImageUrls.size) { i ->
+                                        Box(
+                                            modifier = Modifier
+                                                .padding(horizontal = 3.dp)
+                                                .size(if (qPagerState.currentPage == i) 8.dp else 6.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (qPagerState.currentPage == i)
+                                                        MaterialTheme.colorScheme.primary
+                                                    else
+                                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                                )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+
+                    // ── Videos (rendered individually below images) ──
+                    qVideoUrls.forEach { url ->
+                        val knownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(url)
+                        var videoRatio by remember(url) {
+                            mutableFloatStateOf(knownRatio ?: (16f / 9f))
+                        }
+                        if (knownRatio != null && knownRatio != videoRatio) {
+                            videoRatio = knownRatio
+                        }
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(videoRatio.coerceIn(0.5f, 2.5f))
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(Color.Black)
+                        ) {
+                            InlineVideoPlayer(
+                                url = url,
+                                modifier = Modifier.fillMaxSize(),
+                                isVisible = isVisible,
+                                onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
+                                onAspectRatioKnown = if (knownRatio == null) { ratio -> videoRatio = ratio } else null
+                            )
                         }
                         Spacer(modifier = Modifier.height(4.dp))
                     }
@@ -329,40 +393,86 @@ private fun QuotedNoteBody(
                 )
             }
             is NoteContentBlock.QuotedNote -> {
-                // Depth-limited: nested quotes render as clickable links (not inline cards).
-                // Tapping navigates to the quoted note's thread for infinite exploration.
-                Row(
-                    modifier = Modifier
-                        .padding(vertical = 2.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .clickable {
-                            val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
-                            val qAuthor = profileCache.resolveAuthor(qBlock.eventId)
-                            onNoteClick(Note(
-                                id = qBlock.eventId,
-                                author = qAuthor,
-                                content = "",
-                                timestamp = 0L,
-                                likes = 0, shares = 0, comments = 0,
-                                isLiked = false, hashtags = emptyList(),
-                                mediaUrls = emptyList(), isReply = false,
-                            ))
+                if (depth < 2) {
+                    // Recursive rendering: fetch and display the nested quoted note
+                    val nestedEventId = qBlock.eventId
+                    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                    val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+                    var nestedMeta by remember(nestedEventId) { mutableStateOf<QuotedNoteMeta?>(null) }
+                    LaunchedEffect(nestedEventId) {
+                        val cached = QuotedNoteCache.getCached(nestedEventId)
+                        if (cached != null) {
+                            nestedMeta = cached
+                        } else {
+                            delay(300)
+                            nestedMeta = QuotedNoteCache.get(nestedEventId)
                         }
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Icon(
-                        Icons.Outlined.FormatQuote,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                    )
-                    Text(
-                        text = "View quoted note \u203A",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    }
+                    val nm = nestedMeta
+                    if (nm != null) {
+                        val nestedAuthor = remember(nm.authorId) { profileCache.resolveAuthor(nm.authorId) }
+                        val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+                        QuotedNoteContent(
+                            parentNoteId = meta.eventId,
+                            meta = nm,
+                            quotedAuthor = nestedAuthor,
+                            quotedCounts = countsByNoteId[nestedEventId],
+                            linkStyle = linkStyle,
+                            profileCache = profileCache,
+                            isVisible = isVisible,
+                            onProfileClick = onProfileClick,
+                            onNoteClick = onNoteClick,
+                            onVideoClick = onVideoClick,
+                            onOpenImageViewer = onOpenImageViewer,
+                            onRelayClick = onRelayClick,
+                            depth = depth + 1,
+                        )
+                    } else {
+                        // Loading or failed — show placeholder
+                        Row(
+                            modifier = Modifier.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                            Text("Loading quoted note\u2026", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                        }
+                    }
+                } else {
+                    // Max depth reached — show clickable link
+                    Row(
+                        modifier = Modifier
+                            .padding(vertical = 2.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable {
+                                val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                                val qAuthor = profileCache.resolveAuthor(qBlock.eventId)
+                                onNoteClick(Note(
+                                    id = qBlock.eventId,
+                                    author = qAuthor,
+                                    content = "",
+                                    timestamp = 0L,
+                                    likes = 0, shares = 0, comments = 0,
+                                    isLiked = false, hashtags = emptyList(),
+                                    mediaUrls = emptyList(), isReply = false,
+                                ))
+                            }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            Icons.Outlined.FormatQuote,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            text = "View quoted note \u203A",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             }
             is NoteContentBlock.LiveEventReference -> {
@@ -422,6 +532,7 @@ private fun QuotedNoteContent(
     onVideoClick: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
     onRelayClick: (String) -> Unit = {},
+    depth: Int = 0,
 ) {
     val uriHandler = LocalUriHandler.current
     val quotedExpanded = QuotedNoteExpandedState.isExpanded(parentNoteId, meta.eventId)
@@ -472,7 +583,12 @@ private fun QuotedNoteContent(
         modifier = Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
-            .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp)
+            .padding(
+                start = if (depth == 0) 16.dp else 0.dp,
+                end = if (depth == 0) 16.dp else 0.dp,
+                top = 4.dp,
+                bottom = 4.dp
+            )
     ) {
         // Left accent bar — stretches full height of content
         Box(
@@ -486,7 +602,7 @@ private fun QuotedNoteContent(
                 )
         )
         Column(modifier = Modifier
-            .padding(start = 10.dp, top = 2.dp, bottom = 2.dp)
+            .padding(start = if (depth == 0) 10.dp else 6.dp, top = 2.dp, bottom = 2.dp)
             .weight(1f)
             .animateContentSize(animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = FastOutSlowInEasing))
         ) {
@@ -562,6 +678,8 @@ private fun QuotedNoteContent(
                 onVideoClick = onVideoClick,
                 onOpenImageViewer = onOpenImageViewer,
                 onRelayClick = onRelayClick,
+                navigateToQuotedNote = navigateToQuotedNote,
+                depth = depth,
             )
         }
     }
@@ -1546,19 +1664,39 @@ private fun NoteActionRow(
         // Upvote / Downvote — kind-11 feed + kind-1111 replies
         if (showVoting) {
             val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
+            val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
+            val reactiveDownvotes by social.mycelium.android.repository.VoteRepository.downvoteCounts.collectAsState()
             val reactiveOwnVote = reactiveOwnVotes[note.id] ?: 0
+            val upCount = reactiveUpvotes[note.id] ?: 0
+            val downCount = reactiveDownvotes[note.id] ?: 0
             ActionButton(
                 icon = Icons.Outlined.ArrowUpward,
                 contentDescription = "Upvote",
                 tint = if (reactiveOwnVote > 0) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { onVote?.invoke(note.id, note.author.id, 1) }
             )
+            if (upCount > 0) {
+                Text(
+                    text = "$upCount",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF8FBC8F),
+                    modifier = Modifier.padding(end = 2.dp)
+                )
+            }
             ActionButton(
                 icon = Icons.Outlined.ArrowDownward,
                 contentDescription = "Downvote",
                 tint = if (reactiveOwnVote < 0) Color(0xFFE57373) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { onVote?.invoke(note.id, note.author.id, -1) }
             )
+            if (downCount > 0) {
+                Text(
+                    text = "$downCount",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFE57373),
+                    modifier = Modifier.padding(end = 2.dp)
+                )
+            }
         }
 
         // Boost (Repost / Quote / Fork) — kind-1 feed + kind-11 feed

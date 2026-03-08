@@ -971,6 +971,26 @@ class RelayConnectionStateMachine {
     }
 
     /**
+     * Per-relay filter map subscription that passes the source relay URL to the callback.
+     * Use when the caller needs relay attribution (e.g. OutboxFeedManager for relay orbs).
+     */
+    fun requestTemporarySubscriptionPerRelayWithRelay(
+        relayFilters: Map<String, List<Filter>>,
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event, String) -> Unit,
+    ): TemporarySubscriptionHandle {
+        val filtered = relayFilters.filterKeys { !filterUsableRelays(listOf(it)).isEmpty() }
+        if (filtered.isEmpty()) return NoOpTemporaryHandle
+        val wrappedOnEvent: (Event) -> Unit = { event -> onEvent(event, "") }
+        val subscription = relayPool.subscribe(
+            relayFilters = filtered,
+            priority = priority,
+        ) { event, relayUrl -> onEvent(event, relayUrl) }
+        relayPool.connect()
+        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+    }
+
+    /**
      * EOSE-based one-shot subscription: opens REQ, collects events until all relays send EOSE,
      * then auto-CLOSEs after a short settle window. **No timers, no slot leaks.**
      *

@@ -717,6 +717,11 @@ class NotesRepository private constructor() {
      * Set display filter only (sidebar selection). Does NOT change subscription or follow/reply filters;
      * only updates which relays' notes are shown. Follow and reply filters are preserved and re-applied.
      * Normalizes URLs so they match note.relayUrl from the state machine (avoids blank feed when switching).
+     *
+     * The app stays subscribed to ALL active relays globally — this only controls which
+     * relays' notes are visible in the feed. Notes accumulate relay URLs as they arrive
+     * from multiple relays (dedup merge in flushKind1Events), so filtering by a specific
+     * relay shows notes that were actually received from it.
      */
     fun connectToRelays(displayFilterUrls: List<String>) {
         val normalized = displayFilterUrls.mapNotNull { RelayUrlNormalizer.normalizeOrNull(it)?.url }.distinct()

@@ -53,6 +53,7 @@ import androidx.activity.ComponentActivity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.key
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
@@ -186,6 +187,209 @@ private fun buildReactionsData(
         zapTotalSats = counts?.zapTotalSats ?: 0L,
         boostAuthors = mergedBoosts,
     )
+}
+
+/**
+ * Reusable thread overlay panel — renders a full ModernThreadViewScreen with
+ * ThreadSlideBackBox, scroll state management, and all callbacks.
+ * Used by each layer of the thread overlay stack so each gets its own independent UI state.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OverlayThreadPanel(
+    note: social.mycelium.android.data.Note,
+    highlightReplyId: String?,
+    relayUrls: List<String>,
+    cacheRelayUrls: List<String>,
+    threadStateHolder: social.mycelium.android.viewmodel.ThreadStateHolder,
+    topAppBarState: androidx.compose.material3.TopAppBarState,
+    accountStateViewModel: social.mycelium.android.viewmodel.AccountStateViewModel,
+    appViewModel: AppViewModel,
+    navController: androidx.navigation.NavController,
+    accountNpub: String?,
+    accountHexKey: String?,
+    coroutineScope: kotlinx.coroutines.CoroutineScope,
+    overlayThreadStack: androidx.compose.runtime.snapshots.SnapshotStateList<social.mycelium.android.data.Note>,
+    overlayThreadHighlightIds: androidx.compose.runtime.snapshots.SnapshotStateList<String?>,
+    onAmberLogin: (android.content.Intent) -> Unit,
+    showSnackbar: (String) -> Unit,
+) {
+    val noteId = note.id
+    val savedScrollState = threadStateHolder.getScrollState(noteId)
+    val threadListState = rememberLazyListState(
+        initialFirstVisibleItemIndex = savedScrollState.firstVisibleItemIndex,
+        initialFirstVisibleItemScrollOffset = savedScrollState.firstVisibleItemScrollOffset
+    )
+    val commentStates = threadStateHolder.getCommentStates(noteId)
+    var expandedControlsCommentId by remember(noteId) {
+        mutableStateOf(threadStateHolder.getExpandedControls(noteId))
+    }
+    var expandedControlsReplyId by remember(noteId) {
+        mutableStateOf(threadStateHolder.getExpandedReplyControls(noteId))
+    }
+    val authState by accountStateViewModel.authState.collectAsState()
+    DisposableEffect(noteId) {
+        onDispose {
+            threadStateHolder.saveScrollState(noteId, threadListState)
+            threadStateHolder.setExpandedControls(noteId, expandedControlsCommentId)
+            threadStateHolder.setExpandedReplyControls(noteId, expandedControlsReplyId)
+        }
+    }
+    ThreadSlideBackBox(onBack = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() }) {
+        ModernThreadViewScreen(
+            note = note,
+            comments = emptyList(),
+            listState = threadListState,
+            commentStates = commentStates,
+            expandedControlsCommentId = expandedControlsCommentId,
+            onExpandedControlsChange = { expandedControlsCommentId = if (expandedControlsCommentId == it) null else it },
+            expandedControlsReplyId = expandedControlsReplyId,
+            onExpandedControlsReplyChange = { replyId ->
+                expandedControlsReplyId = if (expandedControlsReplyId == replyId) null else replyId
+            },
+            topAppBarState = topAppBarState,
+            replyKind = 1,
+            highlightReplyId = highlightReplyId,
+            relayUrls = relayUrls,
+            cacheRelayUrls = cacheRelayUrls,
+            onBackClick = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() },
+            onProfileClick = { navController.navigateToProfile(it) },
+            onNoteClick = { clickedNote ->
+                val threadNote = if (clickedNote.originalNoteId != null) clickedNote.copy(id = clickedNote.originalNoteId) else clickedNote
+                if (threadNote.isReply && threadNote.rootNoteId != null) {
+                    val rootId = threadNote.rootNoteId!!
+                    val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
+                    val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote)
+                    overlayThreadStack.add(overlayNote)
+                    overlayThreadHighlightIds.add(threadNote.id)
+                    if (rootFromCache == null) {
+                        coroutineScope.launch(Dispatchers.IO) {
+                            val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
+                                noteId = rootId,
+                                userRelayUrls = threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) } +
+                                    NotesRepository.getInstance().INDEXER_RELAYS,
+                                authorPubkey = threadNote.author.id.takeIf { it.isNotBlank() }
+                            )
+                            if (fetched != null) {
+                                withContext(Dispatchers.Main.immediate) {
+                                    val idx = overlayThreadStack.indexOfFirst { it.id == rootId }
+                                    if (idx >= 0) overlayThreadStack[idx] = fetched
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    overlayThreadStack.add(threadNote)
+                    overlayThreadHighlightIds.add(null)
+                }
+            },
+            onImageTap = { _, urls, idx ->
+                appViewModel.openImageViewer(urls, idx)
+                navController.navigate("image_viewer") { launchSingleTop = true }
+            },
+            onOpenImageViewer = { urls, idx ->
+                appViewModel.openImageViewer(urls, idx)
+                navController.navigate("image_viewer") { launchSingleTop = true }
+            },
+            onVideoClick = { urls, idx ->
+                appViewModel.openVideoViewer(urls, idx)
+                navController.navigate("video_viewer") { launchSingleTop = true }
+            },
+            onReact = { n, emoji ->
+                val error = accountStateViewModel.sendReaction(n, emoji)
+                if (error != null) showSnackbar(error)
+            },
+            onBoost = { n ->
+                val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
+                if (err != null) showSnackbar(err)
+            },
+            onQuote = { n ->
+                val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+                val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+                navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+            },
+            onFork = { n ->
+                val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+                navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
+            },
+            onCustomZapSend = { n, amount, zapType, msg ->
+                val err = accountStateViewModel.sendZap(n, amount, zapType, msg)
+                if (err != null) showSnackbar(err)
+            },
+            onZap = { nId, amount ->
+                val stackNote = overlayThreadStack.lastOrNull()
+                if (stackNote != null && stackNote.id == nId) {
+                    val err = accountStateViewModel.sendZap(stackNote, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                    if (err != null) showSnackbar(err)
+                }
+            },
+            zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
+            zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
+            myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
+            boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
+            onLoginClick = {
+                val loginIntent = accountStateViewModel.loginWithAmber()
+                onAmberLogin(loginIntent)
+            },
+            isGuest = authState.isGuest,
+            userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,
+            userAvatarUrl = authState.userProfile?.picture,
+            accountNpub = accountNpub,
+            onHeaderProfileClick = {
+                authState.userProfile?.pubkey?.let { navController.navigateToProfile(it) }
+            },
+            onHeaderAccountsClick = { },
+            onHeaderQrCodeClick = { navController.navigate("user_qr") { launchSingleTop = true } },
+            onHeaderSettingsClick = { navController.navigate("settings") { launchSingleTop = true } },
+            mediaPageForNote = { nId -> appViewModel.getMediaPage(nId) },
+            onMediaPageChanged = { nId, page -> appViewModel.updateMediaPage(nId, page) },
+            onRelayNavigate = { relayUrl ->
+                val encoded = android.net.Uri.encode(relayUrl)
+                navController.navigate("relay_log/$encoded") { launchSingleTop = true }
+            },
+            onNavigateToRelayList = { urls ->
+                val encoded = urls.joinToString(",") { android.net.Uri.encode(it) }
+                navController.navigate("note_relays/$encoded") { launchSingleTop = true }
+            },
+            onPublishThreadReply = { rootId, rootPubkey, parentId, parentPubkey, content ->
+                accountStateViewModel.publishKind1Reply(rootId, rootPubkey, parentId, parentPubkey, content)
+            },
+            onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
+                appViewModel.setReplyToNote(replyToNote)
+                val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
+                navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=1")
+            },
+            currentUserAuthor = remember(accountHexKey) {
+                accountHexKey?.let { hex ->
+                    ProfileMetadataCache.getInstance().resolveAuthor(hex)
+                }
+            },
+            onSeeAllReactions = { nId ->
+                val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[nId]
+                appViewModel.storeReactionsData(buildReactionsData(nId, counts, note.repostedByAuthors))
+                navController.navigate("reactions/$nId") { launchSingleTop = true }
+            },
+            onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } },
+            threadDrafts = run {
+                val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
+                remember(draftsList, note.id) {
+                    social.mycelium.android.repository.DraftsRepository.replyDraftsForThread(note.id)
+                }
+            },
+            onEditDraft = { draft ->
+                val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
+                when (draft.type) {
+                    social.mycelium.android.data.DraftType.REPLY_KIND1 ->
+                        navController.navigate("reply_compose?rootId=${enc(draft.rootId)}&rootPubkey=${enc(draft.rootPubkey)}&parentId=${enc(draft.parentId)}&parentPubkey=${enc(draft.parentPubkey)}&replyKind=1&draftId=${enc(draft.id)}")
+                    social.mycelium.android.data.DraftType.TOPIC_REPLY ->
+                        navController.navigate("compose_topic_reply/${enc(draft.rootId)}?draftId=${enc(draft.id)}")
+                    else ->
+                        navController.navigate("reply_compose?rootId=${enc(draft.rootId)}&rootPubkey=${enc(draft.rootPubkey)}&parentId=${enc(draft.parentId)}&parentPubkey=${enc(draft.parentPubkey)}&replyKind=1111&draftId=${enc(draft.id)}")
+                }
+            },
+            onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -923,199 +1127,72 @@ fun MyceliumNavigation(
                             overlayThreadHighlightIds.removeLastOrNull()
                         }
 
-                        // Thread overlay: feed stays underneath so slide-back reveals it; slide in from right like nav thread.
-                        // Stack-based: top of stack is the current thread. Back pops. onNoteClick pushes.
-                        val contentNote = overlayThreadStack.lastOrNull()
-                        var lastOverlayNote by remember { mutableStateOf<social.mycelium.android.data.Note?>(null) }
-                        if (contentNote != null) lastOverlayNote = contentNote
-                        val displayNote = contentNote ?: lastOverlayNote
-                        val showThreadOverlay = contentNote != null
-                        AnimatedVisibility(
-                            visible = showThreadOverlay,
-                            enter = slideInHorizontally(
-                                animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
-                            ) { fullWidth -> fullWidth },
-                            exit = slideOutHorizontally(
-                                animationSpec = tween(300, easing = MaterialMotion.EasingStandardAccelerate)
-                            ) { fullWidth -> fullWidth }
-                        ) {
-                            if (displayNote != null) {
-                                val noteId = displayNote.id
-                                val relayUrls = (displayNote.relayUrls.ifEmpty { listOfNotNull(displayNote.relayUrl) } + fallbackRelayUrls).distinct()
-                                val savedScrollState = threadStateHolder.getScrollState(noteId)
-                                val threadListState = rememberLazyListState(
-                                    initialFirstVisibleItemIndex = savedScrollState.firstVisibleItemIndex,
-                                    initialFirstVisibleItemScrollOffset = savedScrollState.firstVisibleItemScrollOffset
-                                )
-                                val commentStates = threadStateHolder.getCommentStates(noteId)
-                                var expandedControlsCommentId by remember(noteId) {
-                                    mutableStateOf(threadStateHolder.getExpandedControls(noteId))
+                        // Thread overlay stack: each entry gets its own AnimatedVisibility slide-in/out.
+                        // Layer 0 = feed→thread (identical to original). Layers 1+ = thread→thread stacking.
+                        // Each layer stays rendered underneath so slide-back reveals the previous thread.
+                        //
+                        // We track a "seen notes" list to keep exit animations working: when a note is
+                        // removed from the stack, it stays in seenNotes so its AnimatedVisibility can
+                        // animate out (visible=false) before being cleaned up.
+                        val seenStackNotes = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
+                        // Sync seenStackNotes with actual stack SYNCHRONOUSLY during composition.
+                        // New entries are added here so AnimatedVisibility sees them on the FIRST
+                        // frame with visible=true, having been absent the frame before → slide-in fires.
+                        // We do NOT add entries inside LaunchedEffect (async) because that would
+                        // cause AnimatedVisibility to start already-visible, skipping the animation.
+                        val currentStackSize = overlayThreadStack.size
+                        overlayThreadStack.forEachIndexed { idx, note ->
+                            if (seenStackNotes.getOrNull(idx)?.id != note.id) {
+                                if (idx < seenStackNotes.size) seenStackNotes[idx] = note
+                                else seenStackNotes.add(note)
+                            }
+                        }
+                        // Delayed cleanup: after exit animation, remove stale seen entries
+                        if (seenStackNotes.size > currentStackSize) {
+                            LaunchedEffect(currentStackSize) {
+                                kotlinx.coroutines.delay(350)
+                                while (seenStackNotes.size > overlayThreadStack.size) {
+                                    seenStackNotes.removeLastOrNull()
                                 }
-                                var expandedControlsReplyId by remember(noteId) {
-                                    mutableStateOf(threadStateHolder.getExpandedReplyControls(noteId))
-                                }
-                                val authState by accountStateViewModel.authState.collectAsState()
-                                DisposableEffect(noteId) {
-                                    onDispose {
-                                        threadStateHolder.saveScrollState(noteId, threadListState)
-                                        threadStateHolder.setExpandedControls(noteId, expandedControlsCommentId)
-                                        threadStateHolder.setExpandedReplyControls(noteId, expandedControlsReplyId)
-                                    }
-                                }
-                                ThreadSlideBackBox(onBack = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() }) {
-                                    ModernThreadViewScreen(
-                                        note = displayNote,
-                                        comments = emptyList(),
-                                        listState = threadListState,
-                                        commentStates = commentStates,
-                                        expandedControlsCommentId = expandedControlsCommentId,
-                                        onExpandedControlsChange = { expandedControlsCommentId = if (expandedControlsCommentId == it) null else it },
-                                        expandedControlsReplyId = expandedControlsReplyId,
-                                        onExpandedControlsReplyChange = { replyId ->
-                                            expandedControlsReplyId = if (expandedControlsReplyId == replyId) null else replyId
-                                        },
-                                        topAppBarState = topAppBarState,
-                                        replyKind = 1,
-                                        highlightReplyId = overlayThreadHighlightIds.lastOrNull(),
-                                        relayUrls = relayUrls,
+                            }
+                        }
+
+                        for (layerIndex in 0 until seenStackNotes.size) {
+                            val layerNote = seenStackNotes[layerIndex]
+                            val isInStack = layerIndex < overlayThreadStack.size &&
+                                overlayThreadStack.getOrNull(layerIndex)?.id == layerNote.id
+                            key(layerNote.id, layerIndex) {
+                                // Start invisible on first frame so AnimatedVisibility
+                                // sees a false→true transition and plays the slide-in.
+                                var appeared by remember { mutableStateOf(false) }
+                                LaunchedEffect(Unit) { appeared = true }
+                                AnimatedVisibility(
+                                    visible = isInStack && appeared,
+                                    enter = slideInHorizontally(
+                                        animationSpec = tween(300, easing = MaterialMotion.EasingStandardDecelerate)
+                                    ) { fullWidth -> fullWidth },
+                                    exit = slideOutHorizontally(
+                                        animationSpec = tween(300, easing = MaterialMotion.EasingStandardAccelerate)
+                                    ) { fullWidth -> fullWidth }
+                                ) {
+                                    val layerRelayUrls = (layerNote.relayUrls.ifEmpty { listOfNotNull(layerNote.relayUrl) } + fallbackRelayUrls).distinct()
+                                    OverlayThreadPanel(
+                                        note = layerNote,
+                                        highlightReplyId = overlayThreadHighlightIds.getOrNull(layerIndex),
+                                        relayUrls = layerRelayUrls,
                                         cacheRelayUrls = cacheRelayUrls,
-                                        onBackClick = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() },
-                                        onProfileClick = { navController.navigateToProfile(it) },
-                                        onNoteClick = { clickedNote ->
-                                            // Resolve repost IDs
-                                            val threadNote = if (clickedNote.originalNoteId != null) clickedNote.copy(id = clickedNote.originalNoteId) else clickedNote
-                                            if (threadNote.isReply && threadNote.rootNoteId != null) {
-                                                // Root walk-up: open the full thread, not just the reply
-                                                val rootId = threadNote.rootNoteId!!
-                                                val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
-                                                val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote)
-                                                overlayThreadStack.add(overlayNote)
-                                                overlayThreadHighlightIds.add(threadNote.id)
-                                                if (rootFromCache == null) {
-                                                    coroutineScope.launch(Dispatchers.IO) {
-                                                        val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
-                                                            noteId = rootId,
-                                                            userRelayUrls = threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) } +
-                                                                NotesRepository.getInstance().INDEXER_RELAYS,
-                                                            authorPubkey = threadNote.author.id.takeIf { it.isNotBlank() }
-                                                        )
-                                                        if (fetched != null) {
-                                                            withContext(Dispatchers.Main.immediate) {
-                                                                val idx = overlayThreadStack.indexOfFirst { it.id == rootId }
-                                                                if (idx >= 0) overlayThreadStack[idx] = fetched
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } else {
-                                                overlayThreadStack.add(threadNote)
-                                                overlayThreadHighlightIds.add(null)
-                                            }
-                                        },
-                                        onImageTap = { _, urls, idx ->
-                                            appViewModel.openImageViewer(urls, idx)
-                                            navController.navigate("image_viewer") { launchSingleTop = true }
-                                        },
-                                        onOpenImageViewer = { urls, idx ->
-                                            appViewModel.openImageViewer(urls, idx)
-                                            navController.navigate("image_viewer") { launchSingleTop = true }
-                                        },
-                                        onVideoClick = { urls, idx ->
-                                            appViewModel.openVideoViewer(urls, idx)
-                                            navController.navigate("video_viewer") { launchSingleTop = true }
-                                        },
-                                        onReact = { note, emoji ->
-                                            val error = accountStateViewModel.sendReaction(note, emoji)
-                                            if (error != null) showSnackbar(error)
-                                        },
-                                        onBoost = { n ->
-                                            val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
-                                            if (err != null) showSnackbar(err)
-                                        },
-                                        onQuote = { n ->
-                                            val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
-                                            val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
-                                            navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
-                                        },
-                                        onFork = { n ->
-                                            val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
-                                            navController.navigate("compose?initialContent=$encoded") { launchSingleTop = true }
-                                        },
-                                        onCustomZapSend = { note, amount, zapType, msg ->
-                                            val err = accountStateViewModel.sendZap(note, amount, zapType, msg)
-                                            if (err != null) showSnackbar(err)
-                                        },
-                                        onZap = { nId, amount ->
-                                            if (contentNote != null && contentNote.id == nId) {
-                                                val err = accountStateViewModel.sendZap(contentNote, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
-                                                if (err != null) showSnackbar(err)
-                                            }
-                                        },
-                                        zapInProgressNoteIds = accountStateViewModel.zapInProgressNoteIds.collectAsState().value,
-                                        zappedNoteIds = accountStateViewModel.zappedNoteIds.collectAsState().value,
-                                        myZappedAmountByNoteId = accountStateViewModel.zappedAmountByNoteId.collectAsState().value,
-                                        boostedNoteIds = accountStateViewModel.boostedNoteIds.collectAsState().value,
-                                        onLoginClick = {
-                                            val loginIntent = accountStateViewModel.loginWithAmber()
-                                            onAmberLogin(loginIntent)
-                                        },
-                                        isGuest = authState.isGuest,
-                                        userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,
-                                        userAvatarUrl = authState.userProfile?.picture,
+                                        threadStateHolder = threadStateHolder,
+                                        topAppBarState = topAppBarState,
+                                        accountStateViewModel = accountStateViewModel,
+                                        appViewModel = appViewModel,
+                                        navController = navController,
                                         accountNpub = currentAccount?.npub,
-                                        onHeaderProfileClick = {
-                                            authState.userProfile?.pubkey?.let { navController.navigateToProfile(it) }
-                                        },
-                                        onHeaderAccountsClick = { },
-                                        onHeaderQrCodeClick = { navController.navigate("user_qr") { launchSingleTop = true } },
-                                        onHeaderSettingsClick = { navController.navigate("settings") { launchSingleTop = true } },
-                                        mediaPageForNote = { noteId -> appViewModel.getMediaPage(noteId) },
-                                        onMediaPageChanged = { noteId, page -> appViewModel.updateMediaPage(noteId, page) },
-                                        onRelayNavigate = { relayUrl ->
-                                            val encoded = android.net.Uri.encode(relayUrl)
-                                            navController.navigate("relay_log/$encoded") { launchSingleTop = true }
-                                        },
-                                        onNavigateToRelayList = { urls ->
-                                            val encoded = urls.joinToString(",") { android.net.Uri.encode(it) }
-                                            navController.navigate("note_relays/$encoded") { launchSingleTop = true }
-                                        },
-                                        onPublishThreadReply = { rootId, rootPubkey, parentId, parentPubkey, content ->
-                                            accountStateViewModel.publishKind1Reply(rootId, rootPubkey, parentId, parentPubkey, content)
-                                        },
-                                        onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
-                                            appViewModel.setReplyToNote(replyToNote)
-                                            val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                            navController.navigate("reply_compose?rootId=${enc(rootId)}&rootPubkey=${enc(rootPubkey)}&parentId=${enc(parentId)}&parentPubkey=${enc(parentPubkey)}&replyKind=1")
-                                        },
-                                        currentUserAuthor = remember(currentAccount) {
-                                            currentAccount?.toHexKey()?.let { hex ->
-                                                ProfileMetadataCache.getInstance().resolveAuthor(hex)
-                                            }
-                                        },
-                                        onSeeAllReactions = { noteId ->
-                                            val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[noteId]
-                                            appViewModel.storeReactionsData(buildReactionsData(noteId, counts, contentNote?.repostedByAuthors ?: emptyList()))
-                                            navController.navigate("reactions/$noteId") { launchSingleTop = true }
-                                        },
-                                        onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } },
-                                        threadDrafts = run {
-                                            val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
-                                            remember(draftsList, displayNote.id) {
-                                                social.mycelium.android.repository.DraftsRepository.replyDraftsForThread(displayNote.id)
-                                            }
-                                        },
-                                        onEditDraft = { draft ->
-                                            val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
-                                            when (draft.type) {
-                                                social.mycelium.android.data.DraftType.REPLY_KIND1 ->
-                                                    navController.navigate("reply_compose?rootId=${enc(draft.rootId)}&rootPubkey=${enc(draft.rootPubkey)}&parentId=${enc(draft.parentId)}&parentPubkey=${enc(draft.parentPubkey)}&replyKind=1&draftId=${enc(draft.id)}")
-                                                social.mycelium.android.data.DraftType.TOPIC_REPLY ->
-                                                    navController.navigate("compose_topic_reply/${enc(draft.rootId)}?draftId=${enc(draft.id)}")
-                                                else ->
-                                                    navController.navigate("reply_compose?rootId=${enc(draft.rootId)}&rootPubkey=${enc(draft.rootPubkey)}&parentId=${enc(draft.parentId)}&parentPubkey=${enc(draft.parentPubkey)}&replyKind=1111&draftId=${enc(draft.id)}")
-                                            }
-                                        },
-                                        onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) }
+                                        accountHexKey = currentAccount?.toHexKey(),
+                                        coroutineScope = coroutineScope,
+                                        overlayThreadStack = overlayThreadStack,
+                                        overlayThreadHighlightIds = overlayThreadHighlightIds,
+                                        onAmberLogin = onAmberLogin,
+                                        showSnackbar = { msg -> showSnackbar(msg) },
                                     )
                                 }
                             }

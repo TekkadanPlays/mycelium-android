@@ -999,6 +999,11 @@ fun DashboardScreen(
     val allCategoryRelayUrls = remember(relayCategories) {
         relayCategories.flatMap { it.relays }.map { it.url }.distinct()
     }
+    // Only subscribed (active) categories contribute to the live subscription.
+    // Toggling a category off removes its relays from the subscription set.
+    val subscribedCategoryRelayUrls = remember(relayCategories) {
+        relayCategories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url }.distinct()
+    }
     val hasAnyConfiguredRelays = allCategoryRelayUrls.isNotEmpty() || hasSavedRelayConfig
 
     // If the selected relay/category was removed, fall back to Global
@@ -1008,11 +1013,11 @@ fun DashboardScreen(
         if (selectedUrl != null && selectedUrl !in allCategoryRelayUrls) {
             feedStateViewModel.setHomeGlobal()
             feedStateViewModel.setTopicsGlobal()
-            if (allCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(allCategoryRelayUrls)
+            if (subscribedCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(subscribedCategoryRelayUrls)
         } else if (selectedCatId != null && relayCategories.none { it.id == selectedCatId }) {
             feedStateViewModel.setHomeGlobal()
             feedStateViewModel.setTopicsGlobal()
-            if (allCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(allCategoryRelayUrls)
+            if (subscribedCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(subscribedCategoryRelayUrls)
         }
     }
 
@@ -1025,22 +1030,22 @@ fun DashboardScreen(
     LaunchedEffect(
         isDashboardVisible,
         currentAccount,
-        allCategoryRelayUrls,
+        subscribedCategoryRelayUrls,
         relayUiState.outboxRelays,
         homeFeedState.isGlobal,
         onboardingComplete
     ) {
         if (!onboardingComplete) return@LaunchedEffect
-        if (!isDashboardVisible || (allCategoryRelayUrls.isEmpty() && relayUiState.outboxRelays.isEmpty())) return@LaunchedEffect
+        if (!isDashboardVisible || (subscribedCategoryRelayUrls.isEmpty() && relayUiState.outboxRelays.isEmpty())) return@LaunchedEffect
         // Debounce: keys settle in rapid succession (visibility, categories, outbox);
         // wait briefly so we only fire the subscription once.
         kotlinx.coroutines.delay(150)
         val pubkey = currentAccount?.toHexKey()
-        // Merge category relays + outbox relays so adding a relay to a category
-        // doesn't drop notes from outbox relays that the user was already reading.
-        // Indexer relays are NOT included — they are only for NIP-65 lookups.
+        // Merge subscribed (active) category relays + outbox relays.
+        // Only subscribed categories contribute to the live subscription — disabled
+        // categories are inactive and their relays are not connected.
         val outboxUrls = if (pubkey != null) relayUiState.outboxRelays.map { it.url } else emptyList()
-        val relayUrlsToUse = (allCategoryRelayUrls + outboxUrls).map { normalizeRelayUrl(it) }.distinct()
+        val relayUrlsToUse = (subscribedCategoryRelayUrls + outboxUrls).map { normalizeRelayUrl(it) }.distinct()
         val displayUrls = when {
             homeFeedState.isGlobal -> relayUrlsToUse
             homeFeedState.selectedCategoryId != null -> relayCategories
@@ -1332,7 +1337,7 @@ fun DashboardScreen(
                 itemId == "global" -> {
                     feedStateViewModel.setHomeGlobal()
                     feedStateViewModel.setTopicsGlobal()
-                    if (allCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(allCategoryRelayUrls)
+                    if (subscribedCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(subscribedCategoryRelayUrls)
                 }
                 itemId.startsWith("relay_category:") -> {
                     val categoryId = itemId.removePrefix("relay_category:")

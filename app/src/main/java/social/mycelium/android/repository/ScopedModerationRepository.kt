@@ -310,6 +310,43 @@ class ScopedModerationRepository private constructor() {
     }
 
     /**
+     * Get the event ID of the current user's off-topic flag on a note (for kind-5 deletion).
+     * Returns null if the user hasn't flagged it.
+     */
+    fun getOwnFlagEventId(anchor: String, noteId: String, userPubkey: String): String? {
+        return synchronized(this) {
+            byAnchor[anchor]?.firstOrNull { it.pubkey == userPubkey && it.targetNoteId == noteId }?.id
+        }
+    }
+
+    /**
+     * Remove the current user's off-topic flag from local state.
+     * Call after successfully publishing a kind-5 deletion event.
+     */
+    fun removeOwnFlag(anchor: String, noteId: String, userPubkey: String) {
+        synchronized(this) {
+            val eventId = byAnchor[anchor]?.firstOrNull { it.pubkey == userPubkey && it.targetNoteId == noteId }?.id
+            if (eventId != null) {
+                allEvents.remove(eventId)
+                byAnchor[anchor]?.removeAll { it.id == eventId }
+                offTopicFlags[anchor to noteId]?.remove(userPubkey)
+            }
+        }
+        // Update observables
+        val key = "$anchor#$noteId"
+        val count = synchronized(this) { offTopicFlags[anchor to noteId]?.size ?: 0 }
+        _offTopicCounts.value = if (count > 0) {
+            _offTopicCounts.value + (key to count)
+        } else {
+            _offTopicCounts.value - key
+        }
+        _moderationCount.value = allEvents.size
+        _filterVersion.value++
+        scheduleSaveToDisk()
+        Log.d(TAG, "Removed own flag: anchor=$anchor note=${noteId.take(8)} by=${userPubkey.take(8)}")
+    }
+
+    /**
      * Get all moderation events for an anchor (for debug/inspection UI).
      */
     fun getModerationEventsForAnchor(anchor: String): List<ModerationEvent> {

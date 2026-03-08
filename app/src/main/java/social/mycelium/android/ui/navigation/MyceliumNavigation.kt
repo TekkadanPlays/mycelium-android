@@ -1985,10 +1985,9 @@ fun MyceliumNavigation(
                                 if (error != null) {
                                     showSnackbar(error)
                                 } else {
-                                    // Refresh follow list so the button updates
+                                    // follow/unfollow emits via followListUpdates flow — no forceRefresh needed.
+                                    // Invalidate profile counts so following/follower numbers refresh.
                                     currentAccount?.toHexKey()?.let { pubkey ->
-                                        dashboardViewModel.loadFollowList(pubkey, cacheUrls, forceRefresh = true)
-                                        // Invalidate profile counts so following/follower numbers refresh
                                         social.mycelium.android.repository.ProfileCountsRepository.invalidate(pubkey)
                                         social.mycelium.android.repository.ProfileCountsRepository.invalidate(targetHex)
                                     }

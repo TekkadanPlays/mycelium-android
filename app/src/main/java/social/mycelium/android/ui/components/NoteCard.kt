@@ -1545,11 +1545,7 @@ private fun NoteActionRow(
 
         // Upvote / Downvote — kind-11 feed + kind-1111 replies
         if (showVoting) {
-            val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
-            val reactiveDownvotes by social.mycelium.android.repository.VoteRepository.downvoteCounts.collectAsState()
             val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
-            val upCount = reactiveUpvotes[note.id] ?: 0
-            val downCount = reactiveDownvotes[note.id] ?: 0
             val reactiveOwnVote = reactiveOwnVotes[note.id] ?: 0
             ActionButton(
                 icon = Icons.Outlined.ArrowUpward,
@@ -1557,28 +1553,12 @@ private fun NoteActionRow(
                 tint = if (reactiveOwnVote > 0) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { onVote?.invoke(note.id, note.author.id, 1) }
             )
-            if (upCount > 0) {
-                Text(
-                    text = "$upCount",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF8FBC8F),
-                    modifier = Modifier.padding(end = 2.dp)
-                )
-            }
             ActionButton(
                 icon = Icons.Outlined.ArrowDownward,
                 contentDescription = "Downvote",
                 tint = if (reactiveOwnVote < 0) Color(0xFFE57373) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { onVote?.invoke(note.id, note.author.id, -1) }
             )
-            if (downCount > 0) {
-                Text(
-                    text = "$downCount",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFFE57373),
-                    modifier = Modifier.padding(end = 2.dp)
-                )
-            }
         }
 
         // Boost (Repost / Quote / Fork) — kind-1 feed + kind-11 feed
@@ -2276,33 +2256,16 @@ fun NoteCard(
                         // Vote score — left of timestamp for kind-11 / kind-1111
                         if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
                             val reactiveScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
-                            val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
                             val score = reactiveScores[note.id] ?: 0
-                            val ownVote = reactiveOwnVotes[note.id] ?: 0
-                            val scoreColor = when {
-                                score > 0 -> MyceliumGreen
-                                score < 0 -> pastelRed
-                                else -> mutedText
-                            }
-                            Icon(
-                                imageVector = when {
-                                    ownVote > 0 -> Icons.Filled.ArrowUpward
-                                    ownVote < 0 -> Icons.Filled.ArrowDownward
-                                    else -> Icons.Outlined.ArrowUpward
-                                },
-                                contentDescription = "Vote score",
-                                modifier = Modifier.size(14.dp),
-                                tint = scoreColor
-                            )
                             if (score != 0) {
+                                val scoreColor = if (score > 0) MyceliumGreen else pastelRed
                                 Text(
                                     text = "$score",
                                     style = countStyle,
-                                    color = scoreColor,
-                                    modifier = Modifier.padding(start = 2.dp)
+                                    color = scoreColor
                                 )
+                                Text(text = " • ", style = countStyle, color = mutedText)
                             }
-                            Text(text = " • ", style = countStyle, color = mutedText)
                         }
                         Text(text = formattedTime, style = countStyle, color = mutedText)
                         if (replyCountVal > 0) {

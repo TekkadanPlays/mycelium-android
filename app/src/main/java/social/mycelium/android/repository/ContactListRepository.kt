@@ -1,5 +1,7 @@
 package social.mycelium.android.repository
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
@@ -12,6 +14,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -47,6 +51,53 @@ object ContactListRepository {
     @Volatile
     private var latestKind3Event: Event? = null
 
+    // ─── Persistence: survive app restarts so stale relay data can't overwrite local changes ───
+    private const val PREFS_NAME = "Mycelium_contact_list"
+    private const val KEY_KIND3_JSON = "latest_kind3_json"
+    private const val KEY_KIND3_CREATED_AT = "latest_kind3_created_at"
+    private const val KEY_KIND3_PUBKEY = "latest_kind3_pubkey"
+    @Volatile private var prefs: SharedPreferences? = null
+
+    /** Call once from MainActivity.onCreate() to enable persistence. */
+    fun init(context: Context) {
+        prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    /** Restore persisted kind-3 into memory. Called after account restore so latestKind3Event
+     *  is populated before any relay fetch can overwrite it with stale data. */
+    fun restorePersistedKind3(pubkey: String) {
+        val p = prefs ?: return
+        val savedPubkey = p.getString(KEY_KIND3_PUBKEY, null)
+        if (savedPubkey != pubkey) return
+        val json = p.getString(KEY_KIND3_JSON, null) ?: return
+        val event = eventFromJson(json)
+        if (event != null) {
+            latestKind3Event = event
+            // Also populate the in-memory cache so fetchFollowList can skip network on cache hit
+            val pubkeys = extractPubkeys(event)
+            cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
+            _followListUpdates.tryEmit(pubkeys)
+            Log.d(TAG, "Restored persisted kind-3 for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
+        }
+    }
+
+    /** Persist the latest kind-3 event to SharedPreferences. */
+    private fun persistKind3(pubkey: String, event: Event) {
+        val p = prefs ?: return
+        p.edit()
+            .putString(KEY_KIND3_PUBKEY, pubkey)
+            .putString(KEY_KIND3_JSON, eventToJson(event))
+            .putLong(KEY_KIND3_CREATED_AT, event.createdAt)
+            .apply()
+    }
+
+    /** Get the persisted createdAt for a pubkey to reject stale relay data. */
+    private fun getPersistedCreatedAt(pubkey: String): Long {
+        val p = prefs ?: return 0L
+        val savedPubkey = p.getString(KEY_KIND3_PUBKEY, null)
+        return if (savedPubkey == pubkey) p.getLong(KEY_KIND3_CREATED_AT, 0L) else 0L
+    }
+
     /** In-flight deduplication: only one network fetch per pubkey at a time. */
     private val inFlightFetches = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<Set<String>>>()
 
@@ -66,6 +117,60 @@ object ContactListRepository {
     fun invalidateCache(pubkey: String?) {
         if (pubkey == null) { cacheEntry = null; latestKind3Event = null }
         else if (cacheEntry?.pubkey == pubkey) { cacheEntry = null; latestKind3Event = null }
+    }
+
+    // ─── Helpers: extract pubkeys, serialize/deserialize kind-3 events ───
+
+    private fun extractPubkeys(event: Event): Set<String> {
+        return event.tags
+            .map { it.toList() }
+            .filter { it.isNotEmpty() && it[0] == "p" }
+            .mapNotNull { list ->
+                val pk = list.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                if (pk.length == 64 && pk.all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' }) pk.lowercase() else null
+            }
+            .toSet()
+    }
+
+    private fun eventToJson(event: Event): String {
+        val obj = JSONObject()
+        obj.put("id", event.id)
+        obj.put("pubKey", event.pubKey)
+        obj.put("createdAt", event.createdAt)
+        obj.put("kind", event.kind)
+        obj.put("content", event.content)
+        obj.put("sig", event.sig)
+        val tagsArr = JSONArray()
+        for (tag in event.tags) {
+            val tagArr = JSONArray()
+            for (s in tag) tagArr.put(s)
+            tagsArr.put(tagArr)
+        }
+        obj.put("tags", tagsArr)
+        return obj.toString()
+    }
+
+    private fun eventFromJson(json: String): Event? {
+        return try {
+            val obj = JSONObject(json)
+            val tagsArr = obj.getJSONArray("tags")
+            val tags = Array(tagsArr.length()) { i ->
+                val inner = tagsArr.getJSONArray(i)
+                Array(inner.length()) { j -> inner.getString(j) }
+            }
+            Event(
+                id = obj.getString("id"),
+                pubKey = obj.getString("pubKey"),
+                createdAt = obj.getLong("createdAt"),
+                kind = obj.getInt("kind"),
+                content = obj.optString("content", ""),
+                sig = obj.getString("sig"),
+                tags = tags
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to parse persisted kind-3: ${e.message}")
+            null
+        }
     }
 
     /**
@@ -120,16 +225,34 @@ object ContactListRepository {
                 if (firstAt > 0 && System.currentTimeMillis() - firstAt >= KIND3_SETTLE_MS) break
             }
             handle.cancel()
-            val event = collected.maxByOrNull { it.createdAt } ?: return emptySet()
-            latestKind3Event = event
-            val pubkeys = event.tags
-                .map { it.toList() }
-                .filter { it.isNotEmpty() && it[0] == "p" }
-                .mapNotNull { list ->
-                    val pk = list.getOrNull(1)?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-                    if (pk.length == 64 && pk.all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' }) pk.lowercase() else null
+            val event = collected.maxByOrNull { it.createdAt } ?: run {
+                // No relay responded — fall back to persisted event if available
+                val persisted = latestKind3Event
+                if (persisted != null) {
+                    val pubkeys = extractPubkeys(persisted)
+                    cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
+                    _followListUpdates.tryEmit(pubkeys)
+                    deferred.complete(pubkeys)
+                    Log.d(TAG, "No relay kind-3 — using persisted (${pubkeys.size} follows)")
+                    return pubkeys
                 }
-                .toSet()
+                return emptySet()
+            }
+            // Only accept relay event if it's at least as new as our persisted version.
+            // This prevents stale relay data from overwriting a local follow/unfollow.
+            val persistedTs = getPersistedCreatedAt(pubkey)
+            if (event.createdAt < persistedTs && latestKind3Event != null) {
+                Log.w(TAG, "Relay kind-3 is STALE (relay=${event.createdAt}, persisted=$persistedTs) — keeping local version")
+                val persisted = latestKind3Event!!
+                val pubkeys = extractPubkeys(persisted)
+                cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
+                _followListUpdates.tryEmit(pubkeys)
+                deferred.complete(pubkeys)
+                return pubkeys
+            }
+            latestKind3Event = event
+            persistKind3(pubkey, event)
+            val pubkeys = extractPubkeys(event)
             cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
             _followListUpdates.tryEmit(pubkeys)
             Log.d(TAG, "Kind-3 parsed ${pubkeys.size} follows for ${pubkey.take(8)}..., contains cff1720e77bb: ${pubkeys.any { it.startsWith("cff1720e77bb") }}")
@@ -177,11 +300,12 @@ object ContactListRepository {
             val signed = signer.sign(template)
 
             // Publish to outbox relays
-            Log.d(TAG, "Publishing follow kind-3 to ${outboxRelays.size} relays")
+            Log.d(TAG, "Publishing follow kind-3 (createdAt=${signed.createdAt}) to ${outboxRelays.size} relays, tags=${signed.tags.size}")
             RelayConnectionStateMachine.getInstance().send(signed, outboxRelays)
 
-            // Update local cache
+            // Update local cache + persist so it survives app restart
             latestKind3Event = signed
+            persistKind3(myPubkey, signed)
             val currentFollows = cacheEntry?.followSet?.toMutableSet() ?: mutableSetOf()
             currentFollows.add(targetPubkey.lowercase())
             cacheEntry = CacheEntry(myPubkey, currentFollows, System.currentTimeMillis())
@@ -224,11 +348,12 @@ object ContactListRepository {
             val signed = signer.sign(template)
 
             // Publish to outbox relays
-            Log.d(TAG, "Publishing unfollow kind-3 to ${outboxRelays.size} relays")
+            Log.d(TAG, "Publishing unfollow kind-3 (createdAt=${signed.createdAt}) to ${outboxRelays.size} relays, tags=${signed.tags.size}")
             RelayConnectionStateMachine.getInstance().send(signed, outboxRelays)
 
-            // Update local cache
+            // Update local cache + persist so it survives app restart
             latestKind3Event = signed
+            persistKind3(myPubkey, signed)
             val currentFollows = cacheEntry?.followSet?.toMutableSet() ?: mutableSetOf()
             currentFollows.remove(targetPubkey.lowercase())
             cacheEntry = CacheEntry(myPubkey, currentFollows, System.currentTimeMillis())

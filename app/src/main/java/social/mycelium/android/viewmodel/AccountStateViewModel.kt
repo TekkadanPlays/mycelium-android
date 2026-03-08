@@ -430,6 +430,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         ReactionsRepository.loadForAccount(getApplication(), accountInfo.npub)
         NoteCountsRepository.currentUserPubkey = hexPubkey
         social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
+        // Restore persisted kind-3 before any relay fetch can overwrite with stale data
+        ContactListRepository.restorePersistedKind3(hexPubkey)
 
         // Set NIP-42 signer for new account
         RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
@@ -541,6 +543,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
             NoteCountsRepository.currentUserPubkey = hexPubkey
             social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
+            // Restore persisted kind-3 before any relay fetch can overwrite with stale data
+            ContactListRepository.restorePersistedKind3(hexPubkey)
 
             // Set NIP-42 signer for new account.
             // NOTE: Cannot use getCurrentSigner() here because _currentAccount.value

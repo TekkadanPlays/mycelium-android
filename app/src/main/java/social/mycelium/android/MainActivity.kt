@@ -202,10 +202,12 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             }
         })
 
-        // Initialize theme preferences (SharedPreferences-backed, must happen before setContent)
+        // Initialize preferences (SharedPreferences-backed, must happen before setContent)
         social.mycelium.android.ui.theme.ThemePreferences.init(applicationContext)
         social.mycelium.android.ui.settings.MediaPreferences.init(applicationContext)
         social.mycelium.android.ui.settings.NotificationPreferences.init(applicationContext)
+        social.mycelium.android.utils.ZapAmountManager.initialize(applicationContext)
+        social.mycelium.android.repository.ContactListRepository.init(applicationContext)
 
         // Create all notification channels (relay service, social, DMs) — idempotent
         social.mycelium.android.services.NotificationChannelManager.createChannels(applicationContext)

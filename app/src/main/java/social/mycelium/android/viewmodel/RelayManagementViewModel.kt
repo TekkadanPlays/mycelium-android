@@ -31,7 +31,8 @@ data class RelayManagementUiState(
     val indexerRelays: List<UserRelay> = emptyList(),
     val announcementRelays: List<UserRelay> = emptyList(),
     val draftsRelays: List<UserRelay> = emptyList(),
-    val otherSystemRelays: List<UserRelay> = emptyList()
+    val blossomServers: List<social.mycelium.android.data.MediaServer> = social.mycelium.android.data.DefaultMediaServers.BLOSSOM_SERVERS,
+    val nip96Servers: List<social.mycelium.android.data.MediaServer> = social.mycelium.android.data.DefaultMediaServers.NIP96_SERVERS
 )
 
 class RelayManagementViewModel(
@@ -91,7 +92,8 @@ class RelayManagementViewModel(
                     indexerRelays = emptyList(),
                     announcementRelays = emptyList(),
                     draftsRelays = emptyList(),
-                    otherSystemRelays = emptyList()
+                    blossomServers = emptyList(),
+                    nip96Servers = emptyList()
                 )
             }
         }
@@ -110,7 +112,8 @@ class RelayManagementViewModel(
             // Load system relays
             val announcements = storageManager.loadAnnouncementRelays(pubkey)
             val drafts = storageManager.loadDraftsRelays(pubkey)
-            val otherSystem = storageManager.loadOtherSystemRelays(pubkey)
+            val blossom = storageManager.loadBlossomServers(pubkey)
+            val nip96 = storageManager.loadNip96Servers(pubkey)
 
             // For same-user reload (e.g. returning from onboarding), only update if
             // the data actually changed — avoids triggering downstream recomposition
@@ -124,15 +127,16 @@ class RelayManagementViewModel(
                 current.indexerRelays == cache &&
                 current.announcementRelays == announcements &&
                 current.draftsRelays == drafts &&
-                current.otherSystemRelays == otherSystem
+                current.blossomServers == blossom &&
+                current.nip96Servers == nip96
             ) return@launch
 
-            _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, otherSystemRelays = otherSystem) }
+            _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, blossomServers = blossom, nip96Servers = nip96) }
 
             // Fetch NIP-11 info in background for all relays (personal + category)
             val allCategoryUrls = categories.flatMap { it.relays }.map { it.url }
             val allPersonalUrls = (outbox + inbox + cache).map { it.url }
-            val allSystemUrls = (announcements + drafts + otherSystem).map { it.url }
+            val allSystemUrls = (announcements + drafts).map { it.url }
             val allUrls = (allCategoryUrls + allPersonalUrls + allSystemUrls).distinct()
             allUrls.forEach { url ->
                 launch(Dispatchers.IO) {
@@ -148,8 +152,7 @@ class RelayManagementViewModel(
                                     inboxRelays = state.inboxRelays.updateRelayInfo(url, freshInfo),
                                     indexerRelays = state.indexerRelays.updateRelayInfo(url, freshInfo),
                                     announcementRelays = state.announcementRelays.updateRelayInfo(url, freshInfo),
-                                    draftsRelays = state.draftsRelays.updateRelayInfo(url, freshInfo),
-                                    otherSystemRelays = state.otherSystemRelays.updateRelayInfo(url, freshInfo)
+                                    draftsRelays = state.draftsRelays.updateRelayInfo(url, freshInfo)
                                 )
                             }
                             saveToStorage()
@@ -180,7 +183,8 @@ class RelayManagementViewModel(
             storageManager.saveIndexerRelays(pubkey, _uiState.value.indexerRelays)
             storageManager.saveAnnouncementRelays(pubkey, _uiState.value.announcementRelays)
             storageManager.saveDraftsRelays(pubkey, _uiState.value.draftsRelays)
-            storageManager.saveOtherSystemRelays(pubkey, _uiState.value.otherSystemRelays)
+            storageManager.saveBlossomServers(pubkey, _uiState.value.blossomServers)
+            storageManager.saveNip96Servers(pubkey, _uiState.value.nip96Servers)
         }
     }
 
@@ -404,13 +408,23 @@ class RelayManagementViewModel(
         saveToStorage()
     }
 
-    fun addOtherSystemRelay(relay: UserRelay) {
-        _uiState.update { it.copy(otherSystemRelays = it.otherSystemRelays + relay) }
+    fun addBlossomServer(server: social.mycelium.android.data.MediaServer) {
+        _uiState.update { it.copy(blossomServers = it.blossomServers + server) }
         saveToStorage()
     }
 
-    fun removeOtherSystemRelay(url: String) {
-        _uiState.update { it.copy(otherSystemRelays = it.otherSystemRelays.filter { r -> r.url != url }) }
+    fun removeBlossomServer(baseUrl: String) {
+        _uiState.update { it.copy(blossomServers = it.blossomServers.filter { s -> s.baseUrl != baseUrl }) }
+        saveToStorage()
+    }
+
+    fun addNip96Server(server: social.mycelium.android.data.MediaServer) {
+        _uiState.update { it.copy(nip96Servers = it.nip96Servers + server) }
+        saveToStorage()
+    }
+
+    fun removeNip96Server(baseUrl: String) {
+        _uiState.update { it.copy(nip96Servers = it.nip96Servers.filter { s -> s.baseUrl != baseUrl }) }
         saveToStorage()
     }
 

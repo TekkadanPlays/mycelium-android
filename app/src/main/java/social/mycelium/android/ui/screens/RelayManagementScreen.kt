@@ -173,7 +173,8 @@ fun RelayManagementScreen(
     val indexerRelays by remember { derivedStateOf { uiState.indexerRelays } }
     val announcementRelays by remember { derivedStateOf { uiState.announcementRelays } }
     val draftsRelays by remember { derivedStateOf { uiState.draftsRelays } }
-    val otherSystemRelays by remember { derivedStateOf { uiState.otherSystemRelays } }
+    val blossomServers by remember { derivedStateOf { uiState.blossomServers } }
+    val nip96Servers by remember { derivedStateOf { uiState.nip96Servers } }
 
     // Live connection state
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
@@ -427,7 +428,7 @@ fun RelayManagementScreen(
                     // Fixed tabs
                     fixedTabs.forEachIndexed { index, tab ->
                         val count = when (tab) {
-                            RelayTab.SYSTEM -> announcementRelays.size + draftsRelays.size + otherSystemRelays.size
+                            RelayTab.SYSTEM -> announcementRelays.size + draftsRelays.size + blossomServers.size + nip96Servers.size
                             RelayTab.INDEXER -> indexerRelays.size
                             RelayTab.OUTBOX -> outboxRelays.size + inboxRelays.size
                         }
@@ -492,7 +493,8 @@ fun RelayManagementScreen(
                         RelayTab.SYSTEM -> SystemTabContent(
                             announcementRelays = announcementRelays,
                             draftsRelays = draftsRelays,
-                            otherSystemRelays = otherSystemRelays,
+                            blossomServers = blossomServers,
+                            nip96Servers = nip96Servers,
                             perRelayState = perRelayState,
                             onAddAnnouncementRelay = { url ->
                                 addRelayTo(url, announcementRelays) { viewModel.addAnnouncementRelay(it) }
@@ -502,10 +504,14 @@ fun RelayManagementScreen(
                                 addRelayTo(url, draftsRelays) { viewModel.addDraftsRelay(it) }
                             },
                             onRemoveDraftsRelay = { viewModel.removeDraftsRelay(it) },
-                            onAddOtherRelay = { url ->
-                                addRelayTo(url, otherSystemRelays) { viewModel.addOtherSystemRelay(it) }
+                            onAddBlossomServer = { name, url ->
+                                viewModel.addBlossomServer(social.mycelium.android.data.MediaServer(name, url, social.mycelium.android.data.MediaServerType.BLOSSOM))
                             },
-                            onRemoveOtherRelay = { viewModel.removeOtherSystemRelay(it) },
+                            onRemoveBlossomServer = { viewModel.removeBlossomServer(it) },
+                            onAddNip96Server = { name, url ->
+                                viewModel.addNip96Server(social.mycelium.android.data.MediaServer(name, url, social.mycelium.android.data.MediaServerType.NIP96))
+                            },
+                            onRemoveNip96Server = { viewModel.removeNip96Server(it) },
                             onOpenRelayLog = onOpenRelayLog,
                             modifier = Modifier.fillMaxSize()
                         )
@@ -1210,29 +1216,34 @@ private fun FabMenuItem(label: String, icon: ImageVector, onClick: () -> Unit) {
     }
 }
 
-//  System Tab (Announcements / Drafts / Other)
+//  System Tab (Announcements / Drafts / Blossom / NIP-96)
 
 @Composable
 private fun SystemTabContent(
     announcementRelays: List<UserRelay>,
     draftsRelays: List<UserRelay>,
-    otherSystemRelays: List<UserRelay>,
+    blossomServers: List<social.mycelium.android.data.MediaServer>,
+    nip96Servers: List<social.mycelium.android.data.MediaServer>,
     perRelayState: Map<String, RelayEndpointStatus>,
     onAddAnnouncementRelay: (String) -> Unit,
     onRemoveAnnouncementRelay: (String) -> Unit,
     onAddDraftsRelay: (String) -> Unit,
     onRemoveDraftsRelay: (String) -> Unit,
-    onAddOtherRelay: (String) -> Unit,
-    onRemoveOtherRelay: (String) -> Unit,
+    onAddBlossomServer: (String, String) -> Unit,
+    onRemoveBlossomServer: (String) -> Unit,
+    onAddNip96Server: (String, String) -> Unit,
+    onRemoveNip96Server: (String) -> Unit,
     onOpenRelayLog: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var announcementsExpanded by remember { mutableStateOf(true) }
     var draftsExpanded by remember { mutableStateOf(true) }
-    var otherExpanded by remember { mutableStateOf(true) }
+    var blossomExpanded by remember { mutableStateOf(true) }
+    var nip96Expanded by remember { mutableStateOf(true) }
     var announcementInput by remember { mutableStateOf("") }
     var draftsInput by remember { mutableStateOf("") }
-    var otherInput by remember { mutableStateOf("") }
+    var blossomInput by remember { mutableStateOf("") }
+    var nip96Input by remember { mutableStateOf("") }
 
     LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
         // ── Announcements Section ──
@@ -1323,48 +1334,170 @@ private fun SystemTabContent(
             }
         }
 
-        // ── Other Section ──
-        item(key = "other_header") {
+        // ── Blossom Media Servers Section ──
+        item(key = "blossom_header") {
             SystemSectionHeader(
-                title = "Other",
-                icon = Icons.Outlined.SettingsEthernet,
-                count = otherSystemRelays.size,
-                expanded = otherExpanded,
-                onToggle = { otherExpanded = !otherExpanded }
+                title = "Blossom Servers",
+                icon = Icons.Outlined.CloudUpload,
+                count = blossomServers.size,
+                expanded = blossomExpanded,
+                onToggle = { blossomExpanded = !blossomExpanded }
             )
         }
-        if (otherExpanded) {
-            if (otherSystemRelays.isEmpty()) {
-                item(key = "other_empty") {
+        if (blossomExpanded) {
+            if (blossomServers.isEmpty()) {
+                item(key = "blossom_empty") {
                     Text(
-                        "Additional system relays for specialized uses.",
+                        "Blossom (BUD-01) HTTP blob servers for media uploads.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
                     )
                 }
             }
-            otherSystemRelays.forEachIndexed { idx, relay ->
-                item(key = "other_${relay.url}") {
-                    SystemRelayItem(
-                        relay = relay,
-                        connectionStatus = perRelayState[relay.url],
-                        onOpenRelayLog = onOpenRelayLog,
-                        onRemove = { onRemoveOtherRelay(relay.url) },
+            blossomServers.forEachIndexed { idx, server ->
+                item(key = "blossom_${server.baseUrl}") {
+                    MediaServerItem(
+                        server = server,
+                        onRemove = { onRemoveBlossomServer(server.baseUrl) },
                         showDivider = true
                     )
                 }
             }
-            item(key = "other_add") {
-                AddRelayRow(
-                    relayUrl = otherInput,
-                    onRelayUrlChange = { otherInput = it },
+            item(key = "blossom_add") {
+                AddMediaServerRow(
+                    serverUrl = blossomInput,
+                    onServerUrlChange = { blossomInput = it },
                     onAdd = { url ->
-                        onAddOtherRelay(url)
-                        otherInput = ""
-                    }
+                        val name = url.removePrefix("https://").removePrefix("http://").removeSuffix("/").split("/").first()
+                        onAddBlossomServer(name, url)
+                        blossomInput = ""
+                    },
+                    placeholder = "https://blossom.example.com"
                 )
             }
+        }
+
+        // ── NIP-96 Media Servers Section ──
+        item(key = "nip96_header") {
+            SystemSectionHeader(
+                title = "NIP-96 Servers",
+                icon = Icons.Outlined.Photo,
+                count = nip96Servers.size,
+                expanded = nip96Expanded,
+                onToggle = { nip96Expanded = !nip96Expanded }
+            )
+        }
+        if (nip96Expanded) {
+            if (nip96Servers.isEmpty()) {
+                item(key = "nip96_empty") {
+                    Text(
+                        "NIP-96 HTTP file storage servers for media uploads.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                }
+            }
+            nip96Servers.forEachIndexed { idx, server ->
+                item(key = "nip96_${server.baseUrl}") {
+                    MediaServerItem(
+                        server = server,
+                        onRemove = { onRemoveNip96Server(server.baseUrl) },
+                        showDivider = true
+                    )
+                }
+            }
+            item(key = "nip96_add") {
+                AddMediaServerRow(
+                    serverUrl = nip96Input,
+                    onServerUrlChange = { nip96Input = it },
+                    onAdd = { url ->
+                        val name = url.removePrefix("https://").removePrefix("http://").removeSuffix("/").split("/").first()
+                        onAddNip96Server(name, url)
+                        nip96Input = ""
+                    },
+                    placeholder = "https://nostr.build"
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MediaServerItem(
+    server: social.mycelium.android.data.MediaServer,
+    onRemove: () -> Unit,
+    showDivider: Boolean = false
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = server.name,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = server.baseUrl,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            IconButton(onClick = onRemove) {
+                Icon(
+                    Icons.Outlined.RemoveCircleOutline,
+                    contentDescription = "Remove",
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+        if (showDivider) {
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+        }
+    }
+}
+
+@Composable
+private fun AddMediaServerRow(
+    serverUrl: String,
+    onServerUrlChange: (String) -> Unit,
+    onAdd: (String) -> Unit,
+    placeholder: String = "https://",
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = serverUrl,
+            onValueChange = onServerUrlChange,
+            placeholder = { Text(placeholder, style = MaterialTheme.typography.bodySmall) },
+            modifier = Modifier.weight(1f),
+            singleLine = true,
+            textStyle = MaterialTheme.typography.bodySmall
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        IconButton(
+            onClick = {
+                val trimmed = serverUrl.trim()
+                if (trimmed.isNotBlank() && (trimmed.startsWith("http://") || trimmed.startsWith("https://"))) {
+                    onAdd(trimmed)
+                }
+            },
+            enabled = serverUrl.isNotBlank()
+        ) {
+            Icon(Icons.Outlined.AddCircleOutline, contentDescription = "Add server")
         }
     }
 }

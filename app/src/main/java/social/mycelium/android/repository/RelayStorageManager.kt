@@ -39,7 +39,8 @@ class RelayStorageManager(val context: Context) {
         private const val KEY_PROFILES = "relay_profiles"
         private const val KEY_SYSTEM_ANNOUNCEMENTS = "relay_system_announcements"
         private const val KEY_SYSTEM_DRAFTS = "relay_system_drafts"
-        private const val KEY_SYSTEM_OTHER = "relay_system_other"
+        private const val KEY_MEDIA_BLOSSOM = "media_blossom_servers"
+        private const val KEY_MEDIA_NIP96 = "media_nip96_servers"
         private const val KEY_ONBOARDING_PHASE = "onboarding_phase"
         private const val KEY_ONBOARDING_INDEXERS = "onboarding_indexers"
 
@@ -253,23 +254,41 @@ class RelayStorageManager(val context: Context) {
         }
     }
 
-    // ====== System Tab - Other System Relays ======
+    // ====== Media Servers (Blossom / NIP-96) ======
 
-    fun saveOtherSystemRelays(pubkey: String, relays: List<UserRelay>) {
-        val key = "${KEY_SYSTEM_OTHER}_${pubkey}"
-        val wrapper = UserRelayListWrapper(normalizeRelays(relays))
+    fun saveBlossomServers(pubkey: String, servers: List<social.mycelium.android.data.MediaServer>) {
+        val key = "${KEY_MEDIA_BLOSSOM}_${pubkey}"
+        val wrapper = MediaServerListWrapper(servers)
         val jsonString = json.encodeToString(wrapper)
         prefs.edit().putString(key, jsonString).apply()
     }
 
-    fun loadOtherSystemRelays(pubkey: String): List<UserRelay> {
-        val key = "${KEY_SYSTEM_OTHER}_${pubkey}"
-        val jsonString = prefs.getString(key, null) ?: return emptyList()
+    fun loadBlossomServers(pubkey: String): List<social.mycelium.android.data.MediaServer> {
+        val key = "${KEY_MEDIA_BLOSSOM}_${pubkey}"
+        val jsonString = prefs.getString(key, null)
+            ?: return social.mycelium.android.data.DefaultMediaServers.BLOSSOM_SERVERS
         return try {
-            val wrapper = json.decodeFromString<UserRelayListWrapper>(jsonString)
-            normalizeRelays(wrapper.relays)
+            json.decodeFromString<MediaServerListWrapper>(jsonString).servers
         } catch (e: Exception) {
-            emptyList()
+            social.mycelium.android.data.DefaultMediaServers.BLOSSOM_SERVERS
+        }
+    }
+
+    fun saveNip96Servers(pubkey: String, servers: List<social.mycelium.android.data.MediaServer>) {
+        val key = "${KEY_MEDIA_NIP96}_${pubkey}"
+        val wrapper = MediaServerListWrapper(servers)
+        val jsonString = json.encodeToString(wrapper)
+        prefs.edit().putString(key, jsonString).apply()
+    }
+
+    fun loadNip96Servers(pubkey: String): List<social.mycelium.android.data.MediaServer> {
+        val key = "${KEY_MEDIA_NIP96}_${pubkey}"
+        val jsonString = prefs.getString(key, null)
+            ?: return social.mycelium.android.data.DefaultMediaServers.NIP96_SERVERS
+        return try {
+            json.decodeFromString<MediaServerListWrapper>(jsonString).servers
+        } catch (e: Exception) {
+            social.mycelium.android.data.DefaultMediaServers.NIP96_SERVERS
         }
     }
 
@@ -314,7 +333,8 @@ class RelayStorageManager(val context: Context) {
             .remove("${KEY_PERSONAL_CACHE}_${pubkey}")
             .remove("${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}")
             .remove("${KEY_SYSTEM_DRAFTS}_${pubkey}")
-            .remove("${KEY_SYSTEM_OTHER}_${pubkey}")
+            .remove("${KEY_MEDIA_BLOSSOM}_${pubkey}")
+            .remove("${KEY_MEDIA_NIP96}_${pubkey}")
             .apply()
     }
 
@@ -329,7 +349,8 @@ class RelayStorageManager(val context: Context) {
                prefs.contains("${KEY_PERSONAL_CACHE}_${pubkey}") ||
                prefs.contains("${KEY_SYSTEM_ANNOUNCEMENTS}_${pubkey}") ||
                prefs.contains("${KEY_SYSTEM_DRAFTS}_${pubkey}") ||
-               prefs.contains("${KEY_SYSTEM_OTHER}_${pubkey}")
+               prefs.contains("${KEY_MEDIA_BLOSSOM}_${pubkey}") ||
+               prefs.contains("${KEY_MEDIA_NIP96}_${pubkey}")
     }
 
     // ====== Onboarding State Persistence ======
@@ -373,4 +394,9 @@ private data class RelayProfilesWrapper(
 @Serializable
 private data class UserRelayListWrapper(
     val relays: List<UserRelay>
+)
+
+@Serializable
+private data class MediaServerListWrapper(
+    val servers: List<social.mycelium.android.data.MediaServer>
 )

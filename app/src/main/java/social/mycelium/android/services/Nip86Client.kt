@@ -117,7 +117,12 @@ class Nip86Client(private val signer: NostrSigner) {
 
             // Create NIP-98 auth event (kind 27235)
             val payloadHash = sha256Hex(body.toByteArray())
-            val authEvent = buildNip98AuthEvent(httpUrl, "POST", payloadHash)
+            val authEvent = try {
+                buildNip98AuthEvent(httpUrl, "POST", payloadHash)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to sign NIP-98 auth event (kind $NIP98_KIND) — Amber may lack permission: ${e.message}", e)
+                return@withContext Nip86Result.Error("Signing failed (kind $NIP98_KIND) — re-login via Amber to grant permission")
+            }
 
             // Base64-encode the signed event JSON for the Authorization header
             val authHeader = "Nostr ${Base64.encodeToString(authEvent.toJson().toByteArray(), Base64.NO_WRAP)}"

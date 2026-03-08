@@ -139,10 +139,22 @@ fun RelayLogScreen(
     val health = healthMap[relayUrl]
 
     // ── NIP-86 Relay Admin Detection ──
+    // NIP-11 pubkey field may be hex OR npub bech32 depending on relay implementation.
+    // Normalize to hex for comparison with the current user's hex pubkey.
     val operatorPubkeyRaw = relayInfo?.pubkey ?: discoveryData?.operatorPubkey
-    val isRelayOperator = remember(operatorPubkeyRaw, currentUserPubkey) {
-        operatorPubkeyRaw != null && currentUserPubkey != null &&
-            operatorPubkeyRaw.lowercase() == currentUserPubkey.lowercase()
+    val operatorPubkeyHex = remember(operatorPubkeyRaw) {
+        val raw = operatorPubkeyRaw?.trim() ?: return@remember null
+        when {
+            raw.startsWith("npub1") -> try {
+                (com.example.cybin.nip19.Nip19Parser.uriToRoute(raw)?.entity as? com.example.cybin.nip19.NPub)?.hex
+            } catch (_: Exception) { null }
+            raw.length == 64 && raw.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } -> raw.lowercase()
+            else -> null
+        }
+    }
+    val isRelayOperator = remember(operatorPubkeyHex, currentUserPubkey) {
+        operatorPubkeyHex != null && currentUserPubkey != null &&
+            operatorPubkeyHex == currentUserPubkey.lowercase()
     }
     var nip86Methods by remember { mutableStateOf<List<String>?>(null) }
     var nip86Probing by remember { mutableStateOf(false) }
@@ -321,8 +333,13 @@ fun RelayLogScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("Relay Operator", style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onTertiaryContainer)
-                                Text("NIP-86 management API unavailable", style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f))
+                                Text(
+                                    "NIP-86 management API unavailable" +
+                                        (nip86Error?.let { ": $it" } ?: ""),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f),
+                                    maxLines = 3, overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
                     }

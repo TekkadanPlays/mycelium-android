@@ -99,7 +99,15 @@ class AmberSignerManager(private val context: Context) {
             ),
             Permission(
                 type = CommandType.SIGN_EVENT,
-                kind = 22242 // NIP-42 auth events
+                kind = 22242 // NIP-42 relay auth events
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 24242 // Blossom BUD-01 auth (media upload)
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 27235 // NIP-98 HTTP Auth (NIP-86 relay management)
             ),
             Permission(
                 type = CommandType.SIGN_EVENT,

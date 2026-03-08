@@ -1012,8 +1012,27 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         if (content.isBlank()) return "Note is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val pubkey = currentAccount.value?.toHexKey()
+        // Pre-parse content for tags BEFORE launching the coroutine
+        val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(content)
+        val hashtagRegex = Regex("""(?:^|\s)#(\w+)""")
+        val hashtags = hashtagRegex.findAll(content).map { it.groupValues[1] }.toList().distinct()
+
         viewModelScope.launch {
             when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1, content = content) {
+                // NIP-18/NIP-27: q-tags for quoted events
+                for (ref in quotedRefs) {
+                    val qTag = mutableListOf("q", ref.eventId)
+                    if (ref.relayHints.isNotEmpty()) qTag.add(ref.relayHints.first())
+                    else qTag.add("")
+                    if (ref.author != null) qTag.add(ref.author)
+                    add(qTag.toTypedArray())
+                    // Also add p-tag for the quoted event's author if known
+                    if (ref.author != null) add(arrayOf("p", ref.author))
+                }
+                // Hashtag t-tags
+                for (tag in hashtags) {
+                    add(arrayOf("t", tag.lowercase()))
+                }
                 if (zapRaiserAmount != null && zapRaiserAmount > 0) {
                     add(arrayOf("zapraiser", zapRaiserAmount.toString()))
                 }
@@ -1030,6 +1049,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         kind = 1,
                         mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(content).filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }.distinct(),
                         hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] },
+                        quotedEventIds = quotedRefs.map { it.eventId },
                         relayUrls = relayUrls.toList(),
                         tags = result.event.tags.map { it.toList() }
                     )

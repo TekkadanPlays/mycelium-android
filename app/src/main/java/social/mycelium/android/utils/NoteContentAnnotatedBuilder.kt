@@ -326,6 +326,7 @@ fun buildNoteContentWithInlinePreviews(
     profileCache: ProfileMetadataCache,
     consumedUrls: Set<String> = emptySet()
 ): List<NoteContentBlock> {
+    @Suppress("NAME_SHADOWING") val content = LinkSanitizer.cleanText(content)
     // Locate every URL with its character position
     val urlPositions = UrlDetector.findUrlsWithPositions(content) // List<Pair<IntRange, String>>
     val previewByUrl = urlPreviews.associateBy { it.url }

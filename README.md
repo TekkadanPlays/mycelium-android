@@ -13,6 +13,7 @@ A native Nostr protocol client for Android built with Jetpack Compose and Materi
 - **Relay Management** — Profile-based relay organization, NIP-66 relay discovery, per-relay health tracking with auto-blocking, slot utilization dashboard, and NIP-42 authentication
 - **Zaps** — NIP-57 lightning zaps via NIP-47 Wallet Connect or external wallet, with arc amount picker and per-note zap state persistence
 - **Publishing** — Full relay selection screen for all compose flows (notes, topics, replies, comments) with NIP-65 inbox/outbox awareness and optimistic local rendering
+- **Link Sanitization** — Automatic stripping of tracking parameters (utm, fbclid, gclid, si, igshid, etc.) from all URLs in both displayed and published content, powered by [PureLink](https://github.com/ahmedthebest31/PureLink-Android)
 - **Profiles** — Tabbed Notes/Replies/Media views, following/follower counts, banner and avatar display, follow/zap/DM actions
 - **Multi-Account** — Switch between Amber (NIP-55 external signer) and nsec accounts with per-account onboarding state
 
@@ -94,6 +95,7 @@ Mycelium builds on the work of several open-source projects:
 - **[Ktor](https://ktor.io)** — Kotlin async HTTP client and WebSocket engine
 - **[Coil](https://coil-kt.github.io/coil/)** — Image loading with GIF and video frame support
 - **[Media3 / ExoPlayer](https://developer.android.com/media/media3)** — Video and livestream playback
+- **[PureLink-Android](https://github.com/ahmedthebest31/PureLink-Android)** — URL sanitization logic for stripping tracking parameters from links (MIT)
 
 ## License
 

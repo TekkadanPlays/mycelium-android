@@ -1989,6 +1989,13 @@ fun NoteCard(
             ReactionsRepository.noteAnimations.collect { event ->
                 if (event.noteId == note.id) {
                     noteAnimState = event
+                    // Update reaction emoji on confirmed publish; revert on total failure
+                    if (event.type == ReactionsRepository.AnimationType.REACTION) {
+                        if (event.success && event.emoji.isNotBlank()) {
+                            reactionEmoji = event.emoji
+                        }
+                        // On failure, reactionEmoji stays as-was (null or previous emoji)
+                    }
                     kotlinx.coroutines.delay(if (event.success) 1500L else 1200L)
                     noteAnimState = null
                 }
@@ -2841,7 +2848,6 @@ fun NoteCard(
                     recentEmojis = recentEmojis,
                     onDismiss = { showReactionPicker = false },
                     onEmojiSelected = { emoji ->
-                        reactionEmoji = emoji
                         showReactionPicker = false
                         ReactionsRepository.recordEmoji(context, accountNpub, emoji)
                         recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)

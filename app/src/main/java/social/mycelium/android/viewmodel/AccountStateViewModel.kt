@@ -858,11 +858,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             .toSet()
         if (relaySet.isEmpty()) return "No outbox relays configured"
 
-        Log.d("AccountStateViewModel", "sendReaction: emoji=$emoji, noteId=${note.id.take(8)}, relays=${relaySet.size}")
+        // For reposts, note.id is a synthetic "repost:xyz" composite — use the real event ID
+        val targetNoteId = note.originalNoteId ?: note.id
+        Log.d("AccountStateViewModel", "sendReaction: emoji=$emoji, noteId=${targetNoteId.take(8)}, relays=${relaySet.size}")
 
         val targetPubkey = normalizeAuthorIdForCache(note.author.id)
         val targetEvent = Event(
-            id = note.id,
+            id = targetNoteId,
             pubKey = targetPubkey,
             createdAt = (note.timestamp / 1000),
             kind = note.kind,
@@ -963,6 +965,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * after signing, so it appears at the top of the feed before relay confirmation.
      */
     fun publishKind1(content: String, relayUrls: Set<String>, zapRaiserAmount: Long? = null): String? {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
         if (content.isBlank()) return "Note is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val pubkey = currentAccount.value?.toHexKey()
@@ -1007,6 +1010,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Returns null on success, or an error message.
      */
     fun publishLiveChatMessage(content: String, activityAddress: String, relayUrls: Set<String>) {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
         if (content.isBlank()) {
             _toastMessage.value = "Message is empty"
             return
@@ -1043,6 +1047,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Returns null on success, or an error message.
      */
     fun publishTopic(title: String, content: String, hashtags: List<String>, relayUrls: Set<String> = emptySet()): String? {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
@@ -1074,6 +1079,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         relayUrls: Set<String> = emptySet(),
         taggedPubkeys: List<String> = emptyList()
     ): String? {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
@@ -1102,6 +1108,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         relayUrls: Set<String> = emptySet(),
         taggedPubkeys: List<String> = emptyList()
     ): String? {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
         if (content.isBlank()) return "Reply is empty"
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
@@ -1557,6 +1564,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         hashtags: List<String>,
         relayUrls: Set<String> = emptySet()
     ) {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
         val signer = getSignerOrNull() ?: run {
             _toastMessage.value = signerUnavailableMessage()
             return

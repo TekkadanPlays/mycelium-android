@@ -486,8 +486,8 @@ class RelayConnectionStateMachine {
                     } else {
                         Filter(kinds = listOf(6), limit = GLOBAL_FEED_LIMIT, since = sevenDaysAgo)
                     }
-                    val filterKind11 = Filter(kinds = listOf(11), limit = 50, since = sevenDaysAgo)
-                    val filterKind1011 = Filter(kinds = listOf(1011), limit = 50, since = sevenDaysAgo)
+                    val filterKind11 = Filter(kinds = listOf(11), limit = 500)
+                    val filterKind1011 = Filter(kinds = listOf(1011), limit = 200)
                     val filterKind30311 = Filter(kinds = listOf(30311), limit = 20)
                     val countsIds = countsNoteIds?.takeIf { it.isNotEmpty() } ?: emptySet()
                     val countsFilters = if (countsIds.isNotEmpty()) {

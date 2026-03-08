@@ -639,7 +639,7 @@ class TopicsRepository private constructor(context: Context) {
         }
 
         // Don't clear cache - just fetch new/recent topics
-        fetchTopics(relayUrls, limit = 50, since = System.currentTimeMillis() / 1000 - 86400) // Last 24 hours
+        fetchTopics(relayUrls, limit = 200)
     }
 
     /**
@@ -647,7 +647,7 @@ class TopicsRepository private constructor(context: Context) {
      */
     suspend fun fullRefresh(relayUrls: List<String>? = null) {
         clearAllTopics()
-        fetchTopics(relayUrls, limit = 200, since = System.currentTimeMillis() / 1000 - 86400 * 7) // Last 7 days
+        fetchTopics(relayUrls, limit = 500)
     }
 
     /**

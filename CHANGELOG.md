@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.89-beta (2026-03-08)
+- **Reaction emoji on feed** — NIP-25 reactions made in thread view now display the correct emoji on the feed card (was showing heart instead of submitted emoji)
+- **Repost counts fix** — Reactions, zaps, and vote counts now display correctly on reposted notes (was using synthetic repost ID instead of real event ID)
+- **Vote loading speed** — Kind-30011 votes moved from Phase 2 (2.5s delay) to Phase 1 (immediate) in counts subscription; votes now appear alongside reply counts
+- **Own notes stay on feed** — User's own notes no longer vanish from the home feed when the follow filter re-runs
+- **Relay orbs accuracy** — Relay orbs only show confirmed relay locations (no more speculative NIP-65 outbox population)
+
 ## v0.4.87-beta (2026-03-02)
 - **Smart profile fetching** — Kind-0 profiles fetched from indexer relays first; missing profiles automatically retried on outbox relays
 - **Relay filtering** — Payment-required and auth-required relays skipped in subscription routing (no wasted slots)

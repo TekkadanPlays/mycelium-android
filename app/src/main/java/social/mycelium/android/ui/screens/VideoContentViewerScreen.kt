@@ -44,7 +44,8 @@ fun VideoContentViewerScreen(
     urls: List<String>,
     initialIndex: Int,
     onBackClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    instanceKey: String? = null
 ) {
     if (urls.isEmpty()) {
         LaunchedEffect(Unit) { onBackClick() }
@@ -75,6 +76,7 @@ fun VideoContentViewerScreen(
                     modifier = Modifier.fillMaxSize(),
                     autoPlay = true,
                     isVisible = isCurrentPage,
+                    instanceKey = instanceKey,
                     onExitFullscreen = onBackClick
                 )
             }

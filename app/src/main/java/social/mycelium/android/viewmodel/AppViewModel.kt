@@ -46,6 +46,8 @@ data class AppState(
     /** When non-null, navigate to video viewer with these URLs and initial index. */
     val videoViewerUrls: List<String>? = null,
     val videoViewerInitialIndex: Int = 0,
+    /** Instance key from the feed player so fullscreen reuses the same pooled ExoPlayer. */
+    val videoViewerInstanceKey: String? = null,
     val threadScrollPosition: Int = 0,
     val threadExpandedComments: Set<String> = emptySet(),
     val threadExpandedControls: String? = null,
@@ -112,12 +114,12 @@ class AppViewModel : ViewModel() {
         _appState.update { it.copy(replyToNote = note) }
     }
 
-    fun openVideoViewer(urls: List<String>, initialIndex: Int = 0) {
-        _appState.update { it.copy(videoViewerUrls = urls, videoViewerInitialIndex = initialIndex.coerceIn(0, urls.size - 1)) }
+    fun openVideoViewer(urls: List<String>, initialIndex: Int = 0, instanceKey: String? = null) {
+        _appState.update { it.copy(videoViewerUrls = urls, videoViewerInitialIndex = initialIndex.coerceIn(0, urls.size - 1), videoViewerInstanceKey = instanceKey) }
     }
 
     fun clearVideoViewer() {
-        _appState.update { it.copy(videoViewerUrls = null, videoViewerInitialIndex = 0) }
+        _appState.update { it.copy(videoViewerUrls = null, videoViewerInitialIndex = 0, videoViewerInstanceKey = null) }
     }
 
     /** Pending navigation from tapping an Android notification. */

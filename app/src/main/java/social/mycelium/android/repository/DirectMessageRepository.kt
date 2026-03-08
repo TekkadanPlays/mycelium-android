@@ -239,9 +239,20 @@ object DirectMessageRepository {
 
         scope.launch {
             try {
-                // Step 1: Decrypt gift wrap content using our key + gift wrap pubkey
+                // Step 1: Decrypt gift wrap content using our key + gift wrap pubkey.
+                // Use background-only decrypt for external signers to avoid launching
+                // Amber's visible activity for every incoming DM.
                 Log.d(TAG, "Step 1: Decrypting gift wrap ${event.id.take(8)} content(${event.content.length} chars) with wrapPubkey=${event.pubKey.take(8)}")
-                val sealJson = signer.nip44Decrypt(event.content, event.pubKey)
+                val sealJson = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
+                    signer.nip44DecryptBackgroundOnly(event.content, event.pubKey)
+                        ?: run {
+                            Log.d(TAG, "Background decrypt unavailable for gift wrap ${event.id.take(8)} — skipping")
+                            processedIds.remove(event.id) // Allow retry later
+                            return@launch
+                        }
+                } else {
+                    signer.nip44Decrypt(event.content, event.pubKey)
+                }
                 Log.d(TAG, "Step 1 result: sealJson length=${sealJson.length}, starts=${sealJson.take(60)}")
                 val seal = Event.fromJsonOrNull(sealJson)
                 if (seal == null || seal.kind != KIND_SEAL) {
@@ -251,7 +262,16 @@ object DirectMessageRepository {
 
                 // Step 2: Decrypt seal content using our key + seal pubkey (sender)
                 Log.d(TAG, "Step 2: Decrypting seal from ${seal.pubKey.take(8)}, content(${seal.content.length} chars)")
-                val rumorJson = signer.nip44Decrypt(seal.content, seal.pubKey)
+                val rumorJson = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
+                    signer.nip44DecryptBackgroundOnly(seal.content, seal.pubKey)
+                        ?: run {
+                            Log.d(TAG, "Background decrypt unavailable for seal from ${seal.pubKey.take(8)} — skipping")
+                            processedIds.remove(event.id)
+                            return@launch
+                        }
+                } else {
+                    signer.nip44Decrypt(seal.content, seal.pubKey)
+                }
                 Log.d(TAG, "Step 2 result: rumorJson length=${rumorJson.length}, starts=${rumorJson.take(60)}")
                 val rumor = Event.fromJsonOrNull(rumorJson)
                 if (rumor == null || rumor.kind != KIND_DM) {

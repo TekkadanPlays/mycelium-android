@@ -40,6 +40,8 @@ import social.mycelium.android.services.EventPublisher
 import social.mycelium.android.services.PublishResult
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.utils.ClientTagManager
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.delay
@@ -134,6 +136,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
     /** In-memory private key bytes for nsec accounts (hexPubkey -> privKey bytes). Used for reactions when not using Amber. */
     private val nsecPrivKeyByHex = mutableMapOf<String, ByteArray>()
+
+    /** True while restoreAccount() is running — suppresses the amber state collector from
+     *  calling handleNewAmberLogin() when amberSignerManager.switchToAccount() emits LoggedIn. */
+    private var restoreInProgress = false
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -251,15 +257,26 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
         }
 
-        // Observe Amber state changes for new logins
+        // Observe Amber state changes for new logins.
+        // Wait for account restore to finish first so the guard inside handleNewAmberLogin
+        // can detect that the account is already active and skip the redundant teardown.
+        // Without this, the collector fires before restoreAccount() completes (it's on
+        // Dispatchers.IO), sees LoggedIn with _accountsRestored=false, and triggers a full
+        // re-login — causing Amber to flicker on every app resume after process death.
         viewModelScope.launch {
+            // Suspend until the restore coroutine above has finished
+            _accountsRestored.filter { it }.first()
+
             amberSignerManager.state.collect { amberState ->
                 Log.d("AccountStateViewModel", "\uD83D\uDD10 Amber state changed: $amberState")
 
                 when (amberState) {
                     is AmberState.LoggedIn -> {
-                        // New login completed
-                        handleNewAmberLogin(amberState.pubKey)
+                        if (restoreInProgress) {
+                            Log.d("AccountStateViewModel", "Amber LoggedIn during restore — skipping handleNewAmberLogin")
+                        } else {
+                            handleNewAmberLogin(amberState.pubKey)
+                        }
                     }
                     is AmberState.Error -> {
                         _authState.update { it.copy(error = amberState.message, isLoading = false) }
@@ -337,15 +354,23 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             return
         }
 
-        // Reset onboarding gate — will be re-evaluated after account is set
-        _onboardingComplete.value = false
-
         // Convert hex to npub
         val npub = try {
             hexPubkey.hexToByteArray().toNpub()
         } catch (e: Exception) {
             Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to convert to npub: ${e.message}")
             return
+        }
+
+        // Pre-check onboarding status BEFORE resetting so we don't flash the sign-in flow
+        // when Amber authenticates a returning account that already completed onboarding.
+        val alreadyOnboarded = isOnboardingPersistedFor(npub) || run {
+            val outbox = relayStorageManager.loadOutboxRelays(hexPubkey)
+            val categories = relayStorageManager.loadCategories(hexPubkey)
+            outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }
+        }
+        if (!alreadyOnboarded) {
+            _onboardingComplete.value = false
         }
 
         // Full teardown FIRST — disconnect relays, clear notes, NIP-42 auth, NIP-65
@@ -442,10 +467,30 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
     /** Core account restore/switch logic. Suspend so init can await it directly. */
     private suspend fun restoreAccount(accountInfo: AccountInfo) {
+        restoreInProgress = true
+        try {
+            restoreAccountInternal(accountInfo)
+        } finally {
+            restoreInProgress = false
+        }
+    }
+
+    private suspend fun restoreAccountInternal(accountInfo: AccountInfo) {
         Log.d("AccountStateViewModel", "\uD83D\uDD04 Switching to account: ${accountInfo.toShortNpub()}")
 
-        // Reset onboarding gate — will be re-evaluated after account is set
-        _onboardingComplete.value = false
+        // Pre-check onboarding status BEFORE resetting so we don't flash the sign-in flow
+        // when switching to an account that's already completed onboarding.
+        val alreadyOnboarded = isOnboardingPersistedFor(accountInfo.npub) || run {
+            val hex = accountInfo.toHexKey()
+            if (hex != null) {
+                val outbox = relayStorageManager.loadOutboxRelays(hex)
+                val categories = relayStorageManager.loadCategories(hex)
+                outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }
+            } else false
+        }
+        if (!alreadyOnboarded) {
+            _onboardingComplete.value = false
+        }
 
         // Full teardown FIRST — disconnect relays, clear notes, NIP-42 auth, NIP-65
         // before updating currentAccount so navigation doesn't react to stale state.
@@ -469,6 +514,12 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val hexPubkey = updatedAccount.toHexKey()
 
         if (hexPubkey != null) {
+            // Switch Amber signer to this account's pubkey BEFORE anything calls getCurrentSigner().
+            // Without this, DM decrypt / NIP-42 auth / settings sync would use the previous account's key.
+            if (updatedAccount.isExternalSigner) {
+                amberSignerManager.switchToAccount(hexPubkey)
+            }
+
             val userProfile = UserProfile(
                 pubkey = hexPubkey,
                 displayName = updatedAccount.displayName ?: "Nostr User",
@@ -491,8 +542,19 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             NoteCountsRepository.currentUserPubkey = hexPubkey
             social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
 
-            // Set NIP-42 signer for new account
-            RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
+            // Set NIP-42 signer for new account.
+            // NOTE: Cannot use getCurrentSigner() here because _currentAccount.value
+            // is still null at this point (set later at line ~572). Resolve directly.
+            val nip42Signer: com.example.cybin.signer.NostrSigner? = when {
+                updatedAccount.isExternalSigner -> amberSignerManager.getCurrentSigner()
+                updatedAccount.hasPrivateKey -> {
+                    val pk = nsecPrivKeyByHex[hexPubkey]
+                    if (pk != null) com.example.cybin.signer.NostrSignerInternal(com.example.cybin.crypto.KeyPair(privKey = pk)) else null
+                }
+                else -> null
+            }
+            RelayConnectionStateMachine.getInstance().setNip42Signer(nip42Signer)
+            Log.d("AccountStateViewModel", "NIP-42 signer set: ${nip42Signer?.let { it::class.simpleName } ?: "null"}")
 
             Log.d("AccountStateViewModel", "\u2705 Switched to account: ${updatedAccount.getDisplayNameOrNpub()}")
         }
@@ -520,6 +582,29 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // navigation LaunchedEffects react to the new account.
         _currentAccount.value = updatedAccount
         _accountsRestored.value = true
+
+        // If ProfileMetadataCache already restored the user's kind-0 from disk
+        // (disk cache loads before _currentAccount is set), apply it now so the
+        // header shows the profile picture immediately instead of waiting for a
+        // network kind-0 fetch.
+        hexPubkey?.let { hex ->
+            ProfileMetadataCache.getInstance().getAuthor(hex)?.let { author ->
+                if (author.avatarUrl != null || author.displayName.isNotBlank()) {
+                    val existing = _authState.value.userProfile
+                    val updated = existing?.copy(
+                        displayName = author.displayName.ifBlank { existing.displayName },
+                        name = author.username.ifBlank { existing.name },
+                        picture = author.avatarUrl ?: existing.picture,
+                        about = author.about ?: existing.about,
+                        nip05 = author.nip05 ?: existing.nip05
+                    )
+                    if (updated != null && updated != existing) {
+                        _authState.update { it.copy(userProfile = updated) }
+                        Log.d("AccountStateViewModel", "\uD83D\uDD0D Applied disk-cached profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
+                    }
+                }
+            }
+        }
 
         // Sync settings via NIP-78 (kind 30078)
         updatedAccount.toHexKey()?.let { initSettingsSync(it) }
@@ -793,6 +878,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     ReactionsRepository.recordEmoji(getApplication(), account.npub, emoji)
                     // Optimistically inject reaction into counts so thread/feed UI updates immediately
                     NoteCountsRepository.injectOwnReaction(note.id, emoji, accountHex)
+                    // Also store under originalNoteId so feed reposts and thread views
+                    // both find the reaction (repost note.id = "repost:xyz", thread = "xyz")
+                    val origId = note.originalNoteId
+                    if (origId != null && origId != note.id) {
+                        ReactionsRepository.setLastReaction(origId, emoji)
+                        NoteCountsRepository.injectOwnReaction(origId, emoji, accountHex)
+                    }
                     // Emit success animation — NoteCard will flash the like glow
                     ReactionsRepository.emitAnimation(note.id, emoji, success = true)
                 }
@@ -1108,8 +1200,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         if (relaySet.isEmpty()) return "No relays configured"
         val newVote = VoteRepository.computeNewVote(noteId, direction)
         val accountNpub = _currentAccount.value?.npub
-        // Optimistic update
-        VoteRepository.setOwnVote(noteId, newVote)
+        val userPubkey = NoteCountsRepository.currentUserPubkey
+        // Optimistic update (pass pubkey so per-voter map uses same key as relay echo)
+        VoteRepository.setOwnVote(noteId, newVote, userPubkey)
         viewModelScope.launch {
             val result = EventPublisher.publish(
                 getApplication(), signer, relaySet,
@@ -1128,7 +1221,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 }
                 is PublishResult.Error -> {
                     // Revert optimistic vote on failure
-                    VoteRepository.setOwnVote(noteId, VoteRepository.computeNewVote(noteId, newVote))
+                    VoteRepository.setOwnVote(noteId, VoteRepository.computeNewVote(noteId, newVote), userPubkey)
                     _toastMessage.value = "Vote failed: ${result.message}"
                 }
             }
@@ -1327,12 +1420,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             Log.d("AccountStateViewModel", "👋 Logging out account: ${accountInfo.toShortNpub()}")
 
-            // Clear all relay data for this account
+            // Clear all relay data and persisted onboarding flag for this account.
+            // Onboarding flag must be cleared so re-login triggers the setup flow.
             val pubkey = accountInfo.toHexKey()
             if (pubkey != null) {
                 relayStorageManager.clearUserData(pubkey)
                 Log.d("AccountStateViewModel", "🗑️ Cleared relay data for account: ${accountInfo.toShortNpub()}")
             }
+            prefs.edit().remove(PREF_ONBOARDING_COMPLETE_PREFIX + accountInfo.npub).apply()
 
             // Remove from saved accounts
             val updatedAccounts = _savedAccounts.value.filter { it.npub != accountInfo.npub }
@@ -1478,6 +1573,87 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 is PublishResult.Error -> _toastMessage.value = "Reply failed: ${result.message}"
             }
         }
+    }
+
+    /**
+     * Publish the user's NIP-65 relay list (kind 10002) from the relay manager's
+     * inbox/outbox configuration. Sends to outbox + inbox + indexer relays for discoverability.
+     *
+     * Returns null on success, or an error message for synchronous failures.
+     */
+    fun publishNip65RelayList(): String? {
+        val account = _currentAccount.value ?: return "Sign in to publish relay list"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        val outboxRelays = relayStorageManager.loadOutboxRelays(accountHex).map { it.url }
+        val inboxRelays = relayStorageManager.loadInboxRelays(accountHex).map { it.url }
+
+        if (outboxRelays.isEmpty() && inboxRelays.isEmpty()) {
+            return "No outbox or inbox relays configured"
+        }
+
+        viewModelScope.launch {
+            try {
+                social.mycelium.android.repository.Nip65RelayListRepository.publishNip65(
+                    context = getApplication(),
+                    outboxUrls = outboxRelays,
+                    inboxUrls = inboxRelays,
+                    signer = signer
+                )
+                _toastMessage.value = "NIP-65 relay list published"
+            } catch (e: Exception) {
+                Log.e("AccountStateViewModel", "NIP-65 publish failed: ${e.message}", e)
+                _toastMessage.value = "Relay list publish failed: ${e.message?.take(80)}"
+            }
+        }
+        return null
+    }
+
+    /**
+     * Publish the user's indexer relay list (kind 10086) so other clients can discover
+     * which indexer relays this user prefers. Sends to outbox + indexer relays.
+     *
+     * Returns null on success, or an error message for synchronous failures.
+     */
+    fun publishIndexerRelayList(): String? {
+        val account = _currentAccount.value ?: return "Sign in to publish indexer list"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        val indexerRelays = relayStorageManager.loadIndexerRelays(accountHex).map { it.url }
+        if (indexerRelays.isEmpty()) {
+            return "No indexer relays configured"
+        }
+
+        val outboxRelays = relayStorageManager.loadOutboxRelays(accountHex)
+            .mapNotNull { RelayUrlNormalizer.normalizeOrNull(it.url)?.url }
+            .toSet()
+        val publishTo = (outboxRelays + indexerRelays).toSet()
+        if (publishTo.isEmpty()) return "No relays to publish to"
+
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                context = getApplication(),
+                signer = signer,
+                relayUrls = publishTo,
+                kind = 10086,
+                content = ""
+            ) {
+                indexerRelays.forEach { url -> add(arrayOf("relay", url)) }
+            }
+            when (result) {
+                is PublishResult.Success -> {
+                    Log.d("AccountStateViewModel", "Indexer relay list published: ${result.eventId.take(8)}")
+                    _toastMessage.value = "Indexer relay list published"
+                }
+                is PublishResult.Error -> {
+                    Log.e("AccountStateViewModel", "Indexer relay list publish failed: ${result.message}")
+                    _toastMessage.value = "Indexer list publish failed: ${result.message}"
+                }
+            }
+        }
+        return null
     }
 }
 

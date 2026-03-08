@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import com.example.cybin.relay.RelaySlotSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.data.DiscoveredRelay
 import social.mycelium.android.data.RelayInformation
@@ -84,7 +85,11 @@ fun RelayLogScreen(
     /** Navigate to dedicated relay users screen. */
     onOpenRelayUsers: (() -> Unit)? = null,
     /** Number of followed users who write/read to this relay per NIP-65. */
-    followedUserCount: Int = 0
+    followedUserCount: Int = 0,
+    /** Current user's hex pubkey — used to detect relay operator authority for NIP-86. */
+    currentUserPubkey: String? = null,
+    /** Signer for the current user — used to authenticate NIP-86 management API calls. */
+    currentSigner: com.example.cybin.signer.NostrSigner? = null
 ) {
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
@@ -132,6 +137,52 @@ fun RelayLogScreen(
     // ── Health data (live) ──
     val healthMap by RelayHealthTracker.healthByRelay.collectAsState()
     val health = healthMap[relayUrl]
+
+    // ── NIP-86 Relay Admin Detection ──
+    val operatorPubkeyRaw = relayInfo?.pubkey ?: discoveryData?.operatorPubkey
+    val isRelayOperator = remember(operatorPubkeyRaw, currentUserPubkey) {
+        operatorPubkeyRaw != null && currentUserPubkey != null &&
+            operatorPubkeyRaw.lowercase() == currentUserPubkey.lowercase()
+    }
+    var nip86Methods by remember { mutableStateOf<List<String>?>(null) }
+    var nip86Probing by remember { mutableStateOf(false) }
+    var nip86Error by remember { mutableStateOf<String?>(null) }
+    var nip86Toast by remember { mutableStateOf<String?>(null) }
+
+    // Probe NIP-86 supported methods when operator is detected
+    LaunchedEffect(isRelayOperator, currentSigner) {
+        if (isRelayOperator && currentSigner != null && nip86Methods == null && !nip86Probing) {
+            nip86Probing = true
+            val client = social.mycelium.android.services.Nip86Client(currentSigner)
+            when (val result = client.supportedMethods(relayUrl)) {
+                is social.mycelium.android.services.Nip86Client.Nip86Result.Success -> {
+                    nip86Methods = result.data
+                    nip86Error = null
+                }
+                is social.mycelium.android.services.Nip86Client.Nip86Result.Error -> {
+                    nip86Methods = emptyList()
+                    nip86Error = result.message
+                }
+            }
+            nip86Probing = false
+        }
+    }
+
+    // Re-fetch NIP-11 after NIP-86 admin change
+    var nip86RefreshTrigger by remember { mutableIntStateOf(0) }
+    LaunchedEffect(nip86RefreshTrigger) {
+        if (nip86RefreshTrigger > 0) {
+            nip11.getRelayInfo(relayUrl, forceRefresh = true)?.let { relayInfo = it }
+        }
+    }
+
+    // Show toast for NIP-86 feedback
+    LaunchedEffect(nip86Toast) {
+        if (nip86Toast != null) {
+            delay(3000)
+            nip86Toast = null
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -221,6 +272,79 @@ fun RelayLogScreen(
             // ── Relay Info Header ──
             item(key = "relay_header") {
                 RelayInfoHeader(relayUrl = relayUrl, info = relayInfo, discovery = discoveryData)
+            }
+
+            // ── NIP-86 Relay Admin Controls ──
+            val methods = nip86Methods
+            if (isRelayOperator && currentSigner != null && methods != null && methods.isNotEmpty()) {
+                item(key = "nip86_admin") {
+                    Nip86AdminCard(
+                        relayUrl = relayUrl,
+                        relayInfo = relayInfo,
+                        supportedMethods = methods,
+                        signer = currentSigner,
+                        onToast = { nip86Toast = it },
+                        onInfoUpdated = { nip86RefreshTrigger++ }
+                    )
+                }
+            } else if (isRelayOperator && nip86Probing) {
+                item(key = "nip86_probing") {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(12.dp))
+                            Text("Checking relay management API…", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            } else if (isRelayOperator && nip86Error != null) {
+                item(key = "nip86_error") {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.large,
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.3f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Outlined.AdminPanelSettings, null, Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Relay Operator", style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onTertiaryContainer)
+                                Text("NIP-86 management API unavailable", style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── NIP-86 Toast ──
+            if (nip86Toast != null) {
+                item(key = "nip86_toast") {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.primaryContainer
+                    ) {
+                        Text(
+                            text = nip86Toast ?: "",
+                            modifier = Modifier.padding(12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
             }
 
             // ── Connection Status ──
@@ -1484,6 +1608,250 @@ private val NIP_DESCRIPTIONS = mapOf(
     98 to "HTTP Auth",
     99 to "Classified listings"
 )
+
+// ── NIP-86 Admin Card ──
+
+@Composable
+private fun Nip86AdminCard(
+    relayUrl: String,
+    relayInfo: RelayInformation?,
+    supportedMethods: List<String>,
+    signer: com.example.cybin.signer.NostrSigner,
+    onToast: (String) -> Unit,
+    onInfoUpdated: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val client = remember(signer) { social.mycelium.android.services.Nip86Client(signer) }
+
+    val canChangeName = "changerelayname" in supportedMethods
+    val canChangeDesc = "changerelaydescription" in supportedMethods
+    val canChangeIcon = "changerelayicon" in supportedMethods
+
+    var editingName by remember { mutableStateOf(false) }
+    var editingDesc by remember { mutableStateOf(false) }
+    var editingIcon by remember { mutableStateOf(false) }
+    var nameText by remember(relayInfo?.name) { mutableStateOf(relayInfo?.name ?: "") }
+    var descText by remember(relayInfo?.description) { mutableStateOf(relayInfo?.description ?: "") }
+    var iconText by remember(relayInfo?.icon, relayInfo?.image) { mutableStateOf(relayInfo?.icon ?: relayInfo?.image ?: "") }
+    var isSaving by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.4f)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Outlined.AdminPanelSettings, null,
+                    Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Relay Administration",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "NIP-86 · ${supportedMethods.size} method${if (supportedMethods.size != 1) "s" else ""} available",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f)
+            )
+            Spacer(Modifier.height(12.dp))
+
+            // ── Relay Name ──
+            if (canChangeName) {
+                Nip86EditableField(
+                    label = "Name",
+                    value = nameText,
+                    onValueChange = { nameText = it },
+                    isEditing = editingName,
+                    onEditToggle = { editingName = !editingName },
+                    isSaving = isSaving,
+                    onSave = {
+                        isSaving = true
+                        scope.launch {
+                            when (val r = client.changeRelayName(relayUrl, nameText)) {
+                                is social.mycelium.android.services.Nip86Client.Nip86Result.Success -> {
+                                    onToast("Relay name updated")
+                                    editingName = false
+                                    onInfoUpdated()
+                                }
+                                is social.mycelium.android.services.Nip86Client.Nip86Result.Error -> onToast("Failed: ${r.message}")
+                            }
+                            isSaving = false
+                        }
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // ── Relay Description ──
+            if (canChangeDesc) {
+                Nip86EditableField(
+                    label = "Description",
+                    value = descText,
+                    onValueChange = { descText = it },
+                    isEditing = editingDesc,
+                    onEditToggle = { editingDesc = !editingDesc },
+                    isSaving = isSaving,
+                    singleLine = false,
+                    onSave = {
+                        isSaving = true
+                        scope.launch {
+                            when (val r = client.changeRelayDescription(relayUrl, descText)) {
+                                is social.mycelium.android.services.Nip86Client.Nip86Result.Success -> {
+                                    onToast("Relay description updated")
+                                    editingDesc = false
+                                    onInfoUpdated()
+                                }
+                                is social.mycelium.android.services.Nip86Client.Nip86Result.Error -> onToast("Failed: ${r.message}")
+                            }
+                            isSaving = false
+                        }
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // ── Relay Icon ──
+            if (canChangeIcon) {
+                Nip86EditableField(
+                    label = "Icon URL",
+                    value = iconText,
+                    onValueChange = { iconText = it },
+                    isEditing = editingIcon,
+                    onEditToggle = { editingIcon = !editingIcon },
+                    isSaving = isSaving,
+                    onSave = {
+                        isSaving = true
+                        scope.launch {
+                            when (val r = client.changeRelayIcon(relayUrl, iconText)) {
+                                is social.mycelium.android.services.Nip86Client.Nip86Result.Success -> {
+                                    onToast("Relay icon updated")
+                                    editingIcon = false
+                                    onInfoUpdated()
+                                }
+                                is social.mycelium.android.services.Nip86Client.Nip86Result.Error -> onToast("Failed: ${r.message}")
+                            }
+                            isSaving = false
+                        }
+                    }
+                )
+            }
+
+            // ── Other available methods (informational) ──
+            val otherMethods = supportedMethods.filter {
+                it !in setOf("supportedmethods", "changerelayname", "changerelaydescription", "changerelayicon")
+            }
+            if (otherMethods.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.15f))
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Additional capabilities",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.6f)
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier.horizontalScroll(rememberScrollState())
+                ) {
+                    otherMethods.forEach { method ->
+                        RelayDetailChip(
+                            method,
+                            MaterialTheme.colorScheme.surfaceContainerHighest,
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Nip86EditableField(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit,
+    isEditing: Boolean,
+    onEditToggle: () -> Unit,
+    isSaving: Boolean,
+    singleLine: Boolean = true,
+    onSave: () -> Unit
+) {
+    Column {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.7f),
+                modifier = Modifier.weight(1f)
+            )
+            if (!isEditing) {
+                IconButton(onClick = onEditToggle, modifier = Modifier.size(28.dp)) {
+                    Icon(Icons.Outlined.Edit, "Edit $label", Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.6f))
+                }
+            }
+        }
+        if (isEditing) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = onValueChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = singleLine,
+                maxLines = if (singleLine) 1 else 4,
+                textStyle = MaterialTheme.typography.bodySmall,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.3f)
+                )
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(
+                    onClick = onSave,
+                    enabled = !isSaving,
+                    modifier = Modifier.height(32.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text("Save", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                TextButton(
+                    onClick = onEditToggle,
+                    modifier = Modifier.height(32.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp)
+                ) {
+                    Text("Cancel", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        } else {
+            Text(
+                text = value.ifBlank { "(not set)" },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (value.isBlank()) MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.4f)
+                    else MaterialTheme.colorScheme.onTertiaryContainer,
+                maxLines = if (singleLine) 1 else 3,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
 
 private val COUNTRY_NAMES = mapOf(
     "AD" to "Andorra", "AE" to "UAE", "AF" to "Afghanistan", "AR" to "Argentina",

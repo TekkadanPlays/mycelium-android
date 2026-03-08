@@ -10,6 +10,7 @@ import com.example.cybin.signer.NostrSigner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -39,6 +40,13 @@ class Nip42AuthHandler(
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Sequential signing queue. AUTH challenges are sent here and processed one at a time,
+     * so at most one Amber foreground prompt is shown at a time (matching Amethyst's UX).
+     */
+    private data class AuthJob(val url: String, val challenge: String, val key: ChallengeKey, val signer: NostrSigner)
+    private val authQueue = Channel<AuthJob>(Channel.UNLIMITED)
 
     /** Current signer — set after login, cleared on logout. */
     @Volatile
@@ -88,6 +96,13 @@ class Nip42AuthHandler(
     init {
         stateMachine.relayPool.addListener(listener)
         Log.d(TAG, "NIP-42 auth handler registered")
+
+        // Process AUTH signing jobs sequentially — one Amber interaction at a time
+        scope.launch {
+            for (job in authQueue) {
+                processAuthJob(job)
+            }
+        }
     }
 
     /** Set the signer after login. NIP-42 auth will only work when a signer is available. */
@@ -128,6 +143,8 @@ class Nip42AuthHandler(
                 lastNoSignerLogMs[url] = now
             }
             updateStatus(url, AuthStatus.FAILED)
+            // Remove so re-challenge can be processed once signer becomes available
+            respondedChallenges.remove(key)
             return
         }
 
@@ -136,6 +153,8 @@ class Nip42AuthHandler(
         val cooldownUntil = authFailCooldownMs[url] ?: 0L
         if (now < cooldownUntil) {
             Log.d(TAG, "AUTH cooldown active for $url (${(cooldownUntil - now) / 1000}s remaining)")
+            // Remove so the challenge can be re-processed after cooldown expires
+            respondedChallenges.remove(key)
             return
         }
 
@@ -144,40 +163,51 @@ class Nip42AuthHandler(
 
         updateStatus(url, AuthStatus.AUTHENTICATING)
 
-        scope.launch {
-            try {
-                // Build kind-22242 auth event (NIP-42) using Cybin
-                val template = eventTemplate(22242, "", nowUnixSeconds()) {
-                    add(arrayOf("relay", url))
-                    add(arrayOf("challenge", challenge))
-                }
-                // Use background-only signing to avoid launching Amber's UI.
-                // AUTH is automatic — if background signing is unavailable, we
-                // silently skip rather than popping up Amber for user approval.
-                val signed = currentSigner.signBackgroundOnly(template)
-                if (signed == null) {
-                    Log.w(TAG, "Background signing unavailable for AUTH to $url — skipping (no Amber UI popup)")
-                    updateStatus(url, AuthStatus.FAILED)
-                    authFailCooldownMs[url] = System.currentTimeMillis() + AUTH_FAIL_COOLDOWN_MS
-                    return@launch
-                }
-                val authMsg = NostrProtocol.buildAuth(signed)
+        // Queue for sequential processing (one Amber prompt at a time)
+        authQueue.trySend(AuthJob(url, challenge, key, currentSigner))
+    }
 
-                pendingAuthEventIds.add(signed.id)
-                stateMachine.relayPool.sendToRelay(url, authMsg)
-                // Clear cooldown on successful send
-                authFailCooldownMs.remove(url)
-                Log.d(TAG, "AUTH response sent to $url (event ${signed.id.take(8)}…)")
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to sign/send AUTH for $url: ${e.message}", e)
-                updateStatus(url, AuthStatus.FAILED)
-                authFailCooldownMs[url] = System.currentTimeMillis() + AUTH_FAIL_COOLDOWN_MS
-                respondedChallenges.remove(key)
+    /**
+     * Process a single AUTH job. Called sequentially from the authQueue consumer.
+     * Uses signer.sign() which tries background (ContentProvider) first, then
+     * foreground (Amber activity) — matching Amethyst's approach.
+     */
+    private suspend fun processAuthJob(job: AuthJob) {
+        val (url, challenge, key, currentSigner) = job
+        try {
+            Log.d(TAG, "AUTH[$url] signer=${currentSigner::class.simpleName}")
+            val template = eventTemplate(22242, "", nowUnixSeconds()) {
+                add(arrayOf("relay", url))
+                add(arrayOf("challenge", challenge))
             }
+            // Background-only signing — AUTH must be invisible (no Amber UI popup).
+            // If kind-22242 isn't pre-approved in Amber, this returns null and we
+            // silently skip. The user can re-login to Amber to grant the permission.
+            val signed = currentSigner.signBackgroundOnly(template)
+            if (signed == null || signed.sig.isBlank()) {
+                Log.w(TAG, "AUTH[$url] Background signing unavailable — skipping (re-login to Amber to grant kind-22242)")
+                updateStatus(url, AuthStatus.FAILED)
+                respondedChallenges.remove(key)
+                // No cooldown — retry immediately on next challenge
+                return
+            }
+            Log.d(TAG, "AUTH[$url] signed id=${signed.id.take(8)} pubKey=${signed.pubKey.take(16)}")
+            val authMsg = NostrProtocol.buildAuth(signed)
+
+            pendingAuthEventIds.add(signed.id)
+            stateMachine.relayPool.sendToRelay(url, authMsg)
+            authFailCooldownMs.remove(url)
+            Log.d(TAG, "AUTH[$url] response sent (event ${signed.id.take(8)}\u2026) \u2014 waiting for OK")
+        } catch (e: Exception) {
+            Log.e(TAG, "AUTH[$url] Failed: ${e.message}", e)
+            updateStatus(url, AuthStatus.FAILED)
+            authFailCooldownMs[url] = System.currentTimeMillis() + AUTH_FAIL_COOLDOWN_MS
+            respondedChallenges.remove(key)
         }
     }
 
     private fun handleOkMessage(url: String, eventId: String, success: Boolean, message: String) {
+        Log.d(TAG, "OK[$url] eventId=${eventId.take(8)} success=$success msg='$message' isPendingAuth=${eventId in pendingAuthEventIds}")
         if (eventId !in pendingAuthEventIds) return
 
         pendingAuthEventIds.remove(eventId)
@@ -215,12 +245,16 @@ class Nip42AuthHandler(
 
     /**
      * Called when a relay responds with OK false + "auth-required" for a published event.
-     * Queues the event for replay after successful authentication.
+     * Queues the event for replay after successful authentication and clears
+     * any auth cooldown so the next AUTH challenge from this relay will be processed.
      */
     fun onAuthRequiredPublishFailure(relayUrl: String, eventId: String) {
         val (event, _) = recentEvents[eventId] ?: return
         pendingReplayEvents.getOrPut(relayUrl) { mutableListOf() }.add(event)
         Log.d(TAG, "Queued event ${eventId.take(8)}… for replay on $relayUrl after auth")
+        // Clear cooldown + consumed challenges so the next AUTH from this relay is processed
+        authFailCooldownMs.remove(relayUrl)
+        respondedChallenges.removeAll { it.relayUrl == relayUrl }
     }
 
     private fun updateStatus(relayUrl: String, status: AuthStatus) {

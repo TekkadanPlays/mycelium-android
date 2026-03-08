@@ -8,11 +8,13 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import java.util.concurrent.ConcurrentHashMap
 
@@ -121,7 +123,7 @@ object BadgeRepository {
                     profileBadgesEvents.add(event)
                 }
             }
-            delay(3000)
+            delay(2000)
             handle1.cancel()
 
             // Pick the latest kind 30008 event
@@ -146,8 +148,13 @@ object BadgeRepository {
 
             Log.d(TAG, "Found ${awardEventIds.size} badge award refs for ${pubkeyHex.take(8)}")
 
-            // ── Step 2: Fetch kind 8 award events ──────────────────────────
+            // ── Step 2+3: Fetch kind 8 awards and kind 30009 definitions concurrently ──
+            data class DefRef(val awardEventId: String, val awardedBy: String, val awardedAt: Long, val aTagValue: String)
             val awardEvents = ConcurrentHashMap<String, Event>()
+            val definitionEvents = ConcurrentHashMap<String, Event>()
+            val defRefs = java.util.Collections.synchronizedList(mutableListOf<DefRef>())
+
+            // Start award fetch
             val awardFilter = Filter(
                 ids = awardEventIds,
                 kinds = listOf(KIND_BADGE_AWARD),
@@ -158,32 +165,29 @@ object BadgeRepository {
             ) { event ->
                 if (event.kind == KIND_BADGE_AWARD) {
                     awardEvents[event.id] = event
+                    // Immediately extract definition refs so step 3 can start resolving
+                    val aTags = event.tags.filter { it.size >= 2 && it[0] == "a" }
+                    for (aTag in aTags) {
+                        val aVal = aTag[1]
+                        if (aVal.startsWith("$KIND_BADGE_DEFINITION:")) {
+                            defRefs.add(DefRef(event.id, event.pubKey, event.createdAt, aVal))
+                        }
+                    }
                 }
             }
-            delay(3000)
-            handle2.cancel()
+
+            // Wait for awards, then start definition fetch
+            delay(1500)
 
             if (awardEvents.isEmpty()) {
+                handle2.cancel()
                 Log.d(TAG, "No kind 8 award events fetched for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
             }
 
-            // Extract badge definition addresses from a-tags in award events
-            // a-tag format: ["a", "30009:<pubkey>:<d-tag>", ...]
-            data class DefRef(val awardEventId: String, val awardedBy: String, val awardedAt: Long, val aTagValue: String)
-            val defRefs = mutableListOf<DefRef>()
-            for (award in awardEvents.values) {
-                val aTags = award.tags.filter { it.size >= 2 && it[0] == "a" }
-                for (aTag in aTags) {
-                    val aVal = aTag[1]
-                    if (aVal.startsWith("$KIND_BADGE_DEFINITION:")) {
-                        defRefs.add(DefRef(award.id, award.pubKey, award.createdAt, aVal))
-                    }
-                }
-            }
-
             if (defRefs.isEmpty()) {
+                handle2.cancel()
                 Log.d(TAG, "No badge definition a-tags in award events for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
@@ -191,7 +195,6 @@ object BadgeRepository {
 
             Log.d(TAG, "Resolving ${defRefs.size} badge definitions for ${pubkeyHex.take(8)}")
 
-            // ── Step 3: Fetch kind 30009 definitions ───────────────────────
             // Parse a-tag values to build filters: "30009:<author>:<d-tag>"
             data class DefKey(val author: String, val dTag: String)
             val defKeys = defRefs.map { ref ->
@@ -199,8 +202,6 @@ object BadgeRepository {
                 DefKey(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
             }.filter { it.author.isNotBlank() && it.dTag.isNotBlank() }.distinct()
 
-            val definitionEvents = ConcurrentHashMap<String, Event>() // key = "author:d-tag"
-            // Batch fetch: all definition authors, filter by kind 30009
             val defAuthors = defKeys.map { it.author }.distinct()
             val defDTags = defKeys.map { it.dTag }.distinct()
             val defFilter = Filter(
@@ -215,14 +216,14 @@ object BadgeRepository {
                 if (event.kind == KIND_BADGE_DEFINITION) {
                     val dTagVal = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
                     val key = "${event.pubKey.lowercase()}:$dTagVal"
-                    // Keep latest version of each replaceable event
                     val existing = definitionEvents[key]
                     if (existing == null || event.createdAt > existing.createdAt) {
                         definitionEvents[key] = event
                     }
                 }
             }
-            delay(3000)
+            delay(1500)
+            handle2.cancel()
             handle3.cancel()
 
             // ── Step 4: Resolve and emit ────────────────────────────────────

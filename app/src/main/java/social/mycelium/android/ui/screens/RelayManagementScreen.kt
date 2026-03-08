@@ -521,6 +521,9 @@ fun RelayManagementScreen(
                             },
                             onOpenRelayLog = onOpenRelayLog, nip65Source = null, nip65CreatedAt = null,
                             emptyMessage = "Indexer relays for profile lookups and search.\nThese are discovered via NIP-66 during sign-in.",
+                            onPublishList = { accountStateViewModel.publishIndexerRelayList() },
+                            publishLabel = "Publish Indexer List (kind 10086)",
+                            publishDescription = "Share your preferred indexer relays with other clients",
                             modifier = Modifier.fillMaxSize())
                         RelayTab.OUTBOX -> {
                             // Compute Both / Outbox-only / Inbox-only groups
@@ -573,6 +576,7 @@ fun RelayManagementScreen(
                                 onOpenRelayLog = onOpenRelayLog,
                                 nip65Source = nip65Source, nip65CreatedAt = nip65CreatedAt,
                                 emptyMessage = "Outbox & inbox relays.\nThese should be found via indexer relays — but you can add some now if you'd like.",
+                                onPublishNip65 = { accountStateViewModel.publishNip65RelayList() },
                                 modifier = Modifier.fillMaxSize())
                         }
                     }
@@ -1464,6 +1468,9 @@ private fun RelayListTab(
     nip65CreatedAt: Long?,
     emptyMessage: String,
     showRwTags: Boolean = false,
+    onPublishList: (() -> Unit)? = null,
+    publishLabel: String = "Publish",
+    publishDescription: String = "",
     modifier: Modifier = Modifier
 ) {
     var addRelayUrl by remember { mutableStateOf("") }
@@ -1495,6 +1502,15 @@ private fun RelayListTab(
                 onRelayUrlChange = { addRelayUrl = it },
                 onAdd = { url -> onAddRelay(url); addRelayUrl = "" }
             )
+        }
+        if (onPublishList != null && relays.isNotEmpty()) {
+            item(key = "publish_list") {
+                PublishRelayListButton(
+                    label = publishLabel,
+                    description = publishDescription,
+                    onClick = onPublishList
+                )
+            }
         }
     }
 }
@@ -1957,6 +1973,7 @@ private fun OutboxSectionedTab(
     nip65Source: String?,
     nip65CreatedAt: Long?,
     emptyMessage: String,
+    onPublishNip65: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val allEmpty = bothRelays.isEmpty() && outboxOnlyRelays.isEmpty() && inboxOnlyRelays.isEmpty()
@@ -2042,6 +2059,15 @@ private fun OutboxSectionedTab(
                 onAdd = { url -> onAddRelay(url); addRelayUrl = "" }
             )
         }
+        if (onPublishNip65 != null && !allEmpty) {
+            item(key = "publish_nip65") {
+                PublishRelayListButton(
+                    label = "Publish Relay List (NIP-65)",
+                    description = "Broadcast your outbox/inbox config so others can find you",
+                    onClick = onPublishNip65
+                )
+            }
+        }
     }
 }
 
@@ -2099,6 +2125,48 @@ private fun DesignationOption(
                     fontWeight = FontWeight.Medium)
                 Text(description, style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PublishRelayListButton(
+    label: String,
+    description: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primaryContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Outlined.CloudUpload,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                )
             }
         }
     }

@@ -294,6 +294,27 @@ class AmberSignerManager(private val context: Context) {
         Log.d("AmberSignerManager", "👋 Logged out from Amber")
     }
 
+    /**
+     * Switch the Amber signer to a different account pubkey. Call during account switch
+     * so the content provider uses the correct pubkey for NIP-44 decrypt, NIP-42 auth, etc.
+     * No-op if the signer is already pointing at the requested pubkey.
+     */
+    fun switchToAccount(hexPubkey: String) {
+        val current = _state.value
+        if (current is AmberState.LoggedIn && current.pubKey == hexPubkey) return
+
+        val packageName = prefs.getString(PREF_PACKAGE_NAME, AMBER_PACKAGE_NAME) ?: AMBER_PACKAGE_NAME
+        val signer = NostrSignerExternal(
+            pubKey = hexPubkey,
+            packageName = packageName,
+            contentResolver = context.applicationContext.contentResolver
+        )
+        currentSigner = signer
+        _state.value = AmberState.LoggedIn(hexPubkey, signer)
+        saveAuthState(hexPubkey, packageName)
+        Log.d("AmberSignerManager", "Switched Amber signer to account: ${hexPubkey.take(16)}")
+    }
+
     fun getCurrentPubKey(): HexKey? {
         return when (val currentState = _state.value) {
             is AmberState.LoggedIn -> currentState.pubKey

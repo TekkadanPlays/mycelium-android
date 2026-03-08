@@ -23,7 +23,9 @@ object PipStreamManager {
         val title: String?,
         val hostName: String?,
         /** Non-null when PiP is for a regular video (not a live stream). */
-        val videoUrl: String? = null
+        val videoUrl: String? = null,
+        /** Instance key for the SharedPlayerPool entry this player came from. */
+        val instanceKey: String? = null
     ) {
         val isVideo: Boolean get() = videoUrl != null
     }
@@ -47,22 +49,25 @@ object PipStreamManager {
         Log.d(TAG, "PiP started for live stream $addressableId")
     }
 
-    /** Start PiP for a regular video URL. The player stays in SharedPlayerPool. */
-    fun startVideoPip(player: ExoPlayer, url: String) {
+    /** Start PiP for a regular video URL. Removes the player from SharedPlayerPool
+     *  so the feed can't reacquire the same ExoPlayer and steal the video surface. */
+    fun startVideoPip(player: ExoPlayer, url: String, instanceKey: String) {
         killCurrentPip()
-        _pipState.value = PipState(player, addressableId = url, title = null, hostName = null, videoUrl = url)
-        Log.d(TAG, "PiP started for video $url")
+        // Orphan the player from the pool — PipStreamManager now owns its lifecycle.
+        // This prevents FeedVideoPlayer.acquire() from getting the same instance back.
+        SharedPlayerPool.steal(instanceKey)
+        // Unmute for PiP — user expects audio from the mini-player.
+        // They can tap PiP → fullscreen → mute if they want silence.
+        player.volume = 1f
+        _pipState.value = PipState(player, addressableId = url, title = null, hostName = null, videoUrl = url, instanceKey = instanceKey)
+        Log.d(TAG, "PiP started for video $url (instance=$instanceKey)")
     }
 
     private fun killCurrentPip() {
         _pipState.value?.let { old ->
             Log.d(TAG, "Releasing previous PiP for ${old.addressableId}")
-            if (old.isVideo) {
-                // Video PiP: detach from pool (don't release — pool manages lifecycle)
-                old.videoUrl?.let { SharedPlayerPool.detach(it) }
-            } else {
-                old.player.release()
-            }
+            old.player.stop()
+            old.player.release()
         }
         _pipState.value = null
     }
@@ -71,6 +76,9 @@ object PipStreamManager {
     fun reclaimPlayer(): PipState? {
         val state = _pipState.value
         _pipState.value = null
+        // Clear the video surface so the PiP overlay's PlayerView releases the
+        // decoder output, allowing the next screen's PlayerView to attach cleanly.
+        state?.player?.clearVideoSurface()
         Log.d(TAG, "PiP reclaimed for ${state?.addressableId}")
         return state
     }
@@ -79,11 +87,8 @@ object PipStreamManager {
     fun dismiss() {
         _pipState.value?.let {
             Log.d(TAG, "PiP dismissed for ${it.addressableId}")
-            if (it.isVideo) {
-                it.videoUrl?.let { url -> SharedPlayerPool.release(url) }
-            } else {
-                it.player.release()
-            }
+            it.player.stop()
+            it.player.release()
         }
         _pipState.value = null
     }
@@ -128,6 +133,10 @@ object PipStreamManager {
     /** Check if PiP is active for a given video URL. */
     fun isVideoFor(url: String): Boolean =
         _pipState.value?.videoUrl == url
+
+    /** Check if PiP is active for a given instance key. */
+    fun isInstanceActive(instanceKey: String): Boolean =
+        _pipState.value?.instanceKey == instanceKey
 
     /** Whether PiP is currently active at all. */
     val isActive: Boolean get() = _pipState.value != null

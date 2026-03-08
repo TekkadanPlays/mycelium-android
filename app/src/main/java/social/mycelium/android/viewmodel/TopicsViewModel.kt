@@ -30,6 +30,8 @@ data class TopicsUiState(
     val topicsForSelectedHashtag: List<TopicNote> = emptyList(),
     val isLoading: Boolean = false,
     val isReceivingEvents: Boolean = false,
+    val isLoadingOlderTopics: Boolean = false,
+    val topicsPaginationExhausted: Boolean = false,
     val error: String? = null,
     val connectedRelays: List<String> = emptyList(),
     val sortOrder: HashtagSortOrder = HashtagSortOrder.MOST_TOPICS,
@@ -90,6 +92,16 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             repository.newTopicsCount.collect { count ->
                 _uiState.update { it.copy(newTopicsCount = count) }
+            }
+        }
+        viewModelScope.launch {
+            repository.isLoadingOlderTopics.collect { loading ->
+                _uiState.update { it.copy(isLoadingOlderTopics = loading) }
+            }
+        }
+        viewModelScope.launch {
+            repository.topicsPaginationExhausted.collect { exhausted ->
+                _uiState.update { it.copy(topicsPaginationExhausted = exhausted) }
             }
         }
     }
@@ -278,6 +290,15 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
     /**
      * Clear error message
      */
+    /**
+     * Load older topics via relay-side cursor pagination.
+     * Optionally filter by hashtag for the selected hashtag feed.
+     */
+    fun loadOlderTopics() {
+        val hashtag = _uiState.value.selectedHashtag
+        repository.loadOlderTopics(forHashtag = hashtag)
+    }
+
     fun clearError() {
         _uiState.update { it.copy(error = null) }
     }

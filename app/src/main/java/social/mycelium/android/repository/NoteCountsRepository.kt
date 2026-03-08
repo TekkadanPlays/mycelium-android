@@ -266,16 +266,21 @@ object NoteCountsRepository {
         )
     }
 
-    /** Phase 1 filters: kind-1 replies only (fast reply counts). */
+    /** Phase 1 filters: kind-1 replies + kind-30011 votes (fast counts).
+     *  Votes are lightweight (one per voter) and the primary engagement metric
+     *  for kind-11 topics, so they load alongside replies instead of waiting for Phase 2. */
     private fun buildPhase1Filters(noteIds: List<String>): List<Filter> {
         return listOf(
-            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500)
+            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
+            Filter(kinds = listOf(30011), tags = mapOf("e" to noteIds), limit = 500)
         )
     }
 
-    /** Phase 2 filters: kind-6 reposts + kind-7 reactions + kind-9735 zaps + kind-30011 votes (enrichment). */
+    /** Phase 2 filters: all kinds — replaces Phase 1, so must carry forward kind-1 + kind-30011
+     *  alongside the enrichment kinds (kind-6 reposts, kind-7 reactions, kind-9735 zaps). */
     private fun buildPhase2Filters(noteIds: List<String>): List<Filter> {
         return listOf(
+            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
             Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
             Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
             Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200),
@@ -490,7 +495,7 @@ object NoteCountsRepository {
         val noteId = event.tags.firstOrNull { it.getOrNull(0) == "e" }?.getOrNull(1) ?: return
         val voterPubkey = event.pubKey
         val voteValue = event.content.trim().toIntOrNull() ?: return
-        VoteRepository.applyVoteEvent(noteId, voterPubkey, voteValue, currentUserPubkey)
+        VoteRepository.applyVoteEvent(noteId, voterPubkey, voteValue, event.createdAt, currentUserPubkey)
     }
 
     /**

@@ -32,6 +32,11 @@ import java.util.concurrent.ConcurrentHashMap
  * - Voting -1 when already -1 → publishes 0 (cancel)
  * - Voting +1 when already -1 → publishes +1 (flip)
  * - Voting -1 when already +1 → publishes -1 (flip)
+ *
+ * Deduplication:
+ * - One vote per voter per note. Latest event (by created_at) wins.
+ * - Counts are recomputed from the per-voter map, never blindly incremented.
+ * - Optimistic own-vote uses Long.MAX_VALUE timestamp so relay echos don't regress it.
  */
 object VoteRepository {
 
@@ -39,6 +44,14 @@ object VoteRepository {
     const val KIND_VOTE = 30011
 
     private val json = Json { ignoreUnknownKeys = true }
+
+    // ── Per-voter vote tracking ──────────────────────────────────────────
+
+    /** Per-note, per-voter state: noteId → { voterPubkey → VoteEntry }. */
+    private val votesByNote = ConcurrentHashMap<String, ConcurrentHashMap<String, VoteEntry>>()
+
+    /** A single voter's vote on a single note. */
+    private data class VoteEntry(val value: Int, val createdAt: Long)
 
     // ── Own vote state ──────────────────────────────────────────────────
 
@@ -52,10 +65,6 @@ object VoteRepository {
     /** Aggregate vote score per note: noteId → net score (sum of all votes). */
     private val _scoreByNoteId = MutableStateFlow<Map<String, Int>>(emptyMap())
     val scoreByNoteId: StateFlow<Map<String, Int>> = _scoreByNoteId.asStateFlow()
-
-    /** Per-note vote counts: noteId → (upvotes, downvotes). */
-    private val upvotesByNoteId = ConcurrentHashMap<String, Int>()
-    private val downvotesByNoteId = ConcurrentHashMap<String, Int>()
 
     /** Reactive per-note upvote counts for Compose observation. */
     private val _upvotesByNoteId = MutableStateFlow<Map<String, Int>>(emptyMap())
@@ -72,22 +81,27 @@ object VoteRepository {
 
     /** Get the net score for a note (upvotes - downvotes). */
     fun getScore(noteId: String): Int {
-        val up = upvotesByNoteId[noteId] ?: 0
-        val down = downvotesByNoteId[noteId] ?: 0
+        val voters = votesByNote[noteId] ?: return 0
+        var up = 0; var down = 0
+        for (entry in voters.values) {
+            if (entry.value > 0) up++ else if (entry.value < 0) down++
+        }
         return up - down
     }
 
     /** Get total upvotes for a note. */
-    fun getUpvotes(noteId: String): Int = upvotesByNoteId[noteId] ?: 0
+    fun getUpvotes(noteId: String): Int =
+        votesByNote[noteId]?.values?.count { it.value > 0 } ?: 0
 
     /** Get total downvotes for a note. */
-    fun getDownvotes(noteId: String): Int = downvotesByNoteId[noteId] ?: 0
+    fun getDownvotes(noteId: String): Int =
+        votesByNote[noteId]?.values?.count { it.value < 0 } ?: 0
 
     /** Sum of upvotes across multiple notes (e.g. all notes in a topic). */
-    fun getTotalUpvotes(noteIds: List<String>): Int = noteIds.sumOf { upvotesByNoteId[it] ?: 0 }
+    fun getTotalUpvotes(noteIds: List<String>): Int = noteIds.sumOf { getUpvotes(it) }
 
     /** Sum of downvotes across multiple notes (e.g. all notes in a topic). */
-    fun getTotalDownvotes(noteIds: List<String>): Int = noteIds.sumOf { downvotesByNoteId[it] ?: 0 }
+    fun getTotalDownvotes(noteIds: List<String>): Int = noteIds.sumOf { getDownvotes(it) }
 
     /** Net score across multiple notes (total upvotes - total downvotes). */
     fun getTotalScore(noteIds: List<String>): Int = getTotalUpvotes(noteIds) - getTotalDownvotes(noteIds)
@@ -107,13 +121,18 @@ object VoteRepository {
     /**
      * Optimistically set the user's vote for a note.
      * Call this immediately when the user taps, before publish completes.
+     * Uses Long.MAX_VALUE as timestamp so relay echoes (with real timestamps) never regress it.
      */
-    fun setOwnVote(noteId: String, value: Int) {
+    fun setOwnVote(noteId: String, value: Int, currentUserPubkey: String? = null) {
         if (noteId.isBlank()) return
         val oldVote = ownVoteByNoteId[noteId] ?: 0
         ownVoteByNoteId[noteId] = value
-        // Adjust counts optimistically
-        adjustCounts(noteId, oldVote, value)
+
+        // Update per-voter map with optimistic timestamp
+        val pubkey = currentUserPubkey ?: "__self__"
+        val voters = votesByNote.getOrPut(noteId) { ConcurrentHashMap() }
+        voters[pubkey] = VoteEntry(value, Long.MAX_VALUE)
+
         emitScoreUpdate()
         Log.d(TAG, "Own vote set: ${noteId.take(8)} = $value (was $oldVote)")
     }
@@ -123,23 +142,28 @@ object VoteRepository {
     /**
      * Process an incoming kind-30011 vote event from a relay.
      * Called by NoteCountsRepository when it encounters a kind-30011 event.
+     *
+     * Deduplication: one vote per voter per note, latest created_at wins.
+     * If the voter already has a newer entry, the incoming event is ignored.
      */
-    fun applyVoteEvent(noteId: String, voterPubkey: String, voteValue: Int, currentUserPubkey: String?) {
+    fun applyVoteEvent(noteId: String, voterPubkey: String, voteValue: Int, createdAt: Long, currentUserPubkey: String?) {
         if (noteId.isBlank()) return
+
+        val voters = votesByNote.getOrPut(noteId) { ConcurrentHashMap() }
+        val existing = voters[voterPubkey]
+
+        // Only accept if newer (or no previous entry)
+        if (existing != null && existing.createdAt >= createdAt) {
+            return // Already have a newer or equal vote from this voter
+        }
+        voters[voterPubkey] = VoteEntry(voteValue, createdAt)
+
         // If this is our own vote, update ownVoteByNoteId
         if (voterPubkey == currentUserPubkey && currentUserPubkey != null) {
-            val existing = ownVoteByNoteId[noteId]
-            if (existing == null) {
-                ownVoteByNoteId[noteId] = voteValue
-                Log.d(TAG, "Populated own vote for ${noteId.take(8)}: $voteValue")
-            }
+            ownVoteByNoteId[noteId] = voteValue
+            Log.d(TAG, "Own vote from relay: ${noteId.take(8)} = $voteValue (ts=$createdAt)")
         }
-        // Aggregate counts (simple accumulation — latest per pubkey wins on relay)
-        when {
-            voteValue > 0 -> upvotesByNoteId[noteId] = (upvotesByNoteId[noteId] ?: 0) + 1
-            voteValue < 0 -> downvotesByNoteId[noteId] = (downvotesByNoteId[noteId] ?: 0) + 1
-            // voteValue == 0 means vote was cancelled, no count change
-        }
+
         emitScoreUpdate()
     }
 
@@ -148,8 +172,7 @@ object VoteRepository {
     /** Load persisted own votes for this account. Call on login/account switch. */
     fun loadForAccount(context: Context, accountNpub: String?) {
         ownVoteByNoteId.clear()
-        upvotesByNoteId.clear()
-        downvotesByNoteId.clear()
+        votesByNote.clear()
         if (accountNpub.isNullOrBlank()) return
         val prefs = context.getSharedPreferences("Mycelium_votes_$accountNpub", Context.MODE_PRIVATE)
         val stored = prefs.getString("own_votes", null) ?: return
@@ -171,28 +194,26 @@ object VoteRepository {
 
     // ── Internal helpers ────────────────────────────────────────────────
 
-    private fun adjustCounts(noteId: String, oldVote: Int, newVote: Int) {
-        // Remove old vote from counts
-        when {
-            oldVote > 0 -> upvotesByNoteId[noteId] = maxOf(0, (upvotesByNoteId[noteId] ?: 0) - 1)
-            oldVote < 0 -> downvotesByNoteId[noteId] = maxOf(0, (downvotesByNoteId[noteId] ?: 0) - 1)
-        }
-        // Add new vote to counts
-        when {
-            newVote > 0 -> upvotesByNoteId[noteId] = (upvotesByNoteId[noteId] ?: 0) + 1
-            newVote < 0 -> downvotesByNoteId[noteId] = (downvotesByNoteId[noteId] ?: 0) + 1
-        }
-    }
-
+    /** Recompute all reactive state from the per-voter maps. */
     private fun emitScoreUpdate() {
         val scores = mutableMapOf<String, Int>()
-        val allNoteIds = (upvotesByNoteId.keys + downvotesByNoteId.keys)
-        for (id in allNoteIds) {
-            scores[id] = (upvotesByNoteId[id] ?: 0) - (downvotesByNoteId[id] ?: 0)
+        val ups = mutableMapOf<String, Int>()
+        val downs = mutableMapOf<String, Int>()
+
+        for ((noteId, voters) in votesByNote) {
+            var up = 0; var down = 0
+            for (entry in voters.values) {
+                if (entry.value > 0) up++ else if (entry.value < 0) down++
+                // value == 0 is a cancel — counts as neither
+            }
+            scores[noteId] = up - down
+            if (up > 0) ups[noteId] = up
+            if (down > 0) downs[noteId] = down
         }
+
         _scoreByNoteId.value = scores
-        _upvotesByNoteId.value = upvotesByNoteId.toMap()
-        _downvotesByNoteId.value = downvotesByNoteId.toMap()
+        _upvotesByNoteId.value = ups
+        _downvotesByNoteId.value = downs
         _ownVotes.value = ownVoteByNoteId.toMap()
     }
 }

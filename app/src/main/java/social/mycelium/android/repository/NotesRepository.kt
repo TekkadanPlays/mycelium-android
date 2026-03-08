@@ -87,8 +87,9 @@ class NotesRepository private constructor() {
     @Volatile
     private var currentUserPubkey: String? = null
 
-    /** Pending kind-1 events waiting to be flushed into the notes list in a single batch. */
-    private val pendingKind1Events = ConcurrentLinkedQueue<Pair<Event, String>>()
+    /** Pending kind-1 events waiting to be flushed into the notes list in a single batch.
+     *  Triple: (event, relayUrl, isPagination) — isPagination=true bypasses the age gate. */
+    private val pendingKind1Events = ConcurrentLinkedQueue<Triple<Event, String, Boolean>>()
     /** Job that schedules the next batch flush (debounce timer). */
     private var kind1FlushJob: Job? = null
     /** Separate job for continuation flushes (not cancelled by new incoming events). */
@@ -110,7 +111,7 @@ class NotesRepository private constructor() {
         }
         relayStateMachine.registerKind1Handler { event, relayUrl ->
             // Lock-free: just enqueue and schedule a batched flush
-            pendingKind1Events.add(event to relayUrl)
+            pendingKind1Events.add(Triple(event, relayUrl, false))
             scheduleKind1Flush()
         }
         relayStateMachine.registerKind6Handler { event, relayUrl ->
@@ -120,7 +121,7 @@ class NotesRepository private constructor() {
         }
         // Wire outbox feed events into the same ingestion pipeline
         outboxFeedManager.onNoteReceived = { event, relayUrl ->
-            pendingKind1Events.add(event to relayUrl)
+            pendingKind1Events.add(Triple(event, relayUrl, false))
             scheduleKind1Flush()
         }
         startProfileUpdateCoalescer()
@@ -163,7 +164,7 @@ class NotesRepository private constructor() {
      * notes list with a single sort + emit. This replaces the old per-event mutex+sort pattern.
      */
     private suspend fun flushKind1Events() {
-        val batch = mutableListOf<Pair<Event, String>>()
+        val batch = mutableListOf<Triple<Event, String, Boolean>>()
         var drained = 0
         while (drained < MAX_FLUSH_CHUNK_SIZE) {
             val item = pendingKind1Events.poll() ?: break
@@ -187,8 +188,25 @@ class NotesRepository private constructor() {
                 synchronized(pendingNotesLock) { _pendingNewNotes.forEach { it.originalNoteId?.let(::add) } }
             }
 
-            for ((event, relayUrl) in batch) {
+            // Age gate: events from the main subscription older than the feed floor are
+            // silently dropped. Only loadOlderNotes (isPagination=true) may introduce older
+            // notes. This prevents relays that ignore `since` from contaminating the feed
+            // with ancient notes that corrupt the pagination cursor.
+            val ageFloorMs = feedAgeFloorMs
+            var ageGateDropped = 0
+
+            for ((event, relayUrl, isPagination) in batch) {
                 if (event.kind != 1) continue
+
+                // Age gate: drop ancient events from the live subscription
+                if (!isPagination && ageFloorMs > 0L) {
+                    val eventMs = event.createdAt * 1000L
+                    if (eventMs < ageFloorMs) {
+                        ageGateDropped++
+                        continue
+                    }
+                }
+
                 if (BuildConfig.DEBUG) logIncomingEventSummary(event, relayUrl)
                 val note = convertEventToNote(event, relayUrl)
 
@@ -322,7 +340,10 @@ class NotesRepository private constructor() {
             }
 
             if (BuildConfig.DEBUG && batch.size > 5) {
-                Log.d(TAG, "Flushed ${batch.size} events: ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges")
+                Log.d(TAG, "Flushed ${batch.size} events: ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges${if (ageGateDropped > 0) ", $ageGateDropped age-gated" else ""}")
+            }
+            if (ageGateDropped > 0) {
+                Log.d(TAG, "Age gate dropped $ageGateDropped events older than ${fmtMs(ageFloorMs)}")
             }
 
             // If more events remain after this chunk, schedule a continuation flush
@@ -359,6 +380,8 @@ class NotesRepository private constructor() {
             }
         }
     }
+
+
 
     /**
      * Set the current user's public key. Used to identify own events for immediate display.
@@ -469,6 +492,11 @@ class NotesRepository private constructor() {
     private var feedCutoffTimestampMs: Long = 0L
     private var latestNoteTimestampAtOpen: Long = 0L
     private var initialLoadComplete: Boolean = false
+    /** Hard age floor (ms): events from the main subscription older than this are dropped.
+     *  Initialized to (now - FEED_SINCE_DAYS) when subscribing. loadOlderNotes lowers this
+     *  as the user paginates so older pages can come through. Prevents relays that ignore
+     *  the `since` filter from contaminating the feed with ancient notes. */
+    @Volatile private var feedAgeFloorMs: Long = 0L
     /** Timestamp when the first note was auto-displayed; notes keep auto-applying for a grace period after this. */
     private var firstNoteDisplayedAtMs: Long = 0L
     private val INITIAL_FEED_GRACE_MS = 5_000L
@@ -512,11 +540,15 @@ class NotesRepository private constructor() {
         private const val FEED_LAST_MODE_KEY = "feed_last_mode"
         private const val FEED_CACHE_MAX = 200
         /** Max time to wait for older notes before declaring done. */
-        private const val OLDER_NOTES_TIMEOUT_MS = 8_000L
+        private const val OLDER_NOTES_TIMEOUT_MS = 12_000L
         /** After last event arrives, wait this long for more before declaring done. */
-        private const val OLDER_NOTES_SETTLE_MS = 1_200L
+        private const val OLDER_NOTES_SETTLE_MS = 1_500L
         /** Max cursor jump per page (14 days). Prevents a single outlier from skipping weeks. */
         private const val MAX_CURSOR_JUMP_MS = 14L * 86_400_000L
+        /** Number of events to request per pagination page (limit param). */
+        private const val PAGINATION_PAGE_SIZE = 500
+        /** How far back (days) the age floor is lowered per pagination page. */
+        private const val PAGINATION_PAGE_DAYS = 30L
 
         @Volatile
         private var instance: NotesRepository? = null
@@ -819,7 +851,11 @@ class NotesRepository private constructor() {
             val followEnabled = followFilterEnabled
             if (followEnabled) {
                 if (currentFollowFilter != null && currentFollowFilter.isNotEmpty()) {
-                    filtered = filtered.filter { note -> normalizeAuthorIdForCache(note.author.id) in currentFollowFilter }
+                    val ownPk = currentUserPubkey
+                    filtered = filtered.filter { note ->
+                        val authorKey = normalizeAuthorIdForCache(note.author.id)
+                        authorKey == ownPk || authorKey in currentFollowFilter
+                    }
                 } else if (_displayedNotes.value.isNotEmpty()) {
                     // Follow filter temporarily null but feed was populated — keep previous notes
                     // (ingestion filter already prevents non-followed notes in Following mode)
@@ -843,16 +879,20 @@ class NotesRepository private constructor() {
             countsSubscriptionJob = scope.launch {
                 delay(600)
                 val notes = _displayedNotes.value.take(150)
-                val noteRelayMap = notes.associate { note ->
-                    note.id to (note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) })
-                }.toMutableMap()
-                // Also subscribe quoted event IDs so their counts appear in the feed
-                notes.forEach { note ->
-                    val parentRelays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                val noteRelayMap = mutableMapOf<String, List<String>>()
+                for (note in notes) {
+                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    // For reposts, subscribe the original note ID (the real event ID relays know)
+                    // instead of the synthetic "repost:xyz" composite ID.
+                    val effectiveId = note.originalNoteId ?: note.id
+                    if (effectiveId !in noteRelayMap) {
+                        noteRelayMap[effectiveId] = relays
+                    }
+                    // Also subscribe quoted event IDs so their counts appear in the feed
                     note.quotedEventIds.forEach { qid ->
                         if (qid !in noteRelayMap) {
                             val cached = QuotedNoteCache.getCached(qid)
-                            noteRelayMap[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { parentRelays }
+                            noteRelayMap[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { relays }
                         }
                     }
                 }
@@ -1003,6 +1043,13 @@ class NotesRepository private constructor() {
         // Cutoff set exactly when we start the subscription: only notes older than this moment are shown in the feed
         feedCutoffTimestampMs = System.currentTimeMillis()
         latestNoteTimestampAtOpen = feedCutoffTimestampMs
+        // Age floor: drop events from the main subscription older than the subscription's since window.
+        // This is the hard boundary — relays that ignore `since` can't contaminate the feed.
+        feedAgeFloorMs = System.currentTimeMillis() - FEED_SINCE_DAYS.toLong() * 86_400_000L
+        paginationCursorMs = 0L
+        paginationExtraCap = 0
+        _paginationExhausted.value = false
+        _timeGapIndex.value = null
 
         try {
             applySubscriptionToStateMachine(subscriptionRelays)
@@ -1098,20 +1145,30 @@ class NotesRepository private constructor() {
 
         _isLoadingOlder.value = true
         olderNotesHandle?.cancel()
-        paginationExtraCap += 200
+        paginationExtraCap += PAGINATION_PAGE_SIZE
         val beforeCount = currentNotes.size
-        Log.d(TAG, "Loading older notes: until=${java.text.SimpleDateFormat("MM/dd HH:mm", java.util.Locale.US).format(cursorMs)} cursor=${cursorMs} from ${relays.size} relays")
-        // Dump relay slot state so we can diagnose starvation
+        Log.d(TAG, "loadOlderNotes: until=${fmtMs(cursorMs)} cursor=$cursorMs ageFloor=${fmtMs(feedAgeFloorMs)} from ${relays.size} relays")
         relayStateMachine.dumpRelaySlots("loadOlder")
 
+        // Lower the age floor so pagination events pass the age gate in flushKind1Events.
+        // Set it far enough back that this page's events will be accepted.
+        // Each page can reach back at most PAGINATION_PAGE_DAYS beyond the current cursor.
+        val pageFloorMs = cursorMs - PAGINATION_PAGE_DAYS * 86_400_000L
+        if (pageFloorMs < feedAgeFloorMs) {
+            feedAgeFloorMs = pageFloorMs
+            Log.d(TAG, "Age floor lowered to ${fmtMs(feedAgeFloorMs)} for pagination")
+        }
+
         val filter = if (authors != null) {
-            Filter(kinds = listOf(1), authors = authors, limit = 200, until = untilSec)
+            Filter(kinds = listOf(1), authors = authors, limit = PAGINATION_PAGE_SIZE, until = untilSec)
         } else {
-            Filter(kinds = listOf(1), limit = 200, until = untilSec)
+            Filter(kinds = listOf(1), limit = PAGINATION_PAGE_SIZE, until = untilSec)
         }
 
         val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
         val eventCount = java.util.concurrent.atomic.AtomicInteger(0)
+        // Track the oldest event timestamp received so we know the exact next cursor
+        val oldestReceivedMs = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
         olderNotesHandle = relayStateMachine.requestTemporarySubscriptionWithRelay(
             relayUrls = relays,
             filters = listOf(filter),
@@ -1120,9 +1177,9 @@ class NotesRepository private constructor() {
             if (event.kind == 1) {
                 lastEventAt.set(System.currentTimeMillis())
                 eventCount.incrementAndGet()
-                // Cursor advancement handled by advancePaginationCursor in flushKind1Events
-                // (outlier-resistant, 5th-percentile, capped jump)
-                pendingKind1Events.add(event to relayUrl)
+                val eventMs = event.createdAt * 1000L
+                oldestReceivedMs.updateAndGet { prev -> minOf(prev, eventMs) }
+                pendingKind1Events.add(Triple(event, relayUrl, true))
                 scheduleKind1Flush()
             }
         }
@@ -1140,26 +1197,34 @@ class NotesRepository private constructor() {
             }
             olderNotesHandle?.cancel()
             olderNotesHandle = null
+
+            // Flush any remaining buffered events from this page
+            kind1FlushJob?.cancel()
+            flushKind1Events()
+
             val newSize = _notes.value.size
             val added = newSize - beforeCount
-            // If pagination produced very few new notes (< 10), the feed has reached
-            // the gap between the main feed and outlier notes. Stop paginating to avoid
-            // an infinite loop where notes keep inserting above outliers.
-            if (added >= 10) {
-                // Check for temporal discontinuity before declaring exhaustion
-                val gap = social.mycelium.android.ui.screens.detectTimeGapIndex(
-                    _notes.value, thresholdMs = 14L * 24 * 3600 * 1000
-                )
-                if (gap != null) {
-                    _timeGapIndex.value = gap
-                    Log.d(TAG, "Time gap detected at index $gap after pagination")
+            val received = eventCount.get()
+
+            // Update cursor from the oldest event we actually received (precise, no inference)
+            val oldest = oldestReceivedMs.get()
+            if (oldest < Long.MAX_VALUE && oldest > 0) {
+                if (paginationCursorMs == 0L || oldest < paginationCursorMs) {
+                    Log.d(TAG, "Pagination cursor: ${fmtMs(paginationCursorMs)} → ${fmtMs(oldest)} (from received events)")
+                    paginationCursorMs = oldest
                 }
-            } else {
+            }
+
+            // Exhaustion: the relay returned 0 raw events, meaning there truly is nothing
+            // older in this relay set. We do NOT exhaust based on deduped additions —
+            // receiving 200 dupes just means we already had them, not that the relay is empty.
+            if (received == 0) {
                 _paginationExhausted.value = true
-                Log.d(TAG, "Older notes: pagination exhausted (only $added new notes from ${eventCount.get()} received)")
+                Log.d(TAG, "Pagination exhausted: relay returned 0 events")
+            } else {
+                Log.d(TAG, "Older notes loaded: +$added new (${received} received), feed=$newSize, cursor=${fmtMs(paginationCursorMs)}")
             }
             _isLoadingOlder.value = false
-            Log.d(TAG, "Older notes loaded: feed now has $newSize notes (was $beforeCount, +$added, received=${eventCount.get()})")
         }
     }
 
@@ -1218,7 +1283,7 @@ class NotesRepository private constructor() {
                 limit = limit
             )
             relayStateMachine.requestFeedChange(relayUrls, filter) { event ->
-                pendingKind1Events.add(event to "")
+                pendingKind1Events.add(Triple(event, "", false))
                 scheduleKind1Flush()
             }
             connectedRelays = relayUrls
@@ -1877,18 +1942,12 @@ class NotesRepository private constructor() {
         val isReply = Nip10ReplyDetector.isReply(event)
         val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(event) else null
         val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(event) else null
-        // Enrich relay URLs with author's NIP-65 outbox (write) relays from cache
-        val deliveryRelays: List<String> = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList()
-        val outboxRelays = Nip65RelayListRepository.getCachedOutboxRelays(pubkeyHex)
-        val relayUrls: List<String> = if (!outboxRelays.isNullOrEmpty()) {
-            (deliveryRelays + outboxRelays).distinct()
-        } else {
-            // Trigger async fetch so next time we have the data
-            if (profileRelayUrls.isNotEmpty()) {
-                Nip65RelayListRepository.fetchOutboxRelaysForAuthor(pubkeyHex, profileRelayUrls)
-            }
-            deliveryRelays
-        }
+        // Relay orbs only show confirmed locations: the relay we actually received
+        // this event from. Additional relays are added as the same event arrives from
+        // other relays (flushKind1Events merge) or when we publish and a relay OK's
+        // (mergePublishRelayUrl). NIP-65 outbox relays are NOT included — they are
+        // the author's *claimed* publish destinations, not confirmed storage locations.
+        val relayUrls: List<String> = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList()
         
         // Convert event tags to List<List<String>> for NIP-22 I tags and better e tag tracking
         val tags = event.tags.map { it.toList() }
@@ -1937,6 +1996,8 @@ class NotesRepository private constructor() {
         paginationExtraCap = 0
         _paginationExhausted.value = false
         _feedSessionState.value = FeedSessionState.Idle
+        // Reset subscription guard so ensureSubscriptionToNotes re-applies after account switch
+        lastEnsuredRelaySet = emptySet()
         // Also clear on-disk feed cache so old account's notes don't leak on next cold start
         appContext?.let { ctx ->
             ctx.getSharedPreferences(FEED_CACHE_PREFS, Context.MODE_PRIVATE)

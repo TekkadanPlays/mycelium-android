@@ -19,6 +19,27 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.89",
+      "versionCode": 26,
+      "releaseDate": "2026-03-08",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.89/Mycelium-v0.4.89.apk",
+      "changelog": "Reaction emoji on feed, repost counts fix, faster vote loading, own notes stay on feed, relay orb accuracy.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "NIP-25 reactions from thread now show correct emoji on feed cards",
+        "Repost notes display reaction/zap/vote counts from the original note",
+        "Kind-30011 votes load immediately (moved from Phase 2 to Phase 1)",
+        "Own notes no longer vanish from feed when follow filter re-runs",
+        "Relay orbs only show confirmed relay locations"
+      ]
+    },
+    {
       "version": "0.4.87",
       "versionCode": 24,
       "releaseDate": "2026-03-02",

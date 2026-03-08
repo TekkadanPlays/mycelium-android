@@ -460,6 +460,7 @@ private fun DashboardFeedContent(
     onMediaPageChanged: (String, Int) -> Unit,
     onShowZapConfig: () -> Unit,
     onSeeAllReactions: (Note) -> Unit,
+    isDashboardVisible: Boolean = true,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -560,9 +561,10 @@ private fun DashboardFeedContent(
                 val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
                 lastVisible to totalItems
             }.collect { (lastVisible, totalItems) ->
-                // Only load older notes when the user has actually scrolled near the bottom.
-                // paginationExhausted stops the loop when notes keep inserting above outliers.
-                if (totalItems > 5 && lastVisible >= totalItems - 5 && !isLoadingOlder && !paginationExhausted) {
+                // Pre-fetch aggressively: trigger 200 items before the bottom so
+                // the user effectively never sees the end of the feed. Events are
+                // cheap JSON; rendering is the bottleneck, not data.
+                if (totalItems > 200 && lastVisible >= totalItems - 200 && !isLoadingOlder && !paginationExhausted) {
                     notesRepo.loadOlderNotes()
                 }
             }
@@ -614,7 +616,7 @@ private fun DashboardFeedContent(
                 key = { it.id },
                 contentType = { "note_card" }
             ) { note ->
-                val counts = countsByNoteId[note.id]
+                val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                 NoteCard(
                     note = note,
                     onLike = { noteId -> viewModel.toggleLike(noteId) },
@@ -712,13 +714,15 @@ private fun DashboardFeedContent(
                     showHashtagsSection = false,
                     initialMediaPage = mediaPageForNote(note.id),
                     onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
-                    isVisible = note.id in visibleKeys,
+                    isVisible = isDashboardVisible && note.id in visibleKeys,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
 
             // ═══ Load older notes indicator ═══
-            if (isLoadingOlder) {
+            // Always show a bottom item when feed has content and pagination isn't exhausted.
+            // This ensures the user always sees feedback: spinner when loading, placeholder when idle.
+            if (!paginationExhausted && sortedNotes.isNotEmpty()) {
                 item(key = "loading_older") {
                     Box(
                         modifier = Modifier
@@ -726,19 +730,28 @@ private fun DashboardFeedContent(
                             .padding(vertical = 24.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
+                        if (isLoadingOlder) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Loading older notes…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        } else {
+                            // Idle placeholder — keeps scroll area so pre-fetch triggers
                             CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            Text(
-                                "Loading older notes…",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 1.5.dp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
                             )
                         }
                     }
@@ -1224,7 +1237,7 @@ fun DashboardScreen(
                 HomeSortOrder.Latest -> deduped.sortedByDescending { it.timestamp }
                 HomeSortOrder.Popular -> deduped.sortedWith(
                     compareByDescending<Note> { note ->
-                        val counts = countsByNoteId[note.id]
+                        val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                         val reactionCount = counts?.reactionAuthors?.values?.sumOf { it.size } ?: 0
                         val zapCount = counts?.zapAuthors?.size ?: 0
                         val replyCount = replyCountByNoteId[note.id] ?: 0
@@ -1646,6 +1659,7 @@ fun DashboardScreen(
                 onMediaPageChanged = { noteId, page -> onMediaPageChanged(noteId, page) },
                 onShowZapConfig = { onNavigateToZapSettings() },
                 onSeeAllReactions = onSeeAllReactions,
+                isDashboardVisible = isDashboardVisible,
             )
         }
     }

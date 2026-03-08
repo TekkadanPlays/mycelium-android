@@ -20,6 +20,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import com.example.cybin.relay.SubscriptionPriority
+import social.mycelium.android.relay.TemporarySubscriptionHandle
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -164,6 +168,17 @@ class TopicsRepository private constructor(context: Context) {
     /** Dirty flag: set when topics change, cleared after save. Prevents pointless periodic saves. */
     @Volatile private var cacheDirty = false
 
+    // ── Pagination state for loading older topics ──────────────────────────
+    private val _isLoadingOlderTopics = MutableStateFlow(false)
+    val isLoadingOlderTopics: StateFlow<Boolean> = _isLoadingOlderTopics.asStateFlow()
+
+    private val _topicsPaginationExhausted = MutableStateFlow(false)
+    val topicsPaginationExhausted: StateFlow<Boolean> = _topicsPaginationExhausted.asStateFlow()
+
+    /** Cursor for pagination: oldest topic timestamp (ms) seen so far. */
+    @Volatile private var topicsPaginationCursorMs: Long = 0L
+    private var olderTopicsHandle: TemporarySubscriptionHandle? = null
+
     companion object {
         private const val TAG = "TopicsRepository"
         private const val TOPIC_FETCH_TIMEOUT_MS = 2000L // Clear loading after 2s if no events
@@ -172,6 +187,12 @@ class TopicsRepository private constructor(context: Context) {
         private const val CACHE_KEY = "cached_topics"
         private const val CACHE_SIZE = 1000
         private const val CACHE_SAVE_INTERVAL = 30000L // Save to disk every 30 seconds, not on every event
+        /** Page size for loading older topics. Kind-11 is sparse so we ask for a lot. */
+        private const val TOPICS_PAGE_SIZE = 200
+        /** Timeout for older topics page. */
+        private const val TOPICS_OLDER_TIMEOUT_MS = 12000L
+        /** Settle time for older topics page. */
+        private const val TOPICS_OLDER_SETTLE_MS = 2000L
 
         @Volatile
         private var instance: TopicsRepository? = null
@@ -294,6 +315,7 @@ class TopicsRepository private constructor(context: Context) {
         followFilterEnabled = false
         followFilter = null
         synchronized(pendingTopicsLock) { _pendingNewTopics.clear(); _newTopicsCount.value = 0 }
+        resetTopicsPagination()
         clearAllTopics()
     }
 
@@ -597,6 +619,7 @@ class TopicsRepository private constructor(context: Context) {
         _hashtagStats.value = emptyList()
         _topicsByHashtag.value = emptyMap()
         synchronized(pendingTopicsLock) { _pendingNewTopics.clear(); _newTopicsCount.value = 0 }
+        resetTopicsPagination()
 
         scope.launch {
             clearPersistentCache()
@@ -623,6 +646,100 @@ class TopicsRepository private constructor(context: Context) {
     suspend fun fullRefresh(relayUrls: List<String>? = null) {
         clearAllTopics()
         fetchTopics(relayUrls, limit = 200, since = System.currentTimeMillis() / 1000 - 86400 * 7) // Last 7 days
+    }
+
+    /**
+     * Load older topics beyond the current feed via relay-side cursor pagination.
+     * Creates a temporary subscription with `until` = pagination cursor.
+     * Called when user scrolls to the bottom of the hashtag feed.
+     */
+    fun loadOlderTopics(forHashtag: String? = null) {
+        if (_isLoadingOlderTopics.value) return
+        if (_topicsPaginationExhausted.value) return
+
+        val relays = subscriptionRelays.ifEmpty { connectedRelays }.ifEmpty { return }
+
+        // Initialize cursor from existing topics if not set
+        val topics = _topics.value.values
+        if (topicsPaginationCursorMs == 0L && topics.isNotEmpty()) {
+            topicsPaginationCursorMs = topics.minOf { it.timestamp }
+        }
+        if (topicsPaginationCursorMs == 0L) return
+
+        val untilSec = topicsPaginationCursorMs / 1000
+
+        _isLoadingOlderTopics.value = true
+        olderTopicsHandle?.cancel()
+
+        // Build filter: kind-11, optional hashtag tag filter
+        val filter = if (forHashtag != null) {
+            Filter(kinds = listOf(11), limit = TOPICS_PAGE_SIZE, until = untilSec, tags = mapOf("t" to listOf(forHashtag.lowercase())))
+        } else {
+            Filter(kinds = listOf(11), limit = TOPICS_PAGE_SIZE, until = untilSec)
+        }
+
+        Log.d(TAG, "loadOlderTopics: until=$untilSec hashtag=${forHashtag ?: "all"} from ${relays.size} relays")
+
+        val lastEventAt = AtomicLong(0L)
+        val eventCount = AtomicInteger(0)
+        val oldestReceivedMs = AtomicLong(Long.MAX_VALUE)
+
+        olderTopicsHandle = relayStateMachine.requestTemporarySubscriptionWithRelay(
+            relayUrls = relays,
+            filters = listOf(filter),
+            priority = SubscriptionPriority.HIGH,
+        ) { event, relayUrl ->
+            if (event.kind == 11) {
+                lastEventAt.set(System.currentTimeMillis())
+                eventCount.incrementAndGet()
+                val eventMs = event.createdAt * 1000L
+                oldestReceivedMs.updateAndGet { prev -> minOf(prev, eventMs) }
+                // Process through the same handler (adds to topics map, computes stats)
+                handleTopicEvent(event, relayUrl)
+            }
+        }
+
+        // Settle-based wait
+        scope.launch {
+            val deadline = System.currentTimeMillis() + TOPICS_OLDER_TIMEOUT_MS
+            while (System.currentTimeMillis() < deadline) {
+                delay(300)
+                val lastAt = lastEventAt.get()
+                if (lastAt > 0) {
+                    val quietMs = System.currentTimeMillis() - lastAt
+                    if (quietMs >= TOPICS_OLDER_SETTLE_MS) break
+                }
+            }
+            olderTopicsHandle?.cancel()
+            olderTopicsHandle = null
+
+            val received = eventCount.get()
+
+            // Update cursor from oldest received event
+            val oldest = oldestReceivedMs.get()
+            if (oldest < Long.MAX_VALUE && oldest > 0) {
+                if (topicsPaginationCursorMs == 0L || oldest < topicsPaginationCursorMs) {
+                    topicsPaginationCursorMs = oldest
+                }
+            }
+
+            if (received == 0) {
+                _topicsPaginationExhausted.value = true
+                Log.d(TAG, "Topics pagination exhausted: relay returned 0 events")
+            } else {
+                Log.d(TAG, "Older topics loaded: $received received, total=${_topics.value.size}")
+            }
+            _isLoadingOlderTopics.value = false
+        }
+    }
+
+    /** Reset pagination state (call when topics are cleared or subscription changes). */
+    private fun resetTopicsPagination() {
+        topicsPaginationCursorMs = 0L
+        _topicsPaginationExhausted.value = false
+        _isLoadingOlderTopics.value = false
+        olderTopicsHandle?.cancel()
+        olderTopicsHandle = null
     }
 
     /**

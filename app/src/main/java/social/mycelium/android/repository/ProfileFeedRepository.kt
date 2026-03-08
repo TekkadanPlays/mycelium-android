@@ -52,11 +52,11 @@ class ProfileFeedRepository(
 ) {
     companion object {
         private const val TAG = "ProfileFeedRepo"
-        private const val PAGE_SIZE = 200
-        private const val INITIAL_LOAD_SIZE = 200
+        private const val PAGE_SIZE = 500
+        private const val INITIAL_LOAD_SIZE = 500
         private const val FLUSH_DEBOUNCE_MS = 120L
-        private const val SETTLE_QUIET_MS = 1200L
-        private const val MAX_WAIT_MS = 8000L
+        private const val SETTLE_QUIET_MS = 1500L
+        private const val MAX_WAIT_MS = 12000L
         /** Minimum new items the *active tab* must gain before we stop a load-more page. */
         private const val TAB_MIN_NEW = 15
         /** Maximum consecutive pages that produced zero items for a tab before declaring exhaustion. */
@@ -209,7 +209,7 @@ class ProfileFeedRepository(
                 val pageAdded = loadOnePage()
                 pagesLoaded++
 
-                if (pageAdded < 10) {
+                if (pageAdded == 0) {
                     globalExhausted = true
                     break
                 }
@@ -247,9 +247,9 @@ class ProfileFeedRepository(
         }
     }
 
-    /** Fetch a single page of older notes. Returns the number of new notes added to the global list. */
+    /** Fetch a single page of older notes. Returns the number of raw events received from relays
+     *  (NOT deduped additions — so exhaustion is based on relay availability, not overlap). */
     private suspend fun loadOnePage(): Int {
-        val beforeCount = _notes.value.size
         val cursorMs = if (paginationCursorMs > 0) paginationCursorMs
             else _notes.value.minOfOrNull { it.timestamp } ?: return 0
         val untilSeconds = cursorMs / 1000
@@ -261,9 +261,11 @@ class ProfileFeedRepository(
             until = untilSeconds
         )
 
-        Log.d(TAG, "Loading page: until=$untilSeconds (cursor=$cursorMs)")
+        Log.d(TAG, "Loading page: until=$untilSeconds (cursor=$cursorMs) from ${relayUrls.size} relays")
         loadMoreSubscription?.cancel()
         val lastEventAt = AtomicLong(0L)
+        val rawEventCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val oldestReceivedMs = AtomicLong(Long.MAX_VALUE)
         loadMoreSubscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscriptionWithRelay(
             relayUrls = relayUrls,
             filter = filter,
@@ -271,6 +273,9 @@ class ProfileFeedRepository(
         ) { event, sourceRelayUrl ->
             if ((event.kind == 1 || event.kind == 6) && event.pubKey == authorPubkey) {
                 lastEventAt.set(System.currentTimeMillis())
+                rawEventCount.incrementAndGet()
+                val eventMs = event.createdAt * 1000L
+                oldestReceivedMs.updateAndGet { prev -> minOf(prev, eventMs) }
                 pendingEvents.add(event to sourceRelayUrl)
                 scheduleFlush()
             }
@@ -289,7 +294,17 @@ class ProfileFeedRepository(
         loadMoreSubscription?.cancel()
         loadMoreSubscription = null
 
-        return _notes.value.size - beforeCount
+        // Update cursor from actual oldest received event (precise, not inferred)
+        val oldest = oldestReceivedMs.get()
+        if (oldest < Long.MAX_VALUE && oldest > 0) {
+            if (paginationCursorMs == 0L || oldest < paginationCursorMs) {
+                paginationCursorMs = oldest
+            }
+        }
+
+        val received = rawEventCount.get()
+        Log.d(TAG, "Page done: $received raw events, feed=${_notes.value.size}, cursor=$paginationCursorMs")
+        return received
     }
 
     /** Count items relevant to a specific tab. */

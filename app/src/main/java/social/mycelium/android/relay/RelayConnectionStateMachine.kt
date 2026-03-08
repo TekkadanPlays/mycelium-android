@@ -769,6 +769,11 @@ class RelayConnectionStateMachine {
     fun disconnectAndClearForAccountSwitch() {
         Log.d(TAG, "Account switch: disconnecting all relays and clearing state")
         stateMachine.transition(RelayEvent.DisconnectRequested)
+        // Clear resume provider so requestReconnectOnResume() won't race with stale relay state.
+        // The new account's ensureSubscriptionToNotes() will re-register it.
+        resumeSubscriptionProvider = null
+        currentSubscriptionRelayUrls = emptyList()
+        _currentSubscription.value = CurrentSubscription(emptyList(), null, emptySet())
         // Clear NIP-42 auth tracking immediately (signer will be re-set by caller)
         nip42AuthHandler.setSigner(null)
         // Clear NIP-65 so stale relay lists from the previous user don't persist
@@ -810,15 +815,39 @@ class RelayConnectionStateMachine {
     }
 
     fun requestReconnectOnResume() {
+        // Release any auto-blocks whose cooldown has expired before we decide what to do
+        RelayHealthTracker.releaseExpiredAutoBlocks()
+
         val cur = _currentSubscription.value
         val (relayUrls, kind1Filter) = resumeSubscriptionProvider?.invoke()?.takeIf { it.first.isNotEmpty() }
             ?: (cur.relayUrls to cur.kind1Filter)
         if (relayUrls.isEmpty()) return
+
+        // If already Subscribed and the healthy relay set hasn't changed, don't tear
+        // down the subscription — just poke dead sockets back to life via the pool.
+        // This avoids the "Connecting to relays…" flash on every resume when a relay
+        // is down/blocked but the rest are fine.
+        val currentState = _state.value
+        val effectiveUrls = RelayHealthTracker.filterBlocked(relayUrls).sorted()
+        val activeUrls = currentSubscriptionRelayUrls.sorted()
+        if (currentState is RelayState.Subscribed && effectiveUrls == activeUrls) {
+            val disconnected = relayPool.getDisconnectedSubscriptionRelays()
+            if (disconnected.isNotEmpty()) {
+                Log.d(TAG, "App resumed: subscription unchanged, reconnecting ${disconnected.size} dead relays")
+                relayPool.clearReconnectState()
+                relayPool.connect()
+            } else {
+                Log.d(TAG, "App resumed: subscription active, ${activeUrls.size} relays healthy — no-op")
+            }
+            return
+        }
+
+        // Relay set changed (e.g. auto-block expired, user added relay) — full resubscribe
         // Reset retry counter so that if this reconnect fails, the state machine
         // can retry from scratch instead of being stuck at MAX_RETRIES from an
         // earlier offline period.
         retryAttempt = 0
-        Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (following=${kind1Filter != null})")
+        Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (${effectiveUrls.size} healthy, following=${kind1Filter != null})")
         stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter, null))
     }
 

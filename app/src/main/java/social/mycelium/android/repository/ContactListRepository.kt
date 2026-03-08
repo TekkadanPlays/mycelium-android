@@ -25,8 +25,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 object ContactListRepository {
 
     private const val TAG = "ContactListRepository"
-    /** Max wait for kind-3 responses; early-exit fires sooner when first event arrives. */
-    private const val KIND3_FETCH_TIMEOUT_MS = 1800L
+    /** Max wait for kind-3 responses; early-exit fires sooner when first event arrives.
+     *  Must be long enough for relays to connect on cold start (DNS + TLS can take 5-10s). */
+    private const val KIND3_FETCH_TIMEOUT_MS = 8000L
     /** After first kind-3 event arrives, wait this long for more relays before returning. */
     private const val KIND3_SETTLE_MS = 500L
     /** No hardcoded priority relays — user's configured relays are used exclusively. */

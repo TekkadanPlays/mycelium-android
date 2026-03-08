@@ -163,8 +163,18 @@ object SettingsSyncManager {
 
                 Log.d(TAG, "Found settings event: ${event.id.take(8)}, created=${event.createdAt}")
 
-                // Decrypt content (NIP-44 encrypted to self)
-                val plaintext = signer.nip44Decrypt(event.content, userPubkey)
+                // Decrypt content (NIP-44 encrypted to self).
+                // Use background-only decrypt for external signers to avoid flashing Amber's
+                // visible activity — settings sync is non-critical.
+                val plaintext = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
+                    signer.nip44DecryptBackgroundOnly(event.content, userPubkey)
+                        ?: run {
+                            Log.w(TAG, "Background decrypt unavailable — skipping settings sync")
+                            return@launch
+                        }
+                } else {
+                    signer.nip44Decrypt(event.content, userPubkey)
+                }
                 val remoteSettings = SyncedSettings.fromJson(plaintext)
 
                 // Apply to local preferences (with guard to prevent re-publish)

@@ -9,14 +9,15 @@ import social.mycelium.android.utils.MediaAspectRatioCache
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Singleton pool of ExoPlayer instances keyed by URL.
- * Allows the same player to be shared between inline feed and fullscreen views
- * so video doesn't stutter or restart on fullscreen toggle.
+ * Singleton pool of ExoPlayer instances keyed by instance ID.
+ * Each video container (NoteCard, quoted note, etc.) gets a unique instance key
+ * so the same URL in multiple containers doesn't share one ExoPlayer.
+ * The feed↔fullscreen transition shares the same instance key for seamless handoff.
  *
  * Flow:
- * 1. Feed player calls [acquire] — creates a new player or returns existing one.
+ * 1. Feed player calls [acquire] with a unique instanceKey — creates or returns player.
  * 2. On fullscreen, feed calls [detach] (keeps player alive but marks it unowned).
- * 3. Fullscreen calls [acquire] — gets the same player, no re-buffer.
+ * 3. Fullscreen calls [acquire] with the SAME instanceKey — gets the same player.
  * 4. On exit fullscreen, fullscreen calls [detach], feed calls [acquire] again.
  * 5. When the composable truly disposes (leaves composition), call [release].
  */
@@ -27,6 +28,7 @@ object SharedPlayerPool {
 
     private data class Entry(
         val player: ExoPlayer,
+        val url: String,
         var ownerCount: Int = 0,
         var lastAccessTime: Long = System.nanoTime()
     )
@@ -34,12 +36,16 @@ object SharedPlayerPool {
     private val pool = ConcurrentHashMap<String, Entry>()
 
     /**
-     * Acquire a player for [url]. If one already exists in the pool, return it.
-     * Otherwise create a new one. Increments the owner count.
+     * Acquire a player for [instanceKey]. If one already exists in the pool, return it.
+     * Otherwise create a new one for [url]. Increments the owner count.
      * When the pool is full, the least-recently-used unowned player is evicted.
      */
-    fun acquire(context: Context, url: String): ExoPlayer {
-        val existing = pool[url]
+    fun acquire(context: Context, instanceKey: String, url: String): ExoPlayer? {
+        // If PiP owns this instance, refuse to create a duplicate player.
+        // The caller should check isPipActive and skip rendering.
+        if (PipStreamManager.isInstanceActive(instanceKey)) return null
+
+        val existing = pool[instanceKey]
         if (existing != null) {
             existing.ownerCount++
             existing.lastAccessTime = System.nanoTime()
@@ -56,7 +62,7 @@ object SharedPlayerPool {
                 .minByOrNull { it.value.lastAccessTime }
             if (lru != null) {
                 pool.remove(lru.key)
-                VideoPositionCache.set(lru.key, lru.value.player.currentPosition)
+                VideoPositionCache.set(lru.value.url, lru.value.player.currentPosition)
                 lru.value.player.release()
             } else {
                 // All entries are owned — allow over-limit rather than deadlock
@@ -77,8 +83,8 @@ object SharedPlayerPool {
             prepare()
             playWhenReady = false
         }
-        val entry = Entry(player, 1)
-        pool[url] = entry
+        val entry = Entry(player, url, 1)
+        pool[instanceKey] = entry
         return entry.player
     }
 
@@ -86,9 +92,13 @@ object SharedPlayerPool {
      * Detach from a player without releasing it.
      * Decrements owner count. Player stays in pool for the next [acquire].
      */
-    fun detach(url: String) {
-        val entry = pool[url] ?: return
+    fun detach(instanceKey: String) {
+        val entry = pool[instanceKey] ?: return
         entry.ownerCount = (entry.ownerCount - 1).coerceAtLeast(0)
+        // Pause when no owners — prevents audio leaking from orphaned pool entries
+        if (entry.ownerCount <= 0) {
+            entry.player.pause()
+        }
     }
 
     /**
@@ -96,12 +106,12 @@ object SharedPlayerPool {
      * Only releases if owner count is zero (no other view is using it).
      * Returns true if the player was actually released.
      */
-    fun release(url: String): Boolean {
-        val entry = pool[url] ?: return false
+    fun release(instanceKey: String): Boolean {
+        val entry = pool[instanceKey] ?: return false
         entry.ownerCount = (entry.ownerCount - 1).coerceAtLeast(0)
         if (entry.ownerCount <= 0) {
-            pool.remove(url)
-            VideoPositionCache.set(url, entry.player.currentPosition)
+            pool.remove(instanceKey)
+            VideoPositionCache.set(entry.url, entry.player.currentPosition)
             entry.player.release()
             return true
         }
@@ -111,30 +121,67 @@ object SharedPlayerPool {
     /**
      * Force-release a player regardless of owner count.
      */
-    fun forceRelease(url: String) {
-        val entry = pool.remove(url) ?: return
-        VideoPositionCache.set(url, entry.player.currentPosition)
+    fun forceRelease(instanceKey: String) {
+        val entry = pool.remove(instanceKey) ?: return
+        VideoPositionCache.set(entry.url, entry.player.currentPosition)
         entry.player.release()
     }
 
     /**
-     * Check if a player exists in the pool for [url].
+     * Remove a player from the pool WITHOUT releasing it.
+     * The caller takes ownership of the ExoPlayer instance.
+     * Used by PipStreamManager to orphan the player so feed can't reacquire it.
      */
-    fun has(url: String): Boolean = pool.containsKey(url)
+    fun steal(instanceKey: String): ExoPlayer? {
+        val entry = pool.remove(instanceKey) ?: return null
+        VideoPositionCache.set(entry.url, entry.player.currentPosition)
+        return entry.player
+    }
 
     /**
-     * Get the player for [url] without changing ownership. Returns null if not pooled.
+     * Return a previously stolen/reclaimed player back to the pool.
+     * Used when PiP hands a player back so the next screen can [acquire] it
+     * instead of creating a duplicate.
      */
-    fun peek(url: String): ExoPlayer? = pool[url]?.player
+    fun returnToPool(instanceKey: String, url: String, player: ExoPlayer) {
+        // If there's already a different player for this key, release the incoming one
+        val existing = pool[instanceKey]
+        if (existing != null && existing.player !== player) {
+            player.stop()
+            player.release()
+            return
+        }
+        pool[instanceKey] = Entry(player, url, ownerCount = 0)
+    }
+
+    /**
+     * Check if a player exists in the pool for [instanceKey].
+     */
+    fun has(instanceKey: String): Boolean = pool.containsKey(instanceKey)
+
+    /**
+     * Check if a pooled player for [instanceKey] exists and has no current owners.
+     * Used by FeedVideoPlayer to detect when FullVideoPlayer has released ownership
+     * so it can safely re-acquire without dual-ownership.
+     */
+    fun isUnowned(instanceKey: String): Boolean {
+        val entry = pool[instanceKey] ?: return false
+        return entry.ownerCount <= 0
+    }
+
+    /**
+     * Get the player for [instanceKey] without changing ownership. Returns null if not pooled.
+     */
+    fun peek(instanceKey: String): ExoPlayer? = pool[instanceKey]?.player
 
     /**
      * Pause ALL pooled players (e.g. when app goes to background).
      * Saves current positions so they can resume cleanly.
      */
     fun pauseAll() {
-        for ((url, entry) in pool) {
+        for ((_, entry) in pool) {
             if (entry.player.isPlaying) {
-                VideoPositionCache.set(url, entry.player.currentPosition)
+                VideoPositionCache.set(entry.url, entry.player.currentPosition)
                 entry.player.pause()
             }
         }
@@ -144,8 +191,8 @@ object SharedPlayerPool {
      * Release ALL pooled players (e.g. on app destruction).
      */
     fun releaseAll() {
-        for ((url, entry) in pool) {
-            VideoPositionCache.set(url, entry.player.currentPosition)
+        for ((_, entry) in pool) {
+            VideoPositionCache.set(entry.url, entry.player.currentPosition)
             entry.player.release()
         }
         pool.clear()

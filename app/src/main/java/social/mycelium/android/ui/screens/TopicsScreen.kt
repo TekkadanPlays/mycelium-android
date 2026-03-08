@@ -821,6 +821,23 @@ fun TopicsScreen(
 
                                 // Observe reactive vote scores so Popular sort recomposes when votes change
                                 val voteScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+
+                                // Pre-fetch: trigger older topics load 10 items from bottom
+                                // (kind-11 feeds are sparse, so use a smaller threshold)
+                                val isLoadingOlderTopics = topicsUiState.isLoadingOlderTopics
+                                val topicsPaginationExhausted = topicsUiState.topicsPaginationExhausted
+                                LaunchedEffect(listState, isLoadingOlderTopics) {
+                                    snapshotFlow {
+                                        val li = listState.layoutInfo
+                                        val total = li.totalItemsCount
+                                        val last = li.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                        last to total
+                                    }.collect { (last, total) ->
+                                        if (total > 5 && last >= total - 5 && !isLoadingOlderTopics && !topicsPaginationExhausted) {
+                                            topicsViewModel.loadOlderTopics()
+                                        }
+                                    }
+                                }
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier.fillMaxSize(),
@@ -993,6 +1010,42 @@ fun TopicsScreen(
                                                     showHashtagsSection = false,
                                                     modifier = Modifier.fillMaxWidth()
                                                 )
+                                            }
+                                        }
+                                    }
+
+                                    // ═══ Topics pagination footer ═══
+                                    if (!topicsPaginationExhausted && topicsUiState.topicsForSelectedHashtag.isNotEmpty()) {
+                                        item(key = "topics_loading_older") {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 24.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                if (isLoadingOlderTopics) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                    ) {
+                                                        CircularProgressIndicator(
+                                                            modifier = Modifier.size(20.dp),
+                                                            strokeWidth = 2.dp,
+                                                            color = MaterialTheme.colorScheme.primary
+                                                        )
+                                                        Text(
+                                                            "Loading older topics…",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                } else {
+                                                    CircularProgressIndicator(
+                                                        modifier = Modifier.size(16.dp),
+                                                        strokeWidth = 1.5.dp,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                                    )
+                                                }
                                             }
                                         }
                                     }

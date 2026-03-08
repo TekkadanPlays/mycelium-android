@@ -109,6 +109,7 @@ import social.mycelium.android.ui.screens.LiveStreamScreen
 import social.mycelium.android.ui.screens.OnboardingScreen
 import social.mycelium.android.ui.components.PipStreamManager
 import social.mycelium.android.ui.components.PipStreamOverlay
+import social.mycelium.android.ui.components.SharedPlayerPool
 import social.mycelium.android.ui.screens.QrCodeScreen
 import social.mycelium.android.ui.screens.ReplyComposeScreen
 import social.mycelium.android.viewmodel.AnnouncementsViewModel
@@ -384,6 +385,12 @@ fun MyceliumNavigation(
     val overlayNotifThreadStack = remember { mutableStateListOf<social.mycelium.android.data.Note>() }
     // Track replyKind per overlay entry for notifications (kind-1 vs kind-1111)
     val overlayNotifReplyKinds = remember { mutableStateListOf<Int>() }
+    // Track highlightReplyId per overlay entry — when a quoted note is a reply,
+    // we open the root thread but scroll/expand to the specific quoted reply.
+    val overlayThreadHighlightIds = remember { mutableStateListOf<String?>() }
+    val overlayTopicThreadHighlightIds = remember { mutableStateListOf<String?>() }
+    val overlayProfileThreadHighlightIds = remember { mutableStateListOf<String?>() }
+    val overlayNotifThreadHighlightIds = remember { mutableStateListOf<String?>() }
     // Derived IDs for backward compatibility with visibility/preserve checks
     val overlayThreadNoteId: String? = overlayThreadStack.lastOrNull()?.id
     val overlayTopicThreadNoteId: String? = overlayTopicThreadStack.lastOrNull()?.id
@@ -410,6 +417,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
         if (!preserveDashboardOverlay) {
             overlayThreadStack.clear()
+            overlayThreadHighlightIds.clear()
         }
         val preserveTopicOverlay = route == "topics" || route in overlayPreserveRoutes
                 || route.startsWith("profile/")
@@ -421,6 +429,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
         if (!preserveTopicOverlay) {
             overlayTopicThreadStack.clear()
+            overlayTopicThreadHighlightIds.clear()
         }
         val preserveProfileOverlay = route in overlayPreserveRoutes
                 || route.startsWith("profile/")
@@ -432,6 +441,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
         if (!preserveProfileOverlay) {
             overlayProfileThreadStack.clear()
+            overlayProfileThreadHighlightIds.clear()
         }
         val preserveNotifOverlay = route == "notifications" || route in overlayPreserveRoutes
                 || route.startsWith("profile/")
@@ -443,6 +453,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
         if (!preserveNotifOverlay) {
             overlayNotifThreadStack.clear()
+            overlayNotifThreadHighlightIds.clear()
             overlayNotifReplyKinds.clear()
         }
     }
@@ -597,26 +608,11 @@ fun MyceliumNavigation(
         }
     }
 
-    // DM subscription: derive signer from composed amberState so Compose tracks the dependency
-    val currentSigner = remember(amberState, currentAccount) { accountStateViewModel.getCurrentSigner() }
-    LaunchedEffect(currentAccount, onboardingComplete, currentSigner) {
-        val pubkey = currentAccount?.toHexKey() ?: return@LaunchedEffect
-        if (!onboardingComplete) return@LaunchedEffect
-        val dmSigner = currentSigner ?: return@LaunchedEffect
-
-        val categories = storageManager.loadCategories(pubkey)
-        val outboxRelays = storageManager.loadOutboxRelays(pubkey)
-        val inboxRelays = storageManager.loadInboxRelays(pubkey)
-        val allUserRelayUrls = (categories.flatMap { it.relays }.map { it.url } +
-                outboxRelays.map { it.url } + inboxRelays.map { it.url })
-            .map { it.trim().removeSuffix("/") }
-            .distinct()
-
-        if (allUserRelayUrls.isNotEmpty()) {
-            social.mycelium.android.repository.DirectMessageRepository.startSubscription(pubkey, dmSigner, allUserRelayUrls)
-            Log.d("MyceliumNav", "DM subscription started: ${allUserRelayUrls.size} relays, signer=${dmSigner::class.simpleName}")
-        }
-    }
+    // DM subscription: disabled until user-configured DM relays are implemented.
+    // DM relays are a distinct category (not inbox/outbox) specifically for NIP-17 gift wraps.
+    // Without explicit DM relays, we don't start a subscription — avoids unnecessary Amber
+    // decrypt calls on general/fallback relays.
+    // TODO: Re-enable when DM relay configuration UI is added to relay settings.
 
     // onboardingComplete is the single source of truth for whether the user can see the feed.
     // It's persisted per-account and set in AccountStateViewModel during login/switch.
@@ -822,7 +818,9 @@ fun MyceliumNavigation(
                                     appViewModel.updateThreadRelayUrls(overlayNote.relayUrls.ifEmpty { listOfNotNull(overlayNote.relayUrl) })
                                     appViewModel.markThreadViewed(note.id)
                                     overlayThreadStack.clear()
+                                    overlayThreadHighlightIds.clear()
                                     overlayThreadStack.add(overlayNote)
+                                    overlayThreadHighlightIds.add(threadNote.id) // scroll to the quoted reply
                                     // Async-fetch the root note so thread view has full data
                                     if (rootFromCache == null) {
                                         coroutineScope.launch(Dispatchers.IO) {
@@ -845,7 +843,9 @@ fun MyceliumNavigation(
                                     appViewModel.updateThreadRelayUrls(threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) })
                                     appViewModel.markThreadViewed(note.id)
                                     overlayThreadStack.clear()
+                                    overlayThreadHighlightIds.clear()
                                     overlayThreadStack.add(threadNote)
+                                    overlayThreadHighlightIds.add(null) // no highlight for non-reply
                                 }
                             },
                             onImageTap = { note, _, _ ->
@@ -856,7 +856,9 @@ fun MyceliumNavigation(
                                 appViewModel.updateThreadRelayUrls(threadNote.relayUrls.ifEmpty { listOfNotNull(threadNote.relayUrl) })
                                 appViewModel.markThreadViewed(note.id)
                                 overlayThreadStack.clear()
+                                overlayThreadHighlightIds.clear()
                                 overlayThreadStack.add(threadNote)
+                                overlayThreadHighlightIds.add(null)
                             },
                             onOpenImageViewer = { urls, index ->
                                 appViewModel.openImageViewer(urls, index)
@@ -918,6 +920,7 @@ fun MyceliumNavigation(
                         // Intercept system back gesture when overlay thread is showing
                         BackHandler(enabled = overlayThreadStack.isNotEmpty()) {
                             overlayThreadStack.removeLastOrNull()
+                            overlayThreadHighlightIds.removeLastOrNull()
                         }
 
                         // Thread overlay: feed stays underneath so slide-back reveals it; slide in from right like nav thread.
@@ -951,7 +954,6 @@ fun MyceliumNavigation(
                                 var expandedControlsReplyId by remember(noteId) {
                                     mutableStateOf(threadStateHolder.getExpandedReplyControls(noteId))
                                 }
-                                val threadTopAppBarState = rememberTopAppBarState()
                                 val authState by accountStateViewModel.authState.collectAsState()
                                 DisposableEffect(noteId) {
                                     onDispose {
@@ -960,7 +962,7 @@ fun MyceliumNavigation(
                                         threadStateHolder.setExpandedReplyControls(noteId, expandedControlsReplyId)
                                     }
                                 }
-                                ThreadSlideBackBox(onBack = { overlayThreadStack.removeLastOrNull() }) {
+                                ThreadSlideBackBox(onBack = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() }) {
                                     ModernThreadViewScreen(
                                         note = displayNote,
                                         comments = emptyList(),
@@ -972,11 +974,12 @@ fun MyceliumNavigation(
                                         onExpandedControlsReplyChange = { replyId ->
                                             expandedControlsReplyId = if (expandedControlsReplyId == replyId) null else replyId
                                         },
-                                        topAppBarState = threadTopAppBarState,
+                                        topAppBarState = topAppBarState,
                                         replyKind = 1,
+                                        highlightReplyId = overlayThreadHighlightIds.lastOrNull(),
                                         relayUrls = relayUrls,
                                         cacheRelayUrls = cacheRelayUrls,
-                                        onBackClick = { overlayThreadStack.removeLastOrNull() },
+                                        onBackClick = { overlayThreadStack.removeLastOrNull(); overlayThreadHighlightIds.removeLastOrNull() },
                                         onProfileClick = { navController.navigateToProfile(it) },
                                         onNoteClick = { clickedNote ->
                                             // Resolve repost IDs
@@ -987,6 +990,7 @@ fun MyceliumNavigation(
                                                 val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
                                                 val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote)
                                                 overlayThreadStack.add(overlayNote)
+                                                overlayThreadHighlightIds.add(threadNote.id)
                                                 if (rootFromCache == null) {
                                                     coroutineScope.launch(Dispatchers.IO) {
                                                         val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
@@ -1005,6 +1009,7 @@ fun MyceliumNavigation(
                                                 }
                                             } else {
                                                 overlayThreadStack.add(threadNote)
+                                                overlayThreadHighlightIds.add(null)
                                             }
                                         },
                                         onImageTap = { _, urls, idx ->
@@ -1428,9 +1433,8 @@ fun MyceliumNavigation(
                             mutableStateOf(threadStateHolder.getExpandedReplyControls(noteId))
                         }
 
-                        // Thread gets its own TopAppBarState so scrolling thread doesn't mutate
-                        // the feed's header state — prevents header flash on gesture back
-                        val threadTopAppBarState = rememberTopAppBarState()
+                        // Share global TopAppBarState so header collapsed/expanded state
+                        // persists across navigation (edge-to-edge consistency)
 
                         // Save scroll state when leaving the screen
                         DisposableEffect(noteId) {
@@ -1462,7 +1466,7 @@ fun MyceliumNavigation(
                                         if (expandedControlsReplyId == replyId) null
                                         else replyId
                             },
-                            topAppBarState = threadTopAppBarState,
+                            topAppBarState = topAppBarState,
                             replyKind = replyKind,
                             highlightReplyId = resolvedHighlightReplyId,
                             relayUrls = relayUrls,
@@ -1680,9 +1684,11 @@ fun MyceliumNavigation(
                     val urls = appState.videoViewerUrls
                     var rememberedUrls by remember { mutableStateOf(urls) }
                     var rememberedIndex by remember { mutableStateOf(appState.videoViewerInitialIndex) }
+                    var rememberedInstanceKey by remember { mutableStateOf(appState.videoViewerInstanceKey) }
                     if (urls != null) {
                         rememberedUrls = urls
                         rememberedIndex = appState.videoViewerInitialIndex
+                        rememberedInstanceKey = appState.videoViewerInstanceKey
                     }
                     val displayUrls = rememberedUrls
                     if (displayUrls != null) {
@@ -1692,7 +1698,8 @@ fun MyceliumNavigation(
                             onBackClick = {
                                 navController.popBackStack()
                                 appViewModel.clearVideoViewer()
-                            }
+                            },
+                            instanceKey = rememberedInstanceKey
                         )
                     }
                 }
@@ -1921,7 +1928,9 @@ fun MyceliumNavigation(
                                 } else {
                                     // Root note: show overlay thread on profile
                                     overlayProfileThreadStack.clear()
+                                    overlayProfileThreadHighlightIds.clear()
                                     overlayProfileThreadStack.add(note)
+                                    overlayProfileThreadHighlightIds.add(null)
                                 }
                             },
                             onReact = { note, emoji ->
@@ -1985,7 +1994,6 @@ fun MyceliumNavigation(
                                     }
                                 }
                             },
-                            onMessageClick = { /* TODO: Open DM */ },
                             parentNoteForReply = { parentId -> parentNotesMap[parentId] },
                             onSeeAllReactions = { note ->
                                 val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
@@ -1998,6 +2006,7 @@ fun MyceliumNavigation(
                     // ── Profile thread overlay (stack-based) ──────────────────────────
                     BackHandler(enabled = overlayProfileThreadStack.isNotEmpty()) {
                         overlayProfileThreadStack.removeLastOrNull()
+                        overlayProfileThreadHighlightIds.removeLastOrNull()
                     }
 
                     val profileContentNote = overlayProfileThreadStack.lastOrNull()
@@ -2014,10 +2023,9 @@ fun MyceliumNavigation(
                             val profileThreadRelayUrls = profileDisplayNote.relayUrls.ifEmpty { listOfNotNull(profileDisplayNote.relayUrl) }.ifEmpty { profileRelayUrls }
                             val pNoteId = profileDisplayNote.id
                             val profileThreadListState = rememberLazyListState()
-                            val profileThreadTopAppBarState = rememberTopAppBarState()
                             var profileExpandedControlsCommentId by remember(pNoteId) { mutableStateOf<String?>(null) }
                             var profileExpandedControlsReplyId by remember(pNoteId) { mutableStateOf<String?>(null) }
-                            ThreadSlideBackBox(onBack = { overlayProfileThreadStack.removeLastOrNull() }) {
+                            ThreadSlideBackBox(onBack = { overlayProfileThreadStack.removeLastOrNull(); overlayProfileThreadHighlightIds.removeLastOrNull() }) {
                                 ModernThreadViewScreen(
                                     note = profileDisplayNote,
                                     comments = emptyList(),
@@ -2028,11 +2036,12 @@ fun MyceliumNavigation(
                                     onExpandedControlsReplyChange = { replyId ->
                                         profileExpandedControlsReplyId = if (profileExpandedControlsReplyId == replyId) null else replyId
                                     },
-                                    topAppBarState = profileThreadTopAppBarState,
+                                    topAppBarState = topAppBarState,
                                     replyKind = 1,
+                                    highlightReplyId = overlayProfileThreadHighlightIds.lastOrNull(),
                                     relayUrls = profileThreadRelayUrls,
                                     cacheRelayUrls = cacheUrls,
-                                    onBackClick = { overlayProfileThreadStack.removeLastOrNull() },
+                                    onBackClick = { overlayProfileThreadStack.removeLastOrNull(); overlayProfileThreadHighlightIds.removeLastOrNull() },
                                     onProfileClick = { navController.navigateToProfile(it) },
                                     onNoteClick = { clickedNote ->
                                         val threadNote = if (clickedNote.originalNoteId != null) clickedNote.copy(id = clickedNote.originalNoteId) else clickedNote
@@ -2041,6 +2050,7 @@ fun MyceliumNavigation(
                                             val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
                                             val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote, profileThreadRelayUrls)
                                             overlayProfileThreadStack.add(overlayNote)
+                                            overlayProfileThreadHighlightIds.add(threadNote.id)
                                             if (rootFromCache == null) {
                                                 coroutineScope.launch(Dispatchers.IO) {
                                                     val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
@@ -2059,6 +2069,7 @@ fun MyceliumNavigation(
                                             }
                                         } else {
                                             overlayProfileThreadStack.add(threadNote)
+                                            overlayProfileThreadHighlightIds.add(null)
                                         }
                                     },
                                     onImageTap = { _, urls, idx ->
@@ -2328,7 +2339,6 @@ fun MyceliumNavigation(
                             onNavigateTo = { /* Not needed with NavController */ },
                             isFollowing = false,
                             onFollowClick = { },
-                            onMessageClick = { },
                             onSeeAllReactions = { note ->
                                 val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
                                 appViewModel.storeReactionsData(buildReactionsData(note.id, counts, note.repostedByAuthors, note.reactions))
@@ -2861,6 +2871,8 @@ fun MyceliumNavigation(
                             navController.navigate("relay_users/$encoded") { launchSingleTop = true }
                         },
                         followedUserCount = logFollowedUserCount,
+                        currentUserPubkey = logPubkey,
+                        currentSigner = accountStateViewModel.getCurrentSigner(),
                         onAddToRelayProfile = addToRelayProfile@{ url, profileType ->
                             val pubkey = logPubkey ?: return@addToRelayProfile
                             val sm = RelayStorageManager(context)
@@ -2999,12 +3011,14 @@ fun MyceliumNavigation(
                                 val threadNote = if (note.originalNoteId != null) note.copy(id = note.originalNoteId) else note
                                 overlayNotifThreadStack.clear()
                                 overlayNotifReplyKinds.clear()
+                                overlayNotifThreadHighlightIds.clear()
                                 if (threadNote.isReply && threadNote.rootNoteId != null) {
                                     val rootId = threadNote.rootNoteId!!
                                     val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
                                     val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote)
                                     overlayNotifThreadStack.add(overlayNote)
                                     overlayNotifReplyKinds.add(1)
+                                    overlayNotifThreadHighlightIds.add(threadNote.id)
                                     if (rootFromCache == null) {
                                         coroutineScope.launch(Dispatchers.IO) {
                                             val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
@@ -3024,6 +3038,7 @@ fun MyceliumNavigation(
                                 } else {
                                     overlayNotifThreadStack.add(threadNote)
                                     overlayNotifReplyKinds.add(1)
+                                    overlayNotifThreadHighlightIds.add(null)
                                 }
                             },
                             onOpenThreadForRootId = { rootNoteId, replyKind, replyNoteId, targetNote ->
@@ -3049,8 +3064,10 @@ fun MyceliumNavigation(
                                         }
                                 overlayNotifThreadStack.clear()
                                 overlayNotifReplyKinds.clear()
+                                overlayNotifThreadHighlightIds.clear()
                                 overlayNotifThreadStack.add(overlayNote)
                                 overlayNotifReplyKinds.add(replyKind)
+                                overlayNotifThreadHighlightIds.add(replyNoteId)
                                 // Async-fetch the root note so the thread composable has full data
                                 notifCoroutineScope.launch(Dispatchers.IO) {
                                     var note = NotesRepository.getInstance().getNoteFromCache(rootNoteId)
@@ -3092,6 +3109,7 @@ fun MyceliumNavigation(
                     BackHandler(enabled = overlayNotifThreadStack.isNotEmpty()) {
                         overlayNotifThreadStack.removeLastOrNull()
                         overlayNotifReplyKinds.removeLastOrNull()
+                        overlayNotifThreadHighlightIds.removeLastOrNull()
                     }
 
                     val notifContentNote = overlayNotifThreadStack.lastOrNull()
@@ -3113,13 +3131,13 @@ fun MyceliumNavigation(
                             val noteId = notifDisplayNote.id
                             val notifRelayUrls = (notifDisplayNote.relayUrls.ifEmpty { listOfNotNull(notifDisplayNote.relayUrl) } + notifFallbackRelayUrls).distinct()
                             val notifThreadListState = rememberLazyListState()
-                            val notifThreadTopAppBarState = rememberTopAppBarState()
                             var notifExpandedControlsCommentId by remember(noteId) { mutableStateOf<String?>(null) }
                             var notifExpandedControlsReplyId by remember(noteId) { mutableStateOf<String?>(null) }
                             val authState by accountStateViewModel.authState.collectAsState()
                             ThreadSlideBackBox(onBack = {
                                 overlayNotifThreadStack.removeLastOrNull()
                                 overlayNotifReplyKinds.removeLastOrNull()
+                                overlayNotifThreadHighlightIds.removeLastOrNull()
                             }) {
                                 ModernThreadViewScreen(
                                     note = notifDisplayNote,
@@ -3131,13 +3149,15 @@ fun MyceliumNavigation(
                                     onExpandedControlsReplyChange = { replyId ->
                                         notifExpandedControlsReplyId = if (notifExpandedControlsReplyId == replyId) null else replyId
                                     },
-                                    topAppBarState = notifThreadTopAppBarState,
+                                    topAppBarState = topAppBarState,
                                     replyKind = notifReplyKind,
+                                    highlightReplyId = overlayNotifThreadHighlightIds.lastOrNull(),
                                     relayUrls = notifRelayUrls,
                                     cacheRelayUrls = notifCacheRelayUrls,
                                     onBackClick = {
                                         overlayNotifThreadStack.removeLastOrNull()
                                         overlayNotifReplyKinds.removeLastOrNull()
+                                        overlayNotifThreadHighlightIds.removeLastOrNull()
                                     },
                                     onProfileClick = { navController.navigateToProfile(it) },
                                     onNoteClick = { clickedNote ->
@@ -3148,6 +3168,7 @@ fun MyceliumNavigation(
                                             val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote, notifRelayUrls)
                                             overlayNotifThreadStack.add(overlayNote)
                                             overlayNotifReplyKinds.add(1)
+                                            overlayNotifThreadHighlightIds.add(threadNote.id)
                                             if (rootFromCache == null) {
                                                 coroutineScope.launch(Dispatchers.IO) {
                                                     val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
@@ -3167,6 +3188,7 @@ fun MyceliumNavigation(
                                         } else {
                                             overlayNotifThreadStack.add(threadNote)
                                             overlayNotifReplyKinds.add(1)
+                                            overlayNotifThreadHighlightIds.add(null)
                                         }
                                     },
                                     onImageTap = { _, urls, idx ->
@@ -3336,7 +3358,9 @@ fun MyceliumNavigation(
                                     appViewModel.updateSelectedNote(note)
                                     appViewModel.updateThreadRelayUrls(relayUrls)
                                     overlayTopicThreadStack.clear()
+                                    overlayTopicThreadHighlightIds.clear()
                                     overlayTopicThreadStack.add(note)
+                                    overlayTopicThreadHighlightIds.add(null)
                                 },
                                 onProfileClick = { authorId ->
                                     navController.navigateToProfile(authorId)
@@ -3381,6 +3405,7 @@ fun MyceliumNavigation(
                         // Intercept system back gesture when overlay thread is showing
                         BackHandler(enabled = overlayTopicThreadStack.isNotEmpty()) {
                             overlayTopicThreadStack.removeLastOrNull()
+                            overlayTopicThreadHighlightIds.removeLastOrNull()
                         }
 
                         // Thread overlay: stack-based for chained exploration
@@ -3413,7 +3438,6 @@ fun MyceliumNavigation(
                                 var expandedControlsReplyId by remember(noteId) {
                                     mutableStateOf(threadStateHolder.getExpandedReplyControls(noteId))
                                 }
-                                val threadTopAppBarState = rememberTopAppBarState()
                                 val authState by accountStateViewModel.authState.collectAsState()
                                 DisposableEffect(noteId) {
                                     onDispose {
@@ -3422,7 +3446,7 @@ fun MyceliumNavigation(
                                         threadStateHolder.setExpandedReplyControls(noteId, expandedControlsReplyId)
                                     }
                                 }
-                                ThreadSlideBackBox(onBack = { overlayTopicThreadStack.removeLastOrNull() }) {
+                                ThreadSlideBackBox(onBack = { overlayTopicThreadStack.removeLastOrNull(); overlayTopicThreadHighlightIds.removeLastOrNull() }) {
                                     ModernThreadViewScreen(
                                         note = topicDisplayNote,
                                         comments = emptyList(),
@@ -3434,11 +3458,12 @@ fun MyceliumNavigation(
                                         onExpandedControlsReplyChange = { replyId ->
                                             expandedControlsReplyId = if (expandedControlsReplyId == replyId) null else replyId
                                         },
-                                        topAppBarState = threadTopAppBarState,
+                                        topAppBarState = topAppBarState,
                                         replyKind = 1111,
+                                        highlightReplyId = overlayTopicThreadHighlightIds.lastOrNull(),
                                         relayUrls = relayUrls,
                                         cacheRelayUrls = topicCacheRelayUrls,
-                                        onBackClick = { overlayTopicThreadStack.removeLastOrNull() },
+                                        onBackClick = { overlayTopicThreadStack.removeLastOrNull(); overlayTopicThreadHighlightIds.removeLastOrNull() },
                                         onProfileClick = { navController.navigateToProfile(it) },
                                         onNoteClick = { clickedNote ->
                                             val threadNote = if (clickedNote.originalNoteId != null) clickedNote.copy(id = clickedNote.originalNoteId) else clickedNote
@@ -3447,6 +3472,7 @@ fun MyceliumNavigation(
                                                 val rootFromCache = NotesRepository.getInstance().getNoteFromCache(rootId)
                                                 val overlayNote = rootFromCache ?: buildRootStubNote(rootId, threadNote, relayUrls)
                                                 overlayTopicThreadStack.add(overlayNote)
+                                                overlayTopicThreadHighlightIds.add(threadNote.id)
                                                 if (rootFromCache == null) {
                                                     coroutineScope.launch(Dispatchers.IO) {
                                                         val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
@@ -3465,6 +3491,7 @@ fun MyceliumNavigation(
                                                 }
                                             } else {
                                                 overlayTopicThreadStack.add(threadNote)
+                                                overlayTopicThreadHighlightIds.add(null)
                                             }
                                         },
                                         onImageTap = { _, urls, idx ->
@@ -3987,9 +4014,14 @@ fun MyceliumNavigation(
                     navController.navigate("live_stream/$encoded") { launchSingleTop = true }
                 },
                 onVideoTapToReturn = { videoUrl ->
-                    // Reclaim PiP state so video_viewer can acquire the pooled player
-                    PipStreamManager.reclaimPlayer()
-                    appViewModel.openVideoViewer(listOf(videoUrl), 0)
+                    // Reclaim PiP player and return it to the pool so video_viewer
+                    // can acquire it seamlessly instead of creating a duplicate.
+                    val reclaimed = PipStreamManager.reclaimPlayer()
+                    val reclaimedInstanceKey = reclaimed?.instanceKey
+                    if (reclaimed != null && reclaimedInstanceKey != null) {
+                        SharedPlayerPool.returnToPool(reclaimedInstanceKey, videoUrl, reclaimed.player)
+                    }
+                    appViewModel.openVideoViewer(listOf(videoUrl), 0, instanceKey = reclaimedInstanceKey)
                     navController.navigate("video_viewer") { launchSingleTop = true }
                 },
                 modifier = Modifier.zIndex(Float.MAX_VALUE)
@@ -4000,9 +4032,7 @@ fun MyceliumNavigation(
 
 /** Navigation extension functions for type-safe navigation */
 private fun NavController.navigateToProfile(authorId: String) {
-    navigate("profile/$authorId") {
-        launchSingleTop = true
-    }
+    navigate("profile/$authorId")
 }
 
 /**
@@ -4011,7 +4041,5 @@ private fun NavController.navigateToProfile(authorId: String) {
  */
 private fun NavController.navigateToThread(noteId: String, replyKind: Int = 1, highlightReplyId: String? = null) {
     val suffix = highlightReplyId?.let { "&highlightReplyId=${android.net.Uri.encode(it)}" } ?: ""
-    navigate("thread/$noteId?replyKind=$replyKind$suffix") {
-        launchSingleTop = true
-    }
+    navigate("thread/$noteId?replyKind=$replyKind$suffix")
 }

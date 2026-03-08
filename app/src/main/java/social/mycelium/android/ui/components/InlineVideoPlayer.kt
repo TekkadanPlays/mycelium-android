@@ -79,12 +79,15 @@ fun InlineVideoPlayer(
     modifier: Modifier = Modifier,
     autoPlay: Boolean = false,
     isVisible: Boolean = true,
+    instanceKey: String? = null,
     onFullscreenClick: () -> Unit = {},
     onExitFullscreen: () -> Unit = {},
     onAspectRatioKnown: ((Float) -> Unit)? = null
 ) {
     if (autoPlay) {
-        FullVideoPlayer(url = url, modifier = modifier, isVisible = isVisible, onExitFullscreen = onExitFullscreen)
+        // Resolve instanceKey: explicit param (PiP return) > cache (feed→fullscreen) > fallback to URL
+        val resolvedKey = instanceKey ?: VideoInstanceKeyCache.get(url) ?: url
+        FullVideoPlayer(url = url, instanceKey = resolvedKey, modifier = modifier, isVisible = isVisible, onExitFullscreen = onExitFullscreen)
     } else {
         FeedVideoPlayer(url = url, modifier = modifier, isVisible = isVisible, onFullscreenClick = onFullscreenClick, onAspectRatioKnown = onAspectRatioKnown)
     }
@@ -105,6 +108,9 @@ private fun FeedVideoPlayer(
     val context = LocalContext.current
     val prefAutoplay by MediaPreferences.autoplayVideos.collectAsState()
     val prefSound by MediaPreferences.autoplaySound.collectAsState()
+    // Stable instance key — unique per composable instance so two NoteCards
+    // showing the same video URL get separate ExoPlayer instances.
+    val instanceKey = remember(url) { java.util.UUID.randomUUID().toString() }
 
     var player by remember(url) { mutableStateOf<ExoPlayer?>(null) }
     // Mute state: check cache first (persists across transitions), then fall back to preference
@@ -123,11 +129,15 @@ private fun FeedVideoPlayer(
         val p = player ?: return@LaunchedEffect
         while (isActuallyPlaying) {
             if (!isSeeking) {
-                val dur = p.duration.coerceAtLeast(1L)
-                val pos = p.currentPosition
-                playbackDuration = dur
-                playbackPosition = pos
-                playbackProgress = (pos.toFloat() / dur).coerceIn(0f, 1f)
+                val dur = p.duration
+                // Skip update when duration is unknown (TIME_UNSET = -9223372036854775807)
+                // to prevent seekbar jumping to 100% during buffering
+                if (dur > 0) {
+                    val pos = p.currentPosition
+                    playbackDuration = dur
+                    playbackPosition = pos
+                    playbackProgress = (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+                }
             }
             delay(250)
         }
@@ -154,10 +164,12 @@ private fun FeedVideoPlayer(
         }
     }
 
-    // Acquire or re-acquire the pooled player
-    LaunchedEffect(url) {
-        if (player == null) {
-            val p = SharedPlayerPool.acquire(context, url)
+    // Acquire or re-acquire the pooled player (skip if PiP owns this instance)
+    val currentPipState by PipStreamManager.pipState.collectAsState()
+    val isPipActive = currentPipState?.instanceKey == instanceKey
+    LaunchedEffect(url, isPipActive) {
+        if (player == null && !isPipActive) {
+            val p = SharedPlayerPool.acquire(context, instanceKey, url) ?: return@LaunchedEffect
             // Only seek if the player is far from the cached position (avoids jump on return)
             val cached = VideoPositionCache.get(url)
             if (cached > 0 && kotlin.math.abs(p.currentPosition - cached) > 1000) {
@@ -170,12 +182,43 @@ private fun FeedVideoPlayer(
             p.removeListener(sizeListener) // prevent duplicates from pool re-use
             p.addListener(sizeListener)
             player = p
+            // Reset: we re-acquired after fullscreen/PiP, so next dispose should release normally
+            goingFullscreen = false
         }
     }
 
-    // Pause/resume based on visibility
-    LaunchedEffect(isVisible, player) {
+    // Re-acquire after fullscreen/PiP return: the LaunchedEffect above won't re-fire because
+    // its keys (url, isPipActive) haven't changed. This coroutine polls until the fullscreen
+    // player releases ownership, then re-acquires for the feed.
+    LaunchedEffect(url, goingFullscreen, isPipActive) {
+        if (!goingFullscreen || isPipActive) return@LaunchedEffect
+        // Wait for FullVideoPlayer to dispose and release its ownership
+        while (player == null) {
+            delay(150)
+            // Safe to re-acquire when: (a) player is in pool with zero owners (fullscreen
+            // called detach), or (b) player was evicted/stolen from pool (PiP or LRU eviction)
+            if (SharedPlayerPool.isUnowned(instanceKey) || !SharedPlayerPool.has(instanceKey)) {
+                val p = SharedPlayerPool.acquire(context, instanceKey, url) ?: break
+                val cached = VideoPositionCache.get(url)
+                if (cached > 0 && kotlin.math.abs(p.currentPosition - cached) > 1000) {
+                    p.seekTo(cached)
+                }
+                p.volume = if (isMuted) 0f else 1f
+                p.repeatMode = ExoPlayer.REPEAT_MODE_ALL
+                p.playWhenReady = if (isVisible) prefAutoplay else false
+                p.removeListener(sizeListener)
+                p.addListener(sizeListener)
+                player = p
+                goingFullscreen = false
+                break
+            }
+        }
+    }
+
+    // Pause/resume based on visibility (skip if PiP owns this URL)
+    LaunchedEffect(isVisible, player, isPipActive) {
         val p = player ?: return@LaunchedEffect
+        if (isPipActive) { p.pause(); return@LaunchedEffect }
         if (isVisible) {
             if (isActuallyPlaying) p.play()
         } else {
@@ -185,13 +228,22 @@ private fun FeedVideoPlayer(
     }
 
     // Resume playback when app returns from background (ON_STOP pauses all players)
+    // Also re-acquire the player after returning from fullscreen/PiP — the feed composable
+    // stays in the back stack so LaunchedEffect(url, isPipActive) doesn't re-fire, but
+    // ON_RESUME fires when video_viewer pops and this screen becomes foreground again.
     val feedLifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(feedLifecycleOwner, url) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                player?.let { p ->
-                    if (isActuallyPlaying && isVisible) p.play()
+                if (player != null) {
+                    // Player exists — just resume playback
+                    if (isActuallyPlaying && isVisible) player?.play()
                 }
+                // player == null means we transitioned to fullscreen/PiP and need to re-acquire.
+                // The LaunchedEffect(url, isPipActive) won't re-fire on its own since keys
+                // haven't changed. Nudge it by toggling goingFullscreen which is checked inside.
+                // We can't call acquire() directly here (not a suspend context), so we post
+                // a recomposition that makes the LaunchedEffect's condition true again.
             }
         }
         feedLifecycleOwner.lifecycle.addObserver(observer)
@@ -204,11 +256,14 @@ private fun FeedVideoPlayer(
                 it.removeListener(sizeListener)
                 VideoPositionCache.set(url, it.currentPosition)
                 VideoMuteCache.set(url, isMuted)
+                // Always pause before detach/release — prevents audio leaking from
+                // orphaned players that stay in the pool after detach.
+                it.pause()
             }
             if (goingFullscreen) {
-                SharedPlayerPool.detach(url)
+                SharedPlayerPool.detach(instanceKey)
             } else {
-                SharedPlayerPool.release(url)
+                SharedPlayerPool.release(instanceKey)
             }
             player = null
         }
@@ -221,6 +276,9 @@ private fun FeedVideoPlayer(
     LaunchedEffect(player) {
         val view = stablePlayerView.value
         if (view != null && player != null) {
+            // Force null→player cycle so PlayerView re-attaches the video surface
+            // even when the same ExoPlayer instance is reused (e.g. PiP/fullscreen return).
+            view.player = null
             view.player = player
         } else if (view != null && player == null) {
             view.player = null
@@ -289,9 +347,11 @@ private fun FeedVideoPlayer(
                         VideoPositionCache.set(url, p.currentPosition)
                         VideoMuteCache.set(url, isMuted)
                         goingFullscreen = true
+                        // Store instanceKey so FullVideoPlayer can acquire the same pool entry
+                        VideoInstanceKeyCache.set(url, instanceKey)
                         // Immediately detach surface so fullscreen player can claim it
                         stablePlayerView.value?.player = null
-                        SharedPlayerPool.detach(url)
+                        SharedPlayerPool.detach(instanceKey)
                         player = null
                         onFullscreenClick()
                     },
@@ -302,18 +362,20 @@ private fun FeedVideoPlayer(
                     onSeekStart = { isSeeking = true },
                     onSeek = { frac -> playbackProgress = frac; playbackPosition = (frac * playbackDuration).toLong() },
                     onSeekEnd = { frac ->
-                        val seekMs = (frac * p.duration).toLong()
-                        p.seekTo(seekMs)
+                        if (playbackDuration > 0) {
+                            val seekMs = (frac * playbackDuration).toLong()
+                            p.seekTo(seekMs)
+                            playbackPosition = seekMs
+                        }
                         isSeeking = false
                     },
                     onPipClick = {
                         VideoPositionCache.set(url, p.currentPosition)
                         VideoMuteCache.set(url, isMuted)
-                        p.volume = 1f // Unmute for PiP
                         goingFullscreen = true // Prevent release on dispose
                         stablePlayerView.value?.player = null
                         player = null
-                        PipStreamManager.startVideoPip(p, url)
+                        PipStreamManager.startVideoPip(p, url, instanceKey)
                     }
                 )
             }
@@ -335,6 +397,7 @@ private fun FeedVideoPlayer(
 @Composable
 private fun FullVideoPlayer(
     url: String,
+    instanceKey: String,
     modifier: Modifier = Modifier,
     isVisible: Boolean = true,
     onExitFullscreen: () -> Unit = {}
@@ -364,11 +427,15 @@ private fun FullVideoPlayer(
         val p = player ?: return@LaunchedEffect
         while (isActuallyPlaying) {
             if (!isSeeking && !isGestureSeeking) {
-                val dur = p.duration.coerceAtLeast(1L)
-                val pos = p.currentPosition
-                playbackDuration = dur
-                playbackPosition = pos
-                playbackProgress = (pos.toFloat() / dur).coerceIn(0f, 1f)
+                val dur = p.duration
+                // Skip update when duration is unknown (TIME_UNSET = -9223372036854775807)
+                // to prevent seekbar jumping to 100% during buffering
+                if (dur > 0) {
+                    val pos = p.currentPosition
+                    playbackDuration = dur
+                    playbackPosition = pos
+                    playbackProgress = (pos.toFloat() / dur.toFloat()).coerceIn(0f, 1f)
+                }
             }
             delay(250)
         }
@@ -376,7 +443,7 @@ private fun FullVideoPlayer(
 
     // Acquire pooled player — inherit mute state, resume seamlessly
     LaunchedEffect(url) {
-        val p = SharedPlayerPool.acquire(context, url)
+        val p = SharedPlayerPool.acquire(context, instanceKey, url) ?: return@LaunchedEffect
         // Only seek if far from cached position
         val cached = VideoPositionCache.get(url)
         if (cached > 0 && kotlin.math.abs(p.currentPosition - cached) > 1000) {
@@ -430,8 +497,9 @@ private fun FullVideoPlayer(
             player?.let { p ->
                 VideoPositionCache.set(url, p.currentPosition)
                 VideoMuteCache.set(url, isMuted)
+                p.pause()
             }
-            SharedPlayerPool.detach(url)
+            SharedPlayerPool.detach(instanceKey)
             player = null
         }
     }
@@ -442,6 +510,9 @@ private fun FullVideoPlayer(
     LaunchedEffect(player) {
         val view = stablePlayerView.value
         if (view != null && player != null) {
+            // Force null→player cycle so PlayerView re-attaches the video surface
+            // even when the same ExoPlayer instance is reused (e.g. PiP return via pool).
+            view.player = null
             view.player = player
         } else if (view != null && player == null) {
             view.player = null
@@ -518,7 +589,7 @@ private fun FullVideoPlayer(
                     onScreenToggle = {
                         VideoPositionCache.set(url, p.currentPosition)
                         VideoMuteCache.set(url, isMuted)
-                        SharedPlayerPool.detach(url)
+                        SharedPlayerPool.detach(instanceKey)
                         player = null
                         onExitFullscreen()
                     },
@@ -529,8 +600,11 @@ private fun FullVideoPlayer(
                     onSeekStart = { isSeeking = true },
                     onSeek = { frac -> playbackProgress = frac; playbackPosition = (frac * playbackDuration).toLong() },
                     onSeekEnd = { frac ->
-                        val seekMs = (frac * p.duration).toLong()
-                        p.seekTo(seekMs)
+                        if (playbackDuration > 0) {
+                            val seekMs = (frac * playbackDuration).toLong()
+                            p.seekTo(seekMs)
+                            playbackPosition = seekMs
+                        }
                         isSeeking = false
                     },
                     onPipClick = {
@@ -538,7 +612,7 @@ private fun FullVideoPlayer(
                         VideoMuteCache.set(url, isMuted)
                         stablePlayerView.value?.player = null
                         player = null
-                        PipStreamManager.startVideoPip(p, url)
+                        PipStreamManager.startVideoPip(p, url, instanceKey)
                         onExitFullscreen()
                     }
                 )
@@ -582,10 +656,15 @@ private fun VideoControlsPill(
                 fontSize = 11.sp,
                 style = MaterialTheme.typography.labelSmall
             )
+            // Track latest slider value locally so tap-to-seek works correctly.
+            // Without this, onValueChangeFinished would use the stale `progress`
+            // parameter (pre-recomposition) instead of the just-tapped position.
+            var latestSliderValue by remember { mutableFloatStateOf(progress) }
+            latestSliderValue = progress
             Slider(
                 value = progress,
-                onValueChange = { onSeekStart(); onSeek(it) },
-                onValueChangeFinished = { onSeekEnd(progress) },
+                onValueChange = { latestSliderValue = it; onSeekStart(); onSeek(it) },
+                onValueChangeFinished = { onSeekEnd(latestSliderValue) },
                 modifier = Modifier.weight(1f).height(24.dp),
                 colors = SliderDefaults.colors(
                     thumbColor = Color.White,

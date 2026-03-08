@@ -444,35 +444,42 @@ private fun QuotedNoteContent(
         )
     }
 
-    // Borderless quoted note: left accent bar + content, edge-to-edge
+    // Helper to build a Note from quoted meta (used by header tap + body fallback)
+    val navigateToQuotedNote = {
+        val quotedNote = Note(
+            id = meta.eventId,
+            author = quotedAuthor,
+            content = meta.fullContent,
+            timestamp = meta.createdAt,
+            likes = 0, shares = 0, comments = 0,
+            isLiked = false, hashtags = emptyList(),
+            mediaUrls = quotedMediaUrls.toList(),
+            isReply = meta.rootNoteId != null,
+            rootNoteId = meta.rootNoteId,
+            relayUrl = meta.relayUrl,
+            relayUrls = listOfNotNull(meta.relayUrl),
+            kind = meta.kind
+        )
+        onNoteClick(quotedNote)
+    }
+
+    // Borderless quoted note: left accent bar + content, edge-to-edge.
+    // NOTE: No .clickable on outer Row — that would swallow taps before
+    // ClickableNoteContent can resolve @mention annotations. Instead,
+    // the header row is clickable for thread nav, and ClickableNoteContent
+    // handles profile/url taps with a fallback to navigateToQuotedNote.
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
             .padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 4.dp)
-            .clickable {
-                val quotedNote = Note(
-                    id = meta.eventId,
-                    author = quotedAuthor,
-                    content = meta.fullContent,
-                    timestamp = meta.createdAt,
-                    likes = 0, shares = 0, comments = 0,
-                    isLiked = false, hashtags = emptyList(),
-                    mediaUrls = quotedMediaUrls.toList(),
-                    isReply = meta.rootNoteId != null,
-                    rootNoteId = meta.rootNoteId,
-                    relayUrl = meta.relayUrl,
-                    relayUrls = listOfNotNull(meta.relayUrl),
-                    kind = meta.kind
-                )
-                onNoteClick(quotedNote)
-            }
     ) {
         // Left accent bar — stretches full height of content
         Box(
             modifier = Modifier
                 .width(3.dp)
                 .fillMaxHeight()
+                .clickable(onClick = navigateToQuotedNote)
                 .background(
                     MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
                     shape = RoundedCornerShape(1.5.dp)
@@ -486,7 +493,7 @@ private fun QuotedNoteContent(
             // ── Header row: author (left) + counters & emojis (right) ──
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().clickable(onClick = navigateToQuotedNote)
             ) {
                 ProfilePicture(author = quotedAuthor, size = 20.dp, onClick = { onProfileClick(meta.authorId) })
                 Spacer(modifier = Modifier.width(6.dp))
@@ -1978,7 +1985,20 @@ fun NoteCard(
     var showCustomZapDialog by remember { mutableStateOf(false) }
     var isDetailsExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
-    var reactionEmoji by remember(note.id) { mutableStateOf(ReactionsRepository.getLastReaction(note.id)) }
+    val effectiveReactionNoteId = note.originalNoteId ?: note.id
+    var reactionEmoji by remember(note.id) {
+        mutableStateOf(
+            ReactionsRepository.getLastReaction(effectiveReactionNoteId)
+                ?: ReactionsRepository.getLastReaction(note.id)
+        )
+    }
+    // Re-derive reactionEmoji when overrideReactions changes (e.g. optimistic injection from thread)
+    // so the heart icon swaps to the emoji without needing a recomposition reset
+    if (reactionEmoji == null && overrideReactions != null && overrideReactions.isNotEmpty()) {
+        val fromRepo = ReactionsRepository.getLastReaction(effectiveReactionNoteId)
+            ?: ReactionsRepository.getLastReaction(note.id)
+        if (fromRepo != null) reactionEmoji = fromRepo
+    }
     var recentEmojis by remember(accountNpub) { mutableStateOf(ReactionsRepository.getRecentEmojis(context, accountNpub)) }
 
     // ── Note animation state (reaction / boost / zap) ─────────────────
@@ -2251,8 +2271,39 @@ fun NoteCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Left side: timestamp • replies
+                    // Left side: [vote score •] timestamp • replies
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Vote score — left of timestamp for kind-11 / kind-1111
+                        if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
+                            val reactiveScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+                            val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
+                            val score = reactiveScores[note.id] ?: 0
+                            val ownVote = reactiveOwnVotes[note.id] ?: 0
+                            val scoreColor = when {
+                                score > 0 -> MyceliumGreen
+                                score < 0 -> pastelRed
+                                else -> mutedText
+                            }
+                            Icon(
+                                imageVector = when {
+                                    ownVote > 0 -> Icons.Filled.ArrowUpward
+                                    ownVote < 0 -> Icons.Filled.ArrowDownward
+                                    else -> Icons.Outlined.ArrowUpward
+                                },
+                                contentDescription = "Vote score",
+                                modifier = Modifier.size(14.dp),
+                                tint = scoreColor
+                            )
+                            if (score != 0) {
+                                Text(
+                                    text = "$score",
+                                    style = countStyle,
+                                    color = scoreColor,
+                                    modifier = Modifier.padding(start = 2.dp)
+                                )
+                            }
+                            Text(text = " • ", style = countStyle, color = mutedText)
+                        }
                         Text(text = formattedTime, style = countStyle, color = mutedText)
                         if (replyCountVal > 0) {
                             Text(text = " • ", style = countStyle, color = mutedText)
@@ -2539,10 +2590,10 @@ fun NoteCard(
                             mediaList = mediaList,
                             allMediaUrls = allMediaUrls,
                             groupStartIndex = groupStartIndex,
-                            initialMediaPage = initialMediaPage,
+                            initialMediaPage = (initialMediaPage - groupStartIndex).coerceAtLeast(0),
                             isVisible = isVisible,
                             mediaMeta = note.mediaMeta,
-                            onMediaPageChanged = onMediaPageChanged,
+                            onMediaPageChanged = { localPage -> onMediaPageChanged(localPage + groupStartIndex) },
                             onImageTap = { urls, index -> onImageTap(note, urls, index) },
                             onOpenImageViewer = onOpenImageViewer,
                             onVideoClick = onVideoClick,

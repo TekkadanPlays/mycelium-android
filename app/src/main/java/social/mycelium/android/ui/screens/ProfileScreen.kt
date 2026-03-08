@@ -117,7 +117,6 @@ fun ProfileScreen(
     onRelayClick: (relayUrl: String) -> Unit = {},
     isFollowing: Boolean = false,
     onFollowClick: () -> Unit = {},
-    onMessageClick: () -> Unit = {},
     accountNpub: String? = null,
     topAppBarState: TopAppBarState = rememberTopAppBarState(),
     onLoginClick: (() -> Unit)? = null,
@@ -178,6 +177,9 @@ fun ProfileScreen(
 
     // Bio expanded state
     var bioExpanded by rememberSaveable { mutableStateOf(false) }
+
+    // 3-dot menu state
+    var showMoreMenu by rememberSaveable { mutableStateOf(false) }
 
     // ── Collapsing header state ──
     val density = LocalDensity.current
@@ -260,8 +262,66 @@ fun ProfileScreen(
                         }
                     },
                     actions = {
-                        IconButton(onClick = { /* TODO: more options */ }) {
-                            Icon(Icons.Outlined.MoreVert, contentDescription = "More")
+                        Box {
+                            IconButton(onClick = { showMoreMenu = true }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "More")
+                            }
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (isFollowing) "Unfollow" else "Follow")
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        onFollowClick()
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (isFollowing) Icons.Default.PersonRemove else Icons.Default.PersonAdd,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Filters & Blocks") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        // TODO: navigate to filters/blocks for this user
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Block,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Report",
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        // TODO: report user
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Flag,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp),
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                )
+                            }
                         }
                     },
                     scrollBehavior = scrollBehavior,
@@ -313,10 +373,23 @@ fun ProfileScreen(
                                 if (timeGapIndex == null) null
                                 else detectTimeGapIndex(notesOnly)
                             }
-                            var showOlderNotes by remember { mutableStateOf(false) }
+                            var showOlderNotes by rememberSaveable { mutableStateOf(false) }
                             val visibleNotes = remember(notesOnly, notesGapIndex, showOlderNotes) {
                                 if (notesGapIndex != null && !showOlderNotes) notesOnly.take(notesGapIndex)
                                 else notesOnly
+                            }
+                            // Pre-fetch: trigger 50 items before the bottom
+                            LaunchedEffect(notesListState, isLoadingMore) {
+                                snapshotFlow {
+                                    val li = notesListState.layoutInfo
+                                    val total = li.totalItemsCount
+                                    val last = li.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                    last to total
+                                }.collect { (last, total) ->
+                                    if (total > 50 && last >= total - 50 && !isLoadingMore && notesHasMore) {
+                                        onLoadMore(ProfileFeedRepository.TAB_NOTES)
+                                    }
+                                }
                             }
                             LazyColumn(
                                 state = notesListState,
@@ -360,6 +433,19 @@ fun ProfileScreen(
                         if (repliesOnly.isEmpty() && !isProfileLoading) {
                             EmptyTabPlaceholder(tabIndex = 1)
                         } else {
+                            // Pre-fetch: trigger 50 items before the bottom
+                            LaunchedEffect(repliesListState, isLoadingMore) {
+                                snapshotFlow {
+                                    val li = repliesListState.layoutInfo
+                                    val total = li.totalItemsCount
+                                    val last = li.visibleItemsInfo.lastOrNull()?.index ?: 0
+                                    last to total
+                                }.collect { (last, total) ->
+                                    if (total > 50 && last >= total - 50 && !isLoadingMore && repliesHasMore) {
+                                        onLoadMore(ProfileFeedRepository.TAB_REPLIES)
+                                    }
+                                }
+                            }
                             LazyColumn(
                                 state = repliesListState,
                                 modifier = Modifier.fillMaxSize(),
@@ -430,6 +516,7 @@ fun ProfileScreen(
                 ) {
                     ProfileBanner(
                         author = author,
+                        badges = badges,
                         onBannerClick = { url ->
                             if (url != null) onOpenImageViewer(listOf(url), 0)
                         },
@@ -445,10 +532,9 @@ fun ProfileScreen(
                         isLoadingCounts = isLoadingCounts,
                         isFollowing = isFollowing,
                         onFollowClick = onFollowClick,
-                        onMessageClick = onMessageClick,
                         bioExpanded = bioExpanded,
                         onBioToggle = { bioExpanded = !bioExpanded },
-                        badges = badges
+                        onProfileClick = onProfileClick
                     )
                 }
 
@@ -581,7 +667,7 @@ private fun ProfileNoteCard(
     onSeeAllReactions: (Note) -> Unit,
     isVisible: Boolean = true,
 ) {
-    val counts = countsForNote(note.id)
+    val counts = countsForNote(note.originalNoteId ?: note.id) ?: countsForNote(note.id)
     NoteCard(
         isVisible = isVisible,
         note = note,
@@ -615,7 +701,8 @@ private fun ProfileNoteCard(
     )
 }
 
-/** Footer items for profile feed lists: load-more trigger, loading spinner, end-of-feed. */
+/** Footer items for profile feed lists: persistent loader + end-of-feed.
+ *  Pre-fetch is handled by [profileFeedPrefetch] via snapshotFlow, not a bottom-of-list LaunchedEffect. */
 private fun LazyListScope.profileFeedFooter(
     tabNotes: List<Note>,
     hasMore: Boolean,
@@ -623,12 +710,8 @@ private fun LazyListScope.profileFeedFooter(
     isProfileLoading: Boolean,
     onLoadMore: () -> Unit
 ) {
-    if (tabNotes.isNotEmpty() && hasMore && !isLoadingMore) {
-        item(key = "load_more_trigger") {
-            LaunchedEffect(Unit) { onLoadMore() }
-        }
-    }
-    if (isProfileLoading || isLoadingMore) {
+    // Always show a bottom item when feed has content and not exhausted
+    if (tabNotes.isNotEmpty() && hasMore) {
         item(key = "loading_indicator") {
             Box(
                 modifier = Modifier
@@ -636,11 +719,20 @@ private fun LazyListScope.profileFeedFooter(
                     .padding(vertical = 24.dp),
                 contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(24.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-                )
+                if (isProfileLoading || isLoadingMore) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                    )
+                } else {
+                    // Idle placeholder — keeps scroll area so pre-fetch triggers
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 1.5.dp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                    )
+                }
             }
         }
     }
@@ -772,6 +864,7 @@ private fun ReplyWithParentContext(
 @Composable
 private fun ProfileBanner(
     author: Author,
+    badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
     onBannerClick: (String?) -> Unit,
     onAvatarClick: (String?) -> Unit,
 ) {
@@ -808,6 +901,43 @@ private fun ProfileBanner(
                         )
                     )
             )
+        }
+
+        // Badges — right-aligned in the overlap area between banner and identity
+        if (badges.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 12.dp, bottom = 4.dp)
+                    .clipToBounds(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Show as many as fit; limit to ~6 to avoid overflowing into the avatar
+                val visibleBadges = badges.take(6)
+                visibleBadges.forEach { badge ->
+                    BadgeThumbnail(badge = badge, size = 26.dp)
+                }
+                if (badges.size > 6) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color.Black.copy(alpha = 0.5f),
+                        modifier = Modifier.height(26.dp)
+                    ) {
+                        Box(
+                            contentAlignment = Alignment.Center,
+                            modifier = Modifier.padding(horizontal = 6.dp)
+                        ) {
+                            Text(
+                                text = "+${badges.size - 6}",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         // Avatar — left-aligned, overlapping banner bottom
@@ -878,14 +1008,14 @@ private fun ProfileIdentity(
     isLoadingCounts: Boolean = false,
     isFollowing: Boolean,
     onFollowClick: () -> Unit,
-    onMessageClick: () -> Unit,
     bioExpanded: Boolean,
     onBioToggle: () -> Unit,
-    badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
+    onProfileClick: (String) -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
+    var showMenu by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -946,8 +1076,51 @@ private fun ProfileIdentity(
                 }
             }
 
-            // Action buttons
-            Spacer(Modifier.width(8.dp))
+            // Action buttons — compact icon-only
+            Spacer(Modifier.width(4.dp))
+
+            // Follow/Unfollow
+            if (isFollowing) {
+                IconButton(
+                    onClick = onFollowClick,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.PersonRemove,
+                        contentDescription = "Unfollow",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            } else {
+                IconButton(
+                    onClick = onFollowClick,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.PersonAdd,
+                        contentDescription = "Follow",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            // Zap
+            if (author.lud16?.isNotBlank() == true) {
+                IconButton(
+                    onClick = { /* TODO: zap profile */ },
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.ElectricBolt,
+                        contentDescription = "Zap",
+                        modifier = Modifier.size(20.dp),
+                        tint = Color(0xFFFFB74D)
+                    )
+                }
+            }
+
             // Copy npub
             IconButton(
                 onClick = {
@@ -968,76 +1141,27 @@ private fun ProfileIdentity(
 
         Spacer(Modifier.height(12.dp))
 
-        // ── Action row: Follow / Zap / Message ──
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (isFollowing) {
-                OutlinedButton(
-                    onClick = onFollowClick,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.Check, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Following", style = MaterialTheme.typography.labelMedium)
-                }
-            } else {
-                Button(
-                    onClick = onFollowClick,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Follow", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            // Zap button
-            if (author.lud16?.isNotBlank() == true) {
-                OutlinedButton(
-                    onClick = { /* TODO: zap profile */ },
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Icon(
-                        Icons.Default.ElectricBolt,
-                        null,
-                        modifier = Modifier.size(16.dp),
-                        tint = Color(0xFFFFB74D)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text("Zap", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-            OutlinedButton(
-                onClick = onMessageClick,
-                shape = RoundedCornerShape(20.dp),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Icon(Icons.Outlined.Mail, null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("DM", style = MaterialTheme.typography.labelMedium)
-            }
-        }
-
         // ── Bio ──
         author.about?.takeIf { it.isNotBlank() }?.let { about ->
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = about,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = if (bioExpanded) Int.MAX_VALUE else 3,
+            val bioAnnotated = remember(about) { parseBioWithNpubs(about) }
+            androidx.compose.foundation.text.ClickableText(
+                text = bioAnnotated,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    color = MaterialTheme.colorScheme.onSurface
+                ),
+                maxLines = if (bioExpanded) Int.MAX_VALUE else 6,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onBioToggle() }
+                onClick = { offset ->
+                    bioAnnotated.getStringAnnotations("npub_hex", offset, offset)
+                        .firstOrNull()?.let { annotation ->
+                            onProfileClick(annotation.item)
+                            return@ClickableText
+                        }
+                    onBioToggle()
+                },
+                modifier = Modifier.fillMaxWidth()
             )
-            if (!bioExpanded && about.length > 150) {
+            if (!bioExpanded && (about.length > 200 || about.count { it == '\n' } > 5)) {
                 Text(
                     "Show more",
                     style = MaterialTheme.typography.labelSmall,
@@ -1116,11 +1240,7 @@ private fun ProfileIdentity(
             )
         }
 
-        // ── Badges row (single line with overflow) ──
-        if (badges.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-            ProfileBadgesRow(badges = badges)
-        }
+        // Badges are displayed in the banner area (ProfileBanner)
 
         Spacer(Modifier.height(8.dp))
     }
@@ -1363,6 +1483,69 @@ private fun LazyMediaGrid(
             }
         }
     }
+}
+
+// ─── NIP-19 Bio Parser ───────────────────────────────────────────────────────
+
+/**
+ * Parse bio text, replacing npub1... and nostr:npub1... with display names.
+ * Returns an AnnotatedString with "npub_hex" annotations for clickable navigation.
+ */
+private fun parseBioWithNpubs(text: String): AnnotatedString {
+    val builder = AnnotatedString.Builder()
+    // Match nostr:npub1... or standalone npub1...
+    val npubRegex = Regex("(?:nostr:)?(npub1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58})", RegexOption.IGNORE_CASE)
+    var lastIndex = 0
+
+    for (match in npubRegex.findAll(text)) {
+        // Append text before this match
+        if (match.range.first > lastIndex) {
+            builder.append(text.substring(lastIndex, match.range.first))
+        }
+
+        val npubBech32 = match.groupValues[1]
+        val hexKey = try {
+            val (_, bytes, _) = com.example.cybin.nip19.Bech32.decodeBytes(npubBech32)
+            bytes.joinToString("") { "%02x".format(it) }
+        } catch (_: Throwable) {
+            null
+        }
+
+        if (hexKey != null) {
+            // Resolve display name from cache
+            val author = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                .resolveAuthor(hexKey)
+            val displayText = if (author.displayName.endsWith("...") && author.displayName.length <= 12) {
+                // Fallback: show truncated npub
+                "@${npubBech32.take(12)}…"
+            } else {
+                "@${author.displayName}"
+            }
+
+            builder.pushStringAnnotation("npub_hex", hexKey)
+            builder.pushStyle(
+                androidx.compose.ui.text.SpanStyle(
+                    color = androidx.compose.ui.graphics.Color(0xFF6B8AFF),
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
+                )
+            )
+            builder.append(displayText)
+            builder.pop() // style
+            builder.pop() // annotation
+        } else {
+            // Failed to decode — just append raw text
+            builder.append(match.value)
+        }
+
+        lastIndex = match.range.last + 1
+    }
+
+    // Append remaining text
+    if (lastIndex < text.length) {
+        builder.append(text.substring(lastIndex))
+    }
+
+    return builder.toAnnotatedString()
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

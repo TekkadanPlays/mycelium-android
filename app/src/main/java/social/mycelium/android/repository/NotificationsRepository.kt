@@ -244,7 +244,7 @@ object NotificationsRepository {
         // For aggregated notifications (likes, zaps, reposts), the id is "like:$eTag" etc.
         // Search by noteId matching the notification's note ID, targetNoteId, or replyNoteId
         return notificationsById.values.firstOrNull { data ->
-            data.note?.id == noteId || data.targetNoteId == noteId || data.replyNoteId == noteId
+            data.note?.id == noteId || data.targetNoteId == noteId || data.targetNote?.id == noteId || data.replyNoteId == noteId
         }
     }
 

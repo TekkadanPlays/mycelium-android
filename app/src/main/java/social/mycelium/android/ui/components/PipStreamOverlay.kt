@@ -11,7 +11,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
@@ -26,10 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.HeadsetOff
-import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -161,9 +157,6 @@ fun PipStreamOverlay(
                 }
             }
 
-            // Background playback toggle state
-            val continueInBg by PipStreamManager.continueInBackground.collectAsState()
-
             // PiP window
             Box(
                 modifier = Modifier
@@ -259,26 +252,6 @@ fun PipStreamOverlay(
                     }
                 )
 
-                // Background playback toggle — top-left corner
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(4.dp)
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.5f))
-                        .clickable {
-                            PipStreamManager.setContinueInBackground(!continueInBg)
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = if (continueInBg) Icons.Default.Headphones else Icons.Default.HeadsetOff,
-                        contentDescription = if (continueInBg) "Background play on" else "Background play off",
-                        tint = if (continueInBg) Color(0xFF4CAF50) else Color.White.copy(alpha = 0.7f),
-                        modifier = Modifier.size(14.dp)
-                    )
-                }
             }
         }
     }

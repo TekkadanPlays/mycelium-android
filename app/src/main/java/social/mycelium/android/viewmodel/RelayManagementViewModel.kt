@@ -203,9 +203,16 @@ class RelayManagementViewModel(
             .filter { it.isSubscribed }
             .flatMap { it.relays }
             .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+        // Include relays from active profiles
+        val profileRelayUrls = state.relayProfiles
+            .filter { it.isActive }
+            .flatMap { it.categories }
+            .filter { it.isSubscribed }
+            .flatMap { it.relays }
+            .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
         // Merge outbox relays so adding a relay to a category doesn't drop outbox notes
         val outboxUrls = state.outboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
-        val relayUrls = (subscribedRelayUrls + outboxUrls).distinct()
+        val relayUrls = (subscribedRelayUrls + profileRelayUrls + outboxUrls).distinct()
         if (relayUrls.isEmpty()) return
         Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays")
         // Invalidate the idempotency guard so the feed re-subscribes with the new relay set
@@ -496,6 +503,7 @@ class RelayManagementViewModel(
             })
         }
         saveToStorage()
+        refreshActiveSubscription()
     }
 
     fun addCategoryToProfile(profileId: String, category: RelayCategory) {
@@ -527,6 +535,7 @@ class RelayManagementViewModel(
             })
         }
         saveToStorage()
+        refreshActiveSubscription()
     }
 
     fun removeRelayFromProfileCategory(profileId: String, categoryId: String, relayUrl: String) {
@@ -540,6 +549,7 @@ class RelayManagementViewModel(
             })
         }
         saveToStorage()
+        refreshActiveSubscription()
     }
 
     fun fetchUserRelaysFromNetwork(pubkey: String) {

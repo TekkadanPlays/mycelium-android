@@ -129,6 +129,7 @@ class Nip86Client(private val signer: NostrSigner) {
 
             val response = MyceliumHttpClient.instance.post(httpUrl) {
                 contentType(ContentType.parse(CONTENT_TYPE))
+                header("Accept", CONTENT_TYPE)
                 header("Authorization", authHeader)
                 setBody(body)
             }
@@ -140,7 +141,14 @@ class Nip86Client(private val signer: NostrSigner) {
                 return@withContext Nip86Result.Error("Unauthorized — you may not be the relay operator")
             }
             if (status !in 200..299) {
-                return@withContext Nip86Result.Error("HTTP $status: $responseText")
+                return@withContext Nip86Result.Error("HTTP $status: ${responseText.take(200)}")
+            }
+
+            // Guard against HTML responses (relay web frontend intercepting the POST)
+            val trimmed = responseText.trimStart()
+            if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+                Log.w(TAG, "NIP-86 response is not JSON (starts with '${trimmed.take(20)}')")
+                return@withContext Nip86Result.Error("Relay returned HTML instead of JSON — NIP-86 management endpoint may not be configured")
             }
 
             val json = JSONObject(responseText)

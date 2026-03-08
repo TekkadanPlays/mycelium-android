@@ -1569,30 +1569,40 @@ class NotesRepository private constructor() {
             }
         }
 
-        // Remove the original kind-1 note from feed if it exists (repost supersedes it)
+        // Check if the original kind-1 note is already visible in the feed.
+        // If so, the repost should upgrade it in-place (add boost badge, reposition
+        // to top) instead of hiding it behind the "X new notes" gate.
         val origId = note.originalNoteId
-        var notesAfterRemoval = currentNotes
         if (origId != null) {
             val origIndex = currentNotes.indexOfFirst { it.id == origId }
             if (origIndex >= 0) {
-                notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }
+                // Original note is already visible — replace with repost version in-place
+                val updatedNotes = currentNotes.toMutableList().apply { removeAt(origIndex) }
+                val newNotes = trimNotesToCap((updatedNotes + note).sortedByDescending { it.repostTimestamp ?: it.timestamp })
+                _notes.value = newNotes
+                scheduleDisplayUpdate()
+                // Also clean up any pending duplicate
+                synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == origId } }
+                return
             }
-            // Also remove from pending
-            synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == origId } }
+            // Check if the original is in the pending queue — upgrade it there
+            synchronized(pendingNotesLock) {
+                val pendingOrigIndex = _pendingNewNotes.indexOfFirst { it.id == origId }
+                if (pendingOrigIndex >= 0) {
+                    _pendingNewNotes[pendingOrigIndex] = note
+                    return
+                }
+            }
         }
 
         val cutoff = feedCutoffTimestampMs
         val isOlderThanCutoff = cutoff <= 0L || repostTimestampMs <= cutoff
 
         if (!initialLoadComplete || isOlderThanCutoff) {
-            val newNotes = trimNotesToCap((notesAfterRemoval + note).sortedByDescending { it.repostTimestamp ?: it.timestamp })
+            val newNotes = trimNotesToCap((currentNotes + note).sortedByDescending { it.repostTimestamp ?: it.timestamp })
             _notes.value = newNotes
             scheduleDisplayUpdate()
         } else {
-            if (notesAfterRemoval !== currentNotes) {
-                _notes.value = notesAfterRemoval
-                scheduleDisplayUpdate()
-            }
             synchronized(pendingNotesLock) { _pendingNewNotes.add(note) }
             updateDisplayedNewNotesCount()
         }

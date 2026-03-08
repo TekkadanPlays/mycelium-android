@@ -575,10 +575,9 @@ private fun QuotedNoteContent(
     }
 
     // Borderless quoted note: left accent bar + content, edge-to-edge.
-    // NOTE: No .clickable on outer Row — that would swallow taps before
-    // ClickableNoteContent can resolve @mention annotations. Instead,
-    // the header row is clickable for thread nav, and ClickableNoteContent
-    // handles profile/url taps with a fallback to navigateToQuotedNote.
+    // Outer Row is clickable to navigateToQuotedNote so tapping anywhere in the
+    // quoted area opens the quoted note's thread (not the parent's).
+    // Inner ClickableNoteContent still resolves @mention annotations first.
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -589,6 +588,7 @@ private fun QuotedNoteContent(
                 top = 4.dp,
                 bottom = 4.dp
             )
+            .clickable(onClick = navigateToQuotedNote)
     ) {
         // Left accent bar — stretches full height of content
         Box(

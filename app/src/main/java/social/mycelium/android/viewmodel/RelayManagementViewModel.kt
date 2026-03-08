@@ -221,6 +221,11 @@ class RelayManagementViewModel(
         // don't accidentally replace a Following subscription with a global one.
         val currentFilter = RelayConnectionStateMachine.getInstance().getCurrentKind1Filter()
         RelayConnectionStateMachine.getInstance().requestFeedChange(relayUrls, currentFilter)
+        // Also refresh TopicsRepository so kind-11 topics arrive from the new relay
+        social.mycelium.android.repository.TopicsRepository.getInstanceOrNull()?.setSubscriptionRelays(relayUrls)
+        // Update NotesRepository relay set so NoteCountsRepository (kind-30011 votes,
+        // kind-1111 replies) picks up the new relay for existing subscriptions
+        social.mycelium.android.repository.NotesRepository.getInstance().setSubscriptionRelays(relayUrls)
     }
 
     fun showAddRelayDialog() {

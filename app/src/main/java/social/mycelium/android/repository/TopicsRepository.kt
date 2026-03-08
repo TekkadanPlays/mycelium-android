@@ -200,6 +200,8 @@ class TopicsRepository private constructor(context: Context) {
             instance ?: synchronized(this) {
                 instance ?: TopicsRepository(context.applicationContext).also { instance = it }
             }
+        /** Get singleton if already initialized (no Context needed). Null if never created. */
+        fun getInstanceOrNull(): TopicsRepository? = instance
     }
 
     init {

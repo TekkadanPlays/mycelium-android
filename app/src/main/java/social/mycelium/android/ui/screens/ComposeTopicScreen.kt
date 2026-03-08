@@ -1,5 +1,9 @@
 package social.mycelium.android.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.cutoutPadding
@@ -9,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -19,12 +24,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.DefaultMediaServers
 import social.mycelium.android.data.MediaServer
+import social.mycelium.android.data.MediaServerType
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.ui.components.ComposeToolbar
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.utils.UnicodeStylizer
+import social.mycelium.android.viewmodel.AccountStateViewModel
 
 /**
  * Dedicated screen for creating a Kind 11 topic (like compose for home feed).
@@ -42,6 +49,7 @@ fun ComposeTopicScreen(
     myAuthor: Author? = null,
     blossomServers: List<MediaServer> = DefaultMediaServers.BLOSSOM_SERVERS,
     nip96Servers: List<MediaServer> = DefaultMediaServers.NIP96_SERVERS,
+    accountStateViewModel: AccountStateViewModel? = null,
     onPublish: (title: String, content: String, hashtags: List<String>, relayUrls: Set<String>) -> String?,
     onBack: () -> Unit,
     draftId: String? = null,
@@ -72,7 +80,34 @@ fun ComposeTopicScreen(
     var showZapRaiser by remember { mutableStateOf(false) }
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
     val markdownTransformation = remember { MarkdownVisualTransformation() }
+    var isUploading by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    // Image picker → EXIF strip → Blossom upload → insert URL
+    val mediaPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val server = selectedMediaServer
+        if (server == null || server.type != MediaServerType.BLOSSOM) {
+            Toast.makeText(context, "Select a Blossom server first", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        if (accountStateViewModel == null) {
+            Toast.makeText(context, "Sign in to upload media", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        val mimeType = context.contentResolver.getType(uri)
+        isUploading = true
+        accountStateViewModel.uploadMedia(uri, server.baseUrl, mimeType) { url, error ->
+            isUploading = false
+            if (url != null) {
+                content = if (content.isBlank()) url else "$content\n$url"
+            } else {
+                Toast.makeText(context, error ?: "Upload failed", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     LaunchedEffect(initialHashtag) {
         if (initialHashtag != null && hashtags.isEmpty()) {
@@ -166,13 +201,24 @@ fun ComposeTopicScreen(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
+            // Upload progress indicator
+            AnimatedVisibility(visible = isUploading) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("Uploading media…", style = MaterialTheme.typography.bodySmall)
+                }
+            }
             ComposeToolbar(
                 blossomServers = blossomServers,
                 nip96Servers = nip96Servers,
                 selectedServer = selectedMediaServer,
                 onServerSelected = { selectedMediaServer = it },
                 onAttachMedia = {
-                    Toast.makeText(context, "Media upload coming soon", Toast.LENGTH_SHORT).show()
+                    mediaPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
                 },
                 markdownEnabled = markdownEnabled,
                 onToggleMarkdown = { markdownEnabled = it },
@@ -190,7 +236,7 @@ fun ComposeTopicScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 8.dp, bottom = 16.dp),
-                enabled = title.isNotBlank()
+                enabled = title.isNotBlank() && !isUploading
             ) {
                 Text("Publish")
             }

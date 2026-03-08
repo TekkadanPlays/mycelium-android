@@ -956,6 +956,49 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         return (outbox + categoryRelays).toSet()
     }
 
+    // ── Media Upload ────────────────────────────────────────────────────
+
+    /**
+     * Upload media to a Blossom server: strip EXIF metadata, hash, sign kind-24242 auth,
+     * upload via multi-strategy, and return the public URL or an error message.
+     *
+     * @param uri Content URI of the picked image/video
+     * @param serverUrl Blossom server base URL (e.g. "https://blossom.band/")
+     * @param mimeType MIME type from the content resolver
+     * @param stripMetadata Whether to strip EXIF/metadata before upload (images only)
+     * @param onResult Callback: first = URL on success, second = error on failure
+     */
+    fun uploadMedia(
+        uri: android.net.Uri,
+        serverUrl: String,
+        mimeType: String?,
+        stripMetadata: Boolean = true,
+        onResult: (url: String?, error: String?) -> Unit
+    ) {
+        val signer = getSignerOrNull()
+        if (signer == null) {
+            onResult(null, signerUnavailableMessage())
+            return
+        }
+        val context = getApplication<Application>()
+        viewModelScope.launch {
+            try {
+                // 1. Optionally strip EXIF metadata for images
+                val uploadUri = if (stripMetadata && mimeType?.startsWith("image/") == true) {
+                    social.mycelium.android.utils.ImageProcessor.processImage(context, uri, mimeType)?.uri ?: uri
+                } else uri
+
+                // 2. Upload via BlossomClient
+                val client = social.mycelium.android.services.BlossomClient()
+                val result = client.upload(context, uploadUri, signer, serverUrl, mimeType)
+                onResult(result.url, null)
+            } catch (e: Exception) {
+                Log.e("AccountStateViewModel", "Media upload failed", e)
+                onResult(null, e.message ?: "Upload failed")
+            }
+        }
+    }
+
     /**
      * Publish a Kind 1 text note. Signs with Amber and sends to the given relay URLs.
      * Returns null on success, or an error message for synchronous failures.

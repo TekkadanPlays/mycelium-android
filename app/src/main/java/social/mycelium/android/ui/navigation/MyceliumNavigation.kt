@@ -3817,6 +3817,7 @@ fun MyceliumNavigation(
                         myAuthor = topicMyAuthor,
                         blossomServers = topicBlossomServers,
                         nip96Servers = topicNip96Servers,
+                        accountStateViewModel = accountStateViewModel,
                         onPublish = { title, content, tags, relayUrls ->
                             accountStateViewModel.publishTopic(title, content, tags, relayUrls)
                         },

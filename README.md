@@ -14,6 +14,12 @@ A native Nostr protocol client for Android built with Jetpack Compose and Materi
 - **Zaps** — NIP-57 lightning zaps via NIP-47 Wallet Connect or external wallet, with arc amount picker and per-note zap state persistence
 - **Publishing** — Full relay selection screen for all compose flows (notes, topics, replies, comments) with NIP-65 inbox/outbox awareness and optimistic local rendering
 - **Link Sanitization** — Automatic stripping of tracking parameters (utm, fbclid, gclid, si, igshid, etc.) from all URLs in both displayed and published content, powered by [PureLink](https://github.com/ahmedthebest31/PureLink-Android)
+- **Image Privacy** — Surgical EXIF/metadata stripping from JPEG and PNG images before upload without re-encoding, with optional compression modes
+- **Note Scheduling** — Schedule kind-1 notes and kind-11 topics for future publication using AlarmManager with WorkManager reliability, surviving device reboots
+- **Blossom Media Upload** — Native Blossom (BUD-01/02/04) HTTP blob storage client with kind-24242 auth events, multi-strategy upload (PUT/POST), and Amethyst-compatible tag ordering
+- **Drafts** — Auto-save and resume drafts for all compose flows (notes, topics, replies) with scheduling support and offline retry queue
+- **Markdown Compose** — Live syntax highlighting in compose text fields with headings, bold/italic, code blocks, blockquotes, lists, and URL/nostr entity coloring
+- **Unicode Text Styles** — 15 decorative Unicode text transformations (serif bold, script, fraktur, monospace, double-struck, circled, small caps, etc.) with strikethrough and underline
 - **Profiles** — Tabbed Notes/Replies/Media views, following/follower counts, banner and avatar display, follow/zap/DM actions
 - **Multi-Account** — Switch between Amber (NIP-55 external signer) and nsec accounts with per-account onboarding state
 

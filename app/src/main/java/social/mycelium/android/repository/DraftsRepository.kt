@@ -112,6 +112,50 @@ object DraftsRepository {
                 (draft.rootId == noteId || draft.parentId == noteId)
         }
 
+    // ── Scheduling helpers ──────────────────────────────────────────────
+
+    /** All drafts that are scheduled (pending or completed). */
+    fun getScheduledDrafts(): List<Draft> =
+        _drafts.value.filter { it.isScheduled }
+
+    /** Scheduled drafts that haven't been published yet. */
+    fun getPendingScheduledDrafts(): List<Draft> =
+        _drafts.value.filter { it.isScheduled && !it.isCompleted && it.signedEventJson != null }
+
+    /** Mark a scheduled draft as successfully published. */
+    fun markCompleted(draftId: String) {
+        val pubkey = currentPubkey ?: return
+        val existing = _drafts.value.toMutableList()
+        val idx = existing.indexOfFirst { it.id == draftId }
+        if (idx >= 0) {
+            existing[idx] = existing[idx].copy(isCompleted = true, publishError = null, updatedAt = System.currentTimeMillis())
+            _drafts.value = existing
+            persistLocally(pubkey)
+            Log.d(TAG, "Draft marked completed: ${draftId.take(8)}")
+        }
+    }
+
+    /** Mark a scheduled draft as failed with an error message. */
+    fun markFailed(draftId: String, error: String) {
+        val pubkey = currentPubkey ?: return
+        val existing = _drafts.value.toMutableList()
+        val idx = existing.indexOfFirst { it.id == draftId }
+        if (idx >= 0) {
+            existing[idx] = existing[idx].copy(publishError = error, updatedAt = System.currentTimeMillis())
+            _drafts.value = existing
+            persistLocally(pubkey)
+            Log.w(TAG, "Draft marked failed: ${draftId.take(8)} — $error")
+        }
+    }
+
+    /** Clear all completed scheduled drafts. */
+    fun clearCompletedScheduled() {
+        val pubkey = currentPubkey ?: return
+        _drafts.update { it.filter { d -> !(d.isScheduled && d.isCompleted) } }
+        persistLocally(pubkey)
+        Log.d(TAG, "Cleared completed scheduled drafts")
+    }
+
     private fun persistLocally(pubkey: String) {
         val key = "$KEY_PREFIX$pubkey"
         val jsonString = json.encodeToString(_drafts.value)

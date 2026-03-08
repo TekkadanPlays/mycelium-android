@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
 
     <application
         android:allowBackup="true"
@@ -27,6 +30,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Maintains persistent WebSocket connections to Nostr relays for real-time note delivery" />
         </service>
+        <receiver
+            android:name="social.mycelium.android.services.ScheduleReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="social.mycelium.android.PUBLISH_SCHEDULED" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name="social.mycelium.android.services.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name="social.mycelium.android.SplashActivity"
             android:exported="false"

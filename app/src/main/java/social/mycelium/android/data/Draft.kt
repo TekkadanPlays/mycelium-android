@@ -14,7 +14,13 @@ data class Draft(
     val parentPubkey: String? = null,
     val hashtags: List<String> = emptyList(),
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val scheduledAt: Long? = null,
+    val isScheduled: Boolean = false,
+    val signedEventJson: String? = null,
+    val relayUrls: List<String> = emptyList(),
+    val publishError: String? = null,
+    val isCompleted: Boolean = false
 )
 
 @Serializable

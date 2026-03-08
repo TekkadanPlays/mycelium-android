@@ -23,6 +23,7 @@ import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ComposeToolbar
+import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.viewmodel.AccountStateViewModel
 
 /**
@@ -67,6 +68,7 @@ fun ComposeNoteScreen(
     var showZapRaiser by remember { mutableStateOf(false) }
     var markdownEnabled by remember { mutableStateOf(false) }
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
+    val markdownTransformation = remember { MarkdownVisualTransformation() }
 
     var showRelayPicker by remember { mutableStateOf(false) }
     val outboxRelays = remember(currentAccount?.npub) {
@@ -144,6 +146,8 @@ fun ComposeNoteScreen(
                     capitalization = KeyboardCapitalization.Sentences,
                     keyboardType = KeyboardType.Text
                 ),
+                visualTransformation = if (markdownEnabled) markdownTransformation
+                    else androidx.compose.ui.text.input.VisualTransformation.None,
             )
             // Zapraiser input (shown when toggled from toolbar)
             AnimatedVisibility(visible = showZapRaiser) {

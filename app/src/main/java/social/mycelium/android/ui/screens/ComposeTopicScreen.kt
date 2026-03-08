@@ -23,6 +23,7 @@ import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.ui.components.ComposeToolbar
+import social.mycelium.android.utils.MarkdownVisualTransformation
 
 /**
  * Dedicated screen for creating a Kind 11 topic (like compose for home feed).
@@ -69,6 +70,7 @@ fun ComposeTopicScreen(
     var markdownEnabled by remember { mutableStateOf(false) }
     var showZapRaiser by remember { mutableStateOf(false) }
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
+    val markdownTransformation = remember { MarkdownVisualTransformation() }
     val context = LocalContext.current
 
     LaunchedEffect(initialHashtag) {
@@ -153,6 +155,8 @@ fun ComposeTopicScreen(
                     capitalization = KeyboardCapitalization.Sentences,
                     keyboardType = KeyboardType.Text
                 ),
+                visualTransformation = if (markdownEnabled) markdownTransformation
+                    else androidx.compose.ui.text.input.VisualTransformation.None,
             )
             social.mycelium.android.ui.components.ModernTextField(
                 value = hashtags,

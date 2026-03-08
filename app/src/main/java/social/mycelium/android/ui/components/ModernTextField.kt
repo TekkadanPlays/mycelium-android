@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 
 /**
@@ -45,6 +46,7 @@ fun ModernTextField(
     ),
     keyboardActions: KeyboardActions = KeyboardActions.Default,
     focusRequester: FocusRequester? = null,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
 ) {
     Surface(
         shape = RoundedCornerShape(12.dp),
@@ -61,6 +63,7 @@ fun ModernTextField(
             singleLine = singleLine,
             textStyle = textStyle,
             cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+            visualTransformation = visualTransformation,
             keyboardOptions = keyboardOptions,
             keyboardActions = keyboardActions,
             modifier = Modifier

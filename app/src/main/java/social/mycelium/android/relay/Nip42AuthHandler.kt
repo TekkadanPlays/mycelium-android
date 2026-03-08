@@ -52,6 +52,11 @@ class Nip42AuthHandler(
     @Volatile
     private var signer: NostrSigner? = null
 
+    /** Whether we've already done one foreground Amber approval this session.
+     *  After one foreground success, Amber remembers the permission and background works. */
+    @Volatile
+    private var foregroundAuthApproved = false
+
     /** Per-relay auth status for UI observation. */
     enum class AuthStatus { NONE, CHALLENGED, AUTHENTICATING, AUTHENTICATED, FAILED }
 
@@ -115,6 +120,7 @@ class Nip42AuthHandler(
             _authStatusByRelay.value = emptyMap()
             respondedChallenges.clear()
             pendingAuthEventIds.clear()
+            foregroundAuthApproved = false
         }
     }
 
@@ -180,16 +186,30 @@ class Nip42AuthHandler(
                 add(arrayOf("relay", url))
                 add(arrayOf("challenge", challenge))
             }
-            // Try background (ContentProvider) first, then foreground (Amber activity)
-            // — matching Amethyst's approach. If kind-22242 isn't pre-approved in Amber's
-            // ContentProvider, the foreground fallback lets the user approve it once,
-            // after which Amber remembers it for future background signing.
-            val signed = currentSigner.sign(template)
-            if (signed.sig.isBlank()) {
-                Log.w(TAG, "AUTH[$url] Signing returned empty signature")
-                updateStatus(url, AuthStatus.FAILED)
-                respondedChallenges.remove(key)
-                return
+            // Try background (ContentProvider) first — no Amber UI popup.
+            // If background fails and we haven't done a foreground approval yet this
+            // session, fall back to foreground sign() ONCE. After one approval Amber
+            // remembers the permission and all subsequent calls use background silently.
+            var signed = currentSigner.signBackgroundOnly(template)
+            if (signed == null || signed.sig.isBlank()) {
+                if (!foregroundAuthApproved) {
+                    Log.d(TAG, "AUTH[$url] Background sign failed, trying foreground (one-time)")
+                    try {
+                        signed = currentSigner.sign(template)
+                        if (signed.sig.isNotBlank()) {
+                            foregroundAuthApproved = true
+                            Log.d(TAG, "AUTH[$url] Foreground approval granted — future signs will use background")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "AUTH[$url] Foreground sign failed: ${e.message}")
+                    }
+                }
+                if (signed == null || signed.sig.isBlank()) {
+                    Log.w(TAG, "AUTH[$url] Signing unavailable — skipping")
+                    updateStatus(url, AuthStatus.FAILED)
+                    respondedChallenges.remove(key)
+                    return
+                }
             }
             Log.d(TAG, "AUTH[$url] signed id=${signed.id.take(8)} pubKey=${signed.pubKey.take(16)}")
             val authMsg = NostrProtocol.buildAuth(signed)

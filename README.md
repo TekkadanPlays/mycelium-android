@@ -96,6 +96,7 @@ Mycelium builds on the work of several open-source projects:
 - **[Coil](https://coil-kt.github.io/coil/)** — Image loading with GIF and video frame support
 - **[Media3 / ExoPlayer](https://developer.android.com/media/media3)** — Video and livestream playback
 - **[PureLink-Android](https://github.com/ahmedthebest31/PureLink-Android)** — URL sanitization logic for stripping tracking parameters from links (MIT)
+- **[Prism](https://github.com/hardran3/Prism)** — Reference for note scheduling, draft persistence, image metadata stripping, and Blossom media upload patterns (unlicensed — FOSS license requested)
 
 ## License
 

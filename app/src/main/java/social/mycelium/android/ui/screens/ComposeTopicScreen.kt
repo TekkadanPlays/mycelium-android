@@ -24,6 +24,7 @@ import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.ui.components.ComposeToolbar
 import social.mycelium.android.utils.MarkdownVisualTransformation
+import social.mycelium.android.utils.UnicodeStylizer
 
 /**
  * Dedicated screen for creating a Kind 11 topic (like compose for home feed).
@@ -177,6 +178,9 @@ fun ComposeTopicScreen(
                 onToggleMarkdown = { markdownEnabled = it },
                 showZapRaiser = showZapRaiser,
                 onToggleZapRaiser = { showZapRaiser = it },
+                onApplyUnicodeStyle = { style ->
+                    content = UnicodeStylizer.stylize(content, style)
+                },
                 onScheduleClick = {
                     Toast.makeText(context, "Topic scheduling coming soon", Toast.LENGTH_SHORT).show()
                 }

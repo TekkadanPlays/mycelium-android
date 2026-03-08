@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.MediaServer
+import social.mycelium.android.utils.UnicodeStylizer
 
 /**
  * Unified compose toolbar for note/topic composition screens.
@@ -35,10 +36,12 @@ fun ComposeToolbar(
     onToggleMarkdown: (Boolean) -> Unit,
     showZapRaiser: Boolean,
     onToggleZapRaiser: (Boolean) -> Unit,
+    onApplyUnicodeStyle: ((UnicodeStylizer.Style) -> Unit)? = null,
     onScheduleClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showServerPicker by remember { mutableStateOf(false) }
+    var showUnicodePicker by remember { mutableStateOf(false) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         // Server picker dropdown
@@ -52,6 +55,17 @@ fun ComposeToolbar(
                     showServerPicker = false
                 },
                 onDismiss = { showServerPicker = false }
+            )
+        }
+
+        // Unicode style picker dropdown
+        AnimatedVisibility(visible = showUnicodePicker && onApplyUnicodeStyle != null) {
+            UnicodeStylePicker(
+                onSelect = { style ->
+                    onApplyUnicodeStyle?.invoke(style)
+                    showUnicodePicker = false
+                },
+                onDismiss = { showUnicodePicker = false }
             )
         }
 
@@ -108,6 +122,18 @@ fun ComposeToolbar(
                 )
             }
 
+            // Unicode text styles
+            if (onApplyUnicodeStyle != null) {
+                IconButton(onClick = { showUnicodePicker = !showUnicodePicker }) {
+                    Icon(
+                        Icons.Outlined.TextFormat,
+                        contentDescription = "Text styles",
+                        tint = if (showUnicodePicker) MaterialTheme.colorScheme.primary
+                               else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             // Zapraiser toggle
             IconButton(onClick = { onToggleZapRaiser(!showZapRaiser) }) {
                 Icon(
@@ -126,6 +152,67 @@ fun ComposeToolbar(
                         contentDescription = "Schedule",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun UnicodeStylePicker(
+    onSelect: (UnicodeStylizer.Style) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val sampleText = "Hello"
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Text Style",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+                    Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = "Close",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            UnicodeStylizer.Style.entries.forEach { style ->
+                val preview = if (style == UnicodeStylizer.Style.DEFAULT) sampleText
+                              else UnicodeStylizer.stylize(sampleText, style)
+                Surface(
+                    onClick = { onSelect(style) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Color.Transparent,
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            preview,
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            style.preview,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }

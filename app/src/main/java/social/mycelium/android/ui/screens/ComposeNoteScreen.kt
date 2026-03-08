@@ -24,6 +24,7 @@ import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ComposeToolbar
 import social.mycelium.android.utils.MarkdownVisualTransformation
+import social.mycelium.android.utils.UnicodeStylizer
 import social.mycelium.android.viewmodel.AccountStateViewModel
 
 /**
@@ -177,6 +178,9 @@ fun ComposeNoteScreen(
                 onToggleZapRaiser = { enabled ->
                     showZapRaiser = enabled
                     if (!enabled) zapRaiserAmount = null
+                },
+                onApplyUnicodeStyle = { style ->
+                    content = UnicodeStylizer.stylize(content, style)
                 },
                 onScheduleClick = {
                     // TODO: Show date/time picker → sign event → store in draft → schedule alarm

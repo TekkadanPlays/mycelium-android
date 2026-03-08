@@ -377,6 +377,12 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // before updating currentAccount so navigation doesn't react to stale state.
         RelayConnectionStateMachine.getInstance().disconnectAndClearForAccountSwitch()
 
+        // Re-set NIP-42 signer IMMEDIATELY after teardown. disconnectAndClear nulls it,
+        // but relays may reconnect and send AUTH challenges before _currentAccount is set.
+        // getCurrentSigner() can't work here (it checks _currentAccount which is still null),
+        // so resolve directly from AmberSignerManager.
+        RelayConnectionStateMachine.getInstance().setNip42Signer(amberSignerManager.getCurrentSigner())
+
         // Check if this account already exists
         val existingAccount = _savedAccounts.value.find { it.npub == npub }
 
@@ -433,8 +439,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // Restore persisted kind-3 before any relay fetch can overwrite with stale data
         ContactListRepository.restorePersistedKind3(hexPubkey)
 
-        // Set NIP-42 signer for new account
-        RelayConnectionStateMachine.getInstance().setNip42Signer(getCurrentSigner())
+        // NIP-42 signer already set at line 384 (immediately after disconnectAndClear).
+        // Do NOT call getCurrentSigner() here — _currentAccount is still null so it returns null.
 
         // Publish account change LAST so all teardown is complete before
         // navigation LaunchedEffects react to the new account.

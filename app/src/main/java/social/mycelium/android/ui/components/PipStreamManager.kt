@@ -35,6 +35,15 @@ object PipStreamManager {
 
     /** Whether PiP should keep playing when the app is backgrounded. Default false. */
     private val _continueInBackground = MutableStateFlow(false)
+
+    /**
+     * Video URL reserved by PiP, persists through PiP→fullscreen→PiP transitions.
+     * The feed checks this to avoid creating a competing player while the video
+     * is transitioning between PiP and fullscreen. Only cleared on explicit dismiss/kill.
+     */
+    @Volatile
+    var reservedVideoUrl: String? = null
+        private set
     val continueInBackground: StateFlow<Boolean> = _continueInBackground.asStateFlow()
 
     fun setContinueInBackground(enabled: Boolean) {
@@ -45,6 +54,7 @@ object PipStreamManager {
     fun startPip(player: ExoPlayer, addressableId: String, title: String?, hostName: String?) {
         // Release any existing PiP player first
         killCurrentPip()
+        player.play() // Ensure playback continues in PiP
         _pipState.value = PipState(player, addressableId, title, hostName)
         Log.d(TAG, "PiP started for live stream $addressableId")
     }
@@ -59,6 +69,9 @@ object PipStreamManager {
         // Unmute for PiP — user expects audio from the mini-player.
         // They can tap PiP → fullscreen → mute if they want silence.
         player.volume = 1f
+        player.play() // Ensure playback continues in PiP (may have been paused by fullscreen dispose)
+        VideoMuteCache.set(url, false) // Sync cache so fullscreen inherits unmuted state
+        reservedVideoUrl = url // Reserve URL through PiP→fullscreen→PiP cycle
         _pipState.value = PipState(player, addressableId = url, title = null, hostName = null, videoUrl = url, instanceKey = instanceKey)
         Log.d(TAG, "PiP started for video $url (instance=$instanceKey)")
     }
@@ -91,6 +104,7 @@ object PipStreamManager {
             it.player.release()
         }
         _pipState.value = null
+        reservedVideoUrl = null // Fully release — feed can re-acquire
     }
 
     /**
@@ -130,9 +144,10 @@ object PipStreamManager {
     fun isActiveFor(addressableId: String): Boolean =
         _pipState.value?.addressableId == addressableId
 
-    /** Check if PiP is active for a given video URL. */
+    /** Check if PiP is active or reserved for a given video URL.
+     *  Returns true during PiP→fullscreen→PiP transitions so the feed doesn't create a competing player. */
     fun isVideoFor(url: String): Boolean =
-        _pipState.value?.videoUrl == url
+        _pipState.value?.videoUrl == url || reservedVideoUrl == url
 
     /** Check if PiP is active for a given instance key. */
     fun isInstanceActive(instanceKey: String): Boolean =

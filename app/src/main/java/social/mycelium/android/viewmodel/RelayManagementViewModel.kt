@@ -133,11 +133,12 @@ class RelayManagementViewModel(
 
             _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, blossomServers = blossom, nip96Servers = nip96) }
 
-            // Fetch NIP-11 info in background for all relays (personal + category)
+            // Fetch NIP-11 info in background for all relays (personal + category + profile categories)
             val allCategoryUrls = categories.flatMap { it.relays }.map { it.url }
+            val allProfileCategoryUrls = profiles.flatMap { it.categories }.flatMap { it.relays }.map { it.url }
             val allPersonalUrls = (outbox + inbox + cache).map { it.url }
             val allSystemUrls = (announcements + drafts).map { it.url }
-            val allUrls = (allCategoryUrls + allPersonalUrls + allSystemUrls).distinct()
+            val allUrls = (allCategoryUrls + allProfileCategoryUrls + allPersonalUrls + allSystemUrls).distinct()
             allUrls.forEach { url ->
                 launch(Dispatchers.IO) {
                     try {
@@ -147,6 +148,11 @@ class RelayManagementViewModel(
                                 state.copy(
                                     relayCategories = state.relayCategories.map { cat ->
                                         cat.copy(relays = cat.relays.updateRelayInfo(url, freshInfo))
+                                    },
+                                    relayProfiles = state.relayProfiles.map { profile ->
+                                        profile.copy(categories = profile.categories.map { cat ->
+                                            cat.copy(relays = cat.relays.updateRelayInfo(url, freshInfo))
+                                        })
                                     },
                                     outboxRelays = state.outboxRelays.updateRelayInfo(url, freshInfo),
                                     inboxRelays = state.inboxRelays.updateRelayInfo(url, freshInfo),

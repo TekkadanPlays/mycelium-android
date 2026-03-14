@@ -41,8 +41,9 @@ object SharedPlayerPool {
      * When the pool is full, the least-recently-used unowned player is evicted.
      */
     fun acquire(context: Context, instanceKey: String, url: String): ExoPlayer? {
-        // If PiP owns this instance, refuse to create a duplicate player.
-        // The caller should check isPipActive and skip rendering.
+        // If PiP owns this exact instance, refuse — the caller should check isPipActive.
+        // URL-based reservation is enforced at the FeedVideoPlayer compose level (isPipActive),
+        // not here, because the fullscreen viewer legitimately needs to acquire the reclaimed player.
         if (PipStreamManager.isInstanceActive(instanceKey)) return null
 
         val existing = pool[instanceKey]

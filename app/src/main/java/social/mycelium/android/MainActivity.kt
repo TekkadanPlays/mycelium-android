@@ -106,9 +106,20 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // registerComponentCallbacks(this) because it causes infinite recursion in
         // onConfigurationChanged on Android 15 foldable devices.
 
-        // Configure Coil with GIF decoder, optimized caching, and crossfade for smooth feed rendering
+        // Configure Coil with GIF decoder, optimized caching, and crossfade for smooth feed rendering.
+        // Custom OkHttpClient provides a User-Agent so servers (e.g. Lemmy pictrs) don't 403.
+        val coilHttpClient = okhttp3.OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                chain.proceed(
+                    chain.request().newBuilder()
+                        .header("User-Agent", "Mycelium/${social.mycelium.android.BuildConfig.VERSION_NAME} Android")
+                        .build()
+                )
+            }
+            .build()
         Coil.setImageLoader(
             ImageLoader.Builder(this)
+                .okHttpClient(coilHttpClient)
                 .components {
                     if (android.os.Build.VERSION.SDK_INT >= 28) {
                         add(ImageDecoderDecoder.Factory())

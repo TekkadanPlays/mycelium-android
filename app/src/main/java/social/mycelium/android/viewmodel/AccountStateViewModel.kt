@@ -486,6 +486,54 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     private suspend fun restoreAccountInternal(accountInfo: AccountInfo) {
         Log.d("AccountStateViewModel", "\uD83D\uDD04 Switching to account: ${accountInfo.toShortNpub()}")
 
+        // Idempotency: if the account being restored is already the active account,
+        // skip the nuclear teardown. This prevents feed clearing when a new ViewModel
+        // instance is created per NavBackStackEntry (e.g. navigating to live_stream).
+        // Check via static NoteCountsRepository.currentUserPubkey — it's set during
+        // account restore and persists across ViewModel instances.
+        val incomingHex = accountInfo.toHexKey()
+        val currentActivePubkey = NoteCountsRepository.currentUserPubkey
+        val isSameAccount = incomingHex != null && incomingHex == currentActivePubkey
+        if (isSameAccount) {
+            Log.d("AccountStateViewModel", "\uD83D\uDD04 Same account already active — skipping teardown")
+            // Populate this instance's state so the UI works, but skip destructive operations
+            val updatedAccount = accountInfo.copy(lastUsed = System.currentTimeMillis())
+            val updatedAccounts = _savedAccounts.value
+                .filter { it.npub != accountInfo.npub }
+                .plus(updatedAccount)
+            saveSavedAccounts(updatedAccounts)
+            // Set _currentAccount so UI observing it works on this instance
+            _currentAccount.value = updatedAccount
+            // Set auth state so UI doesn't show login screen
+            val userProfile = UserProfile(
+                pubkey = incomingHex,
+                displayName = updatedAccount.displayName ?: "Nostr User",
+                name = incomingHex.take(8),
+                picture = updatedAccount.picture,
+                about = if (updatedAccount.isExternalSigner) "Signed in with Amber Signer" else "Nostr User",
+                createdAt = System.currentTimeMillis()
+            )
+            _authState.value = AuthState(
+                isAuthenticated = true,
+                isGuest = false,
+                userProfile = userProfile,
+                isLoading = false,
+                error = null
+            )
+            // Ensure onboarding state is set for this instance
+            val alreadyOnboarded = isOnboardingPersistedFor(accountInfo.npub) || run {
+                val outbox = relayStorageManager.loadOutboxRelays(incomingHex)
+                val categories = relayStorageManager.loadCategories(incomingHex)
+                outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }
+            }
+            if (alreadyOnboarded) {
+                _onboardingComplete.value = true
+                prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + accountInfo.npub, true).apply()
+            }
+            _accountsRestored.value = true
+            return
+        }
+
         // Pre-check onboarding status BEFORE resetting so we don't flash the sign-in flow
         // when switching to an account that's already completed onboarding.
         val alreadyOnboarded = isOnboardingPersistedFor(accountInfo.npub) || run {

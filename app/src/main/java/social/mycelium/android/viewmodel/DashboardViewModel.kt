@@ -138,7 +138,22 @@ class DashboardViewModel : ViewModel() {
      * Uses ContactListRepository cache (5 min TTL) so repeated calls are cheap.
      * @param forceRefresh if true, bypass cache (e.g. pull-to-refresh on Following).
      */
+    /** Tracks the last pubkey+relay combo we loaded follow list for, preventing redundant re-fetches
+     *  when NavHost recreates the dashboard composable (all LaunchedEffects re-fire). */
+    private var lastFollowListPubkey: String? = null
+    private var lastFollowListRelays: Set<String> = emptySet()
+
     fun loadFollowList(pubkey: String, cacheRelayUrls: List<String>, forceRefresh: Boolean = false) {
+        // ViewModel-level idempotency: skip if we already loaded for this pubkey+relays
+        // and the follow list is populated. Prevents re-fetch on composable recreation.
+        val relaySet = cacheRelayUrls.toSet()
+        if (!forceRefresh && pubkey == lastFollowListPubkey && relaySet == lastFollowListRelays
+            && _uiState.value.followList?.isNotEmpty() == true) {
+            return
+        }
+        lastFollowListPubkey = pubkey
+        lastFollowListRelays = relaySet
+
         viewModelScope.launch {
             val cached = ContactListRepository.getCachedFollowList(pubkey)
             if (cached != null && !forceRefresh) {
@@ -176,8 +191,17 @@ class DashboardViewModel : ViewModel() {
      * the repository drops all notes and uses lastAppliedKind1Filter for the subscription,
      * preventing global bleed. Never pass null when enabled=true.
      */
+    /** Last follow filter state applied to the repository — prevents redundant calls on composable recreation. */
+    private var lastFollowFilterEnabled: Boolean? = null
+    private var lastFollowFilterList: Set<String>? = null
+
     fun setFollowFilter(enabled: Boolean) {
         val list = _uiState.value.followList
+        // ViewModel-level idempotency: skip if follow filter state hasn't changed.
+        // Prevents the repository from re-evaluating mode transitions on NavHost recreation.
+        if (enabled == lastFollowFilterEnabled && list == lastFollowFilterList) return
+        lastFollowFilterEnabled = enabled
+        lastFollowFilterList = list
         val toPass = if (enabled) list else null
         notesRepository.setFollowFilter(toPass, enabled)
     }
@@ -481,6 +505,9 @@ class DashboardViewModel : ViewModel() {
     /** Debounce job for loadNotesFromFavoriteCategory so rapid LaunchedEffect re-fires collapse into one call. */
     private var loadNotesJob: Job? = null
     private val LOAD_NOTES_DEBOUNCE_MS = 300L
+    /** Last relay sets passed to loadNotesFromFavoriteCategory for ViewModel-level idempotency. */
+    private var lastLoadAllRelays: Set<String> = emptySet()
+    private var lastLoadDisplayRelays: Set<String> = emptySet()
 
     /**
      * Set subscription to all user relays and display filter to sidebar selection.
@@ -494,6 +521,18 @@ class DashboardViewModel : ViewModel() {
             return
         }
 
+        // ViewModel-level idempotency: if called with the same relay sets and notes
+        // already exist, skip entirely. Prevents visible re-render when the dashboard
+        // composable is recreated by NavHost on return from other screens.
+        val allSet = allUserRelayUrls.toSet()
+        val displaySet = displayUrls.toSet()
+        if (allSet == lastLoadAllRelays && displaySet == lastLoadDisplayRelays && _uiState.value.notes.isNotEmpty()) {
+            Log.d(TAG, "loadNotesFromFavoriteCategory: idempotent skip (same relays, ${_uiState.value.notes.size} notes)")
+            return
+        }
+        lastLoadAllRelays = allSet
+        lastLoadDisplayRelays = displaySet
+
         // Apply display filter immediately (cheap, no subscription change)
         notesRepository.connectToRelays(if (displayUrls.isEmpty()) allUserRelayUrls else displayUrls)
         _uiState.update { it.copy(hasRelays = true) }
@@ -503,7 +542,11 @@ class DashboardViewModel : ViewModel() {
         loadNotesJob = viewModelScope.launch {
             delay(LOAD_NOTES_DEBOUNCE_MS)
             Log.d(TAG, "Loading notes: subscription=${allUserRelayUrls.size} relays, display=${displayUrls.size} relay(s)")
-            _uiState.update { it.copy(isLoadingFromRelays = true) }
+            // Only show loading indicator when feed is empty (cold start).
+            // When notes exist from cache, resubscription happens silently.
+            if (_uiState.value.notes.isEmpty()) {
+                _uiState.update { it.copy(isLoadingFromRelays = true) }
+            }
             try {
                 notesRepository.ensureSubscriptionToNotes(allUserRelayUrls, limit = 100)
                 _uiState.update { it.copy(isLoadingFromRelays = false) }

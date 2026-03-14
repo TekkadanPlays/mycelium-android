@@ -1901,89 +1901,21 @@ private fun ReplyContentBody(
                 }
             }
             is social.mycelium.android.utils.NoteContentBlock.MediaGroup -> {
-                val mediaList = block.urls.take(4)
+                val mediaList = block.urls.take(10)
                 if (mediaList.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(6.dp))
-                    val imgUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
-                    val vidUrls = mediaList.filter { social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
-                    if (imgUrls.size == 1 && vidUrls.isEmpty()) {
-                        val imgUrl = imgUrls[0]
-                        val imgMeta = reply.mediaMeta[imgUrl]
-                        val cachedRatio = imgMeta?.aspectRatio()
-                            ?: social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
-                        val effectiveRatio = (cachedRatio ?: (16f / 9f)).coerceIn(0.5f, 3.0f)
-                        val imgModifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(effectiveRatio)
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable { onImageTap(mediaList, 0) }
-                        coil.compose.SubcomposeAsyncImage(
-                            model = imgUrl,
-                            contentDescription = imgMeta?.alt,
-                            contentScale = ContentScale.FillWidth,
-                            modifier = imgModifier,
-                        ) {
-                            when (painter.state) {
-                                is coil.compose.AsyncImagePainter.State.Loading -> {
-                                    if (imgMeta?.blurhash != null) {
-                                        social.mycelium.android.ui.components.DisplayBlurHash(
-                                            blurhash = imgMeta.blurhash,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize(),
-                                        )
-                                    } else {
-                                        Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)))
-                                    }
-                                }
-                                is coil.compose.AsyncImagePainter.State.Success -> {
-                                    androidx.compose.foundation.Image(painter = painter, contentDescription = imgMeta?.alt, contentScale = ContentScale.FillWidth, modifier = Modifier.fillMaxSize())
-                                    SideEffect {
-                                        val drawable = (painter.state as? coil.compose.AsyncImagePainter.State.Success)?.result?.drawable
-                                        if (drawable != null) {
-                                            social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, drawable.intrinsicWidth, drawable.intrinsicHeight)
-                                        }
-                                    }
-                                }
-                                is coil.compose.AsyncImagePainter.State.Error -> {
-                                    Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)), contentAlignment = Alignment.Center) {
-                                        Icon(Icons.Outlined.BrokenImage, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(24.dp))
-                                    }
-                                }
-                                else -> {}
-                            }
-                        }
-                    } else {
-                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                            imgUrls.take(3).forEachIndexed { idx, url ->
-                                AsyncImage(
-                                    model = url,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .clickable { onImageTap(mediaList, idx) }
-                                )
-                            }
-                            vidUrls.take(2).forEachIndexed { idx, _ ->
-                                Box(
-                                    modifier = Modifier
-                                        .size(56.dp)
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                                        .clickable { onVideoClick(mediaList, imgUrls.size + idx) },
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.PlayArrow,
-                                        contentDescription = "Video",
-                                        modifier = Modifier.size(24.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    social.mycelium.android.ui.components.NoteMediaCarousel(
+                        mediaList = mediaList,
+                        allMediaUrls = mediaList,
+                        groupStartIndex = 0,
+                        initialMediaPage = 0,
+                        isVisible = true,
+                        mediaMeta = reply.mediaMeta,
+                        onMediaPageChanged = { },
+                        onImageTap = onImageTap,
+                        onOpenImageViewer = onImageTap,
+                        onVideoClick = onVideoClick,
+                    )
                 }
             }
             is social.mycelium.android.utils.NoteContentBlock.Preview -> {
@@ -2004,6 +1936,7 @@ private fun ReplyContentBody(
             }
             is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
                 val qProfileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                val qLinkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
                 var qMeta by remember(block.eventId) { mutableStateOf(social.mycelium.android.repository.QuotedNoteCache.getCached(block.eventId)) }
                 LaunchedEffect(block.eventId) {
                     if (qMeta == null) {
@@ -2013,73 +1946,29 @@ private fun ReplyContentBody(
                 val meta = qMeta
                 if (meta != null) {
                     val qAuthor = remember(meta.authorId) { qProfileCache.resolveAuthor(meta.authorId) }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .clickable {
-                                onNoteClick(Note(
-                                    id = meta.eventId,
-                                    author = qAuthor,
-                                    content = meta.fullContent,
-                                    timestamp = meta.createdAt,
-                                    likes = 0, shares = 0, comments = 0,
-                                    isLiked = false, hashtags = emptyList(),
-                                    mediaUrls = emptyList(), isReply = false,
-                                    relayUrl = meta.relayUrl,
-                                    relayUrls = listOfNotNull(meta.relayUrl)
-                                ))
-                            },
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                        shape = MaterialTheme.shapes.small,
-                        shadowElevation = 0.dp
-                    ) {
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            Box(
-                                modifier = Modifier
-                                    .width(3.dp)
-                                    .fillMaxHeight()
-                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-                            )
-                            Column(modifier = Modifier.padding(10.dp).weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    ProfilePicture(author = qAuthor, size = 18.dp, onClick = { onProfileClick(meta.authorId) })
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = qAuthor.displayName,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = meta.contentSnippet,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 3,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
+                    val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+                    social.mycelium.android.ui.components.QuotedNoteContent(
+                        parentNoteId = reply.id,
+                        meta = meta,
+                        quotedAuthor = qAuthor,
+                        quotedCounts = countsByNoteId[block.eventId],
+                        linkStyle = qLinkStyle,
+                        profileCache = qProfileCache,
+                        isVisible = true,
+                        onProfileClick = onProfileClick,
+                        onNoteClick = onNoteClick,
+                        onVideoClick = onVideoClick,
+                        onOpenImageViewer = onImageTap,
+                    )
                 } else {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        color = MaterialTheme.colorScheme.surface,
-                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                        shape = MaterialTheme.shapes.small
+                    // Loading placeholder — matches feed style
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
-                            Text("Loading quoted note\u2026", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
-                        }
+                        androidx.compose.material3.CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                        Text("Loading quoted note\u2026", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                     }
                 }
             }
@@ -2725,6 +2614,8 @@ private fun ThreadedReplyCard(
                         if (isScrolling) return@combinedClickable
                         if (state.isCollapsed) {
                             commentStates[replyKey] = state.copy(isCollapsed = false, isExpanded = true)
+                            // Also expand controls so uncollapse + controls happens in one tap
+                            onExpandedControlsReplyChange(reply.id)
                         } else {
                             onToggleControls()
                         }

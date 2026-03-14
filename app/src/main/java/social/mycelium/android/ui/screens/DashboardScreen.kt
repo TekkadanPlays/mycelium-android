@@ -575,37 +575,41 @@ private fun DashboardFeedContent(
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(top = 4.dp, bottom = 80.dp)
         ) {
-            // New notes counter (tap to load)
-            run {
+            // New notes counter (tap to load).
+            // Always present in the LazyColumn so adding/removing it doesn't shift items.
+            // Content is hidden via AnimatedVisibility when newCount==0.
+            item(key = "new_notes_counter") {
                 val isFollowing = homeFeedState.isFollowing
                 val newCount = if (isFollowing) uiState.newNotesCountFollowing else uiState.newNotesCountAll
-                if (newCount > 0) {
-                    item(key = "new_notes_counter") {
-                        Surface(
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = newCount > 0,
+                    enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
+                    exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                scope.launch {
+                                    viewModel.applyPendingNotes()
+                                    listState.scrollToItem(0)
+                                }
+                            },
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                    ) {
+                        Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    scope.launch {
-                                        viewModel.applyPendingNotes()
-                                        listState.scrollToItem(0)
-                                    }
-                                },
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
-                            ) {
-                                Text(
-                                    text = "\u2191 $newCount new note${if (newCount == 1) "" else "s"}",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
+                            Text(
+                                text = "\u2191 $newCount new note${if (newCount == 1) "" else "s"}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
                     }
                 }
@@ -1021,14 +1025,13 @@ fun DashboardScreen(
         }
     }
 
-    // When dashboard is visible, apply feed subscription. Key by selection only so expand/collapse does not reload.
-    // When categories have no relays (e.g. fresh install or default category empty), fall back to cache + outbox so feed still loads.
-    // Subscription setup: only re-run when visibility, account, or relay config changes.
+    // Apply feed subscription when relay config or account changes.
+    // isDashboardVisible is NOT a key — navigating to live_stream/video_viewer and back
+    // should not re-fire the subscription. The subscription stays active in the background.
     // Sidebar relay/category selection is handled by setDisplayFilterOnly in onItemClick — NOT here.
     // Key on allCategoryRelayUrls (stable URL list) instead of relayCategories (object list that
     // changes on every NIP-11 info update, causing cascading re-fires that delay feed loading).
     LaunchedEffect(
-        isDashboardVisible,
         currentAccount,
         subscribedCategoryRelayUrls,
         relayUiState.outboxRelays,
@@ -1036,7 +1039,7 @@ fun DashboardScreen(
         onboardingComplete
     ) {
         if (!onboardingComplete) return@LaunchedEffect
-        if (!isDashboardVisible || (subscribedCategoryRelayUrls.isEmpty() && relayUiState.outboxRelays.isEmpty())) return@LaunchedEffect
+        if (subscribedCategoryRelayUrls.isEmpty() && relayUiState.outboxRelays.isEmpty()) return@LaunchedEffect
         // Debounce: keys settle in rapid succession (visibility, categories, outbox);
         // wait briefly so we only fire the subscription once.
         kotlinx.coroutines.delay(150)
@@ -1137,13 +1140,22 @@ fun DashboardScreen(
     // Restore home feed scroll position when returning to dashboard (one-shot; do not re-run on notes.size).
     // Skip restoration when coming fresh from onboarding (hasLoadedRelays is false) to avoid
     // landing in the middle of a stale cached feed.
+    // Also skip when the LazyColumn is already at/near the saved position (overlay case: the list
+    // was never destroyed, just hidden behind the thread overlay — scrollToItem on an already-
+    // positioned list triggers a layout pass that causes a violent shift).
     val scrollPos = homeFeedState.scrollPosition
     LaunchedEffect(isDashboardVisible, scrollPos.firstVisibleItem, scrollPos.scrollOffset) {
         if (isDashboardVisible && hasLoadedRelays && scrollPos.firstVisibleItem > 0 && uiState.notes.isNotEmpty()) {
-            listState.scrollToItem(
-                scrollPos.firstVisibleItem.coerceAtMost(uiState.notes.size - 1),
-                scrollPos.scrollOffset
-            )
+            val currentIdx = listState.firstVisibleItemIndex
+            val drift = kotlin.math.abs(currentIdx - scrollPos.firstVisibleItem)
+            // Only restore if the list drifted significantly (e.g. NavHost recreation).
+            // For overlay returns, currentIdx ≈ scrollPos.firstVisibleItem already.
+            if (drift > 2) {
+                listState.scrollToItem(
+                    scrollPos.firstVisibleItem.coerceAtMost(uiState.notes.size - 1),
+                    scrollPos.scrollOffset
+                )
+            }
             feedStateViewModel.updateHomeFeedState { copy(scrollPosition = ScrollPosition(0, 0)) }
         }
     }

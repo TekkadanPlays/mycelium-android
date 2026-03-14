@@ -45,6 +45,8 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Velocity
 import kotlin.math.abs
 import androidx.compose.ui.unit.offset
@@ -150,7 +152,7 @@ private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault(
  * Splits the inner Surface lambda of QuotedNoteContent to reduce 6.8MB JIT.
  */
 @Composable
-private fun QuotedNoteBody(
+internal fun QuotedNoteBody(
     contentBlocks: List<NoteContentBlock>,
     isMarkdown: Boolean,
     isExpanded: Boolean,
@@ -519,7 +521,7 @@ private fun QuotedNoteBody(
  * which was causing 6.8MB JIT compilation for the quoted note path.
  */
 @Composable
-private fun QuotedNoteContent(
+internal fun QuotedNoteContent(
     parentNoteId: String,
     meta: QuotedNoteMeta,
     quotedAuthor: social.mycelium.android.data.Author,
@@ -691,7 +693,7 @@ private fun QuotedNoteContent(
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun NoteMediaCarousel(
+internal fun NoteMediaCarousel(
     mediaList: List<String>,
     allMediaUrls: List<String>,
     groupStartIndex: Int,
@@ -824,6 +826,8 @@ private fun NoteMediaCarousel(
                                 }
                             }
                             is AsyncImagePainter.State.Error -> {
+                                val errorState = painter.state as AsyncImagePainter.State.Error
+                                android.util.Log.e("NoteMediaCarousel", "Image load failed: url=$url error=${errorState.result.throwable.message}", errorState.result.throwable)
                                 Box(
                                     modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
                                     contentAlignment = Alignment.Center
@@ -2802,6 +2806,21 @@ fun NoteCard(
                     }
                     is NoteContentBlock.QuotedNote -> {
                         val eventId = block.eventId
+                        // Height-stable wrapper: cache measured height so scrolling
+                        // back up reserves the correct space immediately (no snap).
+                        val cachedHeightPx = social.mycelium.android.utils.QuotedNoteHeightCache.get(eventId)
+                        val density = LocalDensity.current
+                        val minHeightDp = if (cachedHeightPx != null) with(density) { cachedHeightPx.toDp() } else 0.dp
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = minHeightDp)
+                                .onSizeChanged { size ->
+                                    if (size.height > 0) {
+                                        social.mycelium.android.utils.QuotedNoteHeightCache.put(eventId, size.height)
+                                    }
+                                }
+                        ) {
                         val meta = quotedMetas[eventId]
                         if (meta != null) {
                             val quotedAuthor = remember(meta.authorId, quotedProfileRevision) {
@@ -2864,6 +2883,7 @@ fun NoteCard(
                                 Text("Loading quoted note\u2026", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                             }
                         }
+                        } // end height-stable Box
                     }
                 }
             }

@@ -48,6 +48,8 @@ data class AppState(
     val videoViewerInitialIndex: Int = 0,
     /** Instance key from the feed player so fullscreen reuses the same pooled ExoPlayer. */
     val videoViewerInstanceKey: String? = null,
+    /** True when the video viewer was opened by tapping PiP — gesture-back should restore PiP. */
+    val videoViewerFromPip: Boolean = false,
     val threadScrollPosition: Int = 0,
     val threadExpandedComments: Set<String> = emptySet(),
     val threadExpandedControls: String? = null,
@@ -114,12 +116,12 @@ class AppViewModel : ViewModel() {
         _appState.update { it.copy(replyToNote = note) }
     }
 
-    fun openVideoViewer(urls: List<String>, initialIndex: Int = 0, instanceKey: String? = null) {
-        _appState.update { it.copy(videoViewerUrls = urls, videoViewerInitialIndex = initialIndex.coerceIn(0, urls.size - 1), videoViewerInstanceKey = instanceKey) }
+    fun openVideoViewer(urls: List<String>, initialIndex: Int = 0, instanceKey: String? = null, fromPip: Boolean = false) {
+        _appState.update { it.copy(videoViewerUrls = urls, videoViewerInitialIndex = initialIndex.coerceIn(0, urls.size - 1), videoViewerInstanceKey = instanceKey, videoViewerFromPip = fromPip) }
     }
 
     fun clearVideoViewer() {
-        _appState.update { it.copy(videoViewerUrls = null, videoViewerInitialIndex = 0, videoViewerInstanceKey = null) }
+        _appState.update { it.copy(videoViewerUrls = null, videoViewerInitialIndex = 0, videoViewerInstanceKey = null, videoViewerFromPip = false) }
     }
 
     /** Pending navigation from tapping an Android notification. */

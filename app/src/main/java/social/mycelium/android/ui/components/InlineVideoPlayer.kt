@@ -164,9 +164,11 @@ private fun FeedVideoPlayer(
         }
     }
 
-    // Acquire or re-acquire the pooled player (skip if PiP owns this instance)
+    // Acquire or re-acquire the pooled player (skip if PiP owns or has reserved this URL)
     val currentPipState by PipStreamManager.pipState.collectAsState()
-    val isPipActive = currentPipState?.instanceKey == instanceKey
+    // reservedVideoUrl persists through PiP→fullscreen→PiP transitions (not cleared on reclaim).
+    // Re-read it on every recomposition triggered by pipState changes.
+    val isPipActive = currentPipState?.videoUrl == url || currentPipState?.instanceKey == instanceKey || PipStreamManager.reservedVideoUrl == url
     LaunchedEffect(url, isPipActive) {
         if (player == null && !isPipActive) {
             val p = SharedPlayerPool.acquire(context, instanceKey, url) ?: return@LaunchedEffect
@@ -218,7 +220,7 @@ private fun FeedVideoPlayer(
     // Pause/resume based on visibility (skip if PiP owns this URL)
     LaunchedEffect(isVisible, player, isPipActive) {
         val p = player ?: return@LaunchedEffect
-        if (isPipActive) { p.pause(); return@LaunchedEffect }
+        if (isPipActive) { return@LaunchedEffect }
         if (isVisible) {
             if (isActuallyPlaying) p.play()
         } else {
@@ -497,7 +499,10 @@ private fun FullVideoPlayer(
             player?.let { p ->
                 VideoPositionCache.set(url, p.currentPosition)
                 VideoMuteCache.set(url, isMuted)
-                p.pause()
+                // Don't pause if PiP took ownership — startVideoPip already called play()
+                if (!PipStreamManager.isVideoFor(url)) {
+                    p.pause()
+                }
             }
             SharedPlayerPool.detach(instanceKey)
             player = null

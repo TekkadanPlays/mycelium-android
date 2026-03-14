@@ -123,6 +123,8 @@ fun TopicsScreen(
     onNavigateToCreateTopic: (String?) -> Unit = {},
     onNavigateToTopicDrafts: () -> Unit = {},
     onRelayClick: (String) -> Unit = {},
+    /** When set, tapping relay orbs navigates to a dedicated relay list screen. */
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
     /** Navigate to the full-page zap settings screen. */
     onNavigateToZapSettings: () -> Unit = {},
     onDrawerStateChanged: (Boolean) -> Unit = {},
@@ -779,7 +781,9 @@ fun TopicsScreen(
                                         onClick = {
                                             feedStateViewModel.setTopicsSelectedHashtag(stats.hashtag)
                                             topicsViewModel.selectHashtag(stats.hashtag)
-                                        }
+                                        },
+                                        onRelayClick = onRelayClick,
+                                        onNavigateToRelayList = onNavigateToRelayList
                                     )
                                 }
                             }
@@ -998,6 +1002,7 @@ fun TopicsScreen(
                                                         shouldCloseZapMenus = shouldCloseZapMenus,
                                                         onZapSettings = { onNavigateToZapSettings() },
                                                         onRelayClick = onRelayClick,
+                                                        onNavigateToRelayList = onNavigateToRelayList,
                                                         accountNpub = currentAccount?.npub,
                                                         extraMoreMenuItems = moderationMenuItems,
                                                         actionRowSchema = ActionRowSchema.KIND11_FEED,
@@ -1034,6 +1039,7 @@ fun TopicsScreen(
                                                     shouldCloseZapMenus = shouldCloseZapMenus,
                                                     onZapSettings = { onNavigateToZapSettings() },
                                                     onRelayClick = onRelayClick,
+                                                    onNavigateToRelayList = onNavigateToRelayList,
                                                     accountNpub = currentAccount?.npub,
                                                     extraMoreMenuItems = moderationMenuItems,
                                                     actionRowSchema = ActionRowSchema.KIND11_FEED,
@@ -1183,6 +1189,8 @@ private fun HashtagCard(
     onToggleFavorite: () -> Unit,
     onMenuClick: () -> Unit,
     onClick: () -> Unit,
+    onRelayClick: (String) -> Unit = {},
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -1258,7 +1266,9 @@ private fun HashtagCard(
                 if (stats.relayUrls.isNotEmpty()) {
                     Spacer(Modifier.width(8.dp))
                     social.mycelium.android.ui.components.RelayOrbs(
-                        relayUrls = stats.relayUrls
+                        relayUrls = stats.relayUrls,
+                        onRelayClick = onRelayClick,
+                        onNavigateToRelayList = onNavigateToRelayList
                     )
                 }
 
@@ -1328,6 +1338,8 @@ private fun Kind11TopicCard(
     onFlagOffTopic: (() -> Unit)? = null,
     onExcludeUser: (() -> Unit)? = null,
     hasOwnFlag: Boolean = false,
+    onRelayClick: (String) -> Unit = {},
+    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -1414,7 +1426,8 @@ private fun Kind11TopicCard(
                 if (displayRelayUrls.isNotEmpty()) {
                     social.mycelium.android.ui.components.RelayOrbs(
                         relayUrls = displayRelayUrls,
-                        onRelayClick = { /* relay info */ }
+                        onRelayClick = onRelayClick,
+                        onNavigateToRelayList = onNavigateToRelayList
                     )
                 }
                 // NIP-22: overflow menu with moderation actions

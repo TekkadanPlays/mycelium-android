@@ -19,6 +19,25 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.94",
+      "versionCode": 31,
+      "releaseDate": "2026-03-14",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.94-beta/Mycelium-v0.4.94.apk",
+      "changelog": "Fix comment controls freezing after reply compose, relay icons rendering in user-created categories, relay orbs tappable in #topics view.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Comment controls no longer freeze after navigating to reply compose and returning",
+        "Relay icons now render correctly under user-created categories in relay manager",
+        "Relay orbs are tappable in #topics view (hashtag stats, topic cards, and topic feed notes)"
+      ]
+    },
+    {
       "version": "0.4.90",
       "versionCode": 27,
       "releaseDate": "2026-03-08",

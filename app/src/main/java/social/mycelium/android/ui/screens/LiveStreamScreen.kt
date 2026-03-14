@@ -337,6 +337,7 @@ fun LiveStreamScreen(
     // Back handler: hand off player to PiP if stream is playing AND auto-PiP is enabled
     val autoPipEnabled by social.mycelium.android.ui.settings.MediaPreferences.autoPipLiveActivities.collectAsState()
     val handleBack = {
+        Log.d("LiveStreamScreen", "handleBack: player=${player != null}, hasReceivedVideo=$hasReceivedVideo, showUnavailable=$showUnavailable, autoPipEnabled=$autoPipEnabled, handedOffToPip=$handedOffToPip")
         if (player != null && hasReceivedVideo && !showUnavailable && autoPipEnabled) {
             handedOffToPip = true
             PipStreamManager.startPip(

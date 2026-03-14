@@ -1160,7 +1160,7 @@ fun MyceliumNavigation(
                                 onAmberLogin(loginIntent)
                             },
                             initialTopAppBarState = topAppBarState,
-                            isDashboardVisible = currentRoute in setOf("dashboard", "image_viewer", "video_viewer"),
+                            isDashboardVisible = currentRoute in setOf("dashboard", "image_viewer", "video_viewer") && overlayThreadStack.isEmpty(),
                             onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
                             onSidebarRelayHealthClick = { closeDrawerThen {
                                 navController.navigate("settings/relay_health") {
@@ -1851,9 +1851,11 @@ fun MyceliumNavigation(
                     popEnterTransition = { EnterTransition.None },
                     popExitTransition = { fadeOut(animationSpec = tween(200)) }
                 ) {
-                    // Kill PiP when any media goes fullscreen
-                    LaunchedEffect(Unit) { PipStreamManager.kill() }
+                    // Kill PiP when media goes fullscreen — but NOT if this viewer
+                    // was opened by tapping PiP (the player was already reclaimed).
                     val appState by appViewModel.appState.collectAsState()
+                    val fromPip = remember { appState.videoViewerFromPip }
+                    LaunchedEffect(Unit) { if (!fromPip) PipStreamManager.kill() }
                     // Remember URLs locally so they survive clearVideoViewer() during exit animation
                     val urls = appState.videoViewerUrls
                     var rememberedUrls by remember { mutableStateOf(urls) }
@@ -1870,6 +1872,15 @@ fun MyceliumNavigation(
                             urls = displayUrls,
                             initialIndex = rememberedIndex,
                             onBackClick = {
+                                // If this fullscreen was opened from PiP, restore PiP
+                                // so the user doesn't have to tap the PiP button again.
+                                if (fromPip && rememberedInstanceKey != null) {
+                                    val url = displayUrls.getOrNull(rememberedIndex) ?: displayUrls.first()
+                                    val player = SharedPlayerPool.peek(rememberedInstanceKey!!)
+                                    if (player != null) {
+                                        PipStreamManager.startVideoPip(player, url, rememberedInstanceKey!!)
+                                    }
+                                }
                                 navController.popBackStack()
                                 appViewModel.clearVideoViewer()
                             },
@@ -3570,6 +3581,10 @@ fun MyceliumNavigation(
                                     val encoded = android.net.Uri.encode(relayUrl)
                                     navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                                 },
+                                onNavigateToRelayList = { urls ->
+                                    val encoded = urls.joinToString(",") { android.net.Uri.encode(it) }
+                                    navController.navigate("note_relays/$encoded") { launchSingleTop = true }
+                                },
                                 onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } },
                                 onDrawerStateChanged = { open -> isDrawerOpen = open },
                                 drawerState = sidebarDrawerState
@@ -4219,7 +4234,7 @@ fun MyceliumNavigation(
                     if (reclaimed != null && reclaimedInstanceKey != null) {
                         SharedPlayerPool.returnToPool(reclaimedInstanceKey, videoUrl, reclaimed.player)
                     }
-                    appViewModel.openVideoViewer(listOf(videoUrl), 0, instanceKey = reclaimedInstanceKey)
+                    appViewModel.openVideoViewer(listOf(videoUrl), 0, instanceKey = reclaimedInstanceKey, fromPip = true)
                     navController.navigate("video_viewer") { launchSingleTop = true }
                 },
                 modifier = Modifier.zIndex(Float.MAX_VALUE)

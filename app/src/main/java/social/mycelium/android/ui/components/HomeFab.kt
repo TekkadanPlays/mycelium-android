@@ -8,6 +8,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.outlined.Article
 import androidx.compose.material.icons.outlined.CleaningServices
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.FloatingActionButton
@@ -53,6 +56,7 @@ import androidx.compose.ui.unit.dp
 fun HomeFab(
     onScrollToTop: () -> Unit,
     onCompose: () -> Unit,
+    onArticle: () -> Unit = {},
     onDrafts: () -> Unit = {},
     draftCount: Int = 0,
     modifier: Modifier = Modifier
@@ -104,6 +108,18 @@ fun HomeFab(
                     }
                 )
 
+                // Write Article (NIP-23 long-form)
+                HomeFabItem(
+                    label = "Article",
+                    icon = Icons.Outlined.Article,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    onClick = {
+                        expanded = false
+                        onArticle()
+                    }
+                )
+
                 // Drafts
                 if (draftCount > 0) {
                     HomeFabItem(
@@ -123,6 +139,7 @@ fun HomeFab(
         // Main FAB
         FloatingActionButton(
             onClick = { expanded = !expanded },
+            shape = CircleShape,
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary
         ) {
@@ -150,7 +167,7 @@ private fun HomeFabItem(
         // Label chip
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHighest,
-            shape = MaterialTheme.shapes.small,
+            shape = RoundedCornerShape(8.dp),
             shadowElevation = 2.dp,
         ) {
             Text(
@@ -163,6 +180,7 @@ private fun HomeFabItem(
         Spacer(Modifier.width(8.dp))
         SmallFloatingActionButton(
             onClick = onClick,
+            shape = CircleShape,
             containerColor = containerColor,
             contentColor = contentColor,
         ) {

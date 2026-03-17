@@ -175,6 +175,10 @@ class RelayConnectionStateMachine {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
     val relayPool: CybinRelayPool = CybinRelayPool(MyceliumHttpClient.instance, scope)
 
+    /** NIP-42 relay authentication handler — intercepts AUTH challenges and signs via Amber.
+     *  Eagerly initialized so the onAuth listener is registered BEFORE any relay connections. */
+    val nip42AuthHandler: Nip42AuthHandler = Nip42AuthHandler(this)
+
     init {
         // Register connection listener to track per-relay status from actual WebSocket events
         relayPool.addListener(object : RelayConnectionListener {
@@ -218,9 +222,6 @@ class RelayConnectionStateMachine {
             }
         })
     }
-
-    /** NIP-42 relay authentication handler — intercepts AUTH challenges and signs via Amber. */
-    val nip42AuthHandler: Nip42AuthHandler by lazy { Nip42AuthHandler(this) }
 
     /**
      * Set the signer for NIP-42 relay authentication. Call after login with the current
@@ -453,9 +454,14 @@ class RelayConnectionStateMachine {
                 // Auto-blocked relays stay in perRelayState as Failed so the UI can show a banner.
                 val existing = _perRelayState.value
                 val blockedUrls = relayUrls.filter { it !in effectiveRelayUrls }
-                _perRelayState.value = effectiveRelayUrls.associateWith { url ->
+                val newState = effectiveRelayUrls.associateWith { url ->
                     existing[url] ?: RelayEndpointStatus.Connecting
                 } + blockedUrls.associateWith { RelayEndpointStatus.Failed }
+                // Only emit if the map actually changed — avoids unnecessary recomposition
+                // that causes outbox relay orbs to visually flicker when toggling unrelated categories
+                if (newState != existing) {
+                    _perRelayState.value = newState
+                }
                 if (effectiveRelayUrls.isEmpty()) {
                     // All relays blocked — state updated above for banner, but nothing to subscribe to
                     Log.w(TAG, "All ${relayUrls.size} relays are blocked, no subscription possible")
@@ -489,6 +495,11 @@ class RelayConnectionStateMachine {
                     val filterKind11 = Filter(kinds = listOf(11), limit = 500)
                     val filterKind1011 = Filter(kinds = listOf(1011), limit = 200)
                     val filterKind30311 = Filter(kinds = listOf(30311), limit = 20)
+                    val filterKind30023 = if (kind1Filter != null) {
+                        Filter(kinds = listOf(30023), authors = kind1Filter.authors, limit = 50, since = sevenDaysAgo)
+                    } else {
+                        Filter(kinds = listOf(30023), limit = 50, since = sevenDaysAgo)
+                    }
                     val countsIds = countsNoteIds?.takeIf { it.isNotEmpty() } ?: emptySet()
                     val countsFilters = if (countsIds.isNotEmpty()) {
                         val noteIdList = countsIds.take(200).toList()
@@ -497,7 +508,7 @@ class RelayConnectionStateMachine {
                             Filter(kinds = listOf(9735), tags = mapOf("e" to noteIdList))
                         )
                     } else emptyList()
-                    val allFilters = listOf(filterKind1, filterKind6, filterKind11, filterKind1011, filterKind30311) + countsFilters
+                    val allFilters = listOf(filterKind1, filterKind6, filterKind11, filterKind1011, filterKind30311, filterKind30023) + countsFilters
                     currentSubId = CybinUtils.randomChars(10)
                     val subId = currentSubId!!
                     val relayFilterMap = effectiveRelayUrls.associateWith { allFilters }
@@ -521,6 +532,7 @@ class RelayConnectionStateMachine {
                             6 -> onKind6WithRelay?.invoke(event, relayUrl)
                             11 -> onKind11?.invoke(event, relayUrl)
                             1011 -> onKind1011?.invoke(event)
+                            30023 -> onKind1WithRelay?.invoke(event, relayUrl)
                             30073 -> onKind30073?.invoke(event)
                             30311 -> onKind30311?.invoke(event, relayUrl)
                             7, 9735 -> social.mycelium.android.repository.NoteCountsRepository.onCountsEvent(event)
@@ -530,13 +542,21 @@ class RelayConnectionStateMachine {
                     val mode = if (kind1Filter != null) "following (authors filter)" else "global"
                     Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-11${if (countsIds.isNotEmpty()) " + counts(${countsIds.size})" else ""}, $mode)")
                 }
+                val previousRelayUrls = currentSubscriptionRelayUrls
                 currentSubscriptionRelayUrls = effectiveRelayUrls
                 currentKind1Filter = kind1Filter
                 currentCountsNoteIds = countsNoteIds?.toSet() ?: emptySet()
                 _currentSubscription.value = CurrentSubscription(effectiveRelayUrls, kind1Filter, currentCountsNoteIds)
                 _connectionError.value = null
                 retryAttempt = 0
-                relayPool.connect()
+                relayPool.connect(priorityRelayUrls)
+                // Disconnect relays that were in the previous set but not in the new one.
+                // After closeSubscription above, they have no active subs and can be cleaned up.
+                val staleRelays = previousRelayUrls.toSet() - effectiveRelayUrls.toSet()
+                if (staleRelays.isNotEmpty()) {
+                    Log.d(TAG, "Disconnecting ${staleRelays.size} stale relay(s): ${staleRelays.joinToString()}")
+                    relayPool.disconnectIdleRelays(staleRelays)
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Update subscription failed: ${e.message}", e)
                 // Only mark non-Connected relays as Failed; preserve relays that are already working
@@ -562,6 +582,15 @@ class RelayConnectionStateMachine {
     @Volatile private var currentSubscriptionRelayUrls: List<String> = emptyList()
     @Volatile private var currentKind1Filter: Filter? = null
     @Volatile private var currentCountsNoteIds: Set<String> = emptySet()
+
+    /** Relay URLs that should be connected first (no jitter/cooldown). Typically outbox relays. */
+    @Volatile private var priorityRelayUrls: Set<String> = emptySet()
+
+    /** Set which relay URLs should be prioritized for connection (connect first, clear cooldown).
+     *  Call this with the user's outbox relay URLs so they connect before category relays. */
+    fun setPriorityRelayUrls(urls: Set<String>) {
+        priorityRelayUrls = urls
+    }
 
     // --- Keepalive health check ---
     /** Timestamp of last event received from any relay. Used by keepalive to detect stale connections. */

@@ -95,6 +95,43 @@ class Nip86Client(private val signer: NostrSigner) {
         }
     }
 
+    // ── Allow list management ──
+
+    data class AllowedEntry(val pubkey: String, val reason: String?)
+
+    suspend fun listAllowedPubkeys(relayUrl: String): Nip86Result<List<AllowedEntry>> {
+        return call(relayUrl, "listallowedpubkeys", JSONArray()) { result ->
+            val arr = result as? JSONArray ?: return@call emptyList()
+            (0 until arr.length()).map { i ->
+                val obj = arr.getJSONObject(i)
+                AllowedEntry(
+                    pubkey = obj.getString("pubkey"),
+                    reason = if (obj.has("reason")) obj.optString("reason") else null
+                )
+            }
+        }
+    }
+
+    suspend fun allowPubkey(relayUrl: String, pubkey: String, reason: String = ""): Nip86Result<Boolean> {
+        val params = JSONArray().put(pubkey)
+        if (reason.isNotBlank()) params.put(reason)
+        return call(relayUrl, "allowpubkey", params) { true }
+    }
+
+    suspend fun disallowPubkey(relayUrl: String, pubkey: String, reason: String = ""): Nip86Result<Boolean> {
+        val params = JSONArray().put(pubkey)
+        if (reason.isNotBlank()) params.put(reason)
+        return call(relayUrl, "disallowpubkey", params) { true }
+    }
+
+    // ── Event management ──
+
+    suspend fun deleteEvent(relayUrl: String, eventId: String, reason: String = ""): Nip86Result<Boolean> {
+        val params = JSONArray().put(eventId)
+        if (reason.isNotBlank()) params.put(reason)
+        return call(relayUrl, "banevent", params) { true }
+    }
+
     // ── Internal ──
 
     /**

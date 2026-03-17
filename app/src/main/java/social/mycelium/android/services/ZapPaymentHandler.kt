@@ -9,6 +9,8 @@ import social.mycelium.android.repository.ZapType
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner
+import social.mycelium.android.lightning.PaymentResult
+import social.mycelium.android.lightning.PhoenixWalletManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -136,26 +138,40 @@ object ZapPaymentHandler {
 
             Log.d(TAG, "Got bolt11 invoice: ${bolt11.take(20)}...")
 
-            // 5. Pay via NWC
-            if (!NwcPaymentManager.isConfigured(context)) {
-                Log.w(TAG, "Zap failed: NWC not configured")
-                onProgress(ZapProgress.Failed("NWC not configured. Set up Wallet Connect in Settings."))
-                return@withContext
-            }
-
+            // 5. Pay the invoice — prefer embedded Phoenix wallet, fall back to NWC
             onProgress(ZapProgress.InProgress("Paying invoice..."))
-            Log.d(TAG, "Calling NwcPaymentManager.payInvoice...")
-            val result = NwcPaymentManager.payInvoice(context, bolt11)
 
-            when (result) {
-                is NwcPaymentResult.Success -> {
-                    Log.d(TAG, "Zap successful! preimage=${result.preimage?.take(16)}")
-                    onProgress(ZapProgress.Success(result.preimage))
+            if (PhoenixWalletManager.isReady()) {
+                // Pay directly from the embedded Lightning node (non-custodial)
+                Log.d(TAG, "Paying via Phoenix embedded wallet...")
+                val phoenixResult = PhoenixWalletManager.payInvoice(bolt11)
+                when (phoenixResult) {
+                    is PaymentResult.Success -> {
+                        Log.d(TAG, "Zap successful via Phoenix! preimage=${phoenixResult.preimage.take(16)}")
+                        onProgress(ZapProgress.Success(phoenixResult.preimage))
+                    }
+                    is PaymentResult.Error -> {
+                        Log.w(TAG, "Phoenix payment failed: ${phoenixResult.message}")
+                        onProgress(ZapProgress.Failed(phoenixResult.message))
+                    }
                 }
-                is NwcPaymentResult.Error -> {
-                    Log.w(TAG, "Zap payment failed: ${result.message}")
-                    onProgress(ZapProgress.Failed(result.message))
+            } else if (NwcPaymentManager.isConfigured(context)) {
+                // Fall back to NWC (external wallet via Nostr Wallet Connect)
+                Log.d(TAG, "Phoenix not available, paying via NWC...")
+                val nwcResult = NwcPaymentManager.payInvoice(context, bolt11)
+                when (nwcResult) {
+                    is NwcPaymentResult.Success -> {
+                        Log.d(TAG, "Zap successful via NWC! preimage=${nwcResult.preimage?.take(16)}")
+                        onProgress(ZapProgress.Success(nwcResult.preimage))
+                    }
+                    is NwcPaymentResult.Error -> {
+                        Log.w(TAG, "NWC payment failed: ${nwcResult.message}")
+                        onProgress(ZapProgress.Failed(nwcResult.message))
+                    }
                 }
+            } else {
+                Log.w(TAG, "Zap failed: no payment method available")
+                onProgress(ZapProgress.Failed("No wallet available. Set up Lightning wallet or NWC in Settings."))
             }
 
         } catch (e: Exception) {

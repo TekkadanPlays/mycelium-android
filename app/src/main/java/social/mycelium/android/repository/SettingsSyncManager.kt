@@ -130,6 +130,7 @@ object SettingsSyncManager {
             Log.w(TAG, "No relays for settings fetch")
             return
         }
+        Log.d(TAG, "fetchAndApplySettings: ${relayUrls.size} relays: ${relayUrls.take(3)}")
 
         scope.launch {
             try {
@@ -154,6 +155,7 @@ object SettingsSyncManager {
                 // Wait for responses to settle
                 delay(5000)
                 handle.cancel()
+                Log.d(TAG, "fetchAndApplySettings: subscription done, latestEvent=${latestEvent?.id?.take(8)}")
 
                 val event = latestEvent
                 if (event == null) {
@@ -164,18 +166,19 @@ object SettingsSyncManager {
                 Log.d(TAG, "Found settings event: ${event.id.take(8)}, created=${event.createdAt}")
 
                 // Decrypt content (NIP-44 encrypted to self).
-                // Use background-only decrypt for external signers to avoid flashing Amber's
-                // visible activity — settings sync is non-critical.
+                // Try background-only first to avoid flashing Amber's visible activity;
+                // fall back to foreground decrypt so settings are restored on fresh installs.
                 val plaintext = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
                     signer.nip44DecryptBackgroundOnly(event.content, userPubkey)
                         ?: run {
-                            Log.w(TAG, "Background decrypt unavailable — skipping settings sync")
-                            return@launch
+                            Log.d(TAG, "Background decrypt unavailable — trying foreground decrypt")
+                            signer.nip44Decrypt(event.content, userPubkey)
                         }
                 } else {
                     signer.nip44Decrypt(event.content, userPubkey)
                 }
                 val remoteSettings = SyncedSettings.fromJson(plaintext)
+                Log.d(TAG, "fetchAndApplySettings: parsed settings — compactMedia=${remoteSettings.compactMedia}, theme=${remoteSettings.theme}, accent=${remoteSettings.accent}")
 
                 // Apply to local preferences (with guard to prevent re-publish)
                 isApplyingRemote = true

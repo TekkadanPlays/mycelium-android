@@ -101,12 +101,7 @@ class Nip11Retriever(
      * Normalize relay URL to WebSocket format
      */
     fun normalizeRelayUrl(url: String): String {
-        return when {
-            url.startsWith("wss://") || url.startsWith("ws://") -> url
-            url.startsWith("https://") -> url.replace("https://", "wss://")
-            url.startsWith("http://") -> url.replace("http://", "ws://")
-            else -> "wss://$url"
-        }
+        return social.mycelium.android.utils.normalizeRelayUrl(url)
     }
 
     /**

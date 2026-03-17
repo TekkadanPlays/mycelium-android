@@ -367,24 +367,46 @@ class ProfileFeedRepository(
             if (event.kind == 6) {
                 val repostNote = handleKind6Repost(event, sourceRelayUrl)
                 if (repostNote != null) {
-                    // Merge with existing repost of same original note
-                    val existingIdx = newNotes.indexOfFirst { it.id == repostNote.id }
-                    if (existingIdx >= 0) {
-                        val existing = newNotes[existingIdx]
-                        val mergedAuthors = (repostNote.repostedByAuthors + existing.repostedByAuthors).distinctBy { it.id }
-                        newNotes[existingIdx] = existing.copy(
+                    val origId = repostNote.originalNoteId
+                    // First: try to merge onto the original kind-1 already in this batch
+                    val origIdx = if (origId != null) newNotes.indexOfFirst { it.id == origId } else -1
+                    if (origIdx >= 0) {
+                        val orig = newNotes[origIdx]
+                        val mergedAuthors = (orig.repostedByAuthors + repostNote.repostedByAuthors).distinctBy { it.id }
+                        newNotes[origIdx] = orig.copy(
                             repostedByAuthors = mergedAuthors,
-                            repostTimestamp = maxOf(repostNote.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
+                            repostTimestamp = maxOf(repostNote.repostTimestamp ?: 0L, orig.repostTimestamp ?: 0L)
                         )
                     } else {
-                        newNotes.add(repostNote)
+                        // Second: merge with existing repost of same original note
+                        val existingIdx = newNotes.indexOfFirst { it.id == repostNote.id }
+                        if (existingIdx >= 0) {
+                            val existing = newNotes[existingIdx]
+                            val mergedAuthors = (repostNote.repostedByAuthors + existing.repostedByAuthors).distinctBy { it.id }
+                            newNotes[existingIdx] = existing.copy(
+                                repostedByAuthors = mergedAuthors,
+                                repostTimestamp = maxOf(repostNote.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
+                            )
+                        } else {
+                            newNotes.add(repostNote)
+                        }
                     }
                 }
                 continue
             }
 
             val note = convertEventToNote(event, sourceRelayUrl)
-            newNotes.add(note)
+            // If a repost:id of this note already exists in the batch, absorb its boost authors
+            val repostIdx = newNotes.indexOfFirst { it.originalNoteId == note.id }
+            if (repostIdx >= 0) {
+                val repostEntry = newNotes.removeAt(repostIdx)
+                newNotes.add(note.copy(
+                    repostedByAuthors = (note.repostedByAuthors + repostEntry.repostedByAuthors).distinctBy { it.id },
+                    repostTimestamp = repostEntry.repostTimestamp
+                ))
+            } else {
+                newNotes.add(note)
+            }
         }
 
         if (newNotes.isEmpty()) return
@@ -403,14 +425,51 @@ class ProfileFeedRepository(
                         repostTimestamp = maxOf(note.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
                     )
                 }
+                // If this is an original kind-1 and there's a stale repost:id entry, remove it
+                if (note.originalNoteId == null) {
+                    val staleRepostIdx = currentNotes.indexOfFirst { it.originalNoteId == note.id }
+                    if (staleRepostIdx >= 0) {
+                        val stale = currentNotes.removeAt(staleRepostIdx)
+                        // Re-find existingIdx since removal may have shifted it
+                        val refreshedIdx = currentNotes.indexOfFirst { it.id == note.id }
+                        if (refreshedIdx >= 0) {
+                            val merged2 = (currentNotes[refreshedIdx].repostedByAuthors + stale.repostedByAuthors).distinctBy { it.id }
+                            currentNotes[refreshedIdx] = currentNotes[refreshedIdx].copy(
+                                repostedByAuthors = merged2,
+                                repostTimestamp = maxOf(currentNotes[refreshedIdx].repostTimestamp ?: 0L, stale.repostTimestamp ?: 0L)
+                            )
+                        }
+                    }
+                }
             } else {
-                // If a repost arrives and the original kind-1 is already in feed, replace it
+                // If a repost arrives and the original kind-1 is already in feed,
+                // merge boost authors onto the original instead of adding a duplicate
                 val origId = note.originalNoteId
                 if (origId != null) {
                     val origIdx = currentNotes.indexOfFirst { it.id == origId }
-                    if (origIdx >= 0) currentNotes.removeAt(origIdx)
+                    if (origIdx >= 0) {
+                        val orig = currentNotes[origIdx]
+                        val mergedAuthors = (orig.repostedByAuthors + note.repostedByAuthors).distinctBy { it.id }
+                        currentNotes[origIdx] = orig.copy(
+                            repostedByAuthors = mergedAuthors,
+                            repostTimestamp = maxOf(note.repostTimestamp ?: 0L, orig.repostTimestamp ?: 0L)
+                        )
+                        continue // don't add the repost:id duplicate
+                    }
                 }
-                currentNotes.add(note)
+                // If the repost arrives first (before the original kind-1), check if we
+                // already have a repost:id entry that should absorb it
+                val repostOfSameIdx = if (origId != null) currentNotes.indexOfFirst { it.originalNoteId == origId && it.id != note.id } else -1
+                if (repostOfSameIdx >= 0) {
+                    val existing = currentNotes[repostOfSameIdx]
+                    val mergedAuthors = (existing.repostedByAuthors + note.repostedByAuthors).distinctBy { it.id }
+                    currentNotes[repostOfSameIdx] = existing.copy(
+                        repostedByAuthors = mergedAuthors,
+                        repostTimestamp = maxOf(note.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
+                    )
+                } else {
+                    currentNotes.add(note)
+                }
             }
         }
 

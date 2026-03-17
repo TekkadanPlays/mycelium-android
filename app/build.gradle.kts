@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -16,8 +17,8 @@ android {
         applicationId = "social.mycelium.android"
         minSdk = 35
         targetSdk = 36
-        versionCode = 31
-        versionName = "0.4.94-beta"
+        versionCode = 32
+        versionName = "0.4.95-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -131,13 +132,24 @@ dependencies {
     // secp256k1 JNI native lib needed at runtime (Cybin exports the KMP API)
     implementation(libs.secp256k1.kmp.jni.android)
 
+    // Lightning: ACINQ lightning-kmp (non-custodial LN node on device)
+    implementation("fr.acinq.lightning:lightning-kmp-core-jvm:1.11.5-SNAPSHOT")
+    implementation("fr.acinq.bitcoin:bitcoin-kmp-jvm:0.29.0")
+    implementation("fr.acinq.secp256k1:secp256k1-kmp-jni-android:0.22.0")
+
+    // Encrypted storage for wallet seed
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("io.coil-kt:coil-compose:2.5.0")
     implementation("io.coil-kt:coil-gif:2.5.0")
+    implementation("io.coil-kt:coil-svg:2.5.0")
     implementation("io.coil-kt:coil-video:2.5.0")
     implementation("androidx.media3:media3-exoplayer:1.3.1")
     implementation("androidx.media3:media3-exoplayer-hls:1.3.1")
+    implementation("androidx.media3:media3-datasource:1.3.1")
+    implementation("androidx.media3:media3-database:1.3.1")
     implementation("androidx.media3:media3-ui:1.3.1")
 
     // WorkManager for periodic background relay checks (Adaptive connection mode)
@@ -152,6 +164,16 @@ dependencies {
     // ML Kit: on-demand translation (language detection + translation)
     implementation("com.google.mlkit:language-id:17.0.6")
     implementation("com.google.mlkit:translate:17.0.3")
+
+    // Markdown rendering for long-form articles (kind 30023)
+    implementation(libs.richtext.ui)
+    implementation(libs.richtext.ui.material3)
+    implementation(libs.richtext.commonmark)
+
+    // Room persistence
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

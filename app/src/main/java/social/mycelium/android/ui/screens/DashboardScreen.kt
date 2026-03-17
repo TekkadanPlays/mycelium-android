@@ -1,5 +1,8 @@
+@file:OptIn(kotlinx.coroutines.FlowPreview::class)
+
 package social.mycelium.android.ui.screens
 
+import kotlinx.coroutines.flow.debounce
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -482,6 +485,9 @@ private fun DashboardFeedContent(
         }
         // Prefetch images so they're warm before the user sees them
         val imageLoader = remember { coil.Coil.imageLoader(context) }
+        val screenWidthPx = remember { context.resources.displayMetrics.widthPixels }
+        // Dedup set so we don't re-enqueue already-prefetched URLs
+        val prefetchedUrls = remember { mutableSetOf<String>() }
         // Also cache aspect ratios so media containers have correct size before scrolling into view
         val prefetchListener = remember {
             object : coil.request.ImageRequest.Listener {
@@ -496,16 +502,16 @@ private fun DashboardFeedContent(
             }
         }
         LaunchedEffect(engagementFilteredNotes) {
-            val prefetchCount = 8.coerceAtMost(engagementFilteredNotes.size)
+            val prefetchCount = 15.coerceAtMost(engagementFilteredNotes.size)
             for (i in 0 until prefetchCount) {
                 engagementFilteredNotes[i].mediaUrls.forEach { url ->
-                    if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
+                    if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url) && prefetchedUrls.add(url)) {
                         imageLoader.enqueue(
                             coil.request.ImageRequest.Builder(context)
                                 .data(url)
                                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                .size(1080, 1080)
+                                .size(screenWidthPx, screenWidthPx)
                                 .listener(prefetchListener)
                                 .build()
                         )
@@ -513,27 +519,60 @@ private fun DashboardFeedContent(
                 }
             }
         }
-        // Continue prefetching 5 notes ahead as user scrolls
+        // Continue prefetching 10 notes ahead as user scrolls
         LaunchedEffect(listState) {
             snapshotFlow {
                 listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
             }.collect { lastVisible ->
-                val prefetchEnd = (lastVisible + 5).coerceAtMost(engagementFilteredNotes.size - 1)
+                val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
                 for (i in (lastVisible + 1)..prefetchEnd) {
                     val note = engagementFilteredNotes.getOrNull(i) ?: continue
                     note.mediaUrls.forEach { url ->
-                        if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url)) {
+                        if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url) && prefetchedUrls.add(url)) {
                             imageLoader.enqueue(
                                 coil.request.ImageRequest.Builder(context)
                                     .data(url)
                                     .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                     .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                    .size(1080, 1080)
+                                    .size(screenWidthPx, screenWidthPx)
                                     .listener(prefetchListener)
                                     .build()
                             )
                         }
                     }
+                }
+            }
+        }
+        // Prefetch profile metadata so display names / @mentions resolve before scrolling into view
+        val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+        LaunchedEffect(engagementFilteredNotes) {
+            val prefetchCount = 20.coerceAtMost(engagementFilteredNotes.size)
+            val pubkeys = mutableSetOf<String>()
+            for (i in 0 until prefetchCount) {
+                val note = engagementFilteredNotes[i]
+                pubkeys.add(note.author.id.lowercase())
+                pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
+            }
+            val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
+            if (uncached.isNotEmpty()) {
+                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+            }
+        }
+        // Continue prefetching profiles 10 notes ahead as user scrolls
+        LaunchedEffect(listState) {
+            snapshotFlow {
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            }.debounce(200).collect { lastVisible ->
+                val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
+                val pubkeys = mutableSetOf<String>()
+                for (i in (lastVisible + 1)..prefetchEnd) {
+                    val note = engagementFilteredNotes.getOrNull(i) ?: continue
+                    pubkeys.add(note.author.id.lowercase())
+                    pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
+                }
+                val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
+                if (uncached.isNotEmpty()) {
+                    profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
                 }
             }
         }
@@ -569,6 +608,86 @@ private fun DashboardFeedContent(
                 }
             }
         }
+
+        // Hoist global preferences once so each NoteCard doesn't subscribe independently
+        val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
+        val showSensitiveContent by social.mycelium.android.ui.settings.MediaPreferences.showSensitiveContent.collectAsState()
+
+        // Current user hex key for ownership checks (delete)
+        val currentUserHex = remember(accountNpub) {
+            accountNpub?.let { npub ->
+                try { (com.example.cybin.nip19.Nip19Parser.uriToRoute(npub)?.entity as? com.example.cybin.nip19.NPub)?.hex?.lowercase() } catch (_: Exception) { null }
+            }
+        }
+        val stableOnDelete = remember<(Note) -> Unit> {{ n ->
+            val err = accountStateViewModel.deleteNote(n)
+            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+        }}
+
+        // ── Stable lambdas: allocated once, not per-item ──────────────────────
+        val stableOnReact = remember<(Note, String) -> Unit> {{ reactedNote, emoji ->
+            val error = accountStateViewModel.sendReaction(reactedNote, emoji)
+            if (error != null) Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+        }}
+        val stableOnBoost = remember<(Note) -> Unit> {{ n ->
+            val noteId = n.originalNoteId ?: n.id.removePrefix("repost:")
+            val authorHex = n.author.id
+            android.util.Log.d("BoostDebug", "stableOnBoost called: noteId=$noteId authorHex=${authorHex.take(12)} route=boost_relay_selection/$noteId/$authorHex")
+            onNavigateTo("boost_relay_selection/$noteId/$authorHex")
+        }}
+        val stableOnQuote = remember<(Note) -> Unit> {{ n ->
+            val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
+            val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
+            onNavigateTo("compose?initialContent=$encoded")
+        }}
+        val stableOnFork = remember<(Note) -> Unit> {{ n ->
+            val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
+            onNavigateTo("compose?initialContent=$encoded")
+        }}
+        val stableOnNoteClick = remember<(Note) -> Unit> {{ n -> onThreadClick(n, null) }}
+        val stableOnLike = remember<(String) -> Unit> {{ noteId -> viewModel.toggleLike(noteId) }}
+        val stableOnShare = remember<(String) -> Unit> {{ _ -> }}
+        val stableOnCustomZapSend = remember<(Note, Long, social.mycelium.android.repository.ZapType, String) -> Unit> {{ n, amount, zapType, msg ->
+            val err = accountStateViewModel.sendZap(n, amount, zapType, msg)
+            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+        }}
+        val stableOnFollowAuthor = remember<(String) -> Unit> {{ pubkey ->
+            val err = accountStateViewModel.followUser(pubkey)
+            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+        }}
+        val stableOnUnfollowAuthor = remember<(String) -> Unit> {{ pubkey ->
+            val err = accountStateViewModel.unfollowUser(pubkey)
+            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+        }}
+        val stableOnBlockAuthor = remember<(String) -> Unit> {{ pubkey ->
+            social.mycelium.android.repository.MuteListRepository.blockUser(pubkey)
+            Toast.makeText(context, "Blocked", Toast.LENGTH_SHORT).show()
+        }}
+        val stableOnMuteAuthor = remember<(String) -> Unit> {{ pubkey ->
+            val signer = accountStateViewModel.getCurrentSigner()
+            if (signer != null) {
+                val relays = accountStateViewModel.getOutboxRelayUrlSet()
+                social.mycelium.android.repository.MuteListRepository.muteUser(pubkey, signer, relays)
+                Toast.makeText(context, "Muted", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "Sign in to mute", Toast.LENGTH_SHORT).show()
+            }
+        }}
+        val stableOnBookmarkToggle = remember<(String, Boolean) -> Unit> {{ noteId, isCurrentlyBookmarked ->
+            val signer = accountStateViewModel.getCurrentSigner()
+            if (signer != null) {
+                val relays = accountStateViewModel.getOutboxRelayUrlSet()
+                if (isCurrentlyBookmarked) {
+                    social.mycelium.android.repository.BookmarkRepository.removeBookmark(noteId, signer, relays)
+                    Toast.makeText(context, "Bookmark removed", Toast.LENGTH_SHORT).show()
+                } else {
+                    social.mycelium.android.repository.BookmarkRepository.addBookmark(noteId, signer, relays)
+                    Toast.makeText(context, "Bookmarked", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(context, "Sign in to bookmark", Toast.LENGTH_SHORT).show()
+            }
+        }}
 
         LazyColumn(
             state = listState,
@@ -618,35 +737,51 @@ private fun DashboardFeedContent(
             items(
                 items = engagementFilteredNotes,
                 key = { it.id },
-                contentType = { "note_card" }
+                contentType = { if (it.kind == 30023) "article_card" else "note_card" }
             ) { note ->
+                if (note.kind == 30023) {
+                    social.mycelium.android.ui.components.ArticleCard(
+                        note = note,
+                        onNoteClick = { onThreadClick(note, null) },
+                        onProfileClick = onProfileClick,
+                        onBoost = stableOnBoost,
+                        onQuote = stableOnQuote,
+                        onFork = stableOnFork,
+                        onZap = { _, amount ->
+                            val err = accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                        },
+                        onCustomZapSend = stableOnCustomZapSend,
+                        onZapSettings = onShowZapConfig,
+                        onDelete = if (currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == currentUserHex) stableOnDelete else null,
+                        isAuthorFollowed = note.author.id.lowercase() in followSetLower,
+                        onFollowAuthor = stableOnFollowAuthor,
+                        onUnfollowAuthor = stableOnUnfollowAuthor,
+                        onBlockAuthor = stableOnBlockAuthor,
+                        onMuteAuthor = stableOnMuteAuthor,
+                        onBookmarkToggle = stableOnBookmarkToggle,
+                        isZapInProgress = note.id in zapInProgressNoteIds,
+                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(note.id),
+                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.originalNoteId ?: note.id),
+                        shouldCloseZapMenus = shouldCloseZapMenus,
+                        onRelayClick = onRelayClick,
+                        onNavigateToRelayList = onNavigateToRelayList,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    return@items
+                }
                 val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                 NoteCard(
                     note = note,
-                    onLike = { noteId -> viewModel.toggleLike(noteId) },
-                    onShare = { noteId -> /* Handle share */ },
-                    onComment = { noteId -> onThreadClick(note, null) },
-                    onReact = { reactedNote, emoji ->
-                        val error = accountStateViewModel.sendReaction(reactedNote, emoji)
-                        if (error != null) {
-                            Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onBoost = { n ->
-                        val err = accountStateViewModel.publishRepost(n.id, n.author.id, originalNote = n)
-                        if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                    },
-                    onQuote = { n ->
-                        val nevent = com.example.cybin.nip19.encodeNevent(n.id, authorHex = n.author.id)
-                        val encoded = android.net.Uri.encode(android.net.Uri.encode("\nnostr:$nevent\n"))
-                        onNavigateTo("compose?initialContent=$encoded")
-                    },
-                    onFork = { n ->
-                        val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
-                        onNavigateTo("compose?initialContent=$encoded")
-                    },
+                    onLike = stableOnLike,
+                    onShare = stableOnShare,
+                    onComment = { _ -> onThreadClick(note, null) },
+                    onReact = stableOnReact,
+                    onBoost = stableOnBoost,
+                    onQuote = stableOnQuote,
+                    onFork = stableOnFork,
                     onProfileClick = onProfileClick,
-                    onNoteClick = { n -> onThreadClick(n, null) },
+                    onNoteClick = stableOnNoteClick,
                     onImageTap = onImageTap,
                     onOpenImageViewer = onOpenImageViewer,
                     onVideoClick = onVideoClick,
@@ -654,56 +789,22 @@ private fun DashboardFeedContent(
                         val err = accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
                         if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                     },
-                    onCustomZapSend = { n, amount, zapType, msg ->
-                        val err = accountStateViewModel.sendZap(n, amount, zapType, msg)
-                        if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                    },
+                    onCustomZapSend = stableOnCustomZapSend,
                     onZapSettings = onShowZapConfig,
                     shouldCloseZapMenus = shouldCloseZapMenus,
                     onRelayClick = onRelayClick,
                     onNavigateToRelayList = onNavigateToRelayList,
                     isAuthorFollowed = note.author.id.lowercase() in followSetLower,
-                    onFollowAuthor = { pubkey ->
-                        val err = accountStateViewModel.followUser(pubkey)
-                        if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                    },
-                    onUnfollowAuthor = { pubkey ->
-                        val err = accountStateViewModel.unfollowUser(pubkey)
-                        if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                    },
-                    onBlockAuthor = { pubkey ->
-                        social.mycelium.android.repository.MuteListRepository.blockUser(pubkey)
-                        Toast.makeText(context, "Blocked", Toast.LENGTH_SHORT).show()
-                    },
-                    onMuteAuthor = { pubkey ->
-                        val signer = accountStateViewModel.getCurrentSigner()
-                        if (signer != null) {
-                            val relays = accountStateViewModel.getOutboxRelayUrlSet()
-                            social.mycelium.android.repository.MuteListRepository.muteUser(pubkey, signer, relays)
-                            Toast.makeText(context, "Muted", Toast.LENGTH_SHORT).show()
-                        } else {
-                            Toast.makeText(context, "Sign in to mute", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                    onBookmarkToggle = { noteId, isCurrentlyBookmarked ->
-                        val signer = accountStateViewModel.getCurrentSigner()
-                        if (signer != null) {
-                            val relays = accountStateViewModel.getOutboxRelayUrlSet()
-                            if (isCurrentlyBookmarked) {
-                                social.mycelium.android.repository.BookmarkRepository.removeBookmark(noteId, signer, relays)
-                                Toast.makeText(context, "Bookmark removed", Toast.LENGTH_SHORT).show()
-                            } else {
-                                social.mycelium.android.repository.BookmarkRepository.addBookmark(noteId, signer, relays)
-                                Toast.makeText(context, "Bookmarked", Toast.LENGTH_SHORT).show()
-                            }
-                        } else {
-                            Toast.makeText(context, "Sign in to bookmark", Toast.LENGTH_SHORT).show()
-                        }
-                    },
+                    onFollowAuthor = stableOnFollowAuthor,
+                    onUnfollowAuthor = stableOnUnfollowAuthor,
+                    onBlockAuthor = stableOnBlockAuthor,
+                    onMuteAuthor = stableOnMuteAuthor,
+                    onBookmarkToggle = stableOnBookmarkToggle,
+                    onDelete = if (currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == currentUserHex) stableOnDelete else null,
                     accountNpub = accountNpub,
                     isZapInProgress = note.id in zapInProgressNoteIds,
                     isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(note.id),
-                    isBoosted = note.id in boostedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.id),
+                    isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.originalNoteId ?: note.id),
                     myZappedAmount = zappedAmountByNoteId[note.id],
                     overrideReplyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
                     overrideZapCount = counts?.zapCount,
@@ -719,6 +820,8 @@ private fun DashboardFeedContent(
                     initialMediaPage = mediaPageForNote(note.id),
                     onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
                     isVisible = isDashboardVisible && note.id in visibleKeys,
+                    compactMedia = compactMedia,
+                    showSensitiveContent = showSensitiveContent,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -823,6 +926,7 @@ private fun DashboardFeedContent(
                 }
             }
         }
+
     }
 }
 
@@ -1009,19 +1113,28 @@ fun DashboardScreen(
         relayCategories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url }.distinct()
     }
     val hasAnyConfiguredRelays = allCategoryRelayUrls.isNotEmpty() || hasSavedRelayConfig
+    // All known relay URLs: categories + outbox + inbox — used for validity checks
+    val allKnownRelayUrls = remember(allCategoryRelayUrls, relayUiState.outboxRelays, relayUiState.inboxRelays) {
+        (allCategoryRelayUrls +
+            relayUiState.outboxRelays.map { it.url } +
+            relayUiState.inboxRelays.map { it.url }
+        ).distinct()
+    }
 
     // If the selected relay/category was removed, fall back to Global
-    LaunchedEffect(relayCategories, homeFeedState) {
+    LaunchedEffect(relayCategories, relayUiState.outboxRelays, relayUiState.inboxRelays, homeFeedState) {
         val selectedUrl = homeFeedState.selectedRelayUrl
         val selectedCatId = homeFeedState.selectedCategoryId
-        if (selectedUrl != null && selectedUrl !in allCategoryRelayUrls) {
+        if (selectedUrl != null && selectedUrl !in allKnownRelayUrls) {
             feedStateViewModel.setHomeGlobal()
             feedStateViewModel.setTopicsGlobal()
-            if (subscribedCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(subscribedCategoryRelayUrls)
-        } else if (selectedCatId != null && relayCategories.none { it.id == selectedCatId }) {
+            val allSubscribed = (subscribedCategoryRelayUrls + relayUiState.outboxRelays.map { it.url }).distinct()
+            if (allSubscribed.isNotEmpty()) viewModel.setDisplayFilterOnly(allSubscribed)
+        } else if (selectedCatId != null && selectedCatId != "outbox" && relayCategories.none { it.id == selectedCatId }) {
             feedStateViewModel.setHomeGlobal()
             feedStateViewModel.setTopicsGlobal()
-            if (subscribedCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(subscribedCategoryRelayUrls)
+            val allSubscribed = (subscribedCategoryRelayUrls + relayUiState.outboxRelays.map { it.url }).distinct()
+            if (allSubscribed.isNotEmpty()) viewModel.setDisplayFilterOnly(allSubscribed)
         }
     }
 
@@ -1051,6 +1164,7 @@ fun DashboardScreen(
         val relayUrlsToUse = (subscribedCategoryRelayUrls + outboxUrls).map { normalizeRelayUrl(it) }.distinct()
         val displayUrls = when {
             homeFeedState.isGlobal -> relayUrlsToUse
+            homeFeedState.selectedCategoryId == "outbox" -> outboxUrls.ifEmpty { relayUrlsToUse }
             homeFeedState.selectedCategoryId != null -> relayCategories
                 .firstOrNull { it.id == homeFeedState.selectedCategoryId }?.relays?.map { it.url }
                 ?: relayUrlsToUse
@@ -1247,7 +1361,7 @@ fun DashboardScreen(
     // Home feed sort: Latest (by time) or Popular (cumulative engagement score)
     // distinctBy(id) prevents duplicate-key crashes in LazyColumn when the same note arrives from multiple relays
     // Popular score = total reactions + zap count + reply count (simple cumulative; later becomes WoT-extensible)
-    val sortedNotes by remember(notesList, homeFeedState.homeSortOrder, countsByNoteId, replyCountByNoteId) {
+    val sortedNotes by remember(notesList, homeFeedState.homeSortOrder) {
         derivedStateOf {
             val deduped = notesList.distinctBy { it.id }
             when (homeFeedState.homeSortOrder) {
@@ -1284,7 +1398,7 @@ fun DashboardScreen(
     }
     // Stage 2: engagement sort — only recomputes when filter type or counts change.
     // For the default chronological feed (engagementFilter == null/empty), this is a no-op pass-through.
-    val engagementFilteredNotes by remember(baseFilteredNotes, engagementFilter, replyCountByNoteId, countsByNoteId) {
+    val engagementFilteredNotes by remember(baseFilteredNotes, engagementFilter) {
         derivedStateOf {
             when (engagementFilter) {
                 "replies" -> baseFilteredNotes.sortedByDescending { replyCountByNoteId[it.id] ?: 0 }
@@ -1340,16 +1454,56 @@ fun DashboardScreen(
         onRelayHealthClick = { onSidebarRelayHealthClick() },
         onRelayDiscoveryClick = { onSidebarRelayDiscoveryClick() },
         troubleRelayCount = troubleRelayCount,
-        gesturesEnabled = currentAccount != null,
+        gesturesEnabled = currentAccount != null && !isSearchMode,
         onToggleCategorySubscription = { categoryId ->
             relayViewModel?.toggleCategorySubscription(categoryId)
+            // After toggle, recompute the display filter so the feed reflects the change.
+            // relayCategories snapshot is stale here (toggle hasn't propagated yet),
+            // so invert the current isSubscribed to predict the new state.
+            val updatedSubscribedUrls = relayCategories
+                .filter { cat ->
+                    if (cat.id == categoryId) !cat.isSubscribed else cat.isSubscribed
+                }
+                .flatMap { it.relays }.map { it.url }.distinct()
+            val outboxUrls = relayUiState.outboxRelays.map { it.url }
+            val allSubscribed = (updatedSubscribedUrls + outboxUrls).distinct()
+            val state = homeFeedState
+            when {
+                state.isGlobal -> if (allSubscribed.isNotEmpty()) viewModel.setDisplayFilterOnly(allSubscribed)
+                state.selectedCategoryId == categoryId -> {
+                    // Toggled the currently-selected category — show its relays (or fall back to all if now empty)
+                    val catRelays = relayCategories.firstOrNull { it.id == categoryId }?.relays?.map { it.url } ?: emptyList()
+                    val wasSubscribed = relayCategories.firstOrNull { it.id == categoryId }?.isSubscribed ?: false
+                    if (!wasSubscribed) {
+                        // Re-subscribing: show this category's relays
+                        if (catRelays.isNotEmpty()) viewModel.setDisplayFilterOnly(catRelays)
+                    } else {
+                        // Unsubscribing the selected category: fall back to Global
+                        feedStateViewModel.setHomeGlobal()
+                        feedStateViewModel.setTopicsGlobal()
+                        if (allSubscribed.isNotEmpty()) viewModel.setDisplayFilterOnly(allSubscribed)
+                    }
+                }
+                state.selectedCategoryId == "outbox" -> viewModel.setDisplayFilterOnly(outboxUrls)
+                state.selectedRelayUrl != null -> viewModel.setDisplayFilterOnly(listOf(state.selectedRelayUrl!!))
+                else -> if (allSubscribed.isNotEmpty()) viewModel.setDisplayFilterOnly(allSubscribed)
+            }
         },
         onItemClick = { itemId ->
             when {
                 itemId == "global" -> {
                     feedStateViewModel.setHomeGlobal()
                     feedStateViewModel.setTopicsGlobal()
-                    if (subscribedCategoryRelayUrls.isNotEmpty()) viewModel.setDisplayFilterOnly(subscribedCategoryRelayUrls)
+                    val allSubscribed = (subscribedCategoryRelayUrls + relayUiState.outboxRelays.map { it.url }).distinct()
+                    if (allSubscribed.isNotEmpty()) viewModel.setDisplayFilterOnly(allSubscribed)
+                }
+                itemId == "outbox" -> {
+                    val outboxUrls = relayUiState.outboxRelays.map { it.url }
+                    if (outboxUrls.isNotEmpty()) {
+                        feedStateViewModel.setHomeSelectedOutbox()
+                        feedStateViewModel.setTopicsSelectedOutbox()
+                        viewModel.setDisplayFilterOnly(outboxUrls)
+                    }
                 }
                 itemId.startsWith("relay_category:") -> {
                     val categoryId = itemId.removePrefix("relay_category:")
@@ -1363,9 +1517,14 @@ fun DashboardScreen(
                 }
                 itemId.startsWith("relay:") -> {
                     val relayUrl = itemId.removePrefix("relay:")
+                    // Look up relay name from categories, outbox, and inbox
                     val relay = activeProfile?.categories?.flatMap { it.relays }?.firstOrNull { it.url == relayUrl }
-                    feedStateViewModel.setHomeSelectedRelay(relayUrl, relay?.displayName)
-                    feedStateViewModel.setTopicsSelectedRelay(relayUrl, relay?.displayName)
+                        ?: relayUiState.outboxRelays.firstOrNull { it.url == relayUrl }
+                        ?: relayUiState.inboxRelays.firstOrNull { it.url == relayUrl }
+                    val displayName = relay?.displayName ?: relay?.info?.name ?: relayUrl
+                        .removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+                    feedStateViewModel.setHomeSelectedRelay(relayUrl, displayName)
+                    feedStateViewModel.setTopicsSelectedRelay(relayUrl, displayName)
                     viewModel.setDisplayFilterOnly(listOf(relayUrl))
                 }
                 itemId == "user_profile" -> onNavigateTo("user_profile")
@@ -1509,9 +1668,8 @@ fun DashboardScreen(
                         onSearch = { /* Optional: Handle explicit search submission */ },
                         searchResults = searchResults,
                         onResultClick = { note ->
+                            // Navigate but keep search alive so user can return
                             onThreadClick(note, null)
-                            onSearchModeChange(false)
-                            searchQuery = ""
                         },
                         active = isSearchMode,
                         onActiveChange = { active ->
@@ -1521,10 +1679,20 @@ fun DashboardScreen(
                             }
                         },
                         onBackClick = {
+                            // Only clear search on explicit close (back button)
                             searchQuery = ""
                             onSearchModeChange(false)
                         },
-                        placeholder = { Text("Search notes, users, hashtags...") }
+                        placeholder = { Text("Search notes, users, hashtags...") },
+                        onProfileClick = { pubkey ->
+                            // Navigate but keep search alive so user can return
+                            onProfileClick(pubkey)
+                        },
+                        onHashtagClick = { tag ->
+                            // Navigate but keep search alive so user can return
+                            onNavigateTo("hashtag/$tag")
+                        },
+                        accountPubkey = currentAccount?.toHexKey()
                     )
                 } else {
                     // Normal mode - show scrollable header
@@ -1613,6 +1781,7 @@ fun DashboardScreen(
                             scope.launch { listState.scrollToItem(0) }
                         },
                         onCompose = { onNavigateTo("compose") },
+                        onArticle = { onNavigateTo("compose_article") },
                         onDrafts = { onNavigateTo("drafts") },
                         draftCount = kind1RootDrafts.size,
                         modifier = Modifier.padding(bottom = 80.dp)

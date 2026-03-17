@@ -16,11 +16,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ExpandLess
-import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -57,6 +56,8 @@ import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.RelayLogBuffer
 import social.mycelium.android.relay.RelayLogEntry
+import androidx.compose.ui.window.Dialog
+import com.example.cybin.nip19.toNpub
 import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
 
 /** Types we show by default (connection lifecycle + errors/notices). RECEIVED/EOSE/SENT are hidden unless verbose. */
@@ -89,7 +90,9 @@ fun RelayLogScreen(
     /** Current user's hex pubkey — used to detect relay operator authority for NIP-86. */
     currentUserPubkey: String? = null,
     /** Signer for the current user — used to authenticate NIP-86 management API calls. */
-    currentSigner: com.example.cybin.signer.NostrSigner? = null
+    currentSigner: com.example.cybin.signer.NostrSigner? = null,
+    /** Navigate to dedicated NIP-86 auth list management screen. */
+    onOpenAuthList: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
@@ -224,6 +227,14 @@ fun RelayLogScreen(
                         }
                     },
                     actions = {
+                        // ── NIP-86 Auth List (people icon) — only for relay operators ──
+                        if (isRelayOperator && currentSigner != null && nip86Methods != null &&
+                            ("listallowedpubkeys" in nip86Methods!! || "allowpubkey" in nip86Methods!!) &&
+                            onOpenAuthList != null) {
+                            IconButton(onClick = onOpenAuthList) {
+                                Icon(Icons.Outlined.People, contentDescription = "Manage allowed users")
+                            }
+                        }
                         var showAddMenu by remember { mutableStateOf(false) }
                         Box {
                             IconButton(onClick = { showAddMenu = true }) {
@@ -278,8 +289,8 @@ fun RelayLogScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .background(MaterialTheme.colorScheme.surface),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            contentPadding = PaddingValues(vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             // ── Relay Info Header ──
             item(key = "relay_header") {
@@ -434,7 +445,7 @@ fun RelayLogScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Surface(
-                                shape = androidx.compose.foundation.shape.CircleShape,
+                                shape = CircleShape,
                                 color = MaterialTheme.colorScheme.primaryContainer,
                                 modifier = Modifier.size(40.dp)
                             ) {
@@ -482,7 +493,7 @@ fun RelayLogScreen(
             // ── Activity Log ──
             item(key = "activity_header") {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -578,7 +589,7 @@ private fun RelayInfoHeader(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(100.dp)
-                        .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
+                        .clip(RectangleShape),
                     contentScale = ContentScale.Crop
                 )
             }
@@ -848,14 +859,14 @@ private fun ConnectionStatusCard(
                         modifier = Modifier
                             .weight(1f)
                             .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp))
+                            .clip(RectangleShape)
                             .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                     ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .fillMaxWidth(animatedRatio)
-                                .clip(RoundedCornerShape(3.dp))
+                                .clip(RectangleShape)
                                 .background(barColor)
                         )
                     }
@@ -892,7 +903,7 @@ private fun ConnectionStatusCard(
             if (health?.lastError != null) {
                 Spacer(Modifier.height(8.dp))
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -963,14 +974,14 @@ private fun SubscriptionSlotsCard(snapshot: RelaySlotSnapshot) {
                     modifier = Modifier
                         .weight(1f)
                         .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp))
+                        .clip(RectangleShape)
                         .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxHeight()
                             .fillMaxWidth(animatedUtil)
-                            .clip(RoundedCornerShape(3.dp))
+                            .clip(RectangleShape)
                             .background(barColor)
                     )
                 }
@@ -1042,14 +1053,14 @@ private fun DeliveryPerformanceCard(stat: RelayDeliveryTracker.RelayStats) {
                     modifier = Modifier
                         .weight(1f)
                         .height(8.dp)
-                        .clip(RoundedCornerShape(4.dp))
+                        .clip(RectangleShape)
                         .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                 ) {
                     Box(
                         modifier = Modifier
                             .fillMaxHeight()
                             .fillMaxWidth(animatedRate)
-                            .clip(RoundedCornerShape(4.dp))
+                            .clip(RectangleShape)
                             .background(rateColor)
                     )
                 }
@@ -1089,7 +1100,7 @@ private fun LimitationsCard(info: RelayInformation) {
             if (chips.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
                     chips.forEach { (label, color) ->
-                        Surface(shape = RoundedCornerShape(6.dp), color = color.copy(alpha = 0.12f)) {
+                        Surface(shape = RectangleShape, color = color.copy(alpha = 0.12f)) {
                             Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = color, modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp))
                         }
                     }
@@ -1209,7 +1220,7 @@ private fun SupportedNipsCard(nips: List<Int>) {
                             modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Surface(shape = RoundedCornerShape(4.dp), color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.width(48.dp)) {
+                            Surface(shape = RectangleShape, color = MaterialTheme.colorScheme.primaryContainer, modifier = Modifier.width(48.dp)) {
                                 Text(
                                     text = "$nip",
                                     style = MaterialTheme.typography.labelSmall,
@@ -1333,7 +1344,7 @@ private fun HealthCard(
                     }
                     val statusColor = if (health.isBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary
                     Surface(
-                        shape = RoundedCornerShape(6.dp),
+                        shape = RectangleShape,
                         color = statusColor.copy(alpha = 0.12f)
                     ) {
                         Text(
@@ -1410,7 +1421,7 @@ private fun ActionChip(
     val color = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
+        shape = RectangleShape,
         color = color.copy(alpha = 0.08f)
     ) {
         Row(
@@ -1438,49 +1449,60 @@ private fun LogEntryRow(entry: RelayLogEntry) {
         LogType.RECEIVED -> MaterialTheme.colorScheme.onSurfaceVariant to "RECV"
         LogType.EOSE -> MaterialTheme.colorScheme.onSurfaceVariant to "EOSE"
     }
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(vertical = 4.dp)
+            .padding(start = 16.dp, end = 16.dp)
     ) {
-        // Timestamp
-        Text(
-            text = entry.formattedTime(),
-            style = MaterialTheme.typography.labelSmall,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-            modifier = Modifier.width(68.dp)
-        )
-        // Type badge
-        Surface(
-            shape = RoundedCornerShape(4.dp),
-            color = iconTint.copy(alpha = 0.12f),
-            modifier = Modifier.width(42.dp)
+        Row(
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            // Type badge — left-aligned color accent
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(16.dp)
+                    .background(iconTint.copy(alpha = 0.7f))
+            )
+            Spacer(Modifier.width(8.dp))
+            Surface(
+                shape = RectangleShape,
+                color = iconTint.copy(alpha = 0.10f),
+                modifier = Modifier.width(44.dp)
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = iconTint,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    maxLines = 1
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            // Message
             Text(
-                text = label,
+                text = entry.message,
+                style = MaterialTheme.typography.bodySmall,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(8.dp))
+            // Timestamp — right-aligned
+            Text(
+                text = entry.formattedTime(),
                 style = MaterialTheme.typography.labelSmall,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                color = iconTint,
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                maxLines = 1
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             )
         }
-        Spacer(Modifier.width(8.dp))
-        // Message
-        Text(
-            text = entry.message,
-            style = MaterialTheme.typography.bodySmall,
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
     }
 }
 
@@ -1510,7 +1532,7 @@ private fun RelayStatItem(
 @Composable
 private fun RelayDetailChip(text: String, backgroundColor: Color, textColor: Color) {
     Surface(
-        shape = RoundedCornerShape(6.dp),
+        shape = RectangleShape,
         color = backgroundColor
     ) {
         Text(

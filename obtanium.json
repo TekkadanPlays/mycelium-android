@@ -19,6 +19,34 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.95",
+      "versionCode": 32,
+      "releaseDate": "2026-03-17",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.95-beta/Mycelium-v0.4.95-beta.apk",
+      "changelog": "Major scroll performance overhaul, image loading fixes, thread swipe-back with galleries, embedded Phoenix Lightning wallet (dev), NWC service provider, feature-gated wallet UI.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Eliminated Card overhead — plain Column + background for every feed note card",
+        "Deferred video player creation — ExoPlayer init delayed 200ms after viewport entry",
+        "Off-thread content parsing via produceState on Dispatchers.Default",
+        "Eliminated double measure pass on quoted notes (drawBehind accent bar)",
+        "Coil image optimization with size(ORIGINAL) and allowHardware(true)",
+        "Capped per-card profile observer coroutines (1 update, 1500ms debounce)",
+        "Eliminated O(N) recompositions — hoisted collectAsState to screen level",
+        "Stabilized ~15 lambda allocations above items{} blocks",
+        "Replaced SubcomposeAsyncImage with AsyncImage + rememberAsyncImagePainter",
+        "Image loading headers for stricter CDNs (HTTP 403 fix)",
+        "Thread swipe-back with galleries — right swipe dismisses thread correctly",
+        "Embedded Phoenix Lightning wallet with NWC service provider (dev/testnet)"
+      ]
+    },
+    {
       "version": "0.4.94",
       "versionCode": 31,
       "releaseDate": "2026-03-14",

@@ -10,7 +10,10 @@ import com.example.cybin.relay.SubscriptionPriority
 import com.example.cybin.core.nowUnixSeconds
 import com.example.cybin.core.eventTemplate
 import com.example.cybin.signer.NostrSigner
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -57,15 +60,40 @@ object ContactListRepository {
     private const val KEY_KIND3_CREATED_AT = "latest_kind3_created_at"
     private const val KEY_KIND3_PUBKEY = "latest_kind3_pubkey"
     @Volatile private var prefs: SharedPreferences? = null
+    @Volatile private var db: social.mycelium.android.db.AppDatabase? = null
 
     /** Call once from MainActivity.onCreate() to enable persistence. */
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        db = social.mycelium.android.db.AppDatabase.getInstance(context.applicationContext)
     }
 
     /** Restore persisted kind-3 into memory. Called after account restore so latestKind3Event
      *  is populated before any relay fetch can overwrite it with stale data. */
     fun restorePersistedKind3(pubkey: String) {
+        // Try Room first
+        val database = db
+        if (database != null) {
+            try {
+                val entity = kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                    database.followListDao().get(pubkey)
+                }
+                if (entity != null) {
+                    val event = eventFromJson(entity.eventJson)
+                    if (event != null) {
+                        latestKind3Event = event
+                        val pubkeys = extractPubkeys(event)
+                        cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
+                        _followListUpdates.tryEmit(pubkeys)
+                        Log.d(TAG, "Restored kind-3 from Room for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Room restore failed: ${e.message}")
+            }
+        }
+        // Fallback to SharedPreferences (migration path)
         val p = prefs ?: return
         val savedPubkey = p.getString(KEY_KIND3_PUBKEY, null)
         if (savedPubkey != pubkey) return
@@ -73,15 +101,16 @@ object ContactListRepository {
         val event = eventFromJson(json)
         if (event != null) {
             latestKind3Event = event
-            // Also populate the in-memory cache so fetchFollowList can skip network on cache hit
             val pubkeys = extractPubkeys(event)
             cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
             _followListUpdates.tryEmit(pubkeys)
-            Log.d(TAG, "Restored persisted kind-3 for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
+            Log.d(TAG, "Restored persisted kind-3 from SP for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
+            // Migrate to Room
+            persistKind3ToRoom(pubkey, event, pubkeys)
         }
     }
 
-    /** Persist the latest kind-3 event to SharedPreferences. */
+    /** Persist the latest kind-3 event to SharedPreferences + Room. */
     private fun persistKind3(pubkey: String, event: Event) {
         val p = prefs ?: return
         p.edit()
@@ -89,10 +118,41 @@ object ContactListRepository {
             .putString(KEY_KIND3_JSON, eventToJson(event))
             .putLong(KEY_KIND3_CREATED_AT, event.createdAt)
             .apply()
+        persistKind3ToRoom(pubkey, event, extractPubkeys(event))
+    }
+
+    /** Persist kind-3 to Room DB (fire-and-forget on IO). */
+    private fun persistKind3ToRoom(pubkey: String, event: Event, pubkeys: Set<String>) {
+        val database = db ?: return
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                database.followListDao().upsert(
+                    social.mycelium.android.db.CachedFollowListEntity(
+                        pubkey = pubkey,
+                        eventJson = eventToJson(event),
+                        eventCreatedAt = event.createdAt,
+                        followPubkeys = pubkeys.joinToString(",")
+                    )
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Room persist kind-3 failed: ${e.message}")
+            }
+        }
     }
 
     /** Get the persisted createdAt for a pubkey to reject stale relay data. */
     private fun getPersistedCreatedAt(pubkey: String): Long {
+        // Check Room first
+        val database = db
+        if (database != null) {
+            try {
+                val entity = kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+                    database.followListDao().get(pubkey)
+                }
+                if (entity != null) return entity.eventCreatedAt
+            } catch (_: Exception) { }
+        }
+        // Fallback to SharedPreferences
         val p = prefs ?: return 0L
         val savedPubkey = p.getString(KEY_KIND3_PUBKEY, null)
         return if (savedPubkey == pubkey) p.getLong(KEY_KIND3_CREATED_AT, 0L) else 0L

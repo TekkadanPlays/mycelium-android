@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -254,8 +255,18 @@ fun ModernThreadViewScreen(
     threadDrafts: List<social.mycelium.android.data.Draft> = emptyList(),
     onEditDraft: (social.mycelium.android.data.Draft) -> Unit = {},
     onDeleteDraft: (String) -> Unit = {},
+    /** Delete this note (hybrid NIP-86 + NIP-09). Only pass for the current user's own notes. */
+    onDeleteNote: ((Note) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
+    val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
+    val currentUserHex = remember(accountNpub) {
+        accountNpub?.let { npub ->
+            try {
+                (com.example.cybin.nip19.Nip19Parser.uriToRoute(npub)?.entity as? com.example.cybin.nip19.NPub)?.hex?.lowercase()
+            } catch (_: Exception) { null }
+        }
+    }
     var isRefreshing by remember { mutableStateOf(false) }
     /** Stack of reply ids for sub-thread drill-down; back gesture pops one. Empty = full thread. */
     var rootReplyIdStack by remember { mutableStateOf<List<String>>(emptyList()) }
@@ -625,7 +636,7 @@ fun ModernThreadViewScreen(
                         onZap = effectiveOnZap,
                         isZapInProgress = note.id in zapInProgressNoteIds,
                         isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(note.id),
-                        isBoosted = note.id in boostedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.id),
+                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.originalNoteId ?: note.id),
                         onVote = onVote,
                         ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
                         voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
@@ -642,6 +653,7 @@ fun ModernThreadViewScreen(
                         onNavigateToRelayList = onNavigateToRelayList,
                         shouldCloseZapMenus = shouldCloseZapMenus,
                         accountNpub = accountNpub,
+                        onDelete = if (onDeleteNote != null && currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == currentUserHex) onDeleteNote else null,
                         expandLinkPreviewInThread = true,
                         showHashtagsSection = false,
                         initialMediaPage = mediaPageForNote(note.id),
@@ -649,6 +661,7 @@ fun ModernThreadViewScreen(
                         actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.ActionRowSchema.KIND1_FEED
                             else social.mycelium.android.ui.components.ActionRowSchema.KIND11_FEED,
                         onSeeAllReactions = { onSeeAllReactions(note.id) },
+                        compactMedia = compactMedia,
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -931,6 +944,7 @@ fun ModernThreadViewScreen(
                             onVideoClick = onVideoClick,
                             collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
                             isScrolling = listState.isScrollInProgress,
+                            compactMedia = compactMedia,
                             modifier = Modifier.fillMaxWidth()
                         )
 
@@ -1828,6 +1842,7 @@ private fun ReplyHeader(
  * Extracted reply content body: rich text blocks, inline media, URL previews, quoted notes.
  * Splits ~200 lines from ThreadedReplyCard to reduce 18MB inner lambda JIT.
  */
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 @Composable
 private fun ReplyContentBody(
     reply: ThreadReply,
@@ -1837,6 +1852,8 @@ private fun ReplyContentBody(
     onVideoClick: (List<String>, Int) -> Unit,
     onToggleControls: () -> Unit,
     onLongPress: (() -> Unit)? = null,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    compactMedia: Boolean = false,
 ) {
     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -1850,23 +1867,40 @@ private fun ReplyContentBody(
     val replyMentionedPubkeys = remember(reply.content) {
         social.mycelium.android.utils.extractPubkeysFromContent(reply.content)
     }
-    var replyMentionVersion by remember { androidx.compose.runtime.mutableStateOf(0) }
-    if (replyMentionedPubkeys.isNotEmpty()) {
+    var replyMentionVersion by remember(reply.id) { androidx.compose.runtime.mutableIntStateOf(0) }
+    if (replyMentionedPubkeys.isNotEmpty() && replyMentionVersion == 0) {
         LaunchedEffect(replyMentionedPubkeys) {
             val pubkeySet = replyMentionedPubkeys.toSet()
             profileCache.profileUpdated
                 .filter { it in pubkeySet }
-                .collect { replyMentionVersion++ }
+                .debounce(1500)
+                .collect { replyMentionVersion = 1 }
         }
     }
-    val replyContentBlocks = remember(reply.content, replyMediaUrls, replyMentionVersion) {
-        social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
-            reply.content,
-            replyMediaUrls,
-            emptyList(),
-            linkStyle,
-            profileCache
-        )
+    val replyCacheKey = remember(reply.content, replyMediaUrls, replyMentionVersion) {
+        social.mycelium.android.utils.ContentBlockCache.key(reply.content, replyMediaUrls, mentionVersion = replyMentionVersion)
+    }
+    val replyContentBlocks by androidx.compose.runtime.produceState(
+        initialValue = social.mycelium.android.utils.ContentBlockCache.get(replyCacheKey) ?: emptyList(),
+        replyCacheKey
+    ) {
+        social.mycelium.android.utils.ContentBlockCache.get(replyCacheKey)?.let { cached ->
+            value = cached
+            return@produceState
+        }
+        val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
+                reply.content,
+                replyMediaUrls,
+                emptyList(),
+                linkStyle,
+                profileCache,
+                emptySet(),
+                emptyMap()
+            )
+        }
+        social.mycelium.android.utils.ContentBlockCache.put(replyCacheKey, result)
+        value = result
     }
 
     replyContentBlocks.forEach { block ->
@@ -1886,6 +1920,7 @@ private fun ReplyContentBody(
                         social.mycelium.android.ui.components.ClickableNoteContent(
                             text = annotated,
                             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                            emojiUrls = block.emojiUrls,
                             onClick = { offset ->
                                 val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                 val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
@@ -1911,9 +1946,10 @@ private fun ReplyContentBody(
                         initialMediaPage = 0,
                         isVisible = true,
                         mediaMeta = reply.mediaMeta,
+                        compactMedia = compactMedia,
                         onMediaPageChanged = { },
-                        onImageTap = onImageTap,
-                        onOpenImageViewer = onImageTap,
+                        onImageTap = { _, _ -> onToggleControls() },
+                        onOpenImageViewer = { _, _ -> onToggleControls() },
                         onVideoClick = onVideoClick,
                     )
                 }
@@ -1934,6 +1970,13 @@ private fun ReplyContentBody(
                     modifier = Modifier.padding(vertical = 2.dp)
                 )
             }
+            is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
+                social.mycelium.android.ui.components.EmojiPackGrid(
+                    author = block.author,
+                    dTag = block.dTag,
+                    relayHints = block.relayHints
+                )
+            }
             is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
                 val qProfileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
                 val qLinkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
@@ -1946,12 +1989,11 @@ private fun ReplyContentBody(
                 val meta = qMeta
                 if (meta != null) {
                     val qAuthor = remember(meta.authorId) { qProfileCache.resolveAuthor(meta.authorId) }
-                    val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
                     social.mycelium.android.ui.components.QuotedNoteContent(
                         parentNoteId = reply.id,
                         meta = meta,
                         quotedAuthor = qAuthor,
-                        quotedCounts = countsByNoteId[block.eventId],
+                        quotedCounts = noteCountsByNoteId[block.eventId],
                         linkStyle = qLinkStyle,
                         profileCache = qProfileCache,
                         isVisible = true,
@@ -1959,6 +2001,7 @@ private fun ReplyContentBody(
                         onNoteClick = onNoteClick,
                         onVideoClick = onVideoClick,
                         onOpenImageViewer = onImageTap,
+                        depth = 1,
                     )
                 } else {
                     // Loading placeholder — matches feed style
@@ -2530,6 +2573,7 @@ private fun ThreadedReplyCard(
     collapsedChildCount: Int? = null,
     /** When true, suppress click/longClick to prevent accidental triggers during fast fling. */
     isScrolling: Boolean = false,
+    compactMedia: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val reply = threadedReply.reply
@@ -2545,13 +2589,17 @@ private fun ThreadedReplyCard(
 
     // Resolve author from profile cache so display name/avatar update when profiles load
     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
-    val diskCacheReady by profileCache.diskCacheRestored.collectAsState()
+    // Snapshot read avoids per-reply flow collector; value only flips once at startup
+    val diskCacheReady = profileCache.diskCacheRestored.value
     val authorPubkey = remember(reply.author.id) { social.mycelium.android.utils.normalizeAuthorIdForCache(reply.author.id) }
-    var profileRevision by remember { mutableIntStateOf(0) }
-    LaunchedEffect(authorPubkey) {
-        profileCache.profileUpdated
-            .filter { it == authorPubkey }
-            .collect { profileRevision++ }
+    var profileRevision by remember(reply.id) { mutableIntStateOf(0) }
+    if (profileRevision == 0) {
+        LaunchedEffect(authorPubkey) {
+            profileCache.profileUpdated
+                .filter { it == authorPubkey }
+                .debounce(1500)
+                .collect { profileRevision = 1 }
+        }
     }
     val displayAuthor = remember(reply.author.id, profileRevision, diskCacheReady) {
         profileCache.resolveAuthor(reply.author.id)
@@ -2694,6 +2742,8 @@ private fun ThreadedReplyCard(
                                     commentStates[replyKey] = state.copy(isCollapsed = true, isExpanded = false)
                                 }
                             },
+                            noteCountsByNoteId = noteCountsByNoteId,
+                            compactMedia = compactMedia,
                         )
 
                         // Reactions and zaps — extracted into ReplyControlsPanel
@@ -2747,6 +2797,7 @@ private fun ThreadedReplyCard(
             onImageTap = onImageTap,
             onVideoClick = onVideoClick,
             isScrolling = isScrolling,
+            compactMedia = compactMedia,
         )
 
         }
@@ -2799,6 +2850,7 @@ private fun ThreadedReplyChildren(
     onImageTap: (List<String>, Int) -> Unit,
     onVideoClick: (List<String>, Int) -> Unit,
     isScrolling: Boolean,
+    compactMedia: Boolean = false,
 ) {
     val reply = threadedReply.reply
     val level = threadedReply.level
@@ -2885,6 +2937,7 @@ private fun ThreadedReplyChildren(
                     onImageTap = onImageTap,
                     onVideoClick = onVideoClick,
                     isScrolling = isScrolling,
+                    compactMedia = compactMedia,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

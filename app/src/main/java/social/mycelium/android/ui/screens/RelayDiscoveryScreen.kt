@@ -15,7 +15,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -200,6 +200,7 @@ fun RelayDiscoveryScreen(
             if (selectionMode) {
                 FloatingActionButton(
                     onClick = { onConfirmSelection(selectedUrls.toList()) },
+                    shape = CircleShape,
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
                     modifier = Modifier.navigationBarsPadding()
@@ -309,7 +310,7 @@ fun RelayDiscoveryScreen(
                             .padding(horizontal = 16.dp, vertical = 4.dp),
                         singleLine = true,
                         textStyle = MaterialTheme.typography.bodyMedium,
-                        shape = RoundedCornerShape(12.dp)
+                        shape = RectangleShape
                     )
                 }
             }
@@ -436,7 +437,7 @@ fun RelayDiscoveryScreen(
                                 .heightIn(min = 48.dp),
                             singleLine = true,
                             textStyle = MaterialTheme.typography.bodyMedium,
-                            shape = RoundedCornerShape(12.dp)
+                            shape = RectangleShape
                         )
                         Spacer(Modifier.height(12.dp))
 
@@ -715,7 +716,7 @@ private fun ExpandableFilterSection(
                 )
                 if (selectedOptions.isNotEmpty()) {
                     Surface(
-                        shape = RoundedCornerShape(10.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.primaryContainer
                     ) {
                         Text(
@@ -952,7 +953,7 @@ private fun DiscoveredRelayRow(
 @Composable
 private fun MetadataChip(text: String, backgroundColor: Color, textColor: Color) {
     Surface(
-        shape = RoundedCornerShape(4.dp),
+        shape = RectangleShape,
         color = backgroundColor
     ) {
         Text(
@@ -974,7 +975,7 @@ private fun DiscoveryStatPill(
 ) {
     Surface(
         modifier = modifier,
-        shape = RoundedCornerShape(12.dp),
+        shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 0.dp
     ) {
@@ -994,7 +995,7 @@ private fun EmptyDiscoveryState(context: android.content.Context) {
         modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.size(72.dp)) {
+        Surface(shape = RectangleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.size(72.dp)) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.Explore, null, Modifier.size(36.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
             }

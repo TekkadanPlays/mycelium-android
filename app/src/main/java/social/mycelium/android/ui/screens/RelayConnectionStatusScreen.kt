@@ -8,8 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ChevronRight
@@ -107,7 +106,7 @@ fun RelayConnectionStatusScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 items(entries, key = { it.key }) { (url, status) ->
@@ -145,10 +144,9 @@ private fun RelayConnectionRow(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = RoundedCornerShape(12.dp)
+        shape = RectangleShape
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -158,7 +156,7 @@ private fun RelayConnectionRow(
             Box(
                 modifier = Modifier
                     .size(10.dp)
-                    .background(animColor, shape = CircleShape)
+                    .background(animColor, shape = RectangleShape)
             )
 
             Spacer(Modifier.width(12.dp))

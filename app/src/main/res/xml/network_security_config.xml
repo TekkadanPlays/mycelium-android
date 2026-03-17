@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Allow cleartext (HTTP) traffic for media loading. Many Nostr profile pictures,
+     blossom blobs, and NIP-96 servers use HTTP URLs. Android blocks cleartext by
+     default on API 28+, which causes silent image load failures. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

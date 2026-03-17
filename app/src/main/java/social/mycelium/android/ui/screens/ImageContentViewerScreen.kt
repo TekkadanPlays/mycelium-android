@@ -78,7 +78,9 @@ fun ImageContentViewerScreen(
         pageCount = { urls.size },
         initialPage = initialIndex.coerceIn(0, urls.size - 1)
     )
+    // Per-page HD state: each image starts at standard resolution
     var useHd by remember { mutableStateOf(false) }
+    val screenWidthPx = remember { context.resources.displayMetrics.widthPixels }
     var showControls by remember { mutableStateOf(true) }
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
@@ -96,11 +98,12 @@ fun ImageContentViewerScreen(
     }
     val scope = rememberCoroutineScope()
 
-    // Reset zoom when swiping to a different page; report page change
+    // Reset zoom and HD when swiping to a different page; report page change
     LaunchedEffect(pagerState.currentPage) {
         scale = 1f
         offsetX = 0f
         offsetY = 0f
+        useHd = false
         onPageChanged(pagerState.currentPage)
     }
 
@@ -154,6 +157,13 @@ fun ImageContentViewerScreen(
                         .crossfade(150)
                         .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                         .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+                        .apply {
+                            if (useHd) {
+                                size(coil.size.Size.ORIGINAL)
+                            } else {
+                                size(screenWidthPx, screenWidthPx)
+                            }
+                        }
                         .build(),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,

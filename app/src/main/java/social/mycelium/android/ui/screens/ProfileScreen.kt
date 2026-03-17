@@ -2,7 +2,6 @@ package social.mycelium.android.ui.screens
 
 import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -24,6 +23,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
+import social.mycelium.android.ui.icons.Nip05Verified
+import social.mycelium.android.ui.icons.Nip05VerifiedDark
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -118,18 +119,29 @@ fun ProfileScreen(
     isFollowing: Boolean = false,
     onFollowClick: () -> Unit = {},
     accountNpub: String? = null,
-    topAppBarState: TopAppBarState = rememberTopAppBarState(),
     onLoginClick: (() -> Unit)? = null,
     parentNoteForReply: (String) -> Note? = { null },
     timeGapIndex: Int? = null,
     perTabHasMore: Map<Int, Boolean> = emptyMap(),
     onSeeAllReactions: (Note) -> Unit = {},
+    onDeleteNote: ((Note) -> Unit)? = null,
     badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     androidx.activity.compose.BackHandler { onBackClick() }
 
-    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior(topAppBarState)
+    val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
+    val profileCurrentUserHex = remember(accountNpub) {
+        accountNpub?.let { npub ->
+            try {
+                (com.example.cybin.nip19.Nip19Parser.uriToRoute(npub)?.entity as? com.example.cybin.nip19.NPub)?.hex?.lowercase()
+            } catch (_: Exception) { null }
+        }
+    }
+    val slideBackActive = social.mycelium.android.ui.components.LocalSlideBackActive.current
+
+    // Profile zap dialog state
+    var showProfileZapDialog by remember { mutableStateOf(false) }
 
     // Tab state + pager
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
@@ -224,16 +236,7 @@ fun ProfileScreen(
             }
 
             override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
-                if (headerHeightPx <= 0f) return Velocity.Zero
-                val current = headerOffsetPx.floatValue
-                val mid = -headerHeightPx / 2f
-                val target = if (current < mid) -headerHeightPx else 0f
-                if (current != target) {
-                    val anim = Animatable(current)
-                    anim.animateTo(target, tween(200)) {
-                        headerOffsetPx.floatValue = value
-                    }
-                }
+                // No snap — let the header stay wherever the user left it
                 return Velocity.Zero
             }
         }
@@ -242,96 +245,10 @@ fun ProfileScreen(
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
-            .nestedScroll(collapsingConnection)
-            .nestedScroll(scrollBehavior.nestedScrollConnection),
+            .nestedScroll(collapsingConnection),
         topBar = {
-            Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
-                TopAppBar(
-                    title = {
-                        Text(
-                            text = author.displayName,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                        }
-                    },
-                    actions = {
-                        Box {
-                            IconButton(onClick = { showMoreMenu = true }) {
-                                Icon(Icons.Outlined.MoreVert, contentDescription = "More")
-                            }
-                            DropdownMenu(
-                                expanded = showMoreMenu,
-                                onDismissRequest = { showMoreMenu = false }
-                            ) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(if (isFollowing) "Unfollow" else "Follow")
-                                    },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        onFollowClick()
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            if (isFollowing) Icons.Default.PersonRemove else Icons.Default.PersonAdd,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Filters & Blocks") },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        // TODO: navigate to filters/blocks for this user
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            Icons.Outlined.Block,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                )
-                                HorizontalDivider()
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            "Report",
-                                            color = MaterialTheme.colorScheme.error
-                                        )
-                                    },
-                                    onClick = {
-                                        showMoreMenu = false
-                                        // TODO: report user
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            Icons.Outlined.Flag,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(20.dp),
-                                            tint = MaterialTheme.colorScheme.error
-                                        )
-                                    }
-                                )
-                            }
-                        }
-                    },
-                    scrollBehavior = scrollBehavior,
-                    windowInsets = WindowInsets(0),
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        scrolledContainerColor = MaterialTheme.colorScheme.surface
-                    )
-                )
-            }
+            // Only status-bar inset; the real TopAppBar lives inside the collapsible header
+            Spacer(Modifier.statusBarsPadding())
         }
     ) { paddingValues ->
         // Box layout: header+tabs are drawn on top, pager sits below with dynamic top padding
@@ -360,6 +277,7 @@ fun ProfileScreen(
                         }
                     },
                 beyondViewportPageCount = 1,
+                userScrollEnabled = !slideBackActive,
                 key = { it }
             ) { page ->
                 val isPageVisible = pagerState.currentPage == page
@@ -410,7 +328,9 @@ fun ProfileScreen(
                                         countsForNote = countsForNote,
                                         onRelayClick = onRelayClick, accountNpub = accountNpub,
                                         onSeeAllReactions = onSeeAllReactions,
-                                        isVisible = isPageVisible
+                                        onDelete = if (onDeleteNote != null && profileCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == profileCurrentUserHex) onDeleteNote else null,
+                                        isVisible = isPageVisible,
+                                        compactMedia = compactMedia,
                                     )
                                 }
                                 if (notesGapIndex != null && !showOlderNotes) {
@@ -454,7 +374,7 @@ fun ProfileScreen(
                                 items(repliesOnly, key = { "replies_${it.id}" }) { note ->
                                     ReplyWithParentContext(
                                         note = note,
-                                        parentNote = note.replyToId?.let { parentNoteForReply(it) },
+                                        parentNote = (note.replyToId ?: note.rootNoteId)?.let { parentNoteForReply(it) },
                                         onNoteClick = onNoteClick,
                                         onProfileClick = onProfileClick
                                     )
@@ -471,7 +391,9 @@ fun ProfileScreen(
                                         countsForNote = countsForNote,
                                         onRelayClick = onRelayClick, accountNpub = accountNpub,
                                         onSeeAllReactions = onSeeAllReactions,
-                                        isVisible = isPageVisible
+                                        onDelete = if (onDeleteNote != null && profileCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == profileCurrentUserHex) onDeleteNote else null,
+                                        isVisible = isPageVisible,
+                                        compactMedia = compactMedia,
                                     )
                                 }
                                 profileFeedFooter(repliesOnly, repliesHasMore, isLoadingMore, isProfileLoading) {
@@ -505,7 +427,7 @@ fun ProfileScreen(
                 modifier = Modifier
                     .offset { IntOffset(0, headerOffsetPx.floatValue.roundToInt()) }
             ) {
-                // Banner + Identity — draggable so touches on the header collapse it
+                // TopAppBar + Banner + Identity — all collapse together
                 Column(
                     modifier = Modifier
                         .onGloballyPositioned { coords ->
@@ -514,6 +436,85 @@ fun ProfileScreen(
                         .nestedScroll(collapsingConnection)
                         .verticalScroll(rememberScrollState())
                 ) {
+                    // Back / title / menu bar — collapses with the header
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface)
+                            .padding(start = 4.dp, end = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onBackClick) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                        Text(
+                            text = author.displayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Box {
+                            IconButton(onClick = { showMoreMenu = true }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "More")
+                            }
+                            DropdownMenu(
+                                expanded = showMoreMenu,
+                                onDismissRequest = { showMoreMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (isFollowing) "Unfollow" else "Follow")
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                        onFollowClick()
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (isFollowing) Icons.Default.PersonRemove else Icons.Default.PersonAdd,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Filters & Blocks") },
+                                    onClick = {
+                                        showMoreMenu = false
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Block,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Report",
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    },
+                                    onClick = {
+                                        showMoreMenu = false
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Flag,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp),
+                                            tint = MaterialTheme.colorScheme.error
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
                     ProfileBanner(
                         author = author,
                         badges = badges,
@@ -534,7 +535,8 @@ fun ProfileScreen(
                         onFollowClick = onFollowClick,
                         bioExpanded = bioExpanded,
                         onBioToggle = { bioExpanded = !bioExpanded },
-                        onProfileClick = onProfileClick
+                        onProfileClick = onProfileClick,
+                        onZapProfile = { showProfileZapDialog = true }
                     )
                 }
 
@@ -584,14 +586,36 @@ fun ProfileScreen(
             }
         }
     }
+
+    // Profile zap dialog
+    if (showProfileZapDialog) {
+        social.mycelium.android.ui.components.ZapCustomDialog(
+            onDismiss = { showProfileZapDialog = false },
+            onSendZap = { amount, zapType, message ->
+                showProfileZapDialog = false
+                // Create a synthetic Note representing the profile author for the zap
+                val profileNote = Note(
+                    id = author.id, // use pubkey as note ID for profile zaps
+                    author = author,
+                    content = "",
+                    timestamp = System.currentTimeMillis(),
+                    likes = 0, shares = 0, comments = 0,
+                    isLiked = false, hashtags = emptyList(),
+                    mediaUrls = emptyList(), isReply = false,
+                )
+                onCustomZapSend?.invoke(profileNote, amount, zapType, message)
+            },
+            onZapSettings = { onNavigateTo("zap_settings") }
+        )
+    }
 }
 
 // ─── Time-gap detection ──────────────────────────────────────────────────────
 
-/** Detect the first index where a large time gap (>7 days) exists between consecutive notes. */
+/** Detect the first index where a large time gap (>90 days) exists between consecutive notes. */
 internal fun detectTimeGapIndex(
     sortedNotes: List<Note>,
-    thresholdMs: Long = 7L * 24 * 3600 * 1000
+    thresholdMs: Long = 90L * 24 * 3600 * 1000
 ): Int? {
     for (i in 0 until sortedNotes.size - 1) {
         if (sortedNotes[i].timestamp - sortedNotes[i + 1].timestamp > thresholdMs) return i + 1
@@ -665,7 +689,9 @@ private fun ProfileNoteCard(
     onRelayClick: (String) -> Unit,
     accountNpub: String?,
     onSeeAllReactions: (Note) -> Unit,
+    onDelete: ((Note) -> Unit)? = null,
     isVisible: Boolean = true,
+    compactMedia: Boolean = false,
 ) {
     val counts = countsForNote(note.originalNoteId ?: note.id) ?: countsForNote(note.id)
     NoteCard(
@@ -696,7 +722,9 @@ private fun ProfileNoteCard(
         overrideCustomEmojiUrls = counts?.customEmojiUrls,
         onRelayClick = onRelayClick,
         accountNpub = accountNpub,
+        onDelete = onDelete,
         onSeeAllReactions = { onSeeAllReactions(note) },
+        compactMedia = compactMedia,
         modifier = Modifier.fillMaxWidth()
     )
 }
@@ -831,7 +859,7 @@ private fun ReplyWithParentContext(
                     )
                 }
             }
-        } else if (note.replyToId != null) {
+        } else if (note.replyToId != null || note.rootNoteId != null) {
             // Placeholder when parent hasn't loaded yet
             Row(
                 modifier = Modifier
@@ -1011,6 +1039,7 @@ private fun ProfileIdentity(
     bioExpanded: Boolean,
     onBioToggle: () -> Unit,
     onProfileClick: (String) -> Unit = {},
+    onZapProfile: () -> Unit = {},
 ) {
     val uriHandler = LocalUriHandler.current
     val clipboardManager = LocalClipboardManager.current
@@ -1041,11 +1070,12 @@ private fun ProfileIdentity(
                     )
                     if (author.isVerified) {
                         Spacer(Modifier.width(4.dp))
+                        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
                         Icon(
-                            Icons.Default.Verified,
+                            if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
                             contentDescription = "Verified",
                             modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.primary
+                            tint = androidx.compose.ui.graphics.Color.Unspecified
                         )
                     }
                     author.pronouns?.takeIf { it.isNotBlank() }?.let { p ->
@@ -1073,6 +1103,20 @@ private fun ProfileIdentity(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                }
+                // Lightning address just below NIP-05
+                author.lud16?.takeIf { it.isNotBlank() }?.let { ln ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.ElectricBolt, null, Modifier.size(13.dp), tint = Color(0xFFFFB74D))
+                        Spacer(Modifier.width(3.dp))
+                        Text(
+                            ln,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
 
@@ -1109,7 +1153,7 @@ private fun ProfileIdentity(
             // Zap
             if (author.lud16?.isNotBlank() == true) {
                 IconButton(
-                    onClick = { /* TODO: zap profile */ },
+                    onClick = onZapProfile,
                     modifier = Modifier.size(36.dp)
                 ) {
                     Icon(
@@ -1143,7 +1187,23 @@ private fun ProfileIdentity(
 
         // ── Bio ──
         author.about?.takeIf { it.isNotBlank() }?.let { about ->
-            val bioAnnotated = remember(about) { parseBioWithNpubs(about) }
+            // Extract mentioned pubkeys and request their profiles so display names resolve
+            val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+            val bioMentionPubkeys = remember(about) {
+                social.mycelium.android.utils.extractPubkeysFromContent(about)
+            }
+            // Request profiles for uncached mentions
+            if (bioMentionPubkeys.isNotEmpty()) {
+                LaunchedEffect(bioMentionPubkeys) {
+                    val relayUrls = profileCache.getConfiguredRelayUrls().ifEmpty {
+                        listOf("wss://relay.damus.io", "wss://relay.nostr.band", "wss://nos.lol")
+                    }
+                    profileCache.requestProfiles(bioMentionPubkeys, relayUrls)
+                }
+            }
+            // profileVersion ticks when any profile is updated; rebuild bio when mentions resolve
+            val profileVersion by profileCache.profileVersion.collectAsState()
+            val bioAnnotated = remember(about, profileVersion) { parseBioWithNpubs(about) }
             androidx.compose.foundation.text.ClickableText(
                 text = bioAnnotated,
                 style = MaterialTheme.typography.bodyMedium.copy(
@@ -1173,44 +1233,25 @@ private fun ProfileIdentity(
 
         // ── Links row ──
         val hasWebsite = author.website?.isNotBlank() == true
-        val hasLn = author.lud16?.isNotBlank() == true
-        if (hasWebsite || hasLn) {
+        if (hasWebsite) {
             Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                author.website?.takeIf { it.isNotBlank() }?.let { url ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable {
-                            uriHandler.openUri(if (url.startsWith("http")) url else "https://$url")
-                        }
-                    ) {
-                        Icon(Icons.Default.Link, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.width(3.dp))
-                        Text(
-                            url.removePrefix("https://").removePrefix("http://").removeSuffix("/"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            textDecoration = TextDecoration.Underline,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+            author.website?.takeIf { it.isNotBlank() }?.let { url ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clickable {
+                        uriHandler.openUri(if (url.startsWith("http")) url else "https://$url")
                     }
-                }
-                author.lud16?.takeIf { it.isNotBlank() }?.let { ln ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.ElectricBolt, null, Modifier.size(14.dp), tint = Color(0xFFFFB74D))
-                        Spacer(Modifier.width(3.dp))
-                        Text(
-                            ln,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                ) {
+                    Icon(Icons.Default.Link, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        url.removePrefix("https://").removePrefix("http://").removeSuffix("/"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        textDecoration = TextDecoration.Underline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }

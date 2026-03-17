@@ -151,22 +151,54 @@ object UrlDetector {
     }
     
     /**
+     * Strip query parameters and fragments so extension checks use the bare path.
+     */
+    private fun removeQueryParamsForExtensionCheck(url: String): String {
+        val noQuery = if (url.contains("?")) url.substringBefore("?") else url
+        return if (noQuery.contains("#")) noQuery.substringBefore("#") else noQuery
+    }
+
+    // Aligned with Amethyst's RichTextParser extension lists + extras
+    private val imageExtensions = listOf(
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+        ".avif", ".heic", ".heif", ".jxl", ".tiff", ".tif", ".ico"
+    )
+    private val videoExtensions = listOf(
+        ".mp4", ".webm", ".mov", ".avi", ".mkv", ".flv",
+        ".wmv", ".mpg", ".mpeg", ".amv", ".m3u8", ".ts"
+    )
+    private val audioExtensions = listOf(
+        ".mp3", ".ogg", ".wav", ".flac", ".aac", ".m4a", ".opus", ".wma"
+    )
+
+    /**
      * Check if URL is likely an image
      */
     fun isImageUrl(url: String): Boolean {
-        val imageExtensions = listOf(".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg")
-        val lowerUrl = url.lowercase()
-        return imageExtensions.any { lowerUrl.contains(it) }
+        val clean = removeQueryParamsForExtensionCheck(url).lowercase()
+        return imageExtensions.any { clean.endsWith(it) }
     }
-    
+
     /**
      * Check if URL is likely a video
      */
     fun isVideoUrl(url: String): Boolean {
-        val videoExtensions = listOf(".mp4", ".webm", ".mov", ".avi", ".mkv", ".flv")
-        val lowerUrl = url.lowercase()
-        return videoExtensions.any { lowerUrl.contains(it) }
+        val clean = removeQueryParamsForExtensionCheck(url).lowercase()
+        return videoExtensions.any { clean.endsWith(it) }
     }
+
+    /**
+     * Check if URL is likely an audio file
+     */
+    fun isAudioUrl(url: String): Boolean {
+        val clean = removeQueryParamsForExtensionCheck(url).lowercase()
+        return audioExtensions.any { clean.endsWith(it) }
+    }
+
+    /**
+     * Check if URL is any kind of media (image, video, or audio)
+     */
+    fun isMediaUrl(url: String): Boolean = isImageUrl(url) || isVideoUrl(url) || isAudioUrl(url)
 }
 
 

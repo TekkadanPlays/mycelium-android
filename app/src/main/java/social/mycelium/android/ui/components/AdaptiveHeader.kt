@@ -465,7 +465,7 @@ fun AdaptiveHeader(
                                     // ── Topics explorer filter menu (hashtag list sort) ──
                                     DropdownMenuItem(
                                         text = {
-                                            Text("Most Topics", color = if (explorerSortOrder == HashtagSortOrder.MOST_TOPICS) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                            Text("Topics", color = if (explorerSortOrder == HashtagSortOrder.MOST_TOPICS) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                         },
                                         onClick = {
                                             filterMenuExpanded = false
@@ -477,7 +477,7 @@ fun AdaptiveHeader(
                                     )
                                     DropdownMenuItem(
                                         text = {
-                                            Text("Most Active", color = if (explorerSortOrder == HashtagSortOrder.MOST_ACTIVE) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                            Text("Active", color = if (explorerSortOrder == HashtagSortOrder.MOST_ACTIVE) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                         },
                                         onClick = {
                                             filterMenuExpanded = false
@@ -489,7 +489,7 @@ fun AdaptiveHeader(
                                     )
                                     DropdownMenuItem(
                                         text = {
-                                            Text("Most Popular", color = if (explorerSortOrder == HashtagSortOrder.MOST_POPULAR) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                            Text("Popular", color = if (explorerSortOrder == HashtagSortOrder.MOST_POPULAR) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                         },
                                         onClick = {
                                             filterMenuExpanded = false
@@ -501,7 +501,7 @@ fun AdaptiveHeader(
                                     )
                                     DropdownMenuItem(
                                         text = {
-                                            Text("Alphabetical", color = if (explorerSortOrder == HashtagSortOrder.ALPHABETICAL) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                            Text("A–Z", color = if (explorerSortOrder == HashtagSortOrder.ALPHABETICAL) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                         },
                                         onClick = {
                                             filterMenuExpanded = false

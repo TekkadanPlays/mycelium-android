@@ -121,6 +121,7 @@ class NotesRepository private constructor() {
         }
         // Wire outbox feed events into the same ingestion pipeline
         outboxFeedManager.onNoteReceived = { event, relayUrl ->
+            Log.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
             pendingKind1Events.add(Triple(event, relayUrl, false))
             scheduleKind1Flush()
         }
@@ -196,7 +197,7 @@ class NotesRepository private constructor() {
             var ageGateDropped = 0
 
             for ((event, relayUrl, isPagination) in batch) {
-                if (event.kind != 1) continue
+                if (event.kind != 1 && event.kind != 30023) continue
 
                 // Age gate: drop ancient events from the live subscription
                 if (!isPagination && ageFloorMs > 0L) {
@@ -237,12 +238,59 @@ class NotesRepository private constructor() {
                     }
                 }
 
-                // Skip if a repost of this note already exists in the feed
-                // (the repost card already shows the note with booster attribution)
+                // If a repost of this note already exists in the feed, merge relay URL
+                // into the repost note so relay orbs show everywhere the note lives.
                 val repostId = "repost:${event.id}"
-                if (currentIds.containsKey(repostId) || pendingIds.contains(repostId)) continue
+                val existingRepost = currentIds[repostId]
+                if (existingRepost != null) {
+                    val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                    if (normalizedNew != null) {
+                        val existingUrls = existingRepost.relayUrls.ifEmpty { listOfNotNull(existingRepost.relayUrl) }
+                        val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                        if (normalizedNew !in existingNorm) {
+                            relayUpdates[repostId] = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                            Log.d(TAG, "\uD83D\uDD35 Relay merge into repost: ${repostId.take(16)} += $normalizedNew (now ${relayUpdates[repostId]?.size} orbs)")
+                        }
+                    }
+                    continue
+                }
+                if (pendingIds.contains(repostId)) {
+                    // Merge relay URL into pending repost note
+                    val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                    if (normalizedNew != null) {
+                        synchronized(pendingNotesLock) {
+                            val pendingIndex = _pendingNewNotes.indexOfFirst { it.id == repostId }
+                            if (pendingIndex >= 0) {
+                                val pendingNote = _pendingNewNotes[pendingIndex]
+                                val existingUrls = pendingNote.relayUrls.ifEmpty { listOfNotNull(pendingNote.relayUrl) }
+                                val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                                if (normalizedNew !in existingNorm) {
+                                    _pendingNewNotes[pendingIndex] = pendingNote.copy(
+                                        relayUrls = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    continue
+                }
                 // Also skip if this note's ID is already represented as a repost's originalNoteId
-                if (event.id in repostedOriginalIds) continue
+                // (but still merge relay URL into the repost)
+                if (event.id in repostedOriginalIds) {
+                    val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                    if (normalizedNew != null) {
+                        // Find the repost note that contains this originalNoteId and merge
+                        val repostNote = currentNotes.find { it.originalNoteId == event.id }
+                        if (repostNote != null) {
+                            val existingUrls = repostNote.relayUrls.ifEmpty { listOfNotNull(repostNote.relayUrl) }
+                            val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                            if (normalizedNew !in existingNorm) {
+                                relayUpdates[repostNote.id] = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                            }
+                        }
+                    }
+                    continue
+                }
 
                 // Locally-published event echo: already in feed via injectOwnNote/injectOwnRepost.
                 // Just merge relay URL from the relay that echoed it back.
@@ -267,18 +315,55 @@ class NotesRepository private constructor() {
                     val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
                     if (normalizedNew != null && normalizedNew !in existingNorm) {
                         relayUpdates[note.id] = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                        Log.d(TAG, "\uD83D\uDD35 Relay merge: ${note.id.take(8)} += $normalizedNew (now ${relayUpdates[note.id]?.size} orbs)")
                     }
                     continue
                 }
-                if (pendingIds.contains(note.id)) continue
-                // Dedup within this batch (O(1) via HashSet)
-                if (!newNoteIds.add(note.id)) continue
+                if (pendingIds.contains(note.id)) {
+                    // Merge relay URL into pending note (same logic as feed notes above)
+                    val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                    if (normalizedNew != null) {
+                        synchronized(pendingNotesLock) {
+                            val pendingIndex = _pendingNewNotes.indexOfFirst { it.id == note.id }
+                            if (pendingIndex >= 0) {
+                                val pendingNote = _pendingNewNotes[pendingIndex]
+                                val existingUrls = pendingNote.relayUrls.ifEmpty { listOfNotNull(pendingNote.relayUrl) }
+                                val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                                if (normalizedNew !in existingNorm) {
+                                    _pendingNewNotes[pendingIndex] = pendingNote.copy(
+                                        relayUrls = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    continue
+                }
+                // Dedup within this batch — if already added, merge relay URL
+                if (!newNoteIds.add(note.id)) {
+                    val normalizedNew = note.relayUrl?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                    if (normalizedNew != null) {
+                        val batchIdx = newNotes.indexOfFirst { it.id == note.id }
+                        if (batchIdx >= 0) {
+                            val batchNote = newNotes[batchIdx]
+                            val existingUrls = batchNote.relayUrls.ifEmpty { listOfNotNull(batchNote.relayUrl) }
+                            val existingNorm = existingUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+                            if (normalizedNew !in existingNorm) {
+                                newNotes[batchIdx] = batchNote.copy(
+                                    relayUrls = (existingUrls + normalizedNew).filter { it.isNotBlank() }
+                                )
+                            }
+                        }
+                    }
+                    continue
+                }
 
                 newNotes.add(note)
             }
 
             // Apply relay URL merges to existing notes
             if (relayUpdates.isNotEmpty()) {
+                Log.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges to _notes")
                 val updatedList = currentNotes.map { note ->
                     relayUpdates[note.id]?.let { urls -> note.copy(relayUrls = urls) } ?: note
                 }
@@ -309,11 +394,34 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Merge feed notes: one sort for the whole batch
+            // Merge feed notes efficiently based on temporal position:
+            // - Pagination notes (older) → sort batch only, append to end
+            // - Live notes (newer) → sort batch only, prepend to start
+            // - Mixed → fall back to full merge-sort (rare)
+            // This avoids re-sorting the entire 4000+ element list on every flush.
             if (feedNotes.isNotEmpty()) {
-                val merged = trimNotesToCap(
-                    (_notes.value + feedNotes).sortedByDescending { it.repostTimestamp ?: it.timestamp }
-                )
+                val current = _notes.value
+                val sortedBatch = feedNotes.sortedByDescending { it.repostTimestamp ?: it.timestamp }
+                val merged = if (current.isEmpty()) {
+                    trimNotesToCap(sortedBatch)
+                } else {
+                    val oldestCurrent = current.last().let { it.repostTimestamp ?: it.timestamp }
+                    val newestBatch = sortedBatch.first().let { it.repostTimestamp ?: it.timestamp }
+                    if (newestBatch <= oldestCurrent) {
+                        // All batch notes are older — append (pagination path, most common)
+                        trimNotesToCap(current + sortedBatch)
+                    } else {
+                        val oldestBatch = sortedBatch.last().let { it.repostTimestamp ?: it.timestamp }
+                        val newestCurrent = current.first().let { it.repostTimestamp ?: it.timestamp }
+                        if (oldestBatch > newestCurrent) {
+                            // All batch notes are newer — prepend (live notes path)
+                            trimNotesToCap(sortedBatch + current)
+                        } else {
+                            // Mixed — full merge required (rare: batch spans existing range)
+                            trimNotesToCap((current + sortedBatch).sortedByDescending { it.repostTimestamp ?: it.timestamp })
+                        }
+                    }
+                }
                 _notes.value = merged
                 advancePaginationCursor(feedNotes)
                 if (firstNoteDisplayedAtMs == 0L && merged.isNotEmpty()) {
@@ -525,6 +633,9 @@ class NotesRepository private constructor() {
     private var feedCacheSaveJob: Job? = null
     private val feedCacheJson = Json { ignoreUnknownKeys = true }
 
+    /** Event IDs that the user has deleted — persisted so they stay hidden after restart. */
+    private val deletedEventIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     companion object {
         private const val TAG = "NotesRepository"
         /** Max notes kept in memory; oldest dropped to keep feed bounded (scroll/layout performance). */
@@ -535,6 +646,9 @@ class NotesRepository private constructor() {
         /** Debounce display updates so hundreds of events/sec don't thrash the UI. */
         private const val DISPLAY_UPDATE_DEBOUNCE_MS = 150L
         private const val FEED_CACHE_PREFS = "notes_feed_cache"
+        private const val DELETED_IDS_PREFS = "notes_deleted_ids"
+        private const val DELETED_IDS_KEY = "deleted_event_ids"
+        private const val DELETED_IDS_MAX = 500
         private const val FEED_CACHE_KEY = "feed_notes"
         private const val FEED_CACHE_FOLLOWING_KEY = "feed_notes_following"
         private const val FEED_LAST_MODE_KEY = "feed_last_mode"
@@ -565,6 +679,7 @@ class NotesRepository private constructor() {
     fun prepareFeedCache(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
+        loadDeletedIdsFromDisk(context.applicationContext)
         scope.launch { loadFeedCacheFromDisk() }
         feedCacheSaveJob = scope.launch {
             _notes.collect { list ->
@@ -594,9 +709,13 @@ class NotesRepository private constructor() {
                     _feedCacheChecked.value = true
                     return@withContext
                 }
-                if (list.isNotEmpty() && _notes.value.isEmpty()) {
-                    _notes.value = list
-                    _displayedNotes.value = list
+                val filtered = if (deletedEventIds.isEmpty()) list else list.filter { note ->
+                    note.id !in deletedEventIds &&
+                        note.originalNoteId?.let { it !in deletedEventIds } != false
+                }
+                if (filtered.isNotEmpty() && _notes.value.isEmpty()) {
+                    _notes.value = filtered
+                    _displayedNotes.value = filtered
                     initialLoadComplete = true
                     // Mark grace period as consumed so new subscription events go to pending
                     val now = System.currentTimeMillis()
@@ -604,7 +723,7 @@ class NotesRepository private constructor() {
                     feedCutoffTimestampMs = now
                     latestNoteTimestampAtOpen = list.maxOfOrNull { it.timestamp } ?: now
                     _feedSessionState.value = FeedSessionState.Live
-                    Log.d(TAG, "Restored ${list.size} notes from feed cache (grace period consumed)")
+                    Log.d(TAG, "Restored ${filtered.size} notes from feed cache (grace period consumed, ${list.size - filtered.size} deleted filtered)")
                     // Re-resolve authors from the (now-loaded) profile cache so restored
                     // notes render with display names and avatars immediately.
                     refreshAuthorsFromCache()
@@ -703,6 +822,9 @@ class NotesRepository private constructor() {
         if (allUserRelayUrls.sorted() == subscriptionRelays.sorted()) return
         Log.d(TAG, "Subscription relays set: ${allUserRelayUrls.size} relays (stay connected to all)")
         subscriptionRelays = allUserRelayUrls
+        // Keep the idempotency guard in sync so ensureSubscriptionToNotes doesn't
+        // overwrite the state machine's subscription with a stale relay set.
+        lastEnsuredRelaySet = allUserRelayUrls.toSet()
         profileCache.setFallbackRelayUrls(allUserRelayUrls)
         relayStateMachine.resumeSubscriptionProvider = { getSubscriptionForResume() }
         // Only reset to Idle when no notes exist (first load). When notes are already
@@ -877,6 +999,9 @@ class NotesRepository private constructor() {
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
                 Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")
             }
+            // Log relay orb stats for diagnostics
+            val multiOrb = filtered.count { it.relayUrls.size > 1 }
+            if (multiOrb > 0) Log.d(TAG, "\uD83D\uDD35 Display update: $multiOrb/${filtered.size} notes have 2+ relay orbs")
             _displayedNotes.value = filtered.toList()
             updateDisplayedNewNotesCount()
             // Debounce counts subscription so we don't re-subscribe on every note; cap at 150 note IDs
@@ -1380,12 +1505,18 @@ class NotesRepository private constructor() {
      */
     private suspend fun handleKind6Repost(event: Event, relayUrl: String) {
         try {
+            // Track own boosts so the repost icon turns green (even for relay echoes)
+            val reposterPubkey = event.pubKey
+            if (reposterPubkey.lowercase() == currentUserPubkey) {
+                val boostedId = event.tags.firstOrNull { it.getOrNull(0) == "e" }?.getOrNull(1)
+                if (boostedId != null) NoteCountsRepository.trackOwnBoost(boostedId)
+            }
+
             // Skip relay echo of our own repost — already in feed via injectOwnRepost
             if (locallyPublishedIds.contains(event.id)) {
                 Log.d(TAG, "Skipping kind-6 echo of locally-published repost ${event.id.take(8)}")
                 return
             }
-            val reposterPubkey = event.pubKey
             val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
             val profileRelayUrls = getProfileRelayUrls()
             if (profileCache.getAuthor(reposterPubkey) == null && profileRelayUrls.isNotEmpty()) {
@@ -1406,6 +1537,8 @@ class NotesRepository private constructor() {
                 } ?: return
 
                 val originalNoteId = (jsonObj["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return
+                // Cache the original signed event JSON for NIP-18 re-reposts
+                social.mycelium.android.utils.RawEventCache.put(originalNoteId, content)
                 val notePubkey = (jsonObj["pubkey"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return
                 val noteCreatedAt = (jsonObj["created_at"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
                 val noteContent = (jsonObj["content"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""
@@ -1540,15 +1673,20 @@ class NotesRepository private constructor() {
         val existingIndex = currentNotes.indexOfFirst { it.id == note.id }
 
         if (existingIndex >= 0) {
-            // Same original note already in feed — merge boosters
+            // Same original note already in feed — merge boosters AND relay URLs
             val existing = currentNotes[existingIndex]
             val newBooster = note.repostedByAuthors.firstOrNull() ?: return
             if (existing.repostedByAuthors.any { it.id == newBooster.id }) return // same person already listed
             val mergedAuthors = (listOf(newBooster) + existing.repostedByAuthors).distinctBy { it.id }
             val latestRepostTs = maxOf(repostTimestampMs, existing.repostTimestamp ?: 0L)
+            // Merge relay URLs: existing note's relays + new repost delivery relay
+            val existingUrls = existing.relayUrls.ifEmpty { listOfNotNull(existing.relayUrl) }
+            val newUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+            val mergedUrls = (existingUrls + newUrls).map { social.mycelium.android.utils.normalizeRelayUrl(it) }.distinct().filter { it.isNotBlank() }
             val merged = existing.copy(
                 repostedByAuthors = mergedAuthors,
-                repostTimestamp = latestRepostTs
+                repostTimestamp = latestRepostTs,
+                relayUrls = mergedUrls
             )
             val updatedNotes = currentNotes.toMutableList()
             updatedNotes[existingIndex] = merged
@@ -1566,9 +1704,13 @@ class NotesRepository private constructor() {
                 if (existing.repostedByAuthors.any { it.id == newBooster.id }) return
                 val mergedAuthors = (listOf(newBooster) + existing.repostedByAuthors).distinctBy { it.id }
                 val latestRepostTs = maxOf(repostTimestampMs, existing.repostTimestamp ?: 0L)
+                val existUrls = existing.relayUrls.ifEmpty { listOfNotNull(existing.relayUrl) }
+                val newUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                val mergedUrls = (existUrls + newUrls).map { social.mycelium.android.utils.normalizeRelayUrl(it) }.distinct().filter { it.isNotBlank() }
                 _pendingNewNotes[pendingIndex] = existing.copy(
                     repostedByAuthors = mergedAuthors,
-                    repostTimestamp = latestRepostTs
+                    repostTimestamp = latestRepostTs,
+                    relayUrls = mergedUrls
                 )
                 return
             }
@@ -1582,8 +1724,14 @@ class NotesRepository private constructor() {
             val origIndex = currentNotes.indexOfFirst { it.id == origId }
             if (origIndex >= 0) {
                 // Original note is already visible — replace with repost version in-place
+                // Preserve the original note's accumulated relay URLs
+                val originalNote = currentNotes[origIndex]
+                val origUrls = originalNote.relayUrls.ifEmpty { listOfNotNull(originalNote.relayUrl) }
+                val noteUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                val mergedUrls = (origUrls + noteUrls).map { social.mycelium.android.utils.normalizeRelayUrl(it) }.distinct().filter { it.isNotBlank() }
+                val noteWithMergedRelays = note.copy(relayUrls = mergedUrls)
                 val updatedNotes = currentNotes.toMutableList().apply { removeAt(origIndex) }
-                val newNotes = trimNotesToCap((updatedNotes + note).sortedByDescending { it.repostTimestamp ?: it.timestamp })
+                val newNotes = trimNotesToCap((updatedNotes + noteWithMergedRelays).sortedByDescending { it.repostTimestamp ?: it.timestamp })
                 _notes.value = newNotes
                 scheduleDisplayUpdate()
                 // Also clean up any pending duplicate
@@ -1594,7 +1742,11 @@ class NotesRepository private constructor() {
             synchronized(pendingNotesLock) {
                 val pendingOrigIndex = _pendingNewNotes.indexOfFirst { it.id == origId }
                 if (pendingOrigIndex >= 0) {
-                    _pendingNewNotes[pendingOrigIndex] = note
+                    val pendingOrig = _pendingNewNotes[pendingOrigIndex]
+                    val pOrigUrls = pendingOrig.relayUrls.ifEmpty { listOfNotNull(pendingOrig.relayUrl) }
+                    val pNoteUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    val pMergedUrls = (pOrigUrls + pNoteUrls).map { social.mycelium.android.utils.normalizeRelayUrl(it) }.distinct().filter { it.isNotBlank() }
+                    _pendingNewNotes[pendingOrigIndex] = note.copy(relayUrls = pMergedUrls)
                     return
                 }
             }
@@ -1646,34 +1798,112 @@ class NotesRepository private constructor() {
         try {
             val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
             val repostTimestampMs = System.currentTimeMillis()
-            val compositeId = "repost:${originalNote.id}"
-
-            val currentNotes = _notes.value
-            if (currentNotes.any { it.id == compositeId }) return
+            // Resolve the real original note ID (originalNote might itself be a repost composite)
+            val realOrigId = originalNote.originalNoteId ?: originalNote.id
+            val compositeId = "repost:$realOrigId"
 
             locallyPublishedIds.add(repostEventId)
             locallyPublishedIds.add(compositeId)
 
+            val currentNotes = _notes.value
+
+            // If composite already exists (others already boosted), merge our author in
+            val existingIndex = currentNotes.indexOfFirst { it.id == compositeId }
+            if (existingIndex >= 0) {
+                val existing = currentNotes[existingIndex]
+                if (existing.repostedByAuthors.any { it.id == reposterAuthor.id }) return // already listed
+                val mergedAuthors = (listOf(reposterAuthor) + existing.repostedByAuthors).distinctBy { it.id }
+                val updated = currentNotes.toMutableList()
+                updated[existingIndex] = existing.copy(
+                    repostedByAuthors = mergedAuthors,
+                    repostTimestamp = repostTimestampMs,
+                    publishState = PublishState.Sending
+                )
+                _notes.value = updated.sortedByDescending { it.repostTimestamp ?: it.timestamp }
+                scheduleDisplayUpdate()
+                Log.d(TAG, "Merged own repost into existing ${compositeId.take(16)} (now ${mergedAuthors.size} boosters)")
+                return
+            }
+
             // Remove the original kind-1 from feed if present (repost supersedes it)
             var notesAfterRemoval = currentNotes
-            val origIndex = currentNotes.indexOfFirst { it.id == originalNote.id }
+            val origIndex = currentNotes.indexOfFirst { it.id == realOrigId }
             if (origIndex >= 0) {
                 notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }
             }
-            synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == originalNote.id } }
+            synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == realOrigId } }
+
+            // Preserve existing repostedByAuthors from the original note (if it was already a repost)
+            val existingAuthors = originalNote.repostedByAuthors.filter { it.id != reposterAuthor.id }
+            val mergedAuthors = listOf(reposterAuthor) + existingAuthors
 
             val note = originalNote.copy(
                 id = compositeId,
-                originalNoteId = originalNote.id,
-                repostedByAuthors = listOf(reposterAuthor),
+                originalNoteId = realOrigId,
+                repostedByAuthors = mergedAuthors,
                 repostTimestamp = repostTimestampMs,
                 publishState = PublishState.Sending
             )
             _notes.value = (listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY)
             scheduleDisplayUpdate()
-            Log.d(TAG, "Injected own repost ${compositeId.take(16)} (publishState=Sending)")
+            Log.d(TAG, "Injected own repost ${compositeId.take(16)} (${mergedAuthors.size} boosters, publishState=Sending)")
         } catch (e: Throwable) {
             Log.e(TAG, "injectOwnRepost failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Optimistically remove a note from the feed (e.g. after deletion).
+     * Removes by event ID, also handles repost composites ("repost:eventId").
+     */
+    fun removeNote(eventId: String) {
+        val currentNotes = _notes.value
+        val filtered = currentNotes.filter { note ->
+            note.id != eventId &&
+                note.id != "repost:$eventId" &&
+                note.originalNoteId != eventId
+        }
+        if (filtered.size < currentNotes.size) {
+            _notes.value = filtered
+            synchronized(pendingNotesLock) {
+                _pendingNewNotes.removeAll { it.id == eventId || it.originalNoteId == eventId }
+            }
+            scheduleDisplayUpdate()
+            Log.d(TAG, "Removed note ${eventId.take(8)} from feed (${currentNotes.size - filtered.size} entries)")
+        }
+        deletedEventIds.add(eventId)
+        persistDeletedIds()
+    }
+
+    /** Check whether an event has been locally deleted by the user. */
+    fun isDeletedEvent(eventId: String): Boolean = eventId in deletedEventIds
+
+    private fun loadDeletedIdsFromDisk(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences(DELETED_IDS_PREFS, Context.MODE_PRIVATE)
+            val raw = prefs.getStringSet(DELETED_IDS_KEY, null)
+            if (!raw.isNullOrEmpty()) {
+                deletedEventIds.addAll(raw)
+                Log.d(TAG, "Loaded ${raw.size} deleted event IDs from disk")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load deleted IDs: ${e.message}")
+        }
+    }
+
+    private fun persistDeletedIds() {
+        val ctx = appContext ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                val ids = deletedEventIds.toSet()
+                val trimmed = if (ids.size > DELETED_IDS_MAX) ids.take(DELETED_IDS_MAX).toSet() else ids
+                ctx.getSharedPreferences(DELETED_IDS_PREFS, Context.MODE_PRIVATE)
+                    .edit()
+                    .putStringSet(DELETED_IDS_KEY, trimmed)
+                    .apply()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to persist deleted IDs: ${e.message}")
+            }
         }
     }
 
@@ -1923,6 +2153,8 @@ class NotesRepository private constructor() {
 
     private fun convertEventToNote(event: Event, relayUrl: String): Note {
         android.os.Trace.beginSection("NotesRepo.convertEventToNote")
+        // Cache raw signed event JSON for NIP-18 reposts (kind-6 content field)
+        social.mycelium.android.utils.RawEventCache.put(event.id, event.toJson())
         val storedRelayUrl = relayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
         val pubkeyHex = event.pubKey
         val author = profileCache.resolveAuthor(pubkeyHex)
@@ -1967,6 +2199,13 @@ class NotesRepository private constructor() {
         // Convert event tags to List<List<String>> for NIP-22 I tags and better e tag tracking
         val tags = event.tags.map { it.toList() }
         
+        // NIP-23 long-form content fields (kind 30023)
+        val isArticle = event.kind == 30023
+        val articleTitle = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "title" }?.getOrNull(1) else null
+        val articleSummary = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "summary" }?.getOrNull(1) else null
+        val articleImage = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "image" }?.getOrNull(1) else null
+        val dTag = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1) else null
+
         val note = Note(
             id = event.id,
             author = author,
@@ -1986,11 +2225,15 @@ class NotesRepository private constructor() {
             rootNoteId = rootNoteId,
             replyToId = replyToId,
             kind = event.kind,
+            topicTitle = articleTitle,
             tags = tags,
             mentionedPubkeys = event.tags
                 .filter { tag -> tag.size >= 2 && tag[0] == "p" }
                 .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
-                .distinct()
+                .distinct(),
+            summary = articleSummary,
+            imageUrl = articleImage,
+            dTag = dTag
         )
         android.os.Trace.endSection()
         return note

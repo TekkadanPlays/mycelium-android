@@ -1,11 +1,11 @@
 package social.mycelium.android.ui.components
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Downloading
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material3.Icon
@@ -20,6 +20,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import social.mycelium.android.repository.Nip05Verifier
+import social.mycelium.android.ui.icons.Nip05Verified
+import social.mycelium.android.ui.icons.Nip05VerifiedDark
 
 /**
  * Displays a NIP-05 identifier with a verification badge icon.
@@ -48,11 +50,12 @@ fun Nip05Badge(
     ) {
         when (status) {
             Nip05Verifier.VerificationStatus.VERIFIED -> {
+                val isDark = isSystemInDarkTheme()
                 Icon(
-                    imageVector = Icons.Default.CheckCircle,
+                    imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
                     contentDescription = "NIP-05 verified",
                     modifier = Modifier.size(14.dp),
-                    tint = Color(0xFF66BB6A)
+                    tint = Color.Unspecified
                 )
             }
             Nip05Verifier.VerificationStatus.VERIFYING -> {
@@ -80,13 +83,15 @@ fun Nip05Badge(
             Spacer(Modifier.width(4.dp))
         }
 
-        val displayText = if (showFullIdentifier) {
-            nip05
-        } else {
-            // Show only domain part, unless name is not "_"
-            val parts = nip05.split("@")
-            if (parts.size == 2 && parts[0] == "_") parts[1]
-            else nip05
+        val parts = nip05.split("@")
+        val displayText = when {
+            // _@domain.com → show only domain (Amethyst convention)
+            parts.size == 2 && parts[0] == "_" -> parts[1]
+            // Non-_ with showFullIdentifier → show full nip05
+            showFullIdentifier -> nip05
+            // Non-_ without showFullIdentifier → show domain only
+            parts.size == 2 -> parts[1]
+            else -> nip05
         }
 
         Text(

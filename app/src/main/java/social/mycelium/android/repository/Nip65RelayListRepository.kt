@@ -35,6 +35,73 @@ object Nip65RelayListRepository {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
+    /** Room database for NIP-65 persistence. Set via [init]. */
+    @Volatile private var db: social.mycelium.android.db.AppDatabase? = null
+    private var roomSaveJob: kotlinx.coroutines.Job? = null
+    private const val ROOM_SAVE_DEBOUNCE_MS = 3000L
+
+    /**
+     * Initialize Room-backed persistence. Call once from MainActivity.onCreate.
+     * Loads cached NIP-65 relay lists so outbox resolution works immediately on cold start.
+     */
+    fun init(context: android.content.Context) {
+        if (db != null) return
+        db = social.mycelium.android.db.AppDatabase.getInstance(context.applicationContext)
+        scope.launch {
+            try {
+                val database = db ?: return@launch
+                val allEntities = database.nip65Dao().getAll()
+                var restored = 0
+                for (entity in allEntities) {
+                    val pk = entity.pubkey
+                    if (!authorOutboxCache.containsKey(pk)) {
+                        val writeRelays = entity.writeRelays.split(",").filter { it.isNotBlank() }
+                        val readRelays = entity.readRelays.split(",").filter { it.isNotBlank() }
+                        if (writeRelays.isNotEmpty() || readRelays.isNotEmpty()) {
+                            authorOutboxCache[pk] = writeRelays
+                            authorRelayCache[pk] = AuthorRelayList(pk, readRelays, writeRelays)
+                            restored++
+                        }
+                    }
+                }
+                if (restored > 0) {
+                    emitAuthorRelaySnapshot()
+                    Log.d(TAG, "Restored $restored NIP-65 relay lists from Room DB")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load NIP-65 from Room: ${e.message}", e)
+            }
+        }
+    }
+
+    /** Debounced save of NIP-65 cache to Room DB. */
+    private fun scheduleRoomSave() {
+        val database = db ?: return
+        roomSaveJob?.cancel()
+        roomSaveJob = scope.launch {
+            delay(ROOM_SAVE_DEBOUNCE_MS)
+            try {
+                val snapshot = authorRelayCache.toMap()
+                val entities = snapshot.map { (pk, relay) ->
+                    social.mycelium.android.db.CachedNip65Entity(
+                        pubkey = pk,
+                        writeRelays = relay.writeRelays.joinToString(","),
+                        readRelays = relay.readRelays.joinToString(",")
+                    )
+                }
+                if (entities.isNotEmpty()) {
+                    database.nip65Dao().upsertAll(entities)
+                }
+                // Prune stale entries
+                val pruneMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
+                database.nip65Dao().deleteOlderThan(pruneMs)
+                Log.d(TAG, "Saved ${entities.size} NIP-65 relay lists to Room DB")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save NIP-65 to Room: ${e.message}", e)
+            }
+        }
+    }
+
     /** Read relays from the user's kind-10002 (where the user reads / inbox). */
     private val _readRelays = MutableStateFlow<List<String>>(emptyList())
     val readRelays: StateFlow<List<String>> = _readRelays.asStateFlow()
@@ -755,6 +822,7 @@ object Nip65RelayListRepository {
                         authorOutboxCache[pk] = writeUrls.distinct()
                         authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct(), writeUrls.distinct())
                         Log.d(TAG, "Relays for ${pk.take(8)}: ${writeUrls.size} write, ${readUrls.size} read")
+                        scheduleRoomSave()
                     } else {
                         authorOutboxCache[pk] = emptyList()
                         authorRelayCache[pk] = AuthorRelayList(pk, emptyList(), emptyList())

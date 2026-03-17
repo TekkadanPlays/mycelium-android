@@ -8,6 +8,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -172,6 +174,7 @@ fun ThreadFab(
         // Main FAB
         FloatingActionButton(
             onClick = { expanded = !expanded },
+            shape = CircleShape,
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary
         ) {
@@ -201,7 +204,7 @@ private fun MiniFabItem(
         // Label chip
         androidx.compose.material3.Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHighest,
-            shape = MaterialTheme.shapes.small,
+            shape = RoundedCornerShape(8.dp),
             shadowElevation = 2.dp,
         ) {
             Text(
@@ -214,6 +217,7 @@ private fun MiniFabItem(
         Spacer(Modifier.width(8.dp))
         SmallFloatingActionButton(
             onClick = onClick,
+            shape = CircleShape,
             containerColor = containerColor,
             contentColor = contentColor,
         ) {

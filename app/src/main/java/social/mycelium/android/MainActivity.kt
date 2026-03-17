@@ -23,6 +23,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import social.mycelium.android.repository.NotesRepository
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.TopicsRepository
+import social.mycelium.android.repository.Nip65RelayListRepository
 import social.mycelium.android.repository.ScopedModerationRepository
 import social.mycelium.android.relay.NetworkConnectivityMonitor
 import social.mycelium.android.relay.RelayConnectionStateMachine
@@ -41,6 +42,7 @@ import coil.Coil
 import coil.ImageLoader
 import coil.decode.GifDecoder
 import coil.decode.ImageDecoderDecoder
+import coil.decode.SvgDecoder
 import android.Manifest
 
 /**
@@ -121,11 +123,13 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             ImageLoader.Builder(this)
                 .okHttpClient(coilHttpClient)
                 .components {
+                    add(social.mycelium.android.utils.BlossomFallbackInterceptor())
                     if (android.os.Build.VERSION.SDK_INT >= 28) {
                         add(ImageDecoderDecoder.Factory())
                     } else {
                         add(GifDecoder.Factory())
                     }
+                    add(SvgDecoder.Factory())
                     add(coil.decode.VideoFrameDecoder.Factory())
                 }
                 .crossfade(100)
@@ -153,6 +157,9 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
 
         // Persist profile cache so avatars/display names survive process death; restore before feed
         ProfileMetadataCache.getInstance().init(applicationContext)
+
+        // Persist NIP-65 relay lists so outbox resolution works on cold start
+        Nip65RelayListRepository.init(applicationContext)
 
         // Persist feed so notes survive process death; restore on cold start
         NotesRepository.getInstance().prepareFeedCache(applicationContext)

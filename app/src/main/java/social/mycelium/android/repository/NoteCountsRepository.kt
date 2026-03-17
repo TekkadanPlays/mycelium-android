@@ -69,6 +69,8 @@ object NoteCountsRepository {
 
     /** Check if the current user has boosted a note (from relay data). */
     fun isOwnBoost(noteId: String): Boolean = _ownBoostedNoteIds.contains(noteId)
+    /** Register an own boost detected outside the counts pipeline (e.g. main feed kind-6). */
+    fun trackOwnBoost(noteId: String) { _ownBoostedNoteIds.add(noteId) }
     /** Check if the current user has zapped a note (from relay data). */
     fun isOwnZap(noteId: String): Boolean = _ownZappedNoteIds.contains(noteId)
 
@@ -263,7 +265,15 @@ object NoteCountsRepository {
         val rsm = RelayConnectionStateMachine.getInstance()
         countsSubscriptionHandle = rsm.requestTemporarySubscriptionPerRelay(
             relayFilters = relayFilters,
-            onEvent = { event -> onCountsEvent(event) },
+            onEvent = { event ->
+                onCountsEvent(event)
+                // Cross-pollinate reactions/zaps/reposts to notifications so they appear
+                // in real-time (counts subscription is LOW priority but always active;
+                // notification subscription is BACKGROUND and can be preempted).
+                if (event.kind == 7 || event.kind == 9735 || event.kind == 6) {
+                    NotificationsRepository.ingestEvent(event)
+                }
+            },
             priority = SubscriptionPriority.LOW,
         )
     }
@@ -393,17 +403,27 @@ object NoteCountsRepository {
         val markedRoot = eTags.firstOrNull { pickETagMarker(it) == "root" }?.getOrNull(1)
         val markedReply = eTags.firstOrNull { pickETagMarker(it) == "reply" }?.getOrNull(1)
 
-        // Only count the DIRECT parent — not the root — so reply counts reflect
-        // depth-1 replies only (like Twitter/X). If markedReply exists, that's the
-        // direct parent. If only markedRoot exists (no reply marker), this IS a
-        // direct reply to root. For unmarked positional e-tags, last = direct parent.
+        // Count towards the ROOT note so feed reply counts reflect the total thread
+        // size (all replies at any depth), not just direct/depth-1 replies.
+        // Also count towards the direct parent when it differs, so thread-internal
+        // counts stay accurate for nested replies.
+        val rootId: String? = when {
+            markedRoot != null -> markedRoot
+            else -> eTags.firstOrNull()?.getOrNull(1)
+        }
         val directParent: String? = when {
             markedReply != null -> markedReply
-            markedRoot != null -> markedRoot
+            markedRoot != null -> markedRoot // no reply marker = direct reply to root
             else -> eTags.lastOrNull()?.getOrNull(1)
         }
 
-        if (directParent != null) {
+        if (rootId != null) {
+            val counts = snapshot[rootId] ?: NoteCounts()
+            snapshot[rootId] = counts.copy(replyCount = counts.replyCount + 1)
+            changedReplyNoteIds.add(rootId)
+        }
+        // Also increment the direct parent if it's a different note than root
+        if (directParent != null && directParent != rootId) {
             val counts = snapshot[directParent] ?: NoteCounts()
             snapshot[directParent] = counts.copy(replyCount = counts.replyCount + 1)
             changedReplyNoteIds.add(directParent)

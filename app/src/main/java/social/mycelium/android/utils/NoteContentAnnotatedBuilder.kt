@@ -1,5 +1,6 @@
 package social.mycelium.android.utils
 
+import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -43,6 +44,22 @@ private const val SEG_NADDR = 4
 private const val SEG_NPROFILE = 5
 private const val SEG_HASHTAG = 6
 private const val SEG_RELAY = 7
+private const val SEG_CUSTOM_EMOJI = 8
+private const val SEG_EMOJI_PACK = 9
+
+// NIP-30 custom emoji pattern: :shortcode: where shortcode is alphanumeric + underscore/hyphen
+private val customEmojiPattern = Regex(":(\\w[\\w-]*):", RegexOption.IGNORE_CASE)
+
+/** Extract emoji shortcode→URL map from raw event tags (NIP-30: ["emoji", "shortcode", "url"]). */
+fun extractEmojiUrls(tags: List<List<String>>): Map<String, String> {
+    val map = mutableMapOf<String, String>()
+    for (tag in tags) {
+        if (tag.size >= 3 && tag[0] == "emoji") {
+            map[":${tag[1]}:"] = tag[2]
+        }
+    }
+    return map
+}
 
 // Hashtag pattern: # followed by word characters (letters, digits, underscore), at least 1 char
 private val hashtagPattern = Regex("(?<=\\s|^)#(\\w+)", RegexOption.IGNORE_CASE)
@@ -58,7 +75,8 @@ fun buildNoteContentAnnotatedString(
     mediaUrls: Set<String>,
     linkStyle: SpanStyle,
     profileCache: ProfileMetadataCache,
-    range: IntRange? = null
+    range: IntRange? = null,
+    emojiUrls: Map<String, String> = emptyMap()
 ): AnnotatedString {
     val segments = mutableListOf<Segment>()
     val contentUrls = UrlDetector.findUrls(content)
@@ -127,7 +145,14 @@ fun buildNoteContentAnnotatedString(
         try {
             val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@forEach
             val naddr = parsed.entity as? NAddress ?: return@forEach
-            // kind 34550 = NIP-72 community; use generic label for others
+            // kind 30030 = NIP-30 emoji pack; kind 34550 = NIP-72 community
+            if (naddr.kind == 30030) {
+                val author = naddr.author ?: ""
+                val dTag = naddr.dTag
+                val relays = naddr.relays ?: emptyList()
+                segments.add(Segment(match.range.first, match.range.last + 1, SEG_EMOJI_PACK, Triple(author, dTag, relays)))
+                return@forEach
+            }
             val label = if (naddr.kind == 34550) "Community" else "Addressable event"
             val nostrUri = if (match.value.startsWith("nostr:", ignoreCase = true)) match.value else "nostr:${match.value}"
             val aTag = "${naddr.kind ?: 0}:${naddr.author ?: ""}:${naddr.dTag}"
@@ -158,6 +183,17 @@ fun buildNoteContentAnnotatedString(
         segments.add(Segment(match.range.first, match.range.first + relayUrl.length, SEG_RELAY, relayUrl))
     }
 
+    // NIP-30 custom emoji :shortcode: — only if event has emoji tags
+    if (emojiUrls.isNotEmpty()) {
+        customEmojiPattern.findAll(content).forEach { match ->
+            val shortcode = ":${match.groupValues[1]}:"
+            val url = emojiUrls[shortcode]
+            if (url != null) {
+                segments.add(Segment(match.range.first, match.range.last + 1, SEG_CUSTOM_EMOJI, shortcode to url))
+            }
+        }
+    }
+
     // Deduplicate overlapping segments: NIP-19 types take priority over generic URLs
     val nip19Types = setOf(SEG_NPUB, SEG_NEVENT, SEG_NPROFILE, SEG_NADDR, SEG_EMBEDDED_MEDIA)
     val nip19Ranges = segments.filter { it.type in nip19Types }.map { it.start..it.end }
@@ -169,7 +205,7 @@ fun buildNoteContentAnnotatedString(
     // so that removing the URL text doesn't leave blank lines or dead space.
     // IMPORTANT: preserve at least one \n so text before/after the URL doesn't merge.
     fun expandToConsumeWhitespace(seg: Segment): Segment {
-        if (seg.type != SEG_EMBEDDED_MEDIA && seg.type != SEG_NEVENT) return seg
+        if (seg.type != SEG_EMBEDDED_MEDIA && seg.type != SEG_NEVENT && seg.type != SEG_EMOJI_PACK) return seg
 
         // ── Leading side: eat horizontal whitespace + at most one newline ──
         var newStart = seg.start
@@ -292,6 +328,14 @@ fun buildNoteContentAnnotatedString(
                     withStyle(linkStyle) { append(relayUrl) }
                     pop()
                 }
+                SEG_CUSTOM_EMOJI -> {
+                    val (shortcode, _) = seg.data as Pair<*, *>
+                    // Use inline content placeholder — the composable will supply the actual image
+                    appendInlineContent(shortcode as String, "[$shortcode]")
+                }
+                SEG_EMOJI_PACK -> {
+                    // Hide naddr text; emoji pack block is rendered separately
+                }
             }
             pos = seg.end
         }
@@ -299,9 +343,40 @@ fun buildNoteContentAnnotatedString(
     }
 }
 
+/**
+ * Singleton LRU cache for parsed content blocks.
+ * Prevents layout shifts when LazyColumn recycles items — on re-entry the cached
+ * blocks are used as `initialValue` in `produceState` so content renders instantly.
+ */
+object ContentBlockCache {
+    private const val MAX_ENTRIES = 300
+    private val map = object : LinkedHashMap<String, List<NoteContentBlock>>(MAX_ENTRIES + 16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<NoteContentBlock>>?) =
+            size > MAX_ENTRIES
+    }
+
+    /** Build a cache key from the content string and media URLs. */
+    fun key(content: String, mediaUrls: Set<String>, consumedUrls: Set<String> = emptySet(), mentionVersion: Int = 0): String {
+        // Identity is content + which URLs are media + which are consumed + mention resolution version
+        return if (mediaUrls.isEmpty() && consumedUrls.isEmpty()) {
+            "$mentionVersion:$content"
+        } else {
+            "$mentionVersion:$content\u0000${mediaUrls.sorted().joinToString(",")}\u0000${consumedUrls.sorted().joinToString(",")}"
+        }
+    }
+
+    @Synchronized
+    fun get(key: String): List<NoteContentBlock>? = map[key]
+
+    @Synchronized
+    fun put(key: String, blocks: List<NoteContentBlock>) {
+        map[key] = blocks
+    }
+}
+
 /** Item when rendering content with HTTP metadata directly beneath each URL. */
 sealed class NoteContentBlock {
-    data class Content(val annotated: AnnotatedString) : NoteContentBlock()
+    data class Content(val annotated: AnnotatedString, val emojiUrls: Map<String, String> = emptyMap()) : NoteContentBlock()
     data class Preview(val previewInfo: UrlPreviewInfo) : NoteContentBlock()
     /** A group of consecutive media URLs (images/videos) to render as an inline album carousel. */
     data class MediaGroup(val urls: List<String>) : NoteContentBlock()
@@ -309,6 +384,8 @@ sealed class NoteContentBlock {
     data class QuotedNote(val eventId: String) : NoteContentBlock()
     /** An inline NIP-53 live event reference (nevent1 with kind=30311). */
     data class LiveEventReference(val eventId: String, val author: String?, val relays: List<String>) : NoteContentBlock()
+    /** An inline NIP-30 emoji pack reference (naddr with kind=30030). */
+    data class EmojiPack(val author: String, val dTag: String, val relayHints: List<String>) : NoteContentBlock()
 }
 
 /**
@@ -324,7 +401,8 @@ fun buildNoteContentWithInlinePreviews(
     urlPreviews: List<UrlPreviewInfo>,
     linkStyle: SpanStyle,
     profileCache: ProfileMetadataCache,
-    consumedUrls: Set<String> = emptySet()
+    consumedUrls: Set<String> = emptySet(),
+    emojiUrls: Map<String, String> = emptyMap()
 ): List<NoteContentBlock> {
     @Suppress("NAME_SHADOWING") val content = LinkSanitizer.cleanText(content)
     // Locate every URL with its character position
@@ -332,7 +410,7 @@ fun buildNoteContentWithInlinePreviews(
     val previewByUrl = urlPreviews.associateBy { it.url }
 
     // Build an ordered list of "markers" – each is either a media URL or a link-preview URL at a position
-    data class Marker(val start: Int, val end: Int, val url: String, val isMedia: Boolean, val preview: UrlPreviewInfo?, val quotedEventId: String? = null, val liveEventAuthor: String? = null, val liveEventRelays: List<String>? = null)
+    data class Marker(val start: Int, val end: Int, val url: String, val isMedia: Boolean, val preview: UrlPreviewInfo?, val quotedEventId: String? = null, val liveEventAuthor: String? = null, val liveEventRelays: List<String>? = null, val emojiPackAuthor: String? = null, val emojiPackDTag: String? = null, val emojiPackRelays: List<String>? = null)
     // consumedUrls are hidden from text (like media) but not rendered as media groups
     val allHiddenUrls = mediaUrls + consumedUrls
 
@@ -361,24 +439,37 @@ fun buildNoteContentWithInlinePreviews(
         } catch (_: Exception) { null }
     }.toList()
 
+    // Detect nostr:naddr1... references to kind-30030 emoji packs
+    val emojiPackMarkers = naddrPattern.findAll(content).mapNotNull { match ->
+        val fullUri = if (match.value.startsWith("nostr:", ignoreCase = true)) match.value else "nostr:${match.value}"
+        try {
+            val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@mapNotNull null
+            val naddr = parsed.entity as? NAddress ?: return@mapNotNull null
+            if (naddr.kind != 30030) return@mapNotNull null
+            Marker(match.range.first, match.range.last + 1, match.value, false, null,
+                emojiPackAuthor = naddr.author ?: "", emojiPackDTag = naddr.dTag,
+                emojiPackRelays = naddr.relays)
+        } catch (_: Exception) { null }
+    }.toList()
+
     val urlMarkers = urlPositions.map { (range, url) ->
         val isMed = url in mediaUrls
         val isConsumed = url in consumedUrls
         Marker(range.first, range.last + 1, url, isMed || isConsumed, if (!isMed && !isConsumed) previewByUrl[url] else null)
     }
 
-    // Merge and sort all markers by position; quote markers take priority over URL markers at same position
-    val quoteRanges = quoteMarkers.map { it.start..it.end }.toSet()
-    val filteredUrlMarkers = urlMarkers.filter { m -> quoteRanges.none { qr -> m.start in qr || m.end - 1 in qr } }
-    val markers = (filteredUrlMarkers + quoteMarkers).sortedBy { it.start }
+    // Merge and sort all markers by position; quote/emoji-pack markers take priority over URL markers at same position
+    val specialRanges = (quoteMarkers + emojiPackMarkers).map { it.start..it.end }.toSet()
+    val filteredUrlMarkers = urlMarkers.filter { m -> specialRanges.none { qr -> m.start in qr || m.end - 1 in qr } }
+    val markers = (filteredUrlMarkers + quoteMarkers + emojiPackMarkers).sortedBy { it.start }
 
-    // Also hide quote URIs from text rendering
-    val quoteUris = quoteMarkers.map { it.url }.toSet()
-    val allHiddenUrlsWithQuotes = allHiddenUrls + quoteUris
+    // Also hide quote/emoji-pack URIs from text rendering
+    val hiddenUris = (quoteMarkers + emojiPackMarkers).map { it.url }.toSet()
+    val allHiddenUrlsWithQuotes = allHiddenUrls + hiddenUris
 
     if (markers.isEmpty()) {
-        val full = buildNoteContentAnnotatedString(content, allHiddenUrlsWithQuotes, linkStyle, profileCache, null)
-        return if (full.isNotEmpty()) listOf(NoteContentBlock.Content(full)) else emptyList()
+        val full = buildNoteContentAnnotatedString(content, allHiddenUrlsWithQuotes, linkStyle, profileCache, null, emojiUrls)
+        return if (full.isNotEmpty()) listOf(NoteContentBlock.Content(full, emojiUrls)) else emptyList()
     }
 
     // Group consecutive media markers (only whitespace/newlines between them) into MediaGroups
@@ -389,15 +480,21 @@ fun buildNoteContentWithInlinePreviews(
         if (from >= to) return
         val chunk = buildNoteContentAnnotatedString(
             content, allHiddenUrlsWithQuotes, linkStyle, profileCache,
-            IntRange(from, to - 1)
+            IntRange(from, to - 1), emojiUrls
         )
-        if (chunk.isNotEmpty()) blocks.add(NoteContentBlock.Content(chunk))
+        if (chunk.isNotEmpty()) blocks.add(NoteContentBlock.Content(chunk, emojiUrls))
     }
 
     var i = 0
     while (i < markers.size) {
         val m = markers[i]
-        if (m.quotedEventId != null) {
+        if (m.emojiPackAuthor != null && m.emojiPackDTag != null) {
+            // Inline emoji pack reference – emit text before it, then the pack block
+            emitTextBlock(cursor, m.start)
+            blocks.add(NoteContentBlock.EmojiPack(m.emojiPackAuthor, m.emojiPackDTag, m.emojiPackRelays ?: emptyList()))
+            cursor = m.end
+            i++
+        } else if (m.quotedEventId != null) {
             // Inline quoted note or live event reference – emit text before it, then the block
             emitTextBlock(cursor, m.start)
             if (m.liveEventRelays != null) {

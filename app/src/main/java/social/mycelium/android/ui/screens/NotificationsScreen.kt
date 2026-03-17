@@ -924,7 +924,8 @@ private fun NotificationReplyContent(
             mediaUrls = mediaUrlSet,
             urlPreviews = replyNote.urlPreviews,
             linkStyle = linkStyle,
-            profileCache = profileCache
+            profileCache = profileCache,
+            emojiUrls = social.mycelium.android.utils.extractEmojiUrls(replyNote.tags)
         )
     }
 
@@ -955,6 +956,7 @@ private fun NotificationReplyContent(
                                 ),
                                 maxLines = 12,
                                 modifier = Modifier,
+                                emojiUrls = block.emojiUrls,
                                 onClick = { offset ->
                                     val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                     val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
@@ -1039,6 +1041,13 @@ private fun NotificationReplyContent(
                         )
                     }
                 }
+                is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
+                    social.mycelium.android.ui.components.EmojiPackGrid(
+                        author = block.author,
+                        dTag = block.dTag,
+                        relayHints = block.relayHints
+                    )
+                }
                 is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
                     Row(
                         modifier = Modifier.padding(vertical = 2.dp),
@@ -1100,7 +1109,8 @@ private fun NotificationTargetPreview(
             mediaUrls = targetMediaSet,
             urlPreviews = target.urlPreviews,
             linkStyle = linkStyle,
-            profileCache = profileCache
+            profileCache = profileCache,
+            emojiUrls = social.mycelium.android.utils.extractEmojiUrls(target.tags)
         )
     }
 
@@ -1172,6 +1182,7 @@ private fun NotificationTargetPreview(
                                             lineHeight = 17.sp
                                         ),
                                         maxLines = 4,
+                                        emojiUrls = block.emojiUrls,
                                         onClick = { offset ->
                                             val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                             val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
@@ -1243,6 +1254,13 @@ private fun NotificationTargetPreview(
                                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
                                 )
                             }
+                        }
+                        is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
+                            social.mycelium.android.ui.components.EmojiPackGrid(
+                                author = block.author,
+                                dTag = block.dTag,
+                                relayHints = block.relayHints
+                            )
                         }
                         is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
                             Text(

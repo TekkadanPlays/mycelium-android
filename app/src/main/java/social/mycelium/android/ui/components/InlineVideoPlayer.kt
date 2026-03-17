@@ -171,6 +171,9 @@ private fun FeedVideoPlayer(
     val isPipActive = currentPipState?.videoUrl == url || currentPipState?.instanceKey == instanceKey || PipStreamManager.reservedVideoUrl == url
     LaunchedEffect(url, isPipActive) {
         if (player == null && !isPipActive) {
+            // Defer player creation so it doesn't block the scroll frame.
+            // The user sees a brief black placeholder, then the video appears.
+            delay(200)
             val p = SharedPlayerPool.acquire(context, instanceKey, url) ?: return@LaunchedEffect
             // Only seek if the player is far from the cached position (avoids jump on return)
             val cached = VideoPositionCache.get(url)

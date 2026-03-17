@@ -76,6 +76,13 @@ class FeedStateViewModel : ViewModel() {
     }
 
     /**
+     * Set home feed to filter by all outbox relays.
+     */
+    fun setHomeSelectedOutbox() {
+        _homeFeedState.update { it.copy(isGlobal = false, selectedCategoryId = "outbox", selectedCategoryName = "Outbox", selectedRelayUrl = null, selectedRelayName = null) }
+    }
+
+    /**
      * Set or clear the Following filter for topics feed (same idea as home).
      */
     fun setTopicsFollowingFilter(enabled: Boolean) {
@@ -108,6 +115,13 @@ class FeedStateViewModel : ViewModel() {
      */
     fun setTopicsSelectedRelay(relayUrl: String?, relayName: String?) {
         _topicsFeedState.update { it.copy(isGlobal = false, selectedCategoryId = null, selectedCategoryName = null, selectedRelayUrl = relayUrl, selectedRelayName = relayName) }
+    }
+
+    /**
+     * Set topics feed to filter by all outbox relays.
+     */
+    fun setTopicsSelectedOutbox() {
+        _topicsFeedState.update { it.copy(isGlobal = false, selectedCategoryId = "outbox", selectedCategoryName = "Outbox", selectedRelayUrl = null, selectedRelayName = null) }
     }
 
     /**

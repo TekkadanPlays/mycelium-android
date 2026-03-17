@@ -1,10 +1,14 @@
 package social.mycelium.android.ui.components
 
 import android.content.Context
+import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import social.mycelium.android.utils.MediaAspectRatioCache
 import java.util.concurrent.ConcurrentHashMap
 
@@ -25,6 +29,16 @@ object SharedPlayerPool {
 
     /** Max concurrent ExoPlayer instances to prevent exhausting codec resources. */
     private const val MAX_POOL_SIZE = 3
+
+    // Feed video playback constraints — cap at 720p/2Mbps to save CPU/battery
+    private const val MAX_VIDEO_WIDTH = 1280
+    private const val MAX_VIDEO_HEIGHT = 720
+    private const val MAX_VIDEO_BITRATE = 2_000_000
+    // Buffer durations (ms) — optimized for feed scroll behavior
+    private const val MIN_BUFFER_MS = 10_000
+    private const val MAX_BUFFER_MS = 30_000
+    private const val BUFFER_FOR_PLAYBACK_MS = 2_500
+    private const val BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS = 5_000
 
     private data class Entry(
         val player: ExoPlayer,
@@ -71,7 +85,31 @@ object SharedPlayerPool {
             }
         }
 
-        val player = ExoPlayer.Builder(context.applicationContext).build().apply {
+        @OptIn(UnstableApi::class)
+        val appContext = context.applicationContext
+        val trackSelector = DefaultTrackSelector(appContext).apply {
+            parameters = buildUponParameters()
+                .setMaxVideoSize(MAX_VIDEO_WIDTH, MAX_VIDEO_HEIGHT)
+                .setMaxVideoBitrate(MAX_VIDEO_BITRATE)
+                .setForceLowestBitrate(false)
+                .setForceHighestSupportedBitrate(false)
+                .build()
+        }
+        val loadControl = DefaultLoadControl.Builder()
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .setBufferDurationsMs(
+                MIN_BUFFER_MS,
+                MAX_BUFFER_MS,
+                BUFFER_FOR_PLAYBACK_MS,
+                BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+            )
+            .build()
+        val mediaSourceFactory = VideoDiskCache.createCachedMediaSourceFactory(appContext)
+        val player = ExoPlayer.Builder(appContext)
+            .setTrackSelector(trackSelector)
+            .setLoadControl(loadControl)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build().apply {
             // Cache video aspect ratio on size change (like Amethyst's AspectRatioCacher)
             addListener(object : Player.Listener {
                 override fun onVideoSizeChanged(videoSize: VideoSize) {

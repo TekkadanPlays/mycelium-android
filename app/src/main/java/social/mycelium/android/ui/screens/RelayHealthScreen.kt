@@ -26,7 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -70,8 +70,10 @@ import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.relay.RelayHealthInfo
 import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.relay.RelayHealthTracker
+import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayType
 import social.mycelium.android.repository.ContactListRepository
+import social.mycelium.android.repository.RelayStorageManager
 import social.mycelium.android.repository.Nip65RelayListRepository
 import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
 import social.mycelium.android.repository.ProfileMetadataCache
@@ -108,7 +110,6 @@ fun RelayHealthScreen(
     onOpenRelayDiscovery: () -> Unit = {},
     onOpenRelayLog: (String) -> Unit = {},
     onOpenRelayUsers: (String) -> Unit = {},
-    onOpenNeedsAttention: () -> Unit = {},
     onOpenPublishResults: () -> Unit = {},
     onProfileClick: (String) -> Unit = {},
     modifier: Modifier = Modifier
@@ -200,9 +201,37 @@ fun RelayHealthScreen(
         }
     }
 
+    // ── Load relay manager categories from active profile ──
+    val context = LocalContext.current
+    val storageManager = remember { RelayStorageManager(context) }
+    val currentPubkey = Nip65RelayListRepository.currentPubkey ?: ""
+    val managedCategories = remember(currentPubkey) {
+        if (currentPubkey.isBlank()) emptyList()
+        else {
+            val profiles = storageManager.loadProfiles(currentPubkey)
+            val active = profiles.firstOrNull { it.isActive } ?: profiles.firstOrNull()
+            active?.categories?.filter { it.relays.isNotEmpty() } ?: emptyList()
+        }
+    }
+    // Build set of all managed relay URLs (normalized) for quick lookup
+    val managedUrlSet = remember(managedCategories) {
+        managedCategories.flatMap { cat -> cat.relays.map { RelayStorageManager.normalizeRelayUrl(it.url) } }.toSet()
+    }
+    // Build category → directory entries map
+    val categoryRelayMap = remember(managedCategories, directory) {
+        managedCategories.associate { cat ->
+            val catUrls = cat.relays.map { RelayStorageManager.normalizeRelayUrl(it.url) }.toSet()
+            cat to directory.filter { entry ->
+                val norm = entry.url.trim().removeSuffix("/").lowercase()
+                norm in catUrls || entry.url in catUrls
+            }.sortedByDescending { it.totalUsers }
+        }
+    }
+
     // Categorize into sections
-    val myRelays = remember(directory) {
-        directory.filter { it.isMyOutbox || it.isMyInbox }
+    // My Relays that aren't in any managed category (uncategorized)
+    val myRelaysUncategorized = remember(directory, managedUrlSet) {
+        directory.filter { (it.isMyOutbox || it.isMyInbox) && it.url.trim().removeSuffix("/").lowercase() !in managedUrlSet }
             .sortedByDescending { it.totalUsers }
     }
     val followingOutbox = remember(directory) {
@@ -268,7 +297,6 @@ fun RelayHealthScreen(
     }
 
     // NIP-11 cache
-    val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
 
     Scaffold(
@@ -315,10 +343,11 @@ fun RelayHealthScreen(
                 .padding(paddingValues)
         ) {
             // ── Tab row ──
-            TabRow(
+            ScrollableTabRow(
                 selectedTabIndex = pagerState.currentPage,
                 containerColor = MaterialTheme.colorScheme.surface,
                 contentColor = MaterialTheme.colorScheme.primary,
+                edgePadding = 0.dp,
                 divider = {
                     HorizontalDivider(
                         thickness = 0.5.dp,
@@ -337,11 +366,6 @@ fun RelayHealthScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(
-                                    tabIcons[index],
-                                    contentDescription = null,
-                                    modifier = Modifier.size(14.dp)
-                                )
                                 Text(
                                     title,
                                     style = MaterialTheme.typography.labelMedium,
@@ -349,11 +373,12 @@ fun RelayHealthScreen(
                                     maxLines = 1
                                 )
                                 if (showBadge) {
-                                    Surface(
-                                        shape = CircleShape,
-                                        color = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(6.dp)
-                                    ) {}
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.error)
+                                    )
                                 }
                             }
                         },
@@ -385,7 +410,8 @@ fun RelayHealthScreen(
                         perRelayState = perRelayState
                     )
                     1 -> RelaysTab(
-                        myRelays = myRelays,
+                        categoryRelayMap = categoryRelayMap,
+                        myRelaysUncategorized = myRelaysUncategorized,
                         followingOutbox = followingOutbox,
                         followingInbox = followingInbox,
                         indexerRelays = indexerRelays,
@@ -411,7 +437,6 @@ fun RelayHealthScreen(
                         troubleRelays = troubleRelays,
                         healthMap = healthMap,
                         autoBlockExpiryMap = autoBlockExpiryMap,
-                        onOpenNeedsAttention = onOpenNeedsAttention,
                         onOpenRelayLog = onOpenRelayLog
                     )
                 }
@@ -441,7 +466,7 @@ private fun OverviewTab(
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        contentPadding = PaddingValues(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         // Health score donut + status
@@ -469,7 +494,7 @@ private fun OverviewTab(
             item(key = "connected_summary") {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.surfaceContainerLow
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
@@ -545,7 +570,7 @@ private fun OverviewTab(
             item(key = "failed_summary") {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.15f)
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
@@ -605,7 +630,7 @@ private fun OverviewTab(
 
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.surfaceContainerLow
                 ) {
                     Column(modifier = Modifier.padding(14.dp)) {
@@ -631,14 +656,14 @@ private fun OverviewTab(
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(6.dp)
-                                    .clip(RoundedCornerShape(3.dp))
+                                    .clip(RectangleShape)
                                     .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                             ) {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxHeight()
                                         .fillMaxWidth(animatedUtil)
-                                        .clip(RoundedCornerShape(3.dp))
+                                        .clip(RectangleShape)
                                         .background(barColor)
                                 )
                             }
@@ -660,7 +685,8 @@ private fun OverviewTab(
 
 @Composable
 private fun RelaysTab(
-    myRelays: List<RelayDirectoryEntry>,
+    categoryRelayMap: Map<RelayCategory, List<RelayDirectoryEntry>>,
+    myRelaysUncategorized: List<RelayDirectoryEntry>,
     followingOutbox: List<RelayDirectoryEntry>,
     followingInbox: List<RelayDirectoryEntry>,
     indexerRelays: List<RelayDirectoryEntry>,
@@ -677,7 +703,9 @@ private fun RelaysTab(
     onOpenRelayUsers: (String) -> Unit,
     onProfileClick: (String) -> Unit
 ) {
-    var myRelaysExpanded by remember { mutableStateOf(true) }
+    // Per-category expanded state (managed categories default to expanded)
+    val categoryExpandedState = remember { mutableStateMapOf<String, Boolean>() }
+    var uncategorizedExpanded by remember { mutableStateOf(true) }
     var followingOutboxExpanded by remember { mutableStateOf(true) }
     var followingInboxExpanded by remember { mutableStateOf(false) }
     var indexerExpanded by remember { mutableStateOf(false) }
@@ -713,14 +741,35 @@ private fun RelaysTab(
             }
         }
 
-        // My Relays
-        if (myRelays.isNotEmpty()) {
-            item(key = "section_my") {
-                SectionHeader(title = "My Relays", count = myRelays.size, icon = Icons.Outlined.Person,
-                    expanded = myRelaysExpanded, onToggle = { myRelaysExpanded = !myRelaysExpanded })
+        // ── Managed relay categories (from relay manager) ──
+        categoryRelayMap.forEach { (category, entries) ->
+            if (entries.isNotEmpty()) {
+                val expanded = categoryExpandedState.getOrPut(category.id) { true }
+                item(key = "section_cat_${category.id}") {
+                    SectionHeader(title = category.name, count = entries.size, icon = Icons.Outlined.Folder,
+                        expanded = expanded, onToggle = { categoryExpandedState[category.id] = !expanded })
+                }
+                if (expanded) {
+                    items(entries, key = { "cat_${category.id}_${it.url}" }) { entry ->
+                        RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
+                            slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
+                            profileCache = profileCache, profileRevision = profileRevision,
+                            onRelayClick = { onOpenRelayLog(entry.url) },
+                            onOpenRelayUsers = { onOpenRelayUsers(entry.url) },
+                            onProfileClick = onProfileClick, modifier = Modifier.animateItem())
+                    }
+                }
             }
-            if (myRelaysExpanded) {
-                items(myRelays, key = { "my_${it.url}" }) { entry ->
+        }
+
+        // Uncategorized My Relays (NIP-65 relays not in any managed category)
+        if (myRelaysUncategorized.isNotEmpty()) {
+            item(key = "section_uncategorized") {
+                SectionHeader(title = "My Relays · Other", count = myRelaysUncategorized.size, icon = Icons.Outlined.Person,
+                    expanded = uncategorizedExpanded, onToggle = { uncategorizedExpanded = !uncategorizedExpanded })
+            }
+            if (uncategorizedExpanded) {
+                items(myRelaysUncategorized, key = { "uncat_${it.url}" }) { entry ->
                     RelayDirectoryRow(entry = entry, liveStatus = perRelayState[entry.url],
                         slotSnapshot = slotsByUrl[entry.url.trimEnd('/')], nip11 = nip11,
                         profileCache = profileCache, profileRevision = profileRevision,
@@ -804,14 +853,14 @@ private fun RelaysTab(
         }
 
         // Empty state
-        if (myRelays.isEmpty() && followingOutbox.isEmpty() && followingInbox.isEmpty()
+        if (categoryRelayMap.values.all { it.isEmpty() } && myRelaysUncategorized.isEmpty() && followingOutbox.isEmpty() && followingInbox.isEmpty()
             && indexerRelays.isEmpty() && otherRelays.isEmpty()) {
             item(key = "empty") {
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    Surface(shape = RectangleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         modifier = Modifier.size(72.dp)) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(Icons.Outlined.Public, null, Modifier.size(36.dp),
@@ -849,7 +898,7 @@ private fun DeliveryTab(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        contentPadding = PaddingValues(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Publish results card
@@ -861,7 +910,7 @@ private fun DeliveryTab(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable(onClick = onOpenPublishResults),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RectangleShape,
                     color = if (failedCount > 0)
                         MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
                     else MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f),
@@ -942,7 +991,7 @@ private fun DeliveryTab(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onOpenRelayLog(url) },
-                    shape = RoundedCornerShape(10.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.surfaceContainerLow
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -975,14 +1024,14 @@ private fun DeliveryTab(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(4.dp)
-                                .clip(RoundedCornerShape(2.dp))
+                                .clip(RectangleShape)
                                 .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                         ) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .fillMaxWidth(animatedRate)
-                                    .clip(RoundedCornerShape(2.dp))
+                                    .clip(RectangleShape)
                                     .background(rateColor)
                             )
                         }
@@ -1013,7 +1062,7 @@ private fun DeliveryTab(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    Surface(shape = RectangleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         modifier = Modifier.size(72.dp)) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(Icons.Outlined.Outbox, null, Modifier.size(36.dp),
@@ -1041,12 +1090,11 @@ private fun AttentionTab(
     troubleRelays: List<String>,
     healthMap: Map<String, RelayHealthInfo>,
     autoBlockExpiryMap: Map<String, Long>,
-    onOpenNeedsAttention: () -> Unit,
     onOpenRelayLog: (String) -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+        contentPadding = PaddingValues(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         if (troubleRelays.isEmpty()) {
@@ -1055,7 +1103,7 @@ private fun AttentionTab(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 64.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Surface(shape = CircleShape, color = Color(0xFF4CAF50).copy(alpha = 0.12f),
+                    Surface(shape = RectangleShape, color = Color(0xFF4CAF50).copy(alpha = 0.12f),
                         modifier = Modifier.size(72.dp)) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(Icons.Outlined.CheckCircle, null, Modifier.size(36.dp),
@@ -1074,8 +1122,8 @@ private fun AttentionTab(
         } else {
             item(key = "attention_summary") {
                 Surface(
-                    modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenNeedsAttention),
-                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
                 ) {
                     Row(
@@ -1085,19 +1133,12 @@ private fun AttentionTab(
                         Icon(Icons.Outlined.Warning, null, Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.error)
                         Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                "${troubleRelays.size} relay${if (troubleRelays.size != 1) "s" else ""} need attention",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                            Text("Tap to open full management view",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Icon(Icons.Filled.ChevronRight, null, Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.error.copy(alpha = 0.6f))
+                        Text(
+                            "${troubleRelays.size} relay${if (troubleRelays.size != 1) "s" else ""} need attention",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             }
@@ -1112,7 +1153,7 @@ private fun AttentionTab(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onOpenRelayLog(url) },
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RectangleShape,
                     color = if (isBlocked) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.12f)
                             else MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.12f)
                 ) {
@@ -1134,7 +1175,7 @@ private fun AttentionTab(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Surface(
-                                shape = RoundedCornerShape(6.dp),
+                                shape = RectangleShape,
                                 color = if (isBlocked) MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
                                         else MaterialTheme.colorScheme.tertiary.copy(alpha = 0.12f)
                             ) {
@@ -1186,7 +1227,7 @@ private fun AttentionTab(
                             if (isBlocked) {
                                 Surface(
                                     onClick = { RelayHealthTracker.unblockRelay(url) },
-                                    shape = RoundedCornerShape(8.dp),
+                                    shape = RectangleShape,
                                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
                                 ) {
                                     Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -1203,7 +1244,7 @@ private fun AttentionTab(
                             if (isFlagged && !isBlocked) {
                                 Surface(
                                     onClick = { RelayHealthTracker.unflagRelay(url) },
-                                    shape = RoundedCornerShape(8.dp),
+                                    shape = RectangleShape,
                                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
                                 ) {
                                     Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -1218,7 +1259,7 @@ private fun AttentionTab(
                                 }
                                 Surface(
                                     onClick = { RelayHealthTracker.blockRelay(url) },
-                                    shape = RoundedCornerShape(8.dp),
+                                    shape = RectangleShape,
                                     color = MaterialTheme.colorScheme.error.copy(alpha = 0.08f)
                                 ) {
                                     Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -1234,7 +1275,7 @@ private fun AttentionTab(
                             }
                             Surface(
                                 onClick = { RelayHealthTracker.resetRelay(url) },
-                                shape = RoundedCornerShape(8.dp),
+                                shape = RectangleShape,
                                 color = MaterialTheme.colorScheme.surfaceContainerHighest
                             ) {
                                 Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
@@ -1263,7 +1304,7 @@ private fun OutboxDeliveryCard(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 1.dp
     ) {
@@ -1328,14 +1369,14 @@ private fun OutboxDeliveryCard(
                         modifier = Modifier
                             .width(32.dp)
                             .height(3.dp)
-                            .clip(RoundedCornerShape(1.5.dp))
+                            .clip(RectangleShape)
                             .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
                     ) {
                         Box(
                             modifier = Modifier
                                 .fillMaxHeight()
                                 .fillMaxWidth(rate.toFloat().coerceIn(0f, 1f))
-                                .clip(RoundedCornerShape(1.5.dp))
+                                .clip(RectangleShape)
                                 .background(rateColor)
                         )
                     }
@@ -1592,7 +1633,7 @@ private fun NetworkOverviewCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(16.dp),
+        shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 1.dp
     ) {
@@ -1777,7 +1818,7 @@ private fun SlotUtilizationBar(snapshot: RelaySlotSnapshot) {
             modifier = Modifier
                 .weight(1f)
                 .height(4.dp)
-                .clip(RoundedCornerShape(2.dp))
+                .clip(RectangleShape)
                 .background(trackColor)
         ) {
             // EOSE'd portion (lighter)
@@ -1786,7 +1827,7 @@ private fun SlotUtilizationBar(snapshot: RelaySlotSnapshot) {
                     Modifier
                         .fillMaxHeight()
                         .fillMaxWidth(eoseFraction)
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(RectangleShape)
                         .background(eoseColor)
                 )
             }
@@ -1796,7 +1837,7 @@ private fun SlotUtilizationBar(snapshot: RelaySlotSnapshot) {
                     Modifier
                         .fillMaxHeight()
                         .fillMaxWidth(activeFraction)
-                        .clip(RoundedCornerShape(2.dp))
+                        .clip(RectangleShape)
                         .background(
                             Brush.horizontalGradient(
                                 0f to eoseColor,
@@ -2069,7 +2110,7 @@ private fun MetricLabel(
 @Composable
 private fun StatusBadge(text: String, color: Color) {
     Surface(
-        shape = RoundedCornerShape(6.dp),
+        shape = RectangleShape,
         color = color.copy(alpha = 0.12f)
     ) {
         Text(

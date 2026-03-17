@@ -18,8 +18,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import social.mycelium.android.data.DefaultMediaServers
 import social.mycelium.android.data.MediaServer
 import social.mycelium.android.data.MediaServerType
@@ -27,6 +29,8 @@ import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ComposeToolbar
+import social.mycelium.android.ui.components.MentionSuggestionList
+import social.mycelium.android.ui.components.MentionSuggestionState
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.utils.UnicodeStylizer
 import social.mycelium.android.viewmodel.AccountStateViewModel
@@ -53,7 +57,13 @@ fun ComposeNoteScreen(
     val context = LocalContext.current
     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
     val loadedDraft = remember(draftId) { draftId?.let { social.mycelium.android.repository.DraftsRepository.getDraft(it) } }
-    var content by remember { mutableStateOf(loadedDraft?.content ?: initialContent) }
+    val initialText = loadedDraft?.content ?: initialContent
+    var textFieldValue by remember { mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length))) }
+    val content by remember { derivedStateOf { textFieldValue.text } }
+    val coroutineScope = rememberCoroutineScope()
+    val myPubkeyHex = currentAccount?.toHexKey()
+    val mentionState = remember(myPubkeyHex) { MentionSuggestionState(coroutineScope, myPubkeyHex) }
+    DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
     val onBackWithDraft = {
         if (content.isNotBlank() && content != initialContent) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
@@ -91,7 +101,8 @@ fun ComposeNoteScreen(
         accountStateViewModel.uploadMedia(uri, server.baseUrl, mimeType) { url, error ->
             isUploading = false
             if (url != null) {
-                content = if (content.isBlank()) url else "$content\n$url"
+                val newText = if (content.isBlank()) url else "$content\n$url"
+                textFieldValue = TextFieldValue(newText, TextRange(newText.length))
             } else {
                 Toast.makeText(context, error ?: "Upload failed", Toast.LENGTH_SHORT).show()
             }
@@ -104,7 +115,6 @@ fun ComposeNoteScreen(
     }
 
     // Build relay sections for the selection screen
-    val myPubkeyHex = currentAccount?.toHexKey()
     val myAuthor = remember(myPubkeyHex) {
         myPubkeyHex?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
     }
@@ -163,8 +173,11 @@ fun ComposeNoteScreen(
                 .padding(horizontal = 16.dp)
         ) {
             social.mycelium.android.ui.components.ModernTextField(
-                value = content,
-                onValueChange = { content = it },
+                value = textFieldValue,
+                onValueChange = { newValue ->
+                    textFieldValue = newValue
+                    mentionState.onTextChanged(newValue.text, newValue.selection.end)
+                },
                 placeholder = "What's on your mind?",
                 modifier = Modifier
                     .fillMaxWidth()
@@ -176,6 +189,14 @@ fun ComposeNoteScreen(
                 ),
                 visualTransformation = if (markdownEnabled) markdownTransformation
                     else androidx.compose.ui.text.input.VisualTransformation.None,
+            )
+            // @mention autocomplete suggestions
+            MentionSuggestionList(
+                mentionState = mentionState,
+                currentText = content,
+                onTextUpdated = { newText, newCursor ->
+                    textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+                }
             )
             // Upload progress indicator
             AnimatedVisibility(visible = isUploading) {
@@ -217,7 +238,7 @@ fun ComposeNoteScreen(
                     if (!enabled) zapRaiserAmount = null
                 },
                 onApplyUnicodeStyle = { style ->
-                    content = UnicodeStylizer.stylize(content, style)
+                    textFieldValue = TextFieldValue(UnicodeStylizer.stylize(content, style))
                 },
                 onScheduleClick = {
                     // TODO: Show date/time picker → sign event → store in draft → schedule alarm

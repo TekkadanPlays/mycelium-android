@@ -20,6 +20,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -348,6 +349,7 @@ fun RelayManagementScreen(
                     // Primary FAB
                     FloatingActionButton(
                         onClick = { fabExpanded = !fabExpanded },
+                        shape = CircleShape,
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary
                     ) {
@@ -651,7 +653,7 @@ fun RelayManagementScreen(
         AlertDialog(
             onDismissRequest = { showEditCategoryDialog = false; editCategoryTarget = null },
             containerColor = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(16.dp),
+            shape = RectangleShape,
             icon = { Icon(Icons.Outlined.Folder, null, Modifier.size(28.dp),
                 tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Edit Category", fontWeight = FontWeight.Bold) },
@@ -666,7 +668,7 @@ fun RelayManagementScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     ) {
                         Row(
@@ -703,7 +705,7 @@ fun RelayManagementScreen(
                         }
                     }
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
                         modifier = Modifier.fillMaxWidth().clickable {
                             showEditCategoryDialog = false
@@ -785,7 +787,7 @@ fun RelayManagementScreen(
         AlertDialog(
             onDismissRequest = { showEditProfileDialog = false; editProfileTarget = null },
             containerColor = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(16.dp),
+            shape = RectangleShape,
             icon = { Icon(Icons.Outlined.Edit, null, Modifier.size(28.dp),
                 tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Edit Profile", fontWeight = FontWeight.Bold) },
@@ -800,7 +802,7 @@ fun RelayManagementScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     ) {
                         Row(
@@ -827,7 +829,7 @@ fun RelayManagementScreen(
                         }
                     }
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
                         modifier = Modifier.fillMaxWidth().clickable {
                             showEditProfileDialog = false
@@ -931,7 +933,7 @@ fun RelayManagementScreen(
         AlertDialog(
             onDismissRequest = { cancelCreate() },
             containerColor = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(16.dp),
+            shape = RectangleShape,
             icon = { Icon(Icons.Outlined.AddCircleOutline, null, Modifier.size(28.dp),
                 tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Name Your Profile", fontWeight = FontWeight.Bold) },
@@ -966,7 +968,7 @@ fun RelayManagementScreen(
         AlertDialog(
             onDismissRequest = { showEditRelayDialog = false; editRelayTarget = null },
             containerColor = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(16.dp),
+            shape = RectangleShape,
             icon = { Icon(Icons.Outlined.Router, null, Modifier.size(28.dp),
                 tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Edit Relay", fontWeight = FontWeight.Bold) },
@@ -982,7 +984,7 @@ fun RelayManagementScreen(
                         leadingIcon = { Icon(Icons.Outlined.Link, null) }
                     )
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                     ) {
                         Row(
@@ -1008,7 +1010,7 @@ fun RelayManagementScreen(
                         }
                     }
                     Surface(
-                        shape = RoundedCornerShape(12.dp),
+                        shape = RectangleShape,
                         color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
                         modifier = Modifier.fillMaxWidth().clickable {
                             showEditRelayDialog = false
@@ -1131,7 +1133,7 @@ fun RelayManagementScreen(
         AlertDialog(
             onDismissRequest = { showDesignationPicker = false; pendingRelayUrl = "" },
             containerColor = MaterialTheme.colorScheme.surface,
-            shape = RoundedCornerShape(16.dp),
+            shape = RectangleShape,
             icon = { Icon(Icons.Outlined.SwapVert, null, Modifier.size(28.dp),
                 tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Relay Designation", fontWeight = FontWeight.Bold) },
@@ -1208,6 +1210,7 @@ private fun FabMenuItem(label: String, icon: ImageVector, onClick: () -> Unit) {
         }
         SmallFloatingActionButton(
             onClick = onClick,
+            shape = CircleShape,
             containerColor = MaterialTheme.colorScheme.secondaryContainer,
             contentColor = MaterialTheme.colorScheme.onSecondaryContainer
         ) {
@@ -1676,7 +1679,7 @@ private fun CategoriesTab(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.primaryContainer,
                     modifier = Modifier.weight(1f)
                 ) {
@@ -1688,7 +1691,7 @@ private fun CategoriesTab(
                     }
                 }
                 Surface(
-                    shape = RoundedCornerShape(8.dp),
+                    shape = RectangleShape,
                     color = MaterialTheme.colorScheme.secondaryContainer,
                     modifier = Modifier.weight(1f)
                 ) {
@@ -1835,7 +1838,7 @@ private fun AddRelayRow(
                 tint = MaterialTheme.colorScheme.outline)
             Spacer(Modifier.width(12.dp))
             Surface(
-                shape = RoundedCornerShape(8.dp),
+                shape = RectangleShape,
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)),
                 modifier = Modifier.weight(1f)
@@ -2002,7 +2005,7 @@ private fun FeedCategorySection(
 private fun Nip65SourceBanner(source: String, createdAt: Long?) {
     Card(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-        shape = RoundedCornerShape(10.dp)) {
+        shape = RectangleShape) {
         Row(verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
             Icon(Icons.Outlined.Info, null, Modifier.size(14.dp),
@@ -2034,7 +2037,7 @@ private fun ThemedConfirmDialog(
 ) {
     AlertDialog(onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(16.dp),
+        shape = RectangleShape,
         icon = { Icon(icon, null, Modifier.size(28.dp),
             tint = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary) },
         title = { Text(title, fontWeight = FontWeight.Bold) },
@@ -2056,7 +2059,7 @@ private fun PublishNip65Dialog(
 ) {
     AlertDialog(onDismissRequest = onDismiss,
         containerColor = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(16.dp),
+        shape = RectangleShape,
         icon = { Icon(Icons.Outlined.Publish, null, Modifier.size(28.dp),
             tint = MaterialTheme.colorScheme.primary) },
         title = { Text("Publish Relay List", fontWeight = FontWeight.Bold) },
@@ -2242,7 +2245,7 @@ private fun DesignationOption(
     onClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RectangleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
     ) {
@@ -2270,7 +2273,7 @@ private fun PublishRelayListButton(
     onClick: () -> Unit
 ) {
     Surface(
-        shape = RoundedCornerShape(12.dp),
+        shape = RectangleShape,
         color = MaterialTheme.colorScheme.primaryContainer,
         modifier = Modifier
             .fillMaxWidth()

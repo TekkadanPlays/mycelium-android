@@ -50,11 +50,14 @@ import social.mycelium.android.utils.normalizeRelayUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-/** Relay URLs for display (relayUrls if set, else single relayUrl). Normalizes trailing slashes for dedup. */
+/** Relay URLs for display (relayUrls if set, else single relayUrl). Returns normalized URLs for consistent cache keys. */
 fun Note.displayRelayUrls(): List<String> {
     val raw = relayUrls.ifEmpty { listOfNotNull(relayUrl) }
     val seen = mutableSetOf<String>()
-    return raw.filter { url -> seen.add(normalizeRelayUrl(url)) }
+    return raw.mapNotNull { url ->
+        val normalized = normalizeRelayUrl(url)
+        if (seen.add(normalized)) normalized else null
+    }
 }
 
 /** Max orbs shown in the stacked group before showing a "+N" badge. */

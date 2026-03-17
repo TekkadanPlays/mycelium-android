@@ -133,6 +133,12 @@ class RelayManagementViewModel(
 
             _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, blossomServers = blossom, nip96Servers = nip96) }
 
+            // Mark outbox relays as priority for connection (connect first, no jitter/cooldown)
+            val outboxUrls = outbox.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            if (outboxUrls.isNotEmpty()) {
+                RelayConnectionStateMachine.getInstance().setPriorityRelayUrls(outboxUrls)
+            }
+
             // Fetch NIP-11 info in background for all relays (personal + category + profile categories)
             val allCategoryUrls = categories.flatMap { it.relays }.map { it.url }
             val allProfileCategoryUrls = profiles.flatMap { it.categories }.flatMap { it.relays }.map { it.url }
@@ -220,9 +226,15 @@ class RelayManagementViewModel(
         val outboxUrls = state.outboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
         val relayUrls = (subscribedRelayUrls + profileRelayUrls + outboxUrls).distinct()
         if (relayUrls.isEmpty()) return
-        Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays")
+        Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays (${outboxUrls.size} outbox priority)")
+        // Clear NIP-42 auth state for all relays in the new set so re-enabled relays
+        // get a clean AUTH handshake (no stale cooldowns or consumed challenges)
+        val authHandler = RelayConnectionStateMachine.getInstance().nip42AuthHandler
+        relayUrls.forEach { authHandler.clearAuthStateForRelay(it) }
         // Invalidate the idempotency guard so the feed re-subscribes with the new relay set
         social.mycelium.android.repository.NotesRepository.getInstance().invalidateSubscriptionGuard()
+        // Mark outbox relays as priority so they connect first (no jitter, cooldown cleared)
+        RelayConnectionStateMachine.getInstance().setPriorityRelayUrls(outboxUrls.toSet())
         // Preserve the current kind-1 filter (e.g. Following authors) so relay changes
         // don't accidentally replace a Following subscription with a global one.
         val currentFilter = RelayConnectionStateMachine.getInstance().getCurrentKind1Filter()
@@ -453,9 +465,17 @@ class RelayManagementViewModel(
      */
     fun toggleCategorySubscription(categoryId: String) {
         _uiState.update { state ->
-            state.copy(relayCategories = state.relayCategories.map { category ->
+            val updatedCategories = state.relayCategories.map { category ->
                 if (category.id == categoryId) category.copy(isSubscribed = !category.isSubscribed) else category
-            })
+            }
+            // Also update the categories inside each relay profile so that
+            // DashboardScreen (which reads activeProfile.categories) sees the change.
+            val updatedProfiles = state.relayProfiles.map { profile ->
+                profile.copy(categories = profile.categories.map { category ->
+                    if (category.id == categoryId) category.copy(isSubscribed = !category.isSubscribed) else category
+                })
+            }
+            state.copy(relayCategories = updatedCategories, relayProfiles = updatedProfiles)
         }
         saveToStorage()
         refreshActiveSubscription()

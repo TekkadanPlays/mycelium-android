@@ -37,7 +37,9 @@ import com.example.cybin.core.EventTemplate
 import com.example.cybin.nip25.ReactionEvent
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.services.EventPublisher
+import social.mycelium.android.services.Nip86Client
 import social.mycelium.android.services.PublishResult
+import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.utils.ClientTagManager
 import kotlinx.coroutines.flow.filter
@@ -382,6 +384,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // getCurrentSigner() can't work here (it checks _currentAccount which is still null),
         // so resolve directly from AmberSignerManager.
         RelayConnectionStateMachine.getInstance().setNip42Signer(amberSignerManager.getCurrentSigner())
+        updateNip42AllowedRelays(hexPubkey)
 
         // Check if this account already exists
         val existingAccount = _savedAccounts.value.find { it.npub == npub }
@@ -588,6 +591,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 else -> null
             }
             RelayConnectionStateMachine.getInstance().setNip42Signer(nip42Signer)
+            updateNip42AllowedRelays(hexPubkey)
             Log.d("AccountStateViewModel", "NIP-42 signer set: ${nip42Signer?.let { it::class.simpleName } ?: "null"}")
 
             val userProfile = UserProfile(
@@ -976,6 +980,25 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /** Update the NIP-42 auth handler with the user's configured relay URLs.
+     *  Only relays in this set will be authenticated — prevents leaking identity to random relays. */
+    private fun updateNip42AllowedRelays(accountHex: String) {
+        val outbox = relayStorageManager.loadOutboxRelays(accountHex).map { it.url }
+        val inbox = relayStorageManager.loadInboxRelays(accountHex).map { it.url }
+        val indexer = relayStorageManager.loadIndexerRelays(accountHex).map { it.url }
+        val categories = relayStorageManager.loadCategories(accountHex)
+            .flatMap { it.relays }
+            .map { it.url }
+        // Include relays from active relay profiles — this is where most user relays live
+        val profileRelays = relayStorageManager.loadProfiles(accountHex)
+            .filter { it.isActive }
+            .flatMap { it.categories }
+            .flatMap { it.relays }
+            .map { it.url }
+        val all = (outbox + inbox + indexer + categories + profileRelays).toSet()
+        RelayConnectionStateMachine.getInstance().nip42AuthHandler.setAllowedRelayUrls(all)
+    }
+
     /** Outbox relay URLs as a Set<String> (raw URL strings, pre-normalization happens at publish time). */
     fun getOutboxRelayUrlSet(): Set<String> {
         val account = _currentAccount.value ?: return emptySet()
@@ -1070,10 +1093,19 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(content)
         val hashtagRegex = Regex("""(?:^|\s)#(\w+)""")
         val hashtags = hashtagRegex.findAll(content).map { it.groupValues[1] }.toList().distinct()
+        // Extract mentioned pubkeys from nostr:npub1.../nostr:nprofile1... in content
+        val mentionedPubkeys = com.example.cybin.nip19.Nip19Parser.parseAll(content).mapNotNull { entity ->
+            when (entity) {
+                is com.example.cybin.nip19.NPub -> entity.hex
+                is com.example.cybin.nip19.NProfile -> entity.hex
+                else -> null
+            }
+        }.distinct()
 
         viewModelScope.launch {
             when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1, content = content) {
                 // NIP-18/NIP-27: q-tags for quoted events
+                val addedPubkeys = mutableSetOf<String>()
                 for (ref in quotedRefs) {
                     val qTag = mutableListOf("q", ref.eventId)
                     if (ref.relayHints.isNotEmpty()) qTag.add(ref.relayHints.first())
@@ -1081,7 +1113,17 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     if (ref.author != null) qTag.add(ref.author)
                     add(qTag.toTypedArray())
                     // Also add p-tag for the quoted event's author if known
-                    if (ref.author != null) add(arrayOf("p", ref.author))
+                    if (ref.author != null) {
+                        add(arrayOf("p", ref.author))
+                        addedPubkeys.add(ref.author.lowercase())
+                    }
+                }
+                // p-tags for @mentioned users (nostr:npub1.../nostr:nprofile1...)
+                for (pk in mentionedPubkeys) {
+                    if (pk.lowercase() !in addedPubkeys && pk.lowercase() != pubkey?.lowercase()) {
+                        add(arrayOf("p", pk))
+                        addedPubkeys.add(pk.lowercase())
+                    }
                 }
                 // Hashtag t-tags
                 for (tag in hashtags) {
@@ -1109,6 +1151,84 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     )
                     NotesRepository.getInstance().injectOwnNote(note)
                     // Mark as confirmed — progress line turns green then fades
+                    NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
+                }
+                is PublishResult.Error -> {
+                    _toastMessage.value = "Publish failed: ${result.message}"
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Publish a Kind 30023 long-form content note (NIP-23 article).
+     * Parameterized replaceable event with d-tag, title, summary, image, published_at tags.
+     * Returns null on success, or an error message for synchronous failures.
+     */
+    fun publishLongForm(
+        content: String,
+        title: String,
+        summary: String? = null,
+        imageUrl: String? = null,
+        hashtags: List<String> = emptyList(),
+        relayUrls: Set<String>
+    ): String? {
+        @Suppress("NAME_SHADOWING") val content = social.mycelium.android.utils.LinkSanitizer.cleanText(content)
+        if (content.isBlank()) return "Article content is empty"
+        if (title.isBlank()) return "Article title is required"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val pubkey = currentAccount.value?.toHexKey()
+        val dTag = java.util.UUID.randomUUID().toString()
+        val nowSecs = System.currentTimeMillis() / 1000
+        // Extract mentioned pubkeys from nostr:npub1.../nostr:nprofile1... in content
+        val mentionedPubkeys = com.example.cybin.nip19.Nip19Parser.parseAll(content).mapNotNull { entity ->
+            when (entity) {
+                is com.example.cybin.nip19.NPub -> entity.hex
+                is com.example.cybin.nip19.NProfile -> entity.hex
+                else -> null
+            }
+        }.distinct()
+
+        viewModelScope.launch {
+            when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 30023, content = content) {
+                add(arrayOf("d", dTag))
+                add(arrayOf("title", title))
+                if (!summary.isNullOrBlank()) add(arrayOf("summary", summary))
+                if (!imageUrl.isNullOrBlank()) add(arrayOf("image", imageUrl))
+                add(arrayOf("published_at", nowSecs.toString()))
+                add(arrayOf("alt", "Blog post: $title"))
+                // Hashtag t-tags
+                for (tag in hashtags) {
+                    add(arrayOf("t", tag.lowercase()))
+                }
+                // p-tags for @mentioned users
+                val addedPubkeys = mutableSetOf<String>()
+                for (pk in mentionedPubkeys) {
+                    if (pk.lowercase() !in addedPubkeys && pk.lowercase() != pubkey?.lowercase()) {
+                        add(arrayOf("p", pk))
+                        addedPubkeys.add(pk.lowercase())
+                    }
+                }
+            }) {
+                is PublishResult.Success -> {
+                    val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                        ?: social.mycelium.android.data.Author(id = result.event.pubKey, username = "", displayName = "You")
+                    val note = social.mycelium.android.data.Note(
+                        id = result.event.id,
+                        author = author,
+                        content = content,
+                        timestamp = result.event.createdAt * 1000L,
+                        kind = 30023,
+                        topicTitle = title,
+                        summary = summary,
+                        imageUrl = imageUrl,
+                        dTag = dTag,
+                        hashtags = hashtags,
+                        relayUrls = relayUrls.toList(),
+                        tags = result.event.tags.map { it.toList() }
+                    )
+                    NotesRepository.getInstance().injectOwnNote(note)
                     NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
                 }
                 is PublishResult.Error -> {
@@ -1281,14 +1401,21 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Publish a Kind 6 repost (boost). The content is the JSON of the original event,
      * with e-tag pointing to the original note and p-tag to its author.
      */
-    fun publishRepost(noteId: String, noteAuthorPubkey: String, rawEventJson: String = "", originalNote: social.mycelium.android.data.Note? = null): String? {
+    fun publishRepost(noteId: String, noteAuthorPubkey: String, rawEventJson: String = "", originalNote: social.mycelium.android.data.Note? = null, relayUrls: Set<String> = emptySet()): String? {
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
-        val relaySet = getPublishRelayUrlSet()
+        val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
         val pubkey = currentAccount.value?.toHexKey()
+        // Resolve the real event ID (composite repost IDs start with "repost:")
+        val realNoteId = originalNote?.originalNoteId ?: noteId.removePrefix("repost:")
         viewModelScope.launch {
-            val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 6, content = rawEventJson) {
-                add(arrayOf("e", noteId))
+            // NIP-18: content must be the full JSON of the original signed event.
+            // Try cache first, fall back to caller-provided JSON, then empty as last resort.
+            val eventJson = rawEventJson.ifBlank {
+                social.mycelium.android.utils.RawEventCache.get(realNoteId) ?: ""
+            }
+            val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 6, content = eventJson) {
+                add(arrayOf("e", realNoteId))
                 add(arrayOf("p", noteAuthorPubkey))
             }
             when (result) {
@@ -1297,11 +1424,17 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     if (originalNote != null && pubkey != null) {
                         NotesRepository.getInstance().injectOwnRepost(originalNote, pubkey, result.event.id)
                         delay(400) // Minimum shimmer display before green confirmation
-                        NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
+                        // Use composite ID for state tracking — that's what the note is keyed as in the feed
+                        val compositeId = "repost:${originalNote.originalNoteId ?: originalNote.id.removePrefix("repost:")}"
+                        NotesRepository.getInstance().updatePublishState(compositeId, social.mycelium.android.data.PublishState.Confirmed)
                     }
-                    _boostedNoteIds.value = _boostedNoteIds.value + noteId
+                    _boostedNoteIds.value = _boostedNoteIds.value + realNoteId + noteId
+                    // Merge boost relay URLs into the original note so relay orbs update
+                    for (url in relaySet) {
+                        NotesRepository.getInstance().mergePublishRelayUrl(realNoteId, url)
+                    }
                     // Optimistically inject repost count so UI updates immediately
-                    if (pubkey != null) NoteCountsRepository.injectOwnRepost(noteId, pubkey)
+                    if (pubkey != null) NoteCountsRepository.injectOwnRepost(realNoteId, pubkey)
                     // Flash boost animation on the original note
                     ReactionsRepository.emitAnimation(noteId, ReactionsRepository.AnimationType.BOOST, success = true)
                 }
@@ -1809,6 +1942,67 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 is PublishResult.Error -> {
                     Log.e("AccountStateViewModel", "Indexer relay list publish failed: ${result.message}")
                     _toastMessage.value = "Indexer list publish failed: ${result.message}"
+                }
+            }
+        }
+        return null
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Hybrid event deletion — NIP-86 (controlled relays) + NIP-09 (others)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Delete a note using a hybrid approach:
+     * 1. Optimistically remove from the feed UI immediately.
+     * 2. For relays where the current user is the operator → NIP-86 `banevent` (deleteEvent).
+     * 3. For all remaining relays (+ outbox relays) → NIP-09 kind-5 deletion event.
+     *
+     * Only works for the current user's own notes.
+     */
+    fun deleteNote(note: Note): String? {
+        val account = _currentAccount.value ?: return "Sign in to delete"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        // Verify ownership
+        val noteAuthor = normalizeAuthorIdForCache(note.author.id)
+        if (noteAuthor != accountHex.lowercase()) return "You can only delete your own notes"
+
+        // Real event ID (reposts use synthetic "repost:xyz" IDs)
+        val eventId = note.originalNoteId ?: note.id
+
+        // Optimistically remove from feed
+        NotesRepository.getInstance().removeNote(eventId)
+
+        // Collect only relay URLs where the note was actually seen/confirmed
+        val noteRelays = note.relayUrls.toMutableSet()
+        note.relayUrl?.let { noteRelays.add(it) }
+        val allRelays = noteRelays.mapNotNull { RelayUrlNormalizer.normalizeOrNull(it)?.url }.toSet()
+
+        Log.d("AccountStateViewModel", "deleteNote: eventId=${eventId.take(8)}, confirmedRelays=${allRelays.size}")
+
+        viewModelScope.launch {
+            // NIP-09 kind-5 deletion event to all relays where the note exists
+            if (allRelays.isNotEmpty()) {
+                val result = EventPublisher.publish(
+                    context = getApplication(),
+                    signer = signer,
+                    relayUrls = allRelays,
+                    kind = 5,
+                    content = "Deleted by author"
+                ) {
+                    add(arrayOf("e", eventId))
+                    add(arrayOf("k", note.kind.toString()))
+                }
+                when (result) {
+                    is PublishResult.Success -> {
+                        Log.d("AccountStateViewModel", "NIP-09 deletion published: ${result.eventId.take(8)} → ${allRelays.size} relays")
+                    }
+                    is PublishResult.Error -> {
+                        Log.e("AccountStateViewModel", "NIP-09 deletion failed: ${result.message}")
+                        _toastMessage.value = "Deletion request failed: ${result.message}"
+                    }
                 }
             }
         }

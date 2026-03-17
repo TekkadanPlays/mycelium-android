@@ -52,10 +52,25 @@ class Nip42AuthHandler(
     @Volatile
     private var signer: NostrSigner? = null
 
-    /** Whether we've already done one foreground Amber approval this session.
-     *  After one foreground success, Amber remembers the permission and background works. */
+    /** Timestamp (ms) of the last successful foreground Amber sign.
+     *  Suppresses foreground retry for FOREGROUND_COOLDOWN_MS after the last success
+     *  to prevent repeated Amber UI flashing, while still allowing periodic retry
+     *  in case background permission lapses. */
     @Volatile
-    private var foregroundAuthApproved = false
+    private var lastForegroundSignMs = 0L
+    private val FOREGROUND_COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
+
+    /** Normalized relay URLs the user has configured in their relay manager.
+     *  AUTH challenges from relays NOT in this set are silently ignored. */
+    @Volatile
+    private var allowedRelayUrls: Set<String> = emptySet()
+
+    /** Update the set of relay URLs the user has configured. Only these relays
+     *  will be authenticated via NIP-42. Call when relay config changes or on login. */
+    fun setAllowedRelayUrls(urls: Set<String>) {
+        allowedRelayUrls = urls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+        Log.d(TAG, "Allowed relay URLs updated: ${allowedRelayUrls.size} relays")
+    }
 
     /** Per-relay auth status for UI observation. */
     enum class AuthStatus { NONE, CHALLENGED, AUTHENTICATING, AUTHENTICATED, FAILED }
@@ -90,11 +105,13 @@ class Nip42AuthHandler(
 
         override fun onConnecting(url: String) {
             respondedChallenges.removeAll { it.relayUrl == url }
+            authFailCooldownMs.remove(url)
             updateStatus(url, AuthStatus.NONE)
         }
 
         override fun onDisconnected(url: String) {
             respondedChallenges.removeAll { it.relayUrl == url }
+            authFailCooldownMs.remove(url)
         }
     }
 
@@ -120,7 +137,7 @@ class Nip42AuthHandler(
             _authStatusByRelay.value = emptyMap()
             respondedChallenges.clear()
             pendingAuthEventIds.clear()
-            foregroundAuthApproved = false
+            lastForegroundSignMs = 0L
         }
     }
 
@@ -133,6 +150,14 @@ class Nip42AuthHandler(
     private val AUTH_FAIL_COOLDOWN_MS = 5 * 60 * 1000L // 5 minutes
 
     private fun handleAuthChallenge(url: String, challenge: String) {
+        // Only authenticate with relays the user has configured in their relay manager.
+        // Random relays encountered via outbox or other discovery should not get our identity.
+        val normalizedUrl = social.mycelium.android.utils.normalizeRelayUrl(url)
+        if (allowedRelayUrls.isNotEmpty() && normalizedUrl !in allowedRelayUrls) {
+            Log.d(TAG, "AUTH[$url] Relay not in user's relay manager — ignoring challenge")
+            return
+        }
+
         // Dedup FIRST — prevents processing the same challenge regardless of signer state
         val key = ChallengeKey(url, challenge)
         if (key in respondedChallenges) return
@@ -187,22 +212,30 @@ class Nip42AuthHandler(
                 add(arrayOf("challenge", challenge))
             }
             // Try background (ContentProvider) first — no Amber UI popup.
-            // If background fails and we haven't done a foreground approval yet this
-            // session, fall back to foreground sign() ONCE. After one approval Amber
-            // remembers the permission and all subsequent calls use background silently.
+            // If background fails, fall back to foreground sign() if the cooldown
+            // has elapsed. This prevents repeated Amber flashing while allowing
+            // periodic retry when background permission lapses.
             var signed = currentSigner.signBackgroundOnly(template)
             if (signed == null || signed.sig.isBlank()) {
-                if (!foregroundAuthApproved) {
-                    Log.d(TAG, "AUTH[$url] Background sign failed, trying foreground (one-time)")
-                    try {
-                        signed = currentSigner.sign(template)
-                        if (signed.sig.isNotBlank()) {
-                            foregroundAuthApproved = true
-                            Log.d(TAG, "AUTH[$url] Foreground approval granted — future signs will use background")
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "AUTH[$url] Foreground sign failed: ${e.message}")
+                val now = System.currentTimeMillis()
+                val elapsed = now - lastForegroundSignMs
+                if (lastForegroundSignMs > 0 && elapsed < FOREGROUND_COOLDOWN_MS) {
+                    // Recently did foreground sign — suppress to avoid Amber flash spam.
+                    Log.d(TAG, "AUTH[$url] Background sign failed, foreground cooldown ${(FOREGROUND_COOLDOWN_MS - elapsed) / 1000}s remaining — skipping")
+                    updateStatus(url, AuthStatus.FAILED)
+                    respondedChallenges.remove(key)
+                    return
+                }
+                Log.d(TAG, "AUTH[$url] Background sign failed, trying foreground approval")
+                try {
+                    signed = currentSigner.sign(template)
+                    if (signed != null && signed.sig.isNotBlank()) {
+                        lastForegroundSignMs = System.currentTimeMillis()
+                        Log.d(TAG, "AUTH[$url] Foreground approval granted — suppressing foreground for ${FOREGROUND_COOLDOWN_MS / 1000}s")
                     }
+                } catch (e: Exception) {
+                    Log.w(TAG, "AUTH[$url] Foreground sign failed: ${e.message}")
+                    lastForegroundSignMs = System.currentTimeMillis() // Cooldown even on failure to prevent spam
                 }
                 if (signed == null || signed.sig.isBlank()) {
                     Log.w(TAG, "AUTH[$url] Signing unavailable — skipping")
@@ -235,8 +268,10 @@ class Nip42AuthHandler(
         if (success) {
             Log.d(TAG, "AUTH successful for $url")
             updateStatus(url, AuthStatus.AUTHENTICATED)
-            // Renew filters so subscriptions resume after auth
-            stateMachine.relayPool.renewFilters(url)
+            // Re-apply subscriptions: CLOSED auth-required removes subs from
+            // the connection's activeSubscriptions, so renewFilters finds nothing.
+            // resubscribeRelay looks up pool-level subscriptions and re-sends REQs.
+            stateMachine.relayPool.resubscribeRelay(url)
             // Replay any events that failed due to auth-required on this relay
             val eventsToReplay = pendingReplayEvents.remove(url)
             if (!eventsToReplay.isNullOrEmpty()) {
@@ -275,6 +310,30 @@ class Nip42AuthHandler(
         // Clear cooldown + consumed challenges so the next AUTH from this relay is processed
         authFailCooldownMs.remove(relayUrl)
         respondedChallenges.removeAll { it.relayUrl == relayUrl }
+        // If the relay doesn't send a fresh AUTH challenge spontaneously, force a
+        // reconnect after a short delay to trigger a new AUTH handshake.
+        scope.launch {
+            kotlinx.coroutines.delay(2000)
+            val status = _authStatusByRelay.value[relayUrl]
+            if (status != AuthStatus.AUTHENTICATED && status != AuthStatus.AUTHENTICATING) {
+                Log.d(TAG, "No fresh AUTH from $relayUrl after publish failure — forcing reconnect")
+                stateMachine.relayPool.forceReconnect(relayUrl)
+            }
+        }
+    }
+
+    /**
+     * Fully reset all auth state for a relay. Call when a relay is re-enabled
+     * (e.g. from the sidebar or relay manager) so the next AUTH challenge from
+     * that relay gets a completely clean handshake.
+     */
+    fun clearAuthStateForRelay(relayUrl: String) {
+        respondedChallenges.removeAll { it.relayUrl == relayUrl }
+        authFailCooldownMs.remove(relayUrl)
+        pendingAuthEventIds.removeAll { false } // keep all; no per-relay ID tracking needed
+        pendingReplayEvents.remove(relayUrl)
+        updateStatus(relayUrl, AuthStatus.NONE)
+        Log.d(TAG, "Cleared all auth state for $relayUrl")
     }
 
     private fun updateStatus(relayUrl: String, status: AuthStatus) {

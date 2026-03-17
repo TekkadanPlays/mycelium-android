@@ -134,6 +134,12 @@ data class Note(
     val repostTimestamp: Long? = null,
     /** Pubkeys mentioned in p-tags of this event; used to auto-tag people in reply chain (Amethyst-style). */
     val mentionedPubkeys: List<String> = emptyList(),
+    /** NIP-23 long-form content: article summary (from "summary" tag). */
+    val summary: String? = null,
+    /** NIP-23 long-form content: header/cover image URL (from "image" tag). */
+    val imageUrl: String? = null,
+    /** Parameterized replaceable event d-tag identifier (NIP-23 kind 30023, NIP-33). */
+    val dTag: String? = null,
     /** Publish progress for locally-published notes; null for notes from subscriptions. Not serialized. */
     @Transient val publishState: PublishState? = null
 ) {

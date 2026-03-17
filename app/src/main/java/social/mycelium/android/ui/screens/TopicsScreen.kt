@@ -132,6 +132,7 @@ fun TopicsScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
     val topicsUiState by topicsViewModel.uiState.collectAsState()
     val topicsFeedState by feedStateViewModel.topicsFeedState.collectAsState()
@@ -261,8 +262,10 @@ fun TopicsScreen(
         }
         if (allUserRelayUrls.isEmpty()) return@LaunchedEffect
 
+        val outboxUrls2 = relayUiState.outboxRelays.map { it.url }
         val displayUrls = when {
             topicsFeedState.isGlobal -> allUserRelayUrls
+            topicsFeedState.selectedCategoryId == "outbox" -> outboxUrls2.ifEmpty { allUserRelayUrls }
             topicsFeedState.selectedCategoryId != null && relayCategories.isNotEmpty() -> relayCategories
                 .firstOrNull { it.id == topicsFeedState.selectedCategoryId }?.relays?.map { it.url } ?: allUserRelayUrls
             topicsFeedState.selectedRelayUrl != null -> listOf(topicsFeedState.selectedRelayUrl!!)
@@ -406,16 +409,52 @@ fun TopicsScreen(
         troubleRelayCount = troubleRelayCount,
         onToggleCategorySubscription = { categoryId ->
             relayViewModel?.toggleCategorySubscription(categoryId)
+            val updatedSubscribedUrls = relayCategories
+                .filter { cat ->
+                    if (cat.id == categoryId) !cat.isSubscribed else cat.isSubscribed
+                }
+                .flatMap { it.relays }.map { it.url }.distinct()
+            val outboxUrls = relayUiState.outboxRelays.map { it.url }
+            val allSubscribed = (updatedSubscribedUrls + outboxUrls).distinct()
+            val state = topicsFeedState
+            when {
+                state.isGlobal -> if (allSubscribed.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(allSubscribed)
+                state.selectedCategoryId == categoryId -> {
+                    val catRelays = relayCategories.firstOrNull { it.id == categoryId }?.relays?.map { it.url } ?: emptyList()
+                    val wasSubscribed = relayCategories.firstOrNull { it.id == categoryId }?.isSubscribed ?: false
+                    if (!wasSubscribed) {
+                        if (catRelays.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(catRelays)
+                    } else {
+                        feedStateViewModel.setTopicsGlobal()
+                        feedStateViewModel.setHomeGlobal()
+                        if (allSubscribed.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(allSubscribed)
+                    }
+                }
+                state.selectedCategoryId == "outbox" -> topicsViewModel.setDisplayFilterOnly(outboxUrls)
+                state.selectedRelayUrl != null -> topicsViewModel.setDisplayFilterOnly(listOf(state.selectedRelayUrl!!))
+                else -> if (allSubscribed.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(allSubscribed)
+            }
         },
         onItemClick = { itemId ->
             when {
                 itemId == "global" -> {
+                    scope.launch { listState.scrollToItem(0) }
                     feedStateViewModel.setTopicsGlobal()
                     feedStateViewModel.setHomeGlobal()
-                    val subscribedUrls = relayCategories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url }.distinct()
-                    if (subscribedUrls.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(subscribedUrls)
+                    val allSubscribed = (relayCategories.filter { it.isSubscribed }.flatMap { it.relays }.map { it.url } + relayUiState.outboxRelays.map { it.url }).distinct()
+                    if (allSubscribed.isNotEmpty()) topicsViewModel.setDisplayFilterOnly(allSubscribed)
+                }
+                itemId == "outbox" -> {
+                    scope.launch { listState.scrollToItem(0) }
+                    val outboxUrls = relayUiState.outboxRelays.map { it.url }
+                    if (outboxUrls.isNotEmpty()) {
+                        feedStateViewModel.setTopicsSelectedOutbox()
+                        feedStateViewModel.setHomeSelectedOutbox()
+                        topicsViewModel.setDisplayFilterOnly(outboxUrls)
+                    }
                 }
                 itemId.startsWith("relay_category:") -> {
+                    scope.launch { listState.scrollToItem(0) }
                     val categoryId = itemId.removePrefix("relay_category:")
                     val category = activeProfile?.categories?.firstOrNull { it.id == categoryId }
                     val relayUrls = category?.relays?.map { it.url } ?: emptyList()
@@ -426,10 +465,16 @@ fun TopicsScreen(
                     }
                 }
                 itemId.startsWith("relay:") -> {
+                    scope.launch { listState.scrollToItem(0) }
                     val relayUrl = itemId.removePrefix("relay:")
+                    // Look up relay name from categories, outbox, and inbox
                     val relay = activeProfile?.categories?.flatMap { it.relays }?.firstOrNull { it.url == relayUrl }
-                    feedStateViewModel.setTopicsSelectedRelay(relayUrl, relay?.displayName)
-                    feedStateViewModel.setHomeSelectedRelay(relayUrl, relay?.displayName)
+                        ?: relayUiState.outboxRelays.firstOrNull { it.url == relayUrl }
+                        ?: relayUiState.inboxRelays.firstOrNull { it.url == relayUrl }
+                    val displayName = relay?.displayName ?: relay?.info?.name ?: relayUrl
+                        .removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+                    feedStateViewModel.setTopicsSelectedRelay(relayUrl, displayName)
+                    feedStateViewModel.setHomeSelectedRelay(relayUrl, displayName)
                     topicsViewModel.setDisplayFilterOnly(listOf(relayUrl))
                 }
                 itemId == "user_profile" -> onNavigateTo("user_profile")
@@ -475,7 +520,18 @@ fun TopicsScreen(
                             searchQuery = ""
                             onSearchModeChange(false)
                         },
-                        placeholder = { Text("Search notes, users, hashtags...") }
+                        placeholder = { Text("Search notes, users, hashtags...") },
+                        onProfileClick = { pubkey ->
+                            onProfileClick(pubkey)
+                            onSearchModeChange(false)
+                            searchQuery = ""
+                        },
+                        onHashtagClick = { tag ->
+                            onNavigateTo("hashtag/$tag")
+                            onSearchModeChange(false)
+                            searchQuery = ""
+                        },
+                        accountPubkey = currentAccount?.toHexKey()
                     )
                 } else {
                     // Normal mode - show scrollable header
@@ -545,8 +601,8 @@ fun TopicsScreen(
                         },
                         explorerSortOrder = topicsUiState.sortOrder,
                         onExplorerSortOrderChange = {
-                            scope.launch { listState.scrollToItem(0) }
                             topicsViewModel.setSortOrder(it)
+                            scope.launch { listState.animateScrollToItem(0) }
                         },
                         isViewingHashtagFeed = isViewingHashtagFeed,
                         isTopicsFavoritesFilter = showFavoritesOnly,
@@ -866,6 +922,23 @@ fun TopicsScreen(
                                         }
                                     }
                                 }
+                                // ── Stable lambdas: allocated once, not per-item ──
+                                val topicCurrentUserHex = remember(currentAccount) {
+                                    currentAccount?.toHexKey()?.lowercase()
+                                }
+                                val stableTopicOnDelete = remember<(social.mycelium.android.data.Note) -> Unit> {{ n ->
+                                    accountStateViewModel.deleteNote(n)
+                                }}
+                                val stableTopicOnReact = remember<(social.mycelium.android.data.Note, String) -> Unit> {{ reactedNote, emoji ->
+                                    accountStateViewModel.sendReaction(reactedNote, emoji)
+                                }}
+                                val stableTopicOnCustomZapSend = remember<(social.mycelium.android.data.Note, Long, social.mycelium.android.repository.ZapType, String) -> Unit> {{ n, amount, zapType, msg ->
+                                    accountStateViewModel.sendZap(n, amount, zapType, msg)
+                                }}
+                                val stableTopicOnVote = remember<(String, String, Int) -> Unit> {{ noteId, authorPubkey, direction ->
+                                    accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
+                                }}
+
                                 LazyColumn(
                                     state = listState,
                                     modifier = Modifier.fillMaxSize(),
@@ -981,9 +1054,7 @@ fun TopicsScreen(
                                                             onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
                                                         },
                                                         onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
-                                                        onReact = { reactedNote, emoji ->
-                                                            accountStateViewModel.sendReaction(reactedNote, emoji)
-                                                        },
+                                                        onReact = stableTopicOnReact,
                                                         onProfileClick = onProfileClick,
                                                         onImageTap = { n, urls, idx ->
                                                             onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
@@ -991,12 +1062,8 @@ fun TopicsScreen(
                                                         onZap = { noteId, amount ->
                                                             accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
                                                         },
-                                                        onCustomZapSend = { n, amount, zapType, msg ->
-                                                            accountStateViewModel.sendZap(n, amount, zapType, msg)
-                                                        },
-                                                        onVote = { noteId, authorPubkey, direction ->
-                                                            accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
-                                                        },
+                                                        onCustomZapSend = stableTopicOnCustomZapSend,
+                                                        onVote = stableTopicOnVote,
                                                         ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
                                                         voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
                                                         shouldCloseZapMenus = shouldCloseZapMenus,
@@ -1008,6 +1075,8 @@ fun TopicsScreen(
                                                         actionRowSchema = ActionRowSchema.KIND11_FEED,
                                                         showHashtagsSection = false,
                                                         moderationFlagCount = noteFlagCount,
+                                                        onDelete = if (topicCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == topicCurrentUserHex) stableTopicOnDelete else null,
+                                                        compactMedia = compactMedia,
                                                         modifier = Modifier.fillMaxWidth()
                                                     )
                                                 }
@@ -1018,9 +1087,7 @@ fun TopicsScreen(
                                                         onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
                                                     },
                                                     onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
-                                                    onReact = { reactedNote, emoji ->
-                                                        accountStateViewModel.sendReaction(reactedNote, emoji)
-                                                    },
+                                                    onReact = stableTopicOnReact,
                                                     onProfileClick = onProfileClick,
                                                     onImageTap = { n, urls, idx ->
                                                         onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
@@ -1028,12 +1095,8 @@ fun TopicsScreen(
                                                     onZap = { noteId, amount ->
                                                         accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
                                                     },
-                                                    onCustomZapSend = { n, amount, zapType, msg ->
-                                                        accountStateViewModel.sendZap(n, amount, zapType, msg)
-                                                    },
-                                                    onVote = { noteId, authorPubkey, direction ->
-                                                        accountStateViewModel.sendVote(noteId, authorPubkey, direction, 11)
-                                                    },
+                                                    onCustomZapSend = stableTopicOnCustomZapSend,
+                                                    onVote = stableTopicOnVote,
                                                     ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
                                                     voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
                                                     shouldCloseZapMenus = shouldCloseZapMenus,
@@ -1044,6 +1107,8 @@ fun TopicsScreen(
                                                     extraMoreMenuItems = moderationMenuItems,
                                                     actionRowSchema = ActionRowSchema.KIND11_FEED,
                                                     showHashtagsSection = false,
+                                                    onDelete = if (topicCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == topicCurrentUserHex) stableTopicOnDelete else null,
+                                                    compactMedia = compactMedia,
                                                     modifier = Modifier.fillMaxWidth()
                                                 )
                                             }
@@ -1281,7 +1346,7 @@ private fun HashtagCard(
                     Icon(
                         imageVector = if (isFavorited) Icons.Default.Star else Icons.Default.StarBorder,
                         contentDescription = if (isFavorited) "Unfavorite" else "Favorite",
-                        tint = if (isFavorited) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (isFavorited) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(18.dp)
                     )
                 }

@@ -35,11 +35,11 @@ import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.*
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -73,13 +73,17 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import social.mycelium.android.ui.theme.NoteBodyTextStyle
 import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
+import social.mycelium.android.utils.extractEmojiUrls
 import social.mycelium.android.utils.UrlDetector
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import social.mycelium.android.data.IMetaData
 import social.mycelium.android.utils.MediaAspectRatioCache
+import social.mycelium.android.utils.QuotedNoteHeightCache
+import androidx.compose.foundation.layout.defaultMinSize
 import social.mycelium.android.ui.components.InlineVideoPlayer
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -95,6 +99,8 @@ import social.mycelium.android.ui.icons.ArrowUpward
 import social.mycelium.android.ui.icons.Bolt
 import social.mycelium.android.ui.icons.Bookmark
 import social.mycelium.android.ui.icons.ChatBubble
+import social.mycelium.android.ui.icons.Nip05Verified
+import social.mycelium.android.ui.icons.Nip05VerifiedDark
 import androidx.compose.ui.window.Dialog
 import java.text.SimpleDateFormat
 import java.util.*
@@ -168,6 +174,7 @@ internal fun QuotedNoteBody(
     onOpenImageViewer: (List<String>, Int) -> Unit,
     onRelayClick: (String) -> Unit = {},
     navigateToQuotedNote: () -> Unit = {},
+    countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     depth: Int = 0,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -193,6 +200,7 @@ internal fun QuotedNoteBody(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             ),
                             maxLines = if (isExpanded) Int.MAX_VALUE else 6,
+                            emojiUrls = qBlock.emojiUrls,
                             onClick = { offset ->
                                 val profile = qAnnotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                 val url = qAnnotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
@@ -210,6 +218,7 @@ internal fun QuotedNoteBody(
                                             likes = 0, shares = 0, comments = 0,
                                             isLiked = false, hashtags = emptyList(),
                                             mediaUrls = quotedMediaUrls.toList(),
+                                            quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(meta.fullContent),
                                             isReply = meta.rootNoteId != null,
                                             rootNoteId = meta.rootNoteId,
                                             relayUrl = meta.relayUrl,
@@ -400,12 +409,9 @@ internal fun QuotedNoteBody(
                     val nestedEventId = qBlock.eventId
                     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
                     val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
-                    var nestedMeta by remember(nestedEventId) { mutableStateOf<QuotedNoteMeta?>(null) }
-                    LaunchedEffect(nestedEventId) {
-                        val cached = QuotedNoteCache.getCached(nestedEventId)
-                        if (cached != null) {
-                            nestedMeta = cached
-                        } else {
+                    var nestedMeta by remember(nestedEventId) { mutableStateOf(QuotedNoteCache.getCached(nestedEventId)) }
+                    if (nestedMeta == null) {
+                        LaunchedEffect(nestedEventId) {
                             delay(300)
                             nestedMeta = QuotedNoteCache.get(nestedEventId)
                         }
@@ -413,7 +419,6 @@ internal fun QuotedNoteBody(
                     val nm = nestedMeta
                     if (nm != null) {
                         val nestedAuthor = remember(nm.authorId) { profileCache.resolveAuthor(nm.authorId) }
-                        val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
                         QuotedNoteContent(
                             parentNoteId = meta.eventId,
                             meta = nm,
@@ -427,6 +432,7 @@ internal fun QuotedNoteBody(
                             onVideoClick = onVideoClick,
                             onOpenImageViewer = onOpenImageViewer,
                             onRelayClick = onRelayClick,
+                            countsByNoteId = countsByNoteId,
                             depth = depth + 1,
                         )
                     } else {
@@ -496,6 +502,13 @@ internal fun QuotedNoteBody(
                     )
                 }
             }
+            is NoteContentBlock.EmojiPack -> {
+                EmojiPackGrid(
+                    author = qBlock.author,
+                    dTag = qBlock.dTag,
+                    relayHints = qBlock.relayHints
+                )
+            }
         }
     }
 
@@ -534,6 +547,7 @@ internal fun QuotedNoteContent(
     onVideoClick: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
     onRelayClick: (String) -> Unit = {},
+    countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     depth: Int = 0,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -547,14 +561,28 @@ internal fun QuotedNoteContent(
             .toSet()
     }
     val quotedIsMarkdown = remember(quotedDisplayContent) { isMarkdown(quotedDisplayContent) }
-    val quotedContentBlocks = remember(quotedDisplayContent, quotedMediaUrls) {
-        buildNoteContentWithInlinePreviews(
-            quotedDisplayContent,
-            quotedMediaUrls,
-            emptyList(),
-            linkStyle,
-            profileCache
-        )
+    val quotedCacheKey = remember(quotedDisplayContent, quotedMediaUrls) {
+        social.mycelium.android.utils.ContentBlockCache.key(quotedDisplayContent, quotedMediaUrls)
+    }
+    val quotedContentBlocks by produceState(
+        initialValue = social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey) ?: emptyList(),
+        quotedCacheKey
+    ) {
+        social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey)?.let { cached ->
+            value = cached
+            return@produceState
+        }
+        val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            buildNoteContentWithInlinePreviews(
+                quotedDisplayContent,
+                quotedMediaUrls,
+                emptyList(),
+                linkStyle,
+                profileCache
+            )
+        }
+        social.mycelium.android.utils.ContentBlockCache.put(quotedCacheKey, result)
+        value = result
     }
 
     // Helper to build a Note from quoted meta (used by header tap + body fallback)
@@ -567,6 +595,7 @@ internal fun QuotedNoteContent(
             likes = 0, shares = 0, comments = 0,
             isLiked = false, hashtags = emptyList(),
             mediaUrls = quotedMediaUrls.toList(),
+            quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(meta.fullContent),
             isReply = meta.rootNoteId != null,
             rootNoteId = meta.rootNoteId,
             relayUrl = meta.relayUrl,
@@ -580,10 +609,12 @@ internal fun QuotedNoteContent(
     // Outer Row is clickable to navigateToQuotedNote so tapping anywhere in the
     // quoted area opens the quoted note's thread (not the parent's).
     // Inner ClickableNoteContent still resolves @mention annotations first.
-    Row(
+    val accentColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+    val accentWidthPx = with(LocalDensity.current) { 3.dp.toPx() }
+    val accentCornerPx = with(LocalDensity.current) { 1.5.dp.toPx() }
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(IntrinsicSize.Min)
             .padding(
                 start = if (depth == 0) 16.dp else 0.dp,
                 end = if (depth == 0) 16.dp else 0.dp,
@@ -591,21 +622,18 @@ internal fun QuotedNoteContent(
                 bottom = 4.dp
             )
             .clickable(onClick = navigateToQuotedNote)
-    ) {
-        // Left accent bar — stretches full height of content
-        Box(
-            modifier = Modifier
-                .width(3.dp)
-                .fillMaxHeight()
-                .clickable(onClick = navigateToQuotedNote)
-                .background(
-                    MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
-                    shape = RoundedCornerShape(1.5.dp)
+            .drawBehind {
+                drawRoundRect(
+                    color = accentColor,
+                    topLeft = Offset.Zero,
+                    size = androidx.compose.ui.geometry.Size(accentWidthPx, size.height),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(accentCornerPx, accentCornerPx)
                 )
-        )
+            }
+    ) {
         Column(modifier = Modifier
             .padding(start = if (depth == 0) 10.dp else 6.dp, top = 2.dp, bottom = 2.dp)
-            .weight(1f)
+            .fillMaxWidth()
             .animateContentSize(animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = FastOutSlowInEasing))
         ) {
             // ── Header row: author (left) + counters & emojis (right) ──
@@ -681,6 +709,7 @@ internal fun QuotedNoteContent(
                 onOpenImageViewer = onOpenImageViewer,
                 onRelayClick = onRelayClick,
                 navigateToQuotedNote = navigateToQuotedNote,
+                countsByNoteId = countsByNoteId,
                 depth = depth,
             )
         }
@@ -700,6 +729,7 @@ internal fun NoteMediaCarousel(
     initialMediaPage: Int,
     isVisible: Boolean,
     mediaMeta: Map<String, IMetaData> = emptyMap(),
+    compactMedia: Boolean = false,
     onMediaPageChanged: (Int) -> Unit,
     onImageTap: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
@@ -747,7 +777,6 @@ internal fun NoteMediaCarousel(
             }
         }
     }
-    val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -793,73 +822,76 @@ internal fun NoteMediaCarousel(
                     val imageContext = LocalContext.current
                     val meta = mediaMeta[url]
                     val hasCachedRatio = MediaAspectRatioCache.get(url) != null || mediaMeta[url]?.aspectRatio() != null
-                    SubcomposeAsyncImage(
+                    // Screen-width-aware decode: downsample large images during decode
+                    // instead of loading full resolution (saves memory + decode time)
+                    val screenWidthPx = with(LocalDensity.current) {
+                        (LocalContext.current.resources.displayMetrics.widthPixels)
+                    }
+                    val imagePainter = rememberAsyncImagePainter(
                         model = ImageRequest.Builder(imageContext)
                             .data(url)
                             .crossfade(!hasCachedRatio)
                             .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                             .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                            .build(),
-                        contentDescription = meta?.alt,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        when (painter.state) {
-                            is AsyncImagePainter.State.Loading -> {
-                                if (meta?.blurhash != null) {
-                                    DisplayBlurHash(
-                                        blurhash = meta.blurhash,
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize(),
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.15f)),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(24.dp),
-                                            strokeWidth = 2.dp,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
-                                        )
-                                    }
-                                }
+                            .size(screenWidthPx, screenWidthPx)
+                            .allowHardware(true)
+                            .build()
+                    )
+                    val painterState = imagePainter.state
+                    // Cache aspect ratio on success
+                    if (painterState is AsyncImagePainter.State.Success) {
+                        SideEffect {
+                            val drawable = painterState.result.drawable
+                            val w = drawable.intrinsicWidth
+                            val h = drawable.intrinsicHeight
+                            if (w > 0 && h > 0) {
+                                MediaAspectRatioCache.add(url, w, h)
                             }
-                            is AsyncImagePainter.State.Error -> {
-                                val errorState = painter.state as AsyncImagePainter.State.Error
-                                android.util.Log.e("NoteMediaCarousel", "Image load failed: url=$url error=${errorState.result.throwable.message}", errorState.result.throwable)
+                        }
+                    }
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        // Main image — always composed, invisible while loading
+                        androidx.compose.foundation.Image(
+                            painter = imagePainter,
+                            contentDescription = meta?.alt,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                        // Loading overlay
+                        if (painterState is AsyncImagePainter.State.Loading) {
+                            if (meta?.blurhash != null) {
+                                DisplayBlurHash(
+                                    blurhash = meta.blurhash,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            } else {
                                 Box(
-                                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.15f)),
                                     contentAlignment = Alignment.Center
                                 ) {
-                                    Icon(
-                                        Icons.Outlined.BrokenImage,
-                                        contentDescription = "Image failed to load",
-                                        tint = Color.Gray,
-                                        modifier = Modifier.size(32.dp)
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
                                     )
                                 }
                             }
-                            is AsyncImagePainter.State.Success -> {
-                                androidx.compose.foundation.Image(
-                                    painter = painter,
-                                    contentDescription = meta?.alt,
-                                    contentScale = ContentScale.Fit,
-                                    modifier = Modifier.fillMaxSize()
+                        }
+                        // Error overlay
+                        if (painterState is AsyncImagePainter.State.Error) {
+                            android.util.Log.e("NoteMediaCarousel", "Image load failed: url=$url error=${painterState.result.throwable.message}", painterState.result.throwable)
+                            Box(
+                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Outlined.BrokenImage,
+                                    contentDescription = "Image failed to load",
+                                    tint = Color.Gray,
+                                    modifier = Modifier.size(32.dp)
                                 )
-                                SideEffect {
-                                    val success = painter.state as? AsyncImagePainter.State.Success
-                                    val drawable = success?.result?.drawable
-                                    if (drawable != null) {
-                                        val w = drawable.intrinsicWidth
-                                        val h = drawable.intrinsicHeight
-                                        if (w > 0 && h > 0) {
-                                            MediaAspectRatioCache.add(url, w, h)
-                                        }
-                                    }
-                                }
                             }
-                            else -> {}
                         }
                     }
                     // Fullscreen magnifier icon — one per image
@@ -986,7 +1018,7 @@ private fun NoteDetailsPanel(
                                 imageVector = Icons.Default.Repeat,
                                 contentDescription = null,
                                 modifier = Modifier.size(14.dp),
-                                tint = Color(0xFF4CAF50)
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Spacer(Modifier.width(8.dp))
                             val boostAvatars = boostAuthors.take(5)
@@ -1324,7 +1356,7 @@ private fun NoteDetailsPanel(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NoteActionMenus(
+internal fun NoteActionMenus(
     note: Note,
     showRepostMenu: Boolean,
     onDismissRepostMenu: () -> Unit,
@@ -1340,6 +1372,7 @@ private fun NoteActionMenus(
     onBlockAuthor: ((String) -> Unit)?,
     onMuteAuthor: ((String) -> Unit)?,
     onBookmarkToggle: ((String, Boolean) -> Unit)?,
+    onDelete: ((Note) -> Unit)?,
     extraMoreMenuItems: List<Pair<String, () -> Unit>>,
     translationResult: social.mycelium.android.repository.TranslationService.TranslationResult?,
     isTranslating: Boolean,
@@ -1353,6 +1386,26 @@ private fun NoteActionMenus(
     var menuLevel by remember { mutableIntStateOf(0) }
     val authorLabel = remember(note.author) { authorDisplayLabel(note.author) }
     val closeMenu = { onDismissHeaderMenu(); menuLevel = 0 }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
+    // ── Delete confirmation dialog ──
+    if (showDeleteConfirm && onDelete != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Delete note?") },
+            text = { Text("This will request deletion from all relays this note was seen on. This action cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = { showDeleteConfirm = false; onDelete(note) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
 
     // ── Boost dialog — centered floating menu ──
     if (showRepostMenu) {
@@ -1496,6 +1549,14 @@ private fun NoteActionMenus(
                                         onClick = { menuLevel = 3 }
                                     )
                                 }
+                                // Delete (own notes only)
+                                if (onDelete != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                                        leadingIcon = { Icon(Icons.Outlined.DeleteForever, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error) },
+                                        onClick = { closeMenu(); showDeleteConfirm = true }
+                                    )
+                                }
                                 // Report
                                 DropdownMenuItem(
                                     text = { Text("Report") },
@@ -1611,7 +1672,7 @@ private fun NoteActionMenus(
  */
 @OptIn(ExperimentalFoundationApi::class, FlowPreview::class)
 @Composable
-private fun NoteActionRow(
+internal fun NoteActionRow(
     note: Note,
     actionRowSchema: ActionRowSchema,
     isZapInProgress: Boolean,
@@ -1642,6 +1703,7 @@ private fun NoteActionRow(
     onBlockAuthor: ((String) -> Unit)?,
     onMuteAuthor: ((String) -> Unit)?,
     onBookmarkToggle: ((String, Boolean) -> Unit)?,
+    onDelete: ((Note) -> Unit)?,
     extraMoreMenuItems: List<Pair<String, () -> Unit>>,
     translationResult: social.mycelium.android.repository.TranslationService.TranslationResult?,
     isTranslating: Boolean,
@@ -1706,9 +1768,9 @@ private fun NoteActionRow(
         // Boost (Repost / Quote / Fork) — kind-1 feed + kind-11 feed
         if (showBoost) {
             ActionButton(
-                icon = Icons.Outlined.Repeat,
+                icon = if (isBoosted) Icons.Filled.Repeat else Icons.Outlined.Repeat,
                 contentDescription = "Repost",
-                tint = if (isBoosted) Color(0xFF8FBC8F) else MaterialTheme.colorScheme.onSurfaceVariant,
+                tint = if (isBoosted) Color(0xFF4CAF50) else MaterialTheme.colorScheme.onSurfaceVariant,
                 onClick = { showRepostMenu = true }
             )
         }
@@ -1784,6 +1846,7 @@ private fun NoteActionRow(
         onBlockAuthor = onBlockAuthor,
         onMuteAuthor = onMuteAuthor,
         onBookmarkToggle = onBookmarkToggle,
+        onDelete = onDelete,
         extraMoreMenuItems = extraMoreMenuItems,
         translationResult = translationResult,
         isTranslating = isTranslating,
@@ -2052,6 +2115,8 @@ fun NoteCard(
     onMuteAuthor: ((String) -> Unit)? = null,
     /** Toggle bookmark for a note: (noteId, isCurrentlyBookmarked) -> Unit. */
     onBookmarkToggle: ((String, Boolean) -> Unit)? = null,
+    /** Delete this note (hybrid NIP-86 + NIP-09). Only pass for the current user's own notes. */
+    onDelete: ((Note) -> Unit)? = null,
     /** Current account npub for per-account recent emoji list. */
     accountNpub: String? = null,
     /** True while a zap is being sent for this note (shows loading on bolt). */
@@ -2100,6 +2165,10 @@ fun NoteCard(
     onSeeAllReactions: (() -> Unit)? = null,
     /** NIP-22: Number of moderation flags on this note (shown as badge when > 0). */
     moderationFlagCount: Int = 0,
+    /** Hoisted from ThemePreferences.compactMedia so each card doesn't subscribe independently. */
+    compactMedia: Boolean = false,
+    /** Hoisted from MediaPreferences.showSensitiveContent so each card doesn't subscribe independently. */
+    showSensitiveContent: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     var isZapMenuExpanded by remember { mutableStateOf(false) }
@@ -2159,31 +2228,28 @@ fun NoteCard(
     }
     // Observe profileUpdated directly so profile always renders correctly even if repository timing is off
     val profileCache = ProfileMetadataCache.getInstance()
-    var profileRevision by remember { mutableIntStateOf(0) }
+    var profileRevision by remember(note.id) { mutableIntStateOf(0) }
     val authorPubkey = remember(note.author.id) { normalizeAuthorIdForCache(note.author.id) }
-    LaunchedEffect(authorPubkey) {
-        profileCache.profileUpdated
-            .filter { it == authorPubkey }
-            .debounce(500)
-            .collect { profileRevision++ }
+    if (profileRevision == 0) {
+        LaunchedEffect(authorPubkey) {
+            profileCache.profileUpdated
+                .filter { it == authorPubkey }
+                .debounce(300)
+                .collect { profileRevision = 1 }
+        }
     }
     // Snapshot read of diskCacheRestored avoids per-card flow collector; value only flips once at startup
     val diskCacheReady = profileCache.diskCacheRestored.value
     val displayAuthor = remember(note.author.id, profileRevision, diskCacheReady) {
         profileCache.resolveAuthor(note.author.id)
     }
-    ElevatedCard(
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            .clickable { onNoteClick(note) },
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        shape = RectangleShape,
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable { onNoteClick(note) }
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
             // ── Publish progress line ──────────────────────────────────────
             if (note.publishState != null) {
                 PublishProgressLine(state = note.publishState)
@@ -2211,7 +2277,7 @@ fun NoteCard(
                         imageVector = Icons.Default.Repeat,
                         contentDescription = null,
                         modifier = Modifier.size(12.dp),
-                        tint = Color(0xFF4CAF50).copy(alpha = 0.7f)
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                     )
                     Spacer(Modifier.width(4.dp))
                     // Stacked avatars (up to 3)
@@ -2304,11 +2370,12 @@ fun NoteCard(
                                 )
                                 if (displayAuthor.isVerified) {
                                     Spacer(modifier = Modifier.width(4.dp))
+                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
                                     Icon(
-                                        imageVector = Icons.Default.Star,
+                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
                                         contentDescription = "Verified",
                                         modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = Color.Unspecified
                                     )
                                 }
                             }
@@ -2530,13 +2597,18 @@ fun NoteCard(
             val mentionedPubkeys = remember(note.content) {
                 social.mycelium.android.utils.extractPubkeysFromContent(note.content)
             }
-            var mentionProfileVersion by remember { mutableStateOf(0) }
+            var mentionProfileVersion by remember { mutableIntStateOf(0) }
             if (mentionedPubkeys.isNotEmpty()) {
                 LaunchedEffect(mentionedPubkeys) {
                     val pubkeySet = mentionedPubkeys.toSet()
+                    // Request profiles for any mentioned pubkeys not yet cached
+                    val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
+                    if (uncached.isNotEmpty()) {
+                        profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+                    }
                     profileCache.profileUpdated
                         .filter { it in pubkeySet }
-                        .debounce(600)
+                        .debounce(300)
                         .collect { mentionProfileVersion++ }
                 }
             }
@@ -2544,7 +2616,7 @@ fun NoteCard(
             var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
             var quotedFailedIds by remember(note.id) { mutableStateOf<Set<String>>(emptySet()) }
             var quotedLoading by remember(note.id) { mutableStateOf(note.quotedEventIds.isNotEmpty()) }
-            var quotedProfileRevision by remember { mutableIntStateOf(0) }
+            var quotedProfileRevision by remember(note.id) { mutableIntStateOf(0) }
             if (note.quotedEventIds.isNotEmpty()) {
                 LaunchedEffect(note.quotedEventIds) {
                     quotedLoading = true
@@ -2574,12 +2646,14 @@ fun NoteCard(
                 val quotedAuthorPubkeys = remember(quotedMetas) {
                     quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
                 }
-                LaunchedEffect(quotedAuthorPubkeys) {
-                    if (quotedAuthorPubkeys.isNotEmpty()) {
-                        profileCache.profileUpdated
-                            .filter { it in quotedAuthorPubkeys }
-                            .debounce(600)
-                            .collect { quotedProfileRevision++ }
+                if (quotedProfileRevision == 0) {
+                    LaunchedEffect(quotedAuthorPubkeys) {
+                        if (quotedAuthorPubkeys.isNotEmpty()) {
+                            profileCache.profileUpdated
+                                .filter { it in quotedAuthorPubkeys }
+                                .debounce(1500)
+                                .collect { quotedProfileRevision = 1 }
+                        }
                     }
                 }
             }
@@ -2587,15 +2661,31 @@ fun NoteCard(
             // Use translated text when available and user hasn't toggled to original
             val displayContent = if (translationResult != null && !showOriginal) translationResult!!.translatedText else note.content
             val contentIsMarkdown = remember(displayContent) { isMarkdown(displayContent) }
-            val contentBlocks = remember(displayContent, note.mediaUrls, note.urlPreviews, consumedUrls, mentionProfileVersion, diskCacheReady) {
-                buildNoteContentWithInlinePreviews(
-                    displayContent,
-                    note.mediaUrls.toSet(),
-                    note.urlPreviews,
-                    linkStyle,
-                    profileCache,
-                    consumedUrls
-                )
+            val contentCacheKey = remember(displayContent, note.mediaUrls, consumedUrls, mentionProfileVersion) {
+                social.mycelium.android.utils.ContentBlockCache.key(displayContent, note.mediaUrls.toSet(), consumedUrls, mentionProfileVersion)
+            }
+            val contentBlocks by produceState(
+                initialValue = social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey) ?: emptyList(),
+                contentCacheKey, note.urlPreviews, diskCacheReady
+            ) {
+                // Check cache first (may already be populated from a previous composition)
+                social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey)?.let { cached ->
+                    value = cached
+                    return@produceState
+                }
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    buildNoteContentWithInlinePreviews(
+                        displayContent,
+                        note.mediaUrls.toSet(),
+                        note.urlPreviews,
+                        linkStyle,
+                        profileCache,
+                        consumedUrls,
+                        extractEmojiUrls(note.tags)
+                    )
+                }
+                social.mycelium.android.utils.ContentBlockCache.put(contentCacheKey, result)
+                value = result
             }
             // Collect all media URLs across all MediaGroup blocks for fullscreen viewer
             val allMediaUrls = remember(contentBlocks) {
@@ -2610,9 +2700,8 @@ fun NoteCard(
             val isSensitive = remember(note.tags, note.hashtags) {
                 contentWarningReason != null || note.hashtags.any { it.equals("nsfw", ignoreCase = true) }
             }
-            val showSensitivePref by social.mycelium.android.ui.settings.MediaPreferences.showSensitiveContent.collectAsState()
             var sensitiveRevealed by remember(note.id) { mutableStateOf(false) }
-            val shouldBlur = isSensitive && !showSensitivePref && !sensitiveRevealed
+            val shouldBlur = isSensitive && !showSensitiveContent && !sensitiveRevealed
 
             if (shouldBlur) {
                 Box(
@@ -2653,43 +2742,36 @@ fun NoteCard(
                     is NoteContentBlock.Content -> {
                         val annotated = block.annotated
                         if (annotated.isNotEmpty()) {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = Color.Transparent,
-                                shape = RectangleShape,
-                                tonalElevation = 0.dp,
-                                shadowElevation = 0.dp
-                            ) {
-                                if (contentIsMarkdown) {
-                                    MarkdownNoteContent(
-                                        content = annotated.text,
-                                        style = NoteBodyTextStyle.copy(
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                        onProfileClick = onProfileClick,
-                                        onNoteClick = { onNoteClick(note) },
-                                        onUrlClick = { _ -> onNoteClick(note) },
-                                        onHashtagClick = { /* TODO: hashtag navigation */ }
-                                    )
-                                } else {
-                                    ClickableNoteContent(
-                                        text = annotated,
-                                        style = NoteBodyTextStyle.copy(
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        ),
-                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                        onClick = { offset ->
-                                            val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                            val relay = annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
-                                            when {
-                                                profile != null -> onProfileClick(profile.item)
-                                                relay != null -> onRelayClick(relay.item)
-                                                else -> onNoteClick(note)
-                                            }
+                            if (contentIsMarkdown) {
+                                MarkdownNoteContent(
+                                    content = annotated.text,
+                                    style = NoteBodyTextStyle.copy(
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                    onProfileClick = onProfileClick,
+                                    onNoteClick = { onNoteClick(note) },
+                                    onUrlClick = { _ -> onNoteClick(note) },
+                                    onHashtagClick = { /* TODO: hashtag navigation */ }
+                                )
+                            } else {
+                                ClickableNoteContent(
+                                    text = annotated,
+                                    style = NoteBodyTextStyle.copy(
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                    emojiUrls = block.emojiUrls,
+                                    onClick = { offset ->
+                                        val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                                        val relay = annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
+                                        when {
+                                            profile != null -> onProfileClick(profile.item)
+                                            relay != null -> onRelayClick(relay.item)
+                                            else -> onNoteClick(note)
                                         }
-                                    )
-                                }
+                                    }
+                                )
                             }
                         }
                     }
@@ -2705,6 +2787,7 @@ fun NoteCard(
                             initialMediaPage = (initialMediaPage - groupStartIndex).coerceAtLeast(0),
                             isVisible = isVisible,
                             mediaMeta = note.mediaMeta,
+                            compactMedia = compactMedia,
                             onMediaPageChanged = { localPage -> onMediaPageChanged(localPage + groupStartIndex) },
                             onImageTap = { urls, index -> onImageTap(note, urls, index) },
                             onOpenImageViewer = onOpenImageViewer,
@@ -2726,11 +2809,6 @@ fun NoteCard(
                         // Snapshot read — avoids per-card StateFlow subscription that recomposes all cards on any activity update
                         val liveRepo = remember { social.mycelium.android.repository.LiveActivityRepository.getInstance() }
                         val activity = remember(block.eventId) { liveRepo.allActivities.value.firstOrNull { it.id == block.eventId } }
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(),
-                            color = Color.Transparent,
-                            shape = RectangleShape
-                        ) {
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -2802,22 +2880,30 @@ fun NoteCard(
                                 )
                             }
                         }
-                        }
+                    }
+                    is NoteContentBlock.EmojiPack -> {
+                        EmojiPackGrid(
+                            author = block.author,
+                            dTag = block.dTag,
+                            relayHints = block.relayHints
+                        )
                     }
                     is NoteContentBlock.QuotedNote -> {
                         val eventId = block.eventId
-                        // Height-stable wrapper: cache measured height so scrolling
-                        // back up reserves the correct space immediately (no snap).
-                        val cachedHeightPx = social.mycelium.android.utils.QuotedNoteHeightCache.get(eventId)
                         val density = LocalDensity.current
-                        val minHeightDp = if (cachedHeightPx != null) with(density) { cachedHeightPx.toDp() } else 0.dp
+                        // Seed from cache so scroll-back reserves the right height immediately.
+                        // Once measured, clear the min so animateContentSize can shrink freely.
+                        val cachedHeightPx = remember(note.id, eventId) { QuotedNoteHeightCache.get(note.id, eventId) }
+                        var measured by remember(note.id, eventId) { mutableStateOf(false) }
+                        val minHeightDp = if (!measured && cachedHeightPx != null) with(density) { cachedHeightPx.toDp() } else 0.dp
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .defaultMinSize(minHeight = minHeightDp)
                                 .onSizeChanged { size ->
                                     if (size.height > 0) {
-                                        social.mycelium.android.utils.QuotedNoteHeightCache.put(eventId, size.height)
+                                        measured = true
+                                        QuotedNoteHeightCache.put(note.id, eventId, size.height)
                                     }
                                 }
                         ) {
@@ -2839,6 +2925,7 @@ fun NoteCard(
                                 onVideoClick = onVideoClick,
                                 onOpenImageViewer = onOpenImageViewer,
                                 onRelayClick = onRelayClick,
+                                countsByNoteId = countsByNoteId,
                             )
                         } else if (eventId in quotedFailedIds) {
                             Row(
@@ -2953,6 +3040,7 @@ fun NoteCard(
                 onBlockAuthor = onBlockAuthor,
                 onMuteAuthor = onMuteAuthor,
                 onBookmarkToggle = onBookmarkToggle,
+                onDelete = onDelete,
                 extraMoreMenuItems = extraMoreMenuItems,
                 translationResult = translationResult,
                 isTranslating = isTranslating,
@@ -3020,7 +3108,6 @@ fun NoteCard(
             }
         }
     }
-}
 
 @Composable
 private fun ActionButton(

@@ -49,9 +49,12 @@ import social.mycelium.android.utils.normalizeAuthorIdForCache
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import social.mycelium.android.repository.QuotedNoteCache
+import social.mycelium.android.ui.icons.Nip05Verified
+import social.mycelium.android.ui.icons.Nip05VerifiedDark
 import social.mycelium.android.ui.theme.NoteBodyTextStyle
 import social.mycelium.android.utils.NoteContentBlock
 import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
+import social.mycelium.android.utils.extractEmojiUrls
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
@@ -243,11 +246,12 @@ private fun NoteCardContent(
                         )
                         if (displayAuthor.isVerified) {
                             Spacer(modifier = Modifier.width(4.dp))
+                            val isDark = androidx.compose.foundation.isSystemInDarkTheme()
                             Icon(
-                                imageVector = Icons.Filled.Star,
+                                imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
                                 contentDescription = "Verified",
                                 modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.primary
+                                tint = androidx.compose.ui.graphics.Color.Unspecified
                             )
                         }
                     }
@@ -340,7 +344,9 @@ private fun NoteCardContent(
                     note.mediaUrls.toSet(),
                     note.urlPreviews,
                     linkStyle,
-                    profileCache
+                    profileCache,
+                    emptySet(),
+                    extractEmojiUrls(note.tags)
                 )
             }
             if (hasBodyText) {
@@ -384,6 +390,7 @@ private fun NoteCardContent(
                                             style = NoteBodyTextStyle.copy(
                                                 color = MaterialTheme.colorScheme.onSurface
                                             ),
+                                            emojiUrls = block.emojiUrls,
                                             onClick = { offset ->
                                                 val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                                 val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
@@ -416,6 +423,13 @@ private fun NoteCardContent(
                             }
                             is NoteContentBlock.LiveEventReference -> {
                                 // Live event references handled like quoted notes
+                            }
+                            is NoteContentBlock.EmojiPack -> {
+                                EmojiPackGrid(
+                                    author = block.author,
+                                    dTag = block.dTag,
+                                    relayHints = block.relayHints
+                                )
                             }
                         }
                     }
@@ -551,6 +565,7 @@ private fun NoteCardContent(
                                                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                                                     ),
                                                                     maxLines = if (quotedExpanded) Int.MAX_VALUE else 3,
+                                                                    emojiUrls = qBlock.emojiUrls,
                                                                     onClick = { offset ->
                                                                         val profile = qAnnotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                                                         val url = qAnnotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
@@ -649,6 +664,13 @@ private fun NoteCardContent(
                                                             style = MaterialTheme.typography.labelSmall,
                                                             color = MaterialTheme.colorScheme.primary,
                                                             modifier = Modifier.padding(vertical = 2.dp)
+                                                        )
+                                                    }
+                                                    is NoteContentBlock.EmojiPack -> {
+                                                        EmojiPackGrid(
+                                                            author = qBlock.author,
+                                                            dTag = qBlock.dTag,
+                                                            relayHints = qBlock.relayHints
                                                         )
                                                     }
                                                 }

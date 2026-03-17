@@ -299,14 +299,21 @@ private fun DrawerContent(
                 }
                 byUrl.values.toList()
             }
+            val isOutboxSelected = selectedDisplayName == "Outbox"
             FixedRelaySection(
                 title = "Outbox",
                 icon = Icons.Default.SwapVert,
                 relays = mergedRelays,
                 sectionId = "outbox",
                 isExpanded = expandedCategories.contains("outbox"),
+                isGroupSelected = isOutboxSelected,
+                selectedDisplayName = selectedDisplayName,
                 connectionStatus = connectionStatus,
                 onToggle = { onToggleCategory("outbox") },
+                onGroupClick = {
+                    onItemClick("outbox")
+                    onClose()
+                },
                 onRelayClick = { url -> onItemClick("relay:$url"); onClose() },
                 showRwTags = true
             )
@@ -343,6 +350,7 @@ private fun DrawerContent(
             ActiveProfileSection(
                 categories = activeProfile.categories,
                 expandedCategories = expandedCategories,
+                selectedDisplayName = selectedDisplayName,
                 connectionStatus = connectionStatus,
                 onCategoryClick = { categoryId ->
                     onItemClick("relay_category:$categoryId")
@@ -387,8 +395,11 @@ private fun FixedRelaySection(
     relays: List<UserRelay>,
     sectionId: String,
     isExpanded: Boolean,
+    isGroupSelected: Boolean = false,
+    selectedDisplayName: String = "",
     connectionStatus: Map<String, RelayConnectionStatus>,
     onToggle: () -> Unit,
+    onGroupClick: (() -> Unit)? = null,
     onRelayClick: (String) -> Unit,
     showRwTags: Boolean = false
 ) {
@@ -399,7 +410,12 @@ private fun FixedRelaySection(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggle() }
+            .then(
+                if (isGroupSelected) Modifier.background(
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                ) else Modifier
+            )
+            .clickable { if (onGroupClick != null) onGroupClick() else onToggle() }
             .padding(horizontal = 28.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -409,13 +425,15 @@ private fun FixedRelaySection(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(icon, null, Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                tint = if (isGroupSelected) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(12.dp))
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                color = MaterialTheme.colorScheme.onSurface
+                fontWeight = if (isGroupSelected) FontWeight.SemiBold else FontWeight.Medium,
+                color = if (isGroupSelected) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurface
             )
             Spacer(Modifier.width(8.dp))
             // Connected count indicator
@@ -439,13 +457,19 @@ private fun FixedRelaySection(
         Icon(
             imageVector = if (isExpanded) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
             contentDescription = if (isExpanded) "Collapse" else "Expand",
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier
+                .size(20.dp)
+                .clickable { onToggle() },
             tint = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
     if (isExpanded) {
         relays.forEach { relay ->
             val relayConnected = connectionStatus[normalizeRelayUrl(relay.url)] == RelayConnectionStatus.CONNECTED
+            val strippedUrl = relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+            val isRelaySelected = selectedDisplayName == relay.displayName ||
+                selectedDisplayName == (relay.info?.name ?: "") ||
+                selectedDisplayName == strippedUrl
             SidebarRelayRow(
                 relay = relay,
                 relayConnected = relayConnected,
@@ -455,7 +479,8 @@ private fun FixedRelaySection(
                     relay.read -> "r"
                     relay.write -> "w"
                     else -> null
-                } else null
+                } else null,
+                isSelected = isRelaySelected
             )
         }
     }
@@ -467,6 +492,7 @@ private fun FixedRelaySection(
 private fun ActiveProfileSection(
     categories: List<RelayCategory>,
     expandedCategories: Set<String>,
+    selectedDisplayName: String = "Global",
     connectionStatus: Map<String, RelayConnectionStatus> = emptyMap(),
     onCategoryClick: (String) -> Unit,
     onRelayClick: (String) -> Unit,
@@ -480,34 +506,42 @@ private fun ActiveProfileSection(
             val connectedCount = remember(category.relays, connectionStatus) {
                 category.relays.count { connectionStatus[normalizeRelayUrl(it.url)] == RelayConnectionStatus.CONNECTED }
             }
+            val isSelectedFilter = selectedDisplayName == category.name
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .then(
+                        if (isSelectedFilter) Modifier.background(
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                        ) else Modifier
+                    )
+                    .clickable { onCategoryClick(category.id) }
                     .padding(horizontal = 28.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Main row body: tap = filter by this collection's relays
                 Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clickable { onCategoryClick(category.id) },
+                    modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         imageVector = Icons.Default.Folder,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp),
-                        tint = if (category.isSubscribed) MaterialTheme.colorScheme.onSurfaceVariant
-                               else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        tint = if (category.isSubscribed) {
+                            if (isSelectedFilter) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        } else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
                         text = category.name,
                         style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium,
-                        color = if (category.isSubscribed) MaterialTheme.colorScheme.onSurface
+                        fontWeight = if (isSelectedFilter) FontWeight.SemiBold else FontWeight.Medium,
+                        color = if (isSelectedFilter) MaterialTheme.colorScheme.primary
+                               else if (category.isSubscribed) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                     )
                     if (category.relays.isNotEmpty()) {
@@ -531,19 +565,17 @@ private fun ActiveProfileSection(
                         )
                     }
                 }
-                // Connectivity toggle (active/inactive)
-                Switch(
-                    checked = category.isSubscribed,
-                    onCheckedChange = { onToggleCategorySubscription(category.id) },
-                    modifier = Modifier.height(20.dp),
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = MaterialTheme.colorScheme.primary,
-                        checkedTrackColor = MaterialTheme.colorScheme.primaryContainer,
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                    )
+                // Compact power toggle (enable/disable connections)
+                Icon(
+                    imageVector = Icons.Default.PowerSettingsNew,
+                    contentDescription = if (category.isSubscribed) "Disable" else "Enable",
+                    modifier = Modifier
+                        .size(18.dp)
+                        .clickable { onToggleCategorySubscription(category.id) },
+                    tint = if (category.isSubscribed) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
                 )
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(10.dp))
                 // Chevron: tap = expand/collapse relay list
                 Icon(
                     imageVector = if (isExpanded) Icons.Default.ExpandMore else Icons.Default.ChevronRight,
@@ -566,10 +598,15 @@ private fun ActiveProfileSection(
                 } else {
                     category.relays.forEach { relay ->
                         val relayConnected = connectionStatus[normalizeRelayUrl(relay.url)] == RelayConnectionStatus.CONNECTED
+                        val catStrippedUrl = relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/")
+                        val isRelaySelected = selectedDisplayName == relay.displayName ||
+                            selectedDisplayName == (relay.info?.name ?: "") ||
+                            selectedDisplayName == catStrippedUrl
                         SidebarRelayRow(
                             relay = relay,
                             relayConnected = relayConnected,
-                            onClick = { onRelayClick(relay.url) }
+                            onClick = { onRelayClick(relay.url) },
+                            isSelected = isRelaySelected
                         )
                     }
                 }
@@ -585,19 +622,26 @@ private fun SidebarRelayRow(
     relay: UserRelay,
     relayConnected: Boolean,
     onClick: () -> Unit,
-    rwTag: String? = null
+    rwTag: String? = null,
+    isSelected: Boolean = false
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val nip11Cache = remember { social.mycelium.android.cache.Nip11CacheManager.getInstance(context) }
     var relayInfo by remember(relay.url) { mutableStateOf(nip11Cache.getCachedRelayInfo(relay.url)) }
     LaunchedEffect(relay.url) {
-        if (relayInfo == null) {
-            relayInfo = nip11Cache.getRelayInfo(relay.url)
-        }
+        // Always attempt a (potentially refreshing) fetch — getCachedRelayInfo returns stale
+        // data instantly so the icon renders, and getRelayInfo refreshes in the background
+        val fresh = nip11Cache.getRelayInfo(relay.url)
+        if (fresh != null) relayInfo = fresh
     }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (isSelected) Modifier.background(
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+                ) else Modifier
+            )
             .clickable { onClick() }
             .padding(start = 40.dp, end = 20.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically

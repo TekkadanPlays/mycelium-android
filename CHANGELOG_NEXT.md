@@ -2,22 +2,19 @@
 
 ## Fixes
 
-### PiP (Picture-in-Picture)
-- **PiP restores on back gesture**: Gesturing back from a fullscreen video opened via PiP now automatically returns the video to PiP mode instead of closing the viewer.
-- **PiP playback continuity**: PiP video no longer pauses when transitioning between PiP, fullscreen, and back. Playback is seamless through the entire cycle.
-- **PiP has exclusive playback priority**: Feed video players yield to PiP — no more audio competition or duplicate playback when PiP is active for a video URL.
-- **PiP mute state preserved**: Tapping PiP to go fullscreen now correctly inherits the unmuted state instead of reverting to a stale mute value.
-- **Live activity auto-PiP**: Gesturing back from a live stream correctly hands off the player to PiP when auto-PiP is enabled.
 
-### Feed
-- **No feed reconnection on navigation**: Returning from live events, live streams, video viewer, or any other screen no longer triggers feed clearing, resubscription, or visible refresh.
-- **Feed retained after long background**: Cached notes remain visible when the app returns from background. Loading indicator only appears on truly cold starts with an empty feed.
-- **No duplicate video playback**: Opening a thread overlay from the feed pauses feed video players, preventing the same video from playing in both the feed and the thread.
-- **Scroll stability for quoted notes**: Quoted notes with media no longer cause the feed to jump when scrolling up, thanks to a height reservation cache.
-
-### Thread View
-- **Quoted notes match feed styling**: Quoted notes in thread replies now use the same rich rendering as the home feed — full content blocks, media (images/videos), recursive nested quotes, expand/collapse, reaction/zap/reply counters, and profile avatars.
-- **Full media in replies**: Reply media now uses the same carousel as the home feed — swipeable image pager, inline video players, blurhash placeholders, fullscreen magnifier, page indicators, and proper aspect ratio handling. Replaces the previous 56dp thumbnail grid.
+### Scroll Performance
+- **Eliminated Card overhead**: Replaced Material3 `Card` (which creates Surface → Box with clip, shadow RenderNode, and ripple layers) with a plain `Column` + background color for every note card in the feed.
+- **Deferred video player creation**: ExoPlayer initialization (codec enumeration, surface allocation) is now delayed 200ms after a video card enters the viewport, preventing it from blocking the scroll frame.
+- **Off-thread content parsing**: The 7-regex content block builder (`buildNoteContentWithInlinePreviews`) now runs on `Dispatchers.Default` via `produceState` instead of blocking the main thread during composition — applies to feed cards, quoted notes, and thread replies.
+- **Eliminated double measure pass on quoted notes**: Replaced `Row(IntrinsicSize.Min)` + `fillMaxHeight()` accent bar with a `drawBehind` modifier that draws the accent bar without requiring intrinsic measurement.
+- **Coil image optimization**: Added `size(ORIGINAL)` and `allowHardware(true)` to feed image requests, preventing Coil from waiting for layout to determine target size before decoding.
+- **Capped per-card profile observer coroutines**: Profile update observers on NoteCard, QuotedNoteContent, and thread replies now cap at 1 update with 1500ms debounce. Previously, every visible card maintained a permanent coroutine filtering all profile updates.
+- **Eliminated O(N) recompositions**: Hoisted `compactMedia`, `showSensitiveContent`, and `countsByNoteId` `collectAsState` calls out of per-card composables to the screen level.
+- **Stabilized ~15 lambda allocations**: Hoisted note-independent lambdas (`onReact`, `onBoost`, `onQuote`, `onFork`, `onNoteClick`, `onCustomZapSend`, `onFollowAuthor`, `onLike`, `onShare`, etc.) above `items{}` blocks in DashboardScreen and TopicsScreen using `remember`.
+- **Replaced SubcomposeAsyncImage**: Switched feed images from `SubcomposeAsyncImage` (double measure pass per frame) to `AsyncImage` + `rememberAsyncImagePainter` with separate loading/error overlays.
+- **Removed redundant layout nodes**: Stripped unnecessary `Surface` wrappers from text content blocks and live event references in NoteCard.
+- **Thread view optimizations**: Removed redundant per-reply `countsByNoteId` subscription (threaded screen-level map instead), snapshot-read `diskCacheRestored` instead of per-reply flow collector, moved reply content parsing off main thread.
 
 ### Media & Navigation
 - **Image loading**: Added proper request headers so stricter CDNs no longer reject image requests with HTTP 403.

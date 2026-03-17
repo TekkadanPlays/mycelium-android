@@ -283,6 +283,7 @@ private fun DmFab(
         // Main FAB
         FloatingActionButton(
             onClick = { expanded = !expanded },
+            shape = CircleShape,
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary
         ) {
@@ -306,7 +307,7 @@ private fun DmFabItem(
     Row(verticalAlignment = Alignment.CenterVertically) {
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerHighest,
-            shape = MaterialTheme.shapes.small,
+            shape = RoundedCornerShape(8.dp),
             shadowElevation = 2.dp,
         ) {
             Text(
@@ -319,6 +320,7 @@ private fun DmFabItem(
         Spacer(Modifier.width(8.dp))
         SmallFloatingActionButton(
             onClick = onClick,
+            shape = CircleShape,
             containerColor = containerColor,
             contentColor = contentColor,
         ) {

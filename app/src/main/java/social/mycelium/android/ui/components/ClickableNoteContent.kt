@@ -1,6 +1,8 @@
 package social.mycelium.android.ui.components
 
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material3.DropdownMenu
@@ -18,8 +20,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.Placeholder
+import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 
 /**
  * Renders note content text with click handling and long-press "Copy link" for URL spans.
@@ -31,6 +37,7 @@ fun ClickableNoteContent(
     style: TextStyle,
     modifier: Modifier = Modifier,
     maxLines: Int = Int.MAX_VALUE,
+    emojiUrls: Map<String, String> = emptyMap(),
     onClick: (Int) -> Unit,
     onLongPress: (() -> Unit)? = null
 ) {
@@ -39,11 +46,36 @@ fun ClickableNoteContent(
     var showCopyLinkMenu by remember { mutableStateOf(false) }
     var urlToCopy by remember { mutableStateOf<String?>(null) }
 
+    // Build inline content map for NIP-30 custom emoji
+    val inlineContent = remember(emojiUrls) {
+        if (emojiUrls.isEmpty()) emptyMap()
+        else {
+            val fontSize = style.fontSize.let { if (it == androidx.compose.ui.unit.TextUnit.Unspecified) 16.sp else it }
+            val placeholderSize = fontSize * 1.3f
+            emojiUrls.map { (shortcode, url) ->
+                shortcode to InlineTextContent(
+                    Placeholder(
+                        width = placeholderSize,
+                        height = placeholderSize,
+                        placeholderVerticalAlign = PlaceholderVerticalAlign.Center
+                    )
+                ) {
+                    AsyncImage(
+                        model = url,
+                        contentDescription = shortcode.removeSurrounding(":"),
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }.toMap()
+        }
+    }
+
     Text(
         text = text,
         style = style,
         maxLines = maxLines,
         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        inlineContent = inlineContent,
         modifier = modifier.pointerInput(text) {
             detectTapGestures(
                 onTap = { offset: Offset ->

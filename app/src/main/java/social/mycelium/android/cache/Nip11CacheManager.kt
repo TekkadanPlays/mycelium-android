@@ -126,16 +126,13 @@ class Nip11CacheManager(private val context: Context) {
     }
     
     /**
-     * Get relay information from cache only (no network fetch)
+     * Get relay information from cache only (no network fetch).
+     * Returns stale data if present — callers should trigger a background refresh
+     * for expired entries, but stale icons/names are better than nothing.
      */
     fun getCachedRelayInfo(url: String): RelayInformation? {
         val normalizedUrl = normalizeRelayUrl(url)
-        val cached = memoryCache[normalizedUrl]
-        return if (cached != null && !isExpired(cached.timestamp)) {
-            cached.info
-        } else {
-            null
-        }
+        return memoryCache[normalizedUrl]?.info
     }
     
     /**
@@ -335,12 +332,7 @@ class Nip11CacheManager(private val context: Context) {
      * Normalize relay URL
      */
     private fun normalizeRelayUrl(url: String): String {
-        return when {
-            url.startsWith("wss://") || url.startsWith("ws://") -> url
-            url.startsWith("https://") -> url.replace("https://", "wss://")
-            url.startsWith("http://") -> url.replace("http://", "ws://")
-            else -> "wss://$url"
-        }
+        return social.mycelium.android.utils.normalizeRelayUrl(url)
     }
     
     /**
@@ -356,8 +348,13 @@ class Nip11CacheManager(private val context: Context) {
                 val timestamps = JSON.decodeFromString<Map<String, Long>>(timestampsJson)
                 
                 cacheData.forEach { (url, info) ->
+                    val normalizedKey = normalizeRelayUrl(url)
                     val timestamp = timestamps[url] ?: 0L
-                    memoryCache[url] = CachedRelayInfo(url, info, timestamp)
+                    // If duplicate keys normalize to same URL, keep the newer entry
+                    val existing = memoryCache[normalizedKey]
+                    if (existing == null || existing.timestamp < timestamp) {
+                        memoryCache[normalizedKey] = CachedRelayInfo(normalizedKey, info, timestamp)
+                    }
                 }
                 
                 Log.d(TAG, "💾 Loaded ${memoryCache.size} cached relay info entries")

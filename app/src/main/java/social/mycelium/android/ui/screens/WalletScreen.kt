@@ -40,10 +40,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.NotificationType
+import social.mycelium.android.lightning.PaymentResult
+import social.mycelium.android.lightning.PhoenixWalletManager
+import social.mycelium.android.lightning.SeedManager
 import social.mycelium.android.repository.CoinosRepository
 import social.mycelium.android.repository.CoinosTransaction
 import social.mycelium.android.repository.NotificationsRepository
 import com.example.cybin.signer.NostrSigner
+import kotlinx.coroutines.launch
+import social.mycelium.android.BuildConfig
 
 // ── Color palette ──────────────────────────────────────────────────────
 // Orange is the star — used ONLY for the balance figure and the primary CTA.
@@ -64,87 +69,308 @@ fun WalletScreen(
     pubkey: String?,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val clipboardManager = LocalClipboardManager.current
-
-    // Release builds: always show the "Coming soon" lander.
-    // Debug builds (WALLET_DEV_MODE): show real wallet UI backed by mock or real API.
-    if (!social.mycelium.android.BuildConfig.WALLET_DEV_MODE) {
+    // Feature gate: release builds show Coming Soon; debug builds show Phoenix wallet
+    if (!BuildConfig.WALLET_DEV_MODE) {
         ComingSoonLander()
         return
     }
 
-    LaunchedEffect(Unit) { CoinosRepository.init(context) }
+    val context = LocalContext.current
+    val clipboardManager = LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
 
-    val isLoggedIn by CoinosRepository.isLoggedIn.collectAsState()
-    val username by CoinosRepository.username.collectAsState()
-    val balanceSats by CoinosRepository.balanceSats.collectAsState()
-    val isLoading by CoinosRepository.isLoading.collectAsState()
-    val error by CoinosRepository.error.collectAsState()
-    val coinosTx by CoinosRepository.transactions.collectAsState()
-    val lastInvoice by CoinosRepository.lastInvoice.collectAsState()
+    // Initialize Phoenix wallet manager
+    LaunchedEffect(Unit) { PhoenixWalletManager.init(context) }
 
-    // ── Real zap data from notifications ──
-    val allNotifications by NotificationsRepository.notifications.collectAsState()
-    val zapTransactions = remember(allNotifications) {
-        allNotifications
-            .filter { it.type == NotificationType.ZAP && it.zapAmountSats > 0 }
-            .map { notif ->
-                val senderName = notif.author?.displayName
-                    ?: notif.author?.username
-                    ?: notif.actorPubkeys.firstOrNull()?.take(8)?.let { "nostr:$it…" }
-                CoinosTransaction(
-                    id = notif.id,
-                    amount = notif.zapAmountSats,
-                    memo = "Zap from $senderName",
-                    createdAt = java.time.Instant.ofEpochSecond(notif.sortTimestamp).toString(),
-                    confirmed = true,
-                    type = "zap"
+    val walletState by PhoenixWalletManager.state.collectAsState()
+    val balanceMsat by PhoenixWalletManager.balanceMsat.collectAsState()
+    val isConnected by PhoenixWalletManager.isConnected.collectAsState()
+
+    // Auto-start if seed exists
+    LaunchedEffect(walletState) {
+        if (walletState is PhoenixWalletManager.WalletState.Starting) {
+            PhoenixWalletManager.start(context)
+        }
+    }
+
+    when (walletState) {
+        is PhoenixWalletManager.WalletState.NotInitialized -> {
+            // Still loading
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = BitcoinOrange)
+            }
+        }
+        is PhoenixWalletManager.WalletState.NoWallet -> {
+            // Show wallet creation/restore screen
+            WalletOnboardingScreen(
+                onCreateWallet = {
+                    scope.launch {
+                        PhoenixWalletManager.createWallet(context)
+                    }
+                },
+                onRestoreWallet = { words ->
+                    scope.launch {
+                        PhoenixWalletManager.restoreWallet(context, words)
+                    }
+                }
+            )
+        }
+        is PhoenixWalletManager.WalletState.Starting -> {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = BitcoinOrange)
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Starting Lightning node…",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        is PhoenixWalletManager.WalletState.Running -> {
+            val balanceSats = balanceMsat / 1000
+
+            // Real zap data from notifications
+            val allNotifications by NotificationsRepository.notifications.collectAsState()
+            val zapTransactions = remember(allNotifications) {
+                allNotifications
+                    .filter { it.type == NotificationType.ZAP && it.zapAmountSats > 0 }
+                    .map { notif ->
+                        val senderName = notif.author?.displayName
+                            ?: notif.author?.username
+                            ?: notif.actorPubkeys.firstOrNull()?.take(8)?.let { "nostr:$it…" }
+                        CoinosTransaction(
+                            id = notif.id,
+                            amount = notif.zapAmountSats,
+                            memo = "Zap from $senderName",
+                            createdAt = java.time.Instant.ofEpochSecond(notif.sortTimestamp).toString(),
+                            confirmed = true,
+                            type = "zap"
+                        )
+                    }
+            }
+            val totalZapSats = remember(zapTransactions) { zapTransactions.sumOf { it.amount } }
+
+            var lastInvoice by remember { mutableStateOf<String?>(null) }
+            var isLoading by remember { mutableStateOf(false) }
+            var error by remember { mutableStateOf<String?>(null) }
+
+            WalletDashboard(
+                username = if (isConnected) "⚡ Connected" else "Connecting…",
+                balanceSats = balanceSats,
+                isLoading = isLoading || !isConnected,
+                error = error,
+                transactions = zapTransactions,
+                lastInvoice = lastInvoice,
+                isMockMode = false,
+                zapCount = zapTransactions.size,
+                totalZapSats = totalZapSats,
+                onRefresh = { /* balance is live from channelsFlow */ },
+                onCreateInvoice = { amount, memo ->
+                    scope.launch {
+                        isLoading = true
+                        val invoice = PhoenixWalletManager.createInvoice(amount * 1000, memo)
+                        if (invoice != null) {
+                            lastInvoice = invoice
+                        } else {
+                            error = "Failed to create invoice"
+                        }
+                        isLoading = false
+                    }
+                },
+                onPayInvoice = { bolt11 ->
+                    scope.launch {
+                        isLoading = true
+                        when (val result = PhoenixWalletManager.payInvoice(bolt11)) {
+                            is PaymentResult.Success -> { error = null }
+                            is PaymentResult.Error -> { error = result.message }
+                        }
+                        isLoading = false
+                    }
+                },
+                onCopyInvoice = { invoice ->
+                    clipboardManager.setText(AnnotatedString(invoice))
+                },
+                onLogout = {
+                    PhoenixWalletManager.stop()
+                    SeedManager.deleteSeed(context)
+                },
+                onClearError = { error = null },
+                modifier = modifier
+            )
+        }
+        is PhoenixWalletManager.WalletState.Error -> {
+            val errorState = walletState as PhoenixWalletManager.WalletState.Error
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.padding(32.dp)
+                ) {
+                    Icon(
+                        Icons.Outlined.ErrorOutline,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                        tint = DebitRose
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Lightning node error",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        errorState.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(
+                        onClick = { scope.launch { PhoenixWalletManager.start(context) } },
+                        colors = ButtonDefaults.buttonColors(containerColor = BitcoinOrange)
+                    ) {
+                        Text("Retry")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WalletOnboardingScreen(
+    onCreateWallet: () -> Unit,
+    onRestoreWallet: (List<String>) -> Unit
+) {
+    var showRestore by remember { mutableStateOf(false) }
+    var restoreWords by remember { mutableStateOf("") }
+    var restoreError by remember { mutableStateOf<String?>(null) }
+
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            // Orange glow behind bolt
+            Box(contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier
+                        .size(180.dp)
+                        .background(
+                            Brush.radialGradient(
+                                colors = listOf(
+                                    BitcoinOrange.copy(alpha = 0.10f),
+                                    Color.Transparent
+                                )
+                            )
+                        )
+                )
+                Icon(
+                    Icons.Filled.Bolt,
+                    contentDescription = "Lightning",
+                    modifier = Modifier.size(72.dp),
+                    tint = BitcoinOrange
                 )
             }
-    }
 
-    // Merge: real zaps + CoinOS transactions, sorted by timestamp descending
-    val mergedTransactions = remember(coinosTx, zapTransactions) {
-        (coinosTx + zapTransactions)
-            .distinctBy { it.id }
-            .sortedByDescending { it.createdAt ?: "" }
-    }
+            Spacer(Modifier.height(16.dp))
 
-    // Total zap sats received (for balance enrichment in mock mode)
-    val totalZapSats = remember(zapTransactions) { zapTransactions.sumOf { it.amount } }
+            Text(
+                text = "Lightning Wallet",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
 
-    if (!isLoggedIn) {
-        NostrLoginScreen(
-            signer = signer,
-            pubkey = pubkey,
-            isLoading = isLoading,
-            error = error
-        )
-    } else {
-        WalletDashboard(
-            username = username ?: "",
-            balanceSats = if (CoinosRepository.isMockMode) balanceSats + totalZapSats else balanceSats,
-            isLoading = isLoading,
-            error = error,
-            transactions = mergedTransactions,
-            lastInvoice = lastInvoice,
-            isMockMode = CoinosRepository.isMockMode,
-            zapCount = zapTransactions.size,
-            totalZapSats = totalZapSats,
-            onRefresh = {
-                CoinosRepository.refreshBalance()
-                CoinosRepository.fetchTransactions()
-            },
-            onCreateInvoice = { amount, memo -> CoinosRepository.createInvoice(amount, memo) },
-            onPayInvoice = { bolt11 -> CoinosRepository.payInvoice(bolt11) },
-            onCopyInvoice = { invoice ->
-                clipboardManager.setText(AnnotatedString(invoice))
-            },
-            onLogout = { CoinosRepository.logout() },
-            onClearError = { CoinosRepository.clearError() },
-            modifier = modifier
-        )
+            Spacer(Modifier.height(6.dp))
+
+            Text(
+                text = "Non-custodial · Your keys, your coins",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(36.dp))
+
+            if (!showRestore) {
+                // Create new wallet
+                Button(
+                    onClick = onCreateWallet,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BitcoinOrange),
+                    contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp),
+                    modifier = Modifier.fillMaxWidth(0.75f)
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Create Wallet", fontWeight = FontWeight.SemiBold)
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                OutlinedButton(
+                    onClick = { showRestore = true },
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp),
+                    modifier = Modifier.fillMaxWidth(0.75f)
+                ) {
+                    Icon(Icons.Filled.Restore, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Restore from Seed", fontWeight = FontWeight.SemiBold)
+                }
+            } else {
+                // Restore wallet
+                OutlinedTextField(
+                    value = restoreWords,
+                    onValueChange = { restoreWords = it; restoreError = null },
+                    label = { Text("12-word recovery phrase") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    minLines = 3,
+                    maxLines = 4
+                )
+
+                if (restoreError != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = restoreError!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = DebitRose
+                    )
+                }
+
+                Spacer(Modifier.height(14.dp))
+
+                Button(
+                    onClick = {
+                        val words = restoreWords.trim().lowercase().split("\\s+".toRegex())
+                        if (words.size == 12) {
+                            onRestoreWallet(words)
+                        } else {
+                            restoreError = "Please enter exactly 12 words"
+                        }
+                    },
+                    enabled = restoreWords.isNotBlank(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BitcoinOrange),
+                    modifier = Modifier.fillMaxWidth(0.75f)
+                ) {
+                    Text("Restore Wallet", fontWeight = FontWeight.SemiBold)
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                TextButton(onClick = { showRestore = false; restoreWords = ""; restoreError = null }) {
+                    Text("Back")
+                }
+            }
+        }
     }
 }
 

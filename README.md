@@ -12,6 +12,7 @@ A native Nostr protocol client for Android built with Jetpack Compose and Materi
 - **Live Streams** — NIP-53 live activity discovery and HLS playback with picture-in-picture
 - **Relay Management** — Profile-based relay organization, NIP-66 relay discovery, per-relay health tracking with auto-blocking, slot utilization dashboard, and NIP-42 authentication
 - **Zaps** — NIP-57 lightning zaps via NIP-47 Wallet Connect or external wallet, with arc amount picker and per-note zap state persistence
+- **Embedded Lightning Wallet** — Self-custodial Phoenix-based Lightning node using [lightning-kmp](https://github.com/ACINQ/lightning-kmp) with encrypted seed storage, NIP-47 NWC service provider, bolt11 invoice creation/payment, and real-time channel balance monitoring (dev/testnet)
 - **Publishing** — Full relay selection screen for all compose flows (notes, topics, replies, comments) with NIP-65 inbox/outbox awareness and optimistic local rendering
 - **Link Sanitization** — Automatic stripping of tracking parameters (utm, fbclid, gclid, si, igshid, etc.) from all URLs in both displayed and published content, powered by [PureLink](https://github.com/ahmedthebest31/PureLink-Android)
 - **Image Privacy** — Surgical EXIF/metadata stripping from JPEG and PNG images before upload without re-encoding, with optional compression modes
@@ -72,11 +73,13 @@ Add this URL in Obtainium to get release updates and download the APK from GitHu
 
 | Library | Version | Purpose |
 |---------|---------|---------|
-| Ktor | 3.0.0 | HTTP client + WebSocket (OkHttp engine) |
+| Ktor | 3.4.1 | HTTP client + WebSocket (OkHttp engine) |
 | Compose BOM | 2024.12.01 | UI framework (strong skipping mode) |
 | Coil | 2.5.0 | Image loading with GIF support |
 | Media3 | 1.3.1 | Video/livestream playback (ExoPlayer) |
-| secp256k1-kmp | 0.20.0 | Nostr cryptography |
+| secp256k1-kmp | 0.22.0 | Nostr cryptography |
+| lightning-kmp | 1.11.5-SNAPSHOT | Embedded Lightning node (ACINQ) |
+| bitcoin-kmp | 0.29.0 | Bitcoin primitives (ACINQ) |
 | Kotlinx Serialization | 1.7.3 | JSON parsing |
 | Google ML Kit | — | Language detection + translation |
 
@@ -98,6 +101,8 @@ Mycelium builds on the work of several open-source projects:
 - **[nostr.watch](https://nostr.watch)** — NIP-66 relay discovery and monitoring data
 - **[relay.tools](https://relay.tools)** — Relay metadata and information service
 - **[secp256k1-kmp](https://github.com/nicklashansen/secp256k1-kmp)** — Kotlin Multiplatform secp256k1 cryptography for Nostr event signing
+- **[lightning-kmp](https://github.com/ACINQ/lightning-kmp)** — Embedded Lightning node implementation for self-custodial wallet (Apache 2.0)
+- **[Phoenix](https://github.com/ACINQ/phoenix)** — Reference architecture for wallet manager, node params, and peer connection patterns (Apache 2.0)
 - **[Ktor](https://ktor.io)** — Kotlin async HTTP client and WebSocket engine
 - **[Coil](https://coil-kt.github.io/coil/)** — Image loading with GIF and video frame support
 - **[Media3 / ExoPlayer](https://developer.android.com/media/media3)** — Video and livestream playback
@@ -107,3 +112,7 @@ Mycelium builds on the work of several open-source projects:
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Third-Party Licenses
+
+- **lightning-kmp** and **phoenix** by [ACINQ](https://acinq.co/) are licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). See [NOTICE-ACINQ](NOTICE-ACINQ) for the required notice.

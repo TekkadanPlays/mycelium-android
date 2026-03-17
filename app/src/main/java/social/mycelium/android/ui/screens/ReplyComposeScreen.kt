@@ -25,8 +25,12 @@ import social.mycelium.android.repository.Nip65RelayListRepository
 import social.mycelium.android.repository.ProfileMetadataCache
 import android.widget.Toast
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import social.mycelium.android.ui.components.MentionSuggestionList
+import social.mycelium.android.ui.components.MentionSuggestionState
 
 /**
  * Dedicated screen for replying to a comment. Shows the note being replied to at the top,
@@ -50,7 +54,12 @@ fun ReplyComposeScreen(
     modifier: Modifier = Modifier
 ) {
     val loadedDraft = remember(draftId) { draftId?.let { social.mycelium.android.repository.DraftsRepository.getDraft(it) } }
-    var content by remember { mutableStateOf(loadedDraft?.content ?: "") }
+    val initialText = loadedDraft?.content ?: ""
+    var textFieldValue by remember { mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length))) }
+    val content by remember { derivedStateOf { textFieldValue.text } }
+    val coroutineScope = rememberCoroutineScope()
+    val mentionState = remember(myAuthor?.id) { MentionSuggestionState(coroutineScope, myAuthor?.id) }
+    DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
     val onBackWithDraft = {
         if (content.isNotBlank()) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
@@ -279,8 +288,11 @@ fun ReplyComposeScreen(
                 }
             }
             social.mycelium.android.ui.components.ModernTextField(
-                value = content,
-                onValueChange = { content = it },
+                value = textFieldValue,
+                onValueChange = { newValue ->
+                    textFieldValue = newValue
+                    mentionState.onTextChanged(newValue.text, newValue.selection.end)
+                },
                 placeholder = "Write your reply...",
                 modifier = Modifier
                     .fillMaxWidth()
@@ -290,6 +302,13 @@ fun ReplyComposeScreen(
                     capitalization = KeyboardCapitalization.Sentences,
                     keyboardType = KeyboardType.Text
                 ),
+            )
+            MentionSuggestionList(
+                mentionState = mentionState,
+                currentText = content,
+                onTextUpdated = { newText, newCursor ->
+                    textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+                }
             )
             Button(
                 onClick = { showRelayPicker = true },

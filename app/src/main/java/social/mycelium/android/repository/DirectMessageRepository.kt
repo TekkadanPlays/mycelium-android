@@ -35,8 +35,6 @@ object DirectMessageRepository {
     private const val KIND_GIFT_WRAP = 1059
     private const val KIND_SEAL = 13
     private const val KIND_DM = 14
-    private const val TWO_WEEKS_SEC = 14 * 24 * 60 * 60L
-
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
             Log.e(TAG, "Coroutine failed: ${t.message}", t)
@@ -97,15 +95,13 @@ object DirectMessageRepository {
         _debugStatus.value = "Subscribing on ${allRelays.size} relays..."
         Log.d(TAG, "startSubscription: signer=${signer::class.simpleName}, pubkey=${pubkey.take(8)}, userRelays=${relayUrls.size}, total=${allRelays.size}")
 
-        // Subscribe to kind 1059 with #p = our pubkey
-        val since = (System.currentTimeMillis() / 1000) - TWO_WEEKS_SEC
+        // Subscribe to kind 1059 with #p = our pubkey — no time constraint, fetch everything
         val filter = Filter(
             kinds = listOf(KIND_GIFT_WRAP),
             tags = mapOf("p" to listOf(pubkey)),
-            since = since,
-            limit = 500
+            limit = 5000
         )
-        Log.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, since=$since, limit=500")
+        Log.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, limit=5000 (no since)")
 
         dmHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()

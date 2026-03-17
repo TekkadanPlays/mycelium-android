@@ -22,11 +22,33 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import coil.compose.AsyncImage
+import coil.compose.AsyncImagePainter
+import coil.compose.SubcomposeAsyncImage
+import coil.compose.SubcomposeAsyncImageContent
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.SampleData
+
+/** Negative cache for avatar URLs that failed to load (404, etc). Prevents repeated network requests
+ *  and log spam for permanently broken URLs. Entries expire after 5 minutes. */
+private object AvatarFailureCache {
+    private const val TTL_MS = 5 * 60 * 1000L
+    private const val MAX_SIZE = 200
+    private val failures = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    fun isFailed(url: String): Boolean {
+        val ts = failures[url] ?: return false
+        if (System.currentTimeMillis() - ts > TTL_MS) { failures.remove(url); return false }
+        return true
+    }
+    fun markFailed(url: String) {
+        failures[url] = System.currentTimeMillis()
+        if (failures.size > MAX_SIZE) {
+            val cutoff = System.currentTimeMillis() - TTL_MS
+            failures.entries.removeIf { it.value < cutoff }
+        }
+    }
+}
 
 @Composable
 fun SharedElementTransition(
@@ -84,26 +106,46 @@ fun ProfilePicture(
             ),
         contentAlignment = Alignment.Center
     ) {
-        if (author.avatarUrl != null) {
+        if (author.avatarUrl != null && !AvatarFailureCache.isFailed(author.avatarUrl!!)) {
             val context = LocalContext.current
-            val imageRequest = remember(author.avatarUrl, sizePx) {
+            val avatarUrl = author.avatarUrl!!
+            val imageRequest = remember(avatarUrl, sizePx) {
                 ImageRequest.Builder(context)
-                    .data(author.avatarUrl)
+                    .data(avatarUrl)
                     .crossfade(false)
                     .size(sizePx)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .placeholderMemoryCacheKey(author.avatarUrl)
+                    .placeholderMemoryCacheKey(avatarUrl)
                     .build()
             }
-            AsyncImage(
+            SubcomposeAsyncImage(
                 model = imageRequest,
                 contentDescription = "Profile picture",
                 modifier = Modifier
                     .fillMaxSize()
                     .clip(CircleShape),
                 contentScale = ContentScale.Crop
-            )
+            ) {
+                when (painter.state) {
+                    is AsyncImagePainter.State.Error -> {
+                        AvatarFailureCache.markFailed(avatarUrl)
+                        // Show fallback initial/icon on error
+                        Box(
+                            modifier = Modifier.fillMaxSize().background(fallbackBg),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (isHexPlaceholder) {
+                                Icon(Icons.Filled.Person, null, tint = fallbackFg, modifier = Modifier.size(size * 0.55f))
+                            } else {
+                                val fs = with(density) { (size * 0.45f).toSp() }
+                                Text(author.displayName.take(1).uppercase(), style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, fontSize = fs, lineHeight = fs, color = fallbackFg))
+                            }
+                        }
+                    }
+                    else -> SubcomposeAsyncImageContent()
+                }
+            }
         } else if (isHexPlaceholder) {
             // No real name — show person silhouette icon, scaled to container
             Icon(

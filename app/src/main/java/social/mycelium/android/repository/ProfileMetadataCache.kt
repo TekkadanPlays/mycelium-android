@@ -110,8 +110,10 @@ class ProfileMetadataCache {
         consecutiveEarlyOuts = 0
     }
 
-    /** Application context for SharedPreferences persistence. Set via [init]. */
+    /** Application context for Room DB persistence. Set via [init]. */
     @Volatile private var appContext: Context? = null
+    /** Room database instance for profile + NIP-65 persistence. */
+    @Volatile private var db: social.mycelium.android.db.AppDatabase? = null
     /** Debounced disk save job. */
     private var diskSaveJob: Job? = null
     /** Prevents concurrent disk saves; if a save is in progress, new requests just mark dirty. */
@@ -172,14 +174,23 @@ class ProfileMetadataCache {
      * Sanitize kind-0 string: trim, strip control/non-printable chars, collapse whitespace.
      * Returns null if result is blank or only "null" literal.
      */
-    private fun sanitizeKind0String(s: String?, maxLen: Int = Int.MAX_VALUE): String? {
+    private fun sanitizeKind0String(s: String?, maxLen: Int = Int.MAX_VALUE, preserveNewlines: Boolean = false): String? {
         if (s == null) return null
         val trimmed = s.trim()
         if (trimmed.isEmpty() || trimmed == "null") return null
-        val noControl = trimmed
-            .filter { c -> c.code >= 32 && c.code != 0xFFFD }
-            .replace(Regex("\\s+"), " ")
-            .trim()
+        val noControl = if (preserveNewlines) {
+            // Keep \n but strip other control chars; collapse runs of spaces within lines
+            trimmed
+                .filter { c -> c == '\n' || (c.code >= 32 && c.code != 0xFFFD) }
+                .replace(Regex("[^\\S\\n]+"), " ")  // collapse horizontal whitespace only
+                .replace(Regex("\n{3,}"), "\n\n") // cap consecutive newlines at 2
+                .trim()
+        } else {
+            trimmed
+                .filter { c -> c.code >= 32 && c.code != 0xFFFD }
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
         if (noControl.isBlank()) return null
         return noControl.take(maxLen)
     }
@@ -454,7 +465,7 @@ class ProfileMetadataCache {
                 ?: sanitizeKind0String(parsed.display_name, 16)
                 ?: fallbackShort
             val picture = sanitizeKind0String(parsed.picture, 512)
-            val about = sanitizeKind0String(parsed.about, 500)
+            val about = sanitizeKind0String(parsed.about, 500, preserveNewlines = true)
             val nip05 = sanitizeKind0String(parsed.nip05, 128)
             val website = sanitizeKind0String(parsed.website, 256)
             val lud16 = sanitizeKind0String(parsed.lud16, 128)
@@ -504,6 +515,7 @@ class ProfileMetadataCache {
     fun init(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
+        db = social.mycelium.android.db.AppDatabase.getInstance(context.applicationContext)
         scope.launch { loadProfileCacheFromDisk() }
     }
 
@@ -532,57 +544,112 @@ class ProfileMetadataCache {
     }
 
     private suspend fun loadProfileCacheFromDisk() {
-        val ctx = appContext ?: return
+        val database = db ?: return
         withContext(Dispatchers.IO) {
             try {
+                // ── Phase 1: Try Room DB ──
+                val profileEntities = database.profileDao().getAllProfiles()
+                val nip65Entities = database.nip65Dao().getMany(
+                    profileEntities.map { it.pubkey }
+                )
+                val nip65Map = nip65Entities.associateBy { it.pubkey }
+
+                if (profileEntities.isNotEmpty()) {
+                    val restoredKeys = mutableListOf<String>()
+                    synchronized(cache) {
+                        for (entity in profileEntities) {
+                            val key = entity.pubkey
+                            if (cache[key] == null) {
+                                cache[key] = Author(
+                                    id = key,
+                                    username = entity.username,
+                                    displayName = entity.displayName,
+                                    avatarUrl = entity.avatarUrl,
+                                    isVerified = false,
+                                    about = entity.about,
+                                    nip05 = entity.nip05,
+                                    website = entity.website,
+                                    lud16 = entity.lud16,
+                                    banner = entity.banner,
+                                    pronouns = entity.pronouns
+                                )
+                                profileFetchedAt[key] = entity.updatedAt
+                                restoredKeys.add(key)
+                            }
+                        }
+                    }
+                    // Restore outbox relay cache from NIP-65 table
+                    for ((pubkey, nip65) in nip65Map) {
+                        if (outboxRelayCache[pubkey] == null && nip65.writeRelays.isNotBlank()) {
+                            outboxRelayCache[pubkey] = nip65.writeRelays.split(",").filter { it.isNotBlank() }
+                        }
+                    }
+                    Log.d(TAG, "Restored ${profileEntities.size} profiles from Room DB (${restoredKeys.size} new)")
+                    _diskCacheRestored.value = true
+                    return@withContext
+                }
+
+                // ── Phase 2: Migration fallback — load from SharedPreferences if Room is empty ──
+                val ctx = appContext ?: return@withContext
                 val prefs = ctx.getSharedPreferences(PROFILE_CACHE_PREFS, Context.MODE_PRIVATE)
                 val profilesJson = prefs.getString(PROFILE_CACHE_KEY, null) ?: return@withContext
-                val createdAtJson = prefs.getString(PROFILE_CREATED_AT_KEY, null)
                 val fetchedAtJson = prefs.getString(PROFILE_FETCHED_AT_KEY, null)
                 val outboxJson = prefs.getString(OUTBOX_RELAYS_KEY, null)
 
                 val profiles: Map<String, Author> = json.decodeFromString(profilesJson)
-                val createdAts: Map<String, Long> = if (createdAtJson != null) {
-                    json.decodeFromString(createdAtJson)
-                } else {
-                    emptyMap()
-                }
                 val fetchedAts: Map<String, Long> = if (fetchedAtJson != null) {
                     try { json.decodeFromString(fetchedAtJson) } catch (_: Exception) { emptyMap() }
-                } else {
-                    emptyMap()
-                }
+                } else emptyMap()
                 val outboxRelays: Map<String, List<String>> = if (outboxJson != null) {
                     try { json.decodeFromString(outboxJson) } catch (_: Exception) { emptyMap() }
-                } else {
-                    emptyMap()
-                }
+                } else emptyMap()
 
                 if (profiles.isEmpty()) return@withContext
 
                 val restoredKeys = mutableListOf<String>()
+                val roomEntities = mutableListOf<social.mycelium.android.db.CachedProfileEntity>()
                 synchronized(cache) {
                     for ((key, author) in profiles) {
                         val normalized = normalizeKey(key)
                         if (cache[normalized] == null) {
                             cache[normalized] = author
-                            createdAts[normalized]?.let { profileCreatedAt[normalized] = it }
                             fetchedAts[normalized]?.let { profileFetchedAt[normalized] = it }
                             restoredKeys.add(normalized)
                         }
+                        roomEntities.add(social.mycelium.android.db.CachedProfileEntity(
+                            pubkey = normalized,
+                            displayName = author.displayName,
+                            username = author.username,
+                            avatarUrl = author.avatarUrl,
+                            about = author.about,
+                            nip05 = author.nip05,
+                            website = author.website,
+                            lud16 = author.lud16,
+                            banner = author.banner,
+                            pronouns = author.pronouns,
+                            updatedAt = fetchedAts[normalized] ?: System.currentTimeMillis()
+                        ))
                     }
                 }
-                // Restore outbox relay cache
+                // Migrate outbox relays
+                val nip65Migrated = mutableListOf<social.mycelium.android.db.CachedNip65Entity>()
                 for ((key, relays) in outboxRelays) {
                     val normalized = normalizeKey(key)
                     if (outboxRelayCache[normalized] == null) {
                         outboxRelayCache[normalized] = relays
                     }
+                    nip65Migrated.add(social.mycelium.android.db.CachedNip65Entity(
+                        pubkey = normalized,
+                        writeRelays = relays.joinToString(","),
+                        readRelays = ""
+                    ))
                 }
-                Log.d(TAG, "Restored ${profiles.size} profiles, ${outboxRelays.size} outbox relay sets from disk cache (${restoredKeys.size} new)")
-                // Signal UI components to rebuild with real display names.
-                // We use diskCacheRestored (StateFlow) instead of emitting profileUpdated
-                // for every key, which would flood reply ViewModels and cause race conditions.
+                // Persist migrated data to Room
+                if (roomEntities.isNotEmpty()) database.profileDao().upsertAll(roomEntities)
+                if (nip65Migrated.isNotEmpty()) database.nip65Dao().upsertAll(nip65Migrated)
+                // Clear SharedPreferences after successful migration
+                prefs.edit().clear().apply()
+                Log.d(TAG, "Migrated ${profiles.size} profiles from SharedPreferences to Room DB (${restoredKeys.size} new)")
                 _diskCacheRestored.value = true
             } catch (e: Exception) {
                 Log.e(TAG, "Load profile cache from disk failed: ${e.message}", e)
@@ -591,12 +658,10 @@ class ProfileMetadataCache {
     }
 
     private suspend fun saveProfileCacheToDisk() {
-        val ctx = appContext ?: return
+        val database = db ?: return
         withContext(Dispatchers.IO) {
             try {
-                // Take a snapshot of the most recent entries (pinned first, then LRU order)
                 val snapshot: Map<String, Author>
-                val createdAtSnapshot: Map<String, Long>
                 val fetchedAtSnapshot: Map<String, Long>
                 val outboxSnapshot: Map<String, List<String>>
                 synchronized(cache) {
@@ -605,29 +670,43 @@ class ProfileMetadataCache {
                     val combined = (pinned + rest).takeLast(DISK_CACHE_MAX)
                     val keys = combined.map { it.key }.toSet()
                     snapshot = combined.associate { it.key to it.value }
-                    createdAtSnapshot = combined.mapNotNull { entry ->
-                        profileCreatedAt[entry.key]?.let { entry.key to it }
-                    }.toMap()
                     fetchedAtSnapshot = combined.mapNotNull { entry ->
                         profileFetchedAt[entry.key]?.let { entry.key to it }
                     }.toMap()
                     outboxSnapshot = outboxRelayCache.filter { it.key in keys }
                 }
 
-                val profilesJson = json.encodeToString(snapshot)
-                val createdAtJson = json.encodeToString(createdAtSnapshot)
-                val fetchedAtJson = json.encodeToString(fetchedAtSnapshot)
-                val outboxJson = json.encodeToString(outboxSnapshot)
-                ctx.getSharedPreferences(PROFILE_CACHE_PREFS, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(PROFILE_CACHE_KEY, profilesJson)
-                    .putString(PROFILE_CREATED_AT_KEY, createdAtJson)
-                    .putString(PROFILE_FETCHED_AT_KEY, fetchedAtJson)
-                    .putString(OUTBOX_RELAYS_KEY, outboxJson)
-                    .apply()
-                Log.d(TAG, "Saved ${snapshot.size} profiles, ${outboxSnapshot.size} outbox relay sets to disk cache")
+                val profileEntities = snapshot.map { (key, author) ->
+                    social.mycelium.android.db.CachedProfileEntity(
+                        pubkey = key,
+                        displayName = author.displayName,
+                        username = author.username,
+                        avatarUrl = author.avatarUrl,
+                        about = author.about,
+                        nip05 = author.nip05,
+                        website = author.website,
+                        lud16 = author.lud16,
+                        banner = author.banner,
+                        pronouns = author.pronouns,
+                        updatedAt = fetchedAtSnapshot[key] ?: System.currentTimeMillis()
+                    )
+                }
+                val nip65Entities = outboxSnapshot.map { (key, relays) ->
+                    social.mycelium.android.db.CachedNip65Entity(
+                        pubkey = key,
+                        writeRelays = relays.joinToString(","),
+                        readRelays = ""
+                    )
+                }
+                if (profileEntities.isNotEmpty()) database.profileDao().upsertAll(profileEntities)
+                if (nip65Entities.isNotEmpty()) database.nip65Dao().upsertAll(nip65Entities)
+                // Prune stale entries older than 30 days
+                val pruneMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
+                database.profileDao().deleteOlderThan(pruneMs)
+                database.nip65Dao().deleteOlderThan(pruneMs)
+                Log.d(TAG, "Saved ${profileEntities.size} profiles, ${nip65Entities.size} NIP-65 sets to Room DB")
             } catch (e: Exception) {
-                Log.e(TAG, "Save profile cache to disk failed: ${e.message}", e)
+                Log.e(TAG, "Save profile cache to Room DB failed: ${e.message}", e)
             }
         }
     }

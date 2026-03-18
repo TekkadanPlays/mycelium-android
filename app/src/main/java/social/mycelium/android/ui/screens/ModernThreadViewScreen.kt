@@ -509,8 +509,9 @@ fun ModernThreadViewScreen(
             listState.animateScrollToItem(scrollIndex)
             // Trigger flicker highlight
             flickerReplyId = highlightReplyId
+            haveScrolledToHighlight = true
         }
-        haveScrolledToHighlight = true
+        // Don't set haveScrolledToHighlight if reply not found yet — retry when replies load
     }
     // Auto-clear flicker after animation
     LaunchedEffect(flickerReplyId) {

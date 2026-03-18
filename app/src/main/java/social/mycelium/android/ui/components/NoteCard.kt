@@ -2862,9 +2862,11 @@ fun NoteCard(
                                     onClick = { offset ->
                                         val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
                                         val relay = annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
+                                        val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
                                         when {
                                             profile != null -> onProfileClick(profile.item)
                                             relay != null -> onRelayClick(relay.item)
+                                            url != null -> uriHandler.openUri(url.item)
                                             else -> onNoteClick(note)
                                         }
                                     }

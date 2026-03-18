@@ -488,6 +488,25 @@ object NotificationsRepository {
         if (event.kind !in ACCEPTED_KINDS) return
         // Deduplicate: skip events already processed (relay reconnects replay all stored events)
         if (!seenEventIds.add(event.id)) return
+        // Skip own events — we don't notify ourselves
+        val pubkey = myPubkeyHex ?: return
+        if (event.pubKey == pubkey) return
+        // ── Client-side relevance gate ──────────────────────────────────────
+        // Relays may return events that don't match our subscription filters
+        // (buggy filter implementations, extra events, etc.). Validate that
+        // the event actually references us before creating a notification.
+        val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
+        val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
+                event.tags.any { it.size >= 2 && it[0] == "E" && it[1] in myTopicIds }
+        val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
+                event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
+        // For kind-1 replies: also accept if user is directly cited in content (mention)
+        val isCitedInContent = event.kind == NOTIFICATION_KIND_TEXT &&
+                isUserCitedInContent(event.content, pubkey)
+        if (!hasPTag && !hasETag && !hasQTag && !isCitedInContent) {
+            Log.d(TAG, "Dropping irrelevant event ${event.id.take(8)} kind=${event.kind} — no p/E/q tag or content cite matching us")
+            return
+        }
         // Skip notifications from muted/blocked users
         if (MuteListRepository.isHidden(event.pubKey)) return
         val profileIsCached = profileCache.getAuthor(event.pubKey) != null
@@ -872,6 +891,8 @@ object NotificationsRepository {
         notificationsById[event.id] = data
         emitSorted()
         fireAndroidNotification(NotificationType.POLL_VOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = pollId)
+        // Fetch the poll note so tapping the notification can navigate to it
+        scope.launch { fetchAndSetTargetNote(pollId, event.id) { d -> { note -> d.copy(targetNote = note) } } }
         // Asynchronously fetch the poll event to enrich with question + option labels
         if (subscriptionRelayUrls.isNotEmpty()) {
             scope.launch { enrichPollVoteNotification(event.id, pollId, responseCodes) }
@@ -1266,6 +1287,18 @@ object NotificationsRepository {
                         // p-tag filtering so it IS relevant) but without a target note preview.
                         // Previously we deleted likes/reposts here, causing silent notification loss.
                         Log.d(TAG, "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview")
+                        // If this is a REPLY and user is cited in content, reclassify as MENTION
+                        // so it appears in the Mentions tab even without target note resolution.
+                        if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT &&
+                            myPubkeyHex != null && current.note != null &&
+                            isUserCitedInContent(current.note.content, myPubkeyHex!!)) {
+                            val mentionUpdate = current.copy(
+                                type = NotificationType.MENTION,
+                                text = "${current.author?.displayName ?: "Someone"} mentioned you"
+                            )
+                            notificationsById[pending.notificationId] = mentionUpdate
+                            Log.d(TAG, "Reclassified ${pending.notificationId.take(8)} as MENTION (cited in content, target fetch exhausted)")
+                        }
                     }
                     continue
                 }
@@ -1361,6 +1394,9 @@ object NotificationsRepository {
         val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
         val replyToId = social.mycelium.android.utils.Nip10ReplyDetector.getReplyToId(event)
         val isReply = social.mycelium.android.utils.Nip10ReplyDetector.isReply(event)
+        // NIP-88 poll data (kind 1068)
+        val tags = event.tags.map { it.toList() }
+        val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
         return Note(
             id = event.id,
             author = author,
@@ -1376,7 +1412,8 @@ object NotificationsRepository {
             isReply = isReply,
             rootNoteId = rootId,
             replyToId = replyToId,
-            kind = event.kind
+            kind = event.kind,
+            pollData = pollData
         )
     }
 

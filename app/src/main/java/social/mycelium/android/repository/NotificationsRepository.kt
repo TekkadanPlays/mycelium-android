@@ -435,6 +435,12 @@ object NotificationsRepository {
                 Log.d(TAG, "Phase 3: Thread reply + quote filters on ${inboxUrls.size} inbox relays")
             }
         }
+
+        // ── Phase 4: Re-enrich notifications that missed target notes on cold start ──
+        scope.launch {
+            delay(8_000L) // Wait for relays to fully connect and feed to settle
+            reEnrichOrphanedNotifications()
+        }
     }
 
     fun stopSubscription() {
@@ -1314,6 +1320,25 @@ object NotificationsRepository {
                 pendingTargetFetches.getOrPut(pending.noteId) { mutableListOf() }.add(pending)
             }
             scheduleTargetFetchFlush()
+        }
+    }
+
+    /**
+     * Phase 4: Re-enrich notifications that were created during cold start before relays
+     * were fully connected. Finds notifications with a targetNoteId but no targetNote
+     * and re-queues them for a fresh fetch now that relays should be available.
+     */
+    private fun reEnrichOrphanedNotifications() {
+        val orphans = notificationsById.values.filter { data ->
+            data.targetNoteId != null && data.targetNote == null &&
+            data.type in listOf(NotificationType.LIKE, NotificationType.REPOST, NotificationType.REPLY,
+                NotificationType.COMMENT, NotificationType.QUOTE)
+        }
+        if (orphans.isEmpty()) return
+        Log.d(TAG, "Phase 4: Re-enriching ${orphans.size} orphaned notifications (missing targetNote)")
+        for (orphan in orphans) {
+            val targetId = orphan.targetNoteId ?: continue
+            fetchAndSetTargetNote(targetId, orphan.id) { d -> { note -> d.copy(targetNote = note) } }
         }
     }
 

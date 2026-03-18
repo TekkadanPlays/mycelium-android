@@ -35,8 +35,9 @@ object ContactListRepository {
     /** Max wait for kind-3 responses; early-exit fires sooner when first event arrives.
      *  Must be long enough for relays to connect on cold start (DNS + TLS can take 5-10s). */
     private const val KIND3_FETCH_TIMEOUT_MS = 8000L
-    /** After first kind-3 event arrives, wait this long for more relays before returning. */
-    private const val KIND3_SETTLE_MS = 500L
+    /** After first kind-3 event arrives, wait this long for more relays before returning.
+     *  Raised from 500→1500ms so slower relays have time to deliver the newest kind-3. */
+    private const val KIND3_SETTLE_MS = 1500L
     /** No hardcoded priority relays — user's configured relays are used exclusively. */
     private val KIND3_PRIORITY_RELAYS = emptyList<String>()
     /** Cache TTL: 2 min so we don't rely on stale follow lists; forceRefresh on Following pull. */

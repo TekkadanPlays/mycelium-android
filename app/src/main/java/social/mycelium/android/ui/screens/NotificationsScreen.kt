@@ -1064,6 +1064,14 @@ private fun NotificationReplyContent(
                         relayHints = block.relayHints
                     )
                 }
+                is social.mycelium.android.utils.NoteContentBlock.Article -> {
+                    social.mycelium.android.ui.components.EmbeddedArticlePreview(
+                        author = block.author,
+                        dTag = block.dTag,
+                        relayHints = block.relayHints,
+                        onNoteClick = { onClick() }
+                    )
+                }
                 is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
                     Row(
                         modifier = Modifier.padding(vertical = 2.dp),
@@ -1273,6 +1281,13 @@ private fun NotificationTargetPreview(
                         }
                         is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
                             social.mycelium.android.ui.components.EmojiPackGrid(
+                                author = block.author,
+                                dTag = block.dTag,
+                                relayHints = block.relayHints
+                            )
+                        }
+                        is social.mycelium.android.utils.NoteContentBlock.Article -> {
+                            social.mycelium.android.ui.components.EmbeddedArticlePreview(
                                 author = block.author,
                                 dTag = block.dTag,
                                 relayHints = block.relayHints

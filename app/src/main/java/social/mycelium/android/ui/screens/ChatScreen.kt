@@ -1,7 +1,14 @@
 package social.mycelium.android.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,16 +18,27 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.outlined.ElectricBolt
+import androidx.compose.material.icons.outlined.EmojiEmotions
+import androidx.compose.material.icons.outlined.Router
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
@@ -38,11 +56,16 @@ fun ChatScreen(
     relayUrls: Set<String>,
     onBackClick: () -> Unit,
     onProfileClick: (String) -> Unit,
+    onNavigateToRelayList: (List<String>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val messages by DirectMessageRepository.activeMessages.collectAsState()
     val listState = rememberLazyListState()
     var messageText by remember { mutableStateOf("") }
+    var replyToMessage by remember { mutableStateOf<DirectMessage?>(null) }
+    var selectedMessageId by remember { mutableStateOf<String?>(null) }
+    val clipboardManager = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
 
     val profileCache = remember { ProfileMetadataCache.getInstance() }
     val peerAuthor = remember(peerPubkey) { profileCache.getAuthor(peerPubkey) }
@@ -152,10 +175,67 @@ fun ChatScreen(
                         thickness = 0.5.dp,
                         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
                     )
+                    // Reply quote banner
+                    AnimatedVisibility(
+                        visible = replyToMessage != null,
+                        enter = slideInVertically { it } + fadeIn(),
+                        exit = slideOutVertically { it } + fadeOut()
+                    ) {
+                        replyToMessage?.let { reply ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(3.dp)
+                                            .height(32.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.primary,
+                                                RoundedCornerShape(2.dp)
+                                            )
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = if (reply.isOutgoing) "You" else peerName,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                        Text(
+                                            text = reply.content,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { replyToMessage = null },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Close,
+                                            contentDescription = "Cancel reply",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .navigationBarsPadding()
+                            .imePadding()
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.Bottom
                     ) {
@@ -186,9 +266,11 @@ fun ChatScreen(
                                         content = messageText.trim(),
                                         recipientPubkey = peerPubkey,
                                         signer = signer,
-                                        relayUrls = relayUrls
+                                        relayUrls = relayUrls,
+                                        replyToId = replyToMessage?.id
                                     )
                                     messageText = ""
+                                    replyToMessage = null
                                 }
                             },
                             enabled = messageText.isNotBlank() && signer != null,
@@ -225,8 +307,7 @@ fun ChatScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
-                .imePadding(),
+                .padding(paddingValues),
             state = listState,
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
         ) {
@@ -259,6 +340,29 @@ fun ChatScreen(
                         message = message,
                         isFirstInGroup = isFirstInGroup,
                         isLastInGroup = isLastInGroup,
+                        isSelected = selectedMessageId == message.id,
+                        onLongPress = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            selectedMessageId = if (selectedMessageId == message.id) null else message.id
+                        },
+                        onTap = { selectedMessageId = null },
+                        onReply = {
+                            replyToMessage = message
+                            selectedMessageId = null
+                        },
+                        onCopy = {
+                            clipboardManager.setText(AnnotatedString(message.content))
+                            selectedMessageId = null
+                        },
+                        onReact = {
+                            // TODO: open emoji picker for NIP-17 wrapped reaction
+                            selectedMessageId = null
+                        },
+                        onZap = {
+                            // TODO: NIP-57 zap via gift wrap
+                            selectedMessageId = null
+                        },
+                        onNavigateToRelayList = onNavigateToRelayList,
                         modifier = Modifier.padding(
                             top = if (isFirstInGroup) 6.dp else 1.dp,
                             bottom = if (isLastInGroup) 6.dp else 1.dp
@@ -270,15 +374,23 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun MessageBubble(
     message: DirectMessage,
     isFirstInGroup: Boolean = true,
     isLastInGroup: Boolean = true,
+    isSelected: Boolean = false,
+    onLongPress: () -> Unit = {},
+    onTap: () -> Unit = {},
+    onReply: () -> Unit = {},
+    onCopy: () -> Unit = {},
+    onReact: () -> Unit = {},
+    onZap: () -> Unit = {},
+    onNavigateToRelayList: (List<String>) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isOutgoing = message.isOutgoing
-    val alignment = if (isOutgoing) Alignment.CenterEnd else Alignment.CenterStart
 
     // Adaptive corner radii for message grouping
     val cornerRadius = 18.dp
@@ -310,33 +422,134 @@ private fun MessageBubble(
         MaterialTheme.colorScheme.onSurface
     }
 
-    Box(
+    // Amethyst-style: bubble + small icon row to the side
+    Row(
         modifier = modifier.fillMaxWidth(),
-        contentAlignment = alignment
+        horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.CenterVertically
     ) {
+        // Action icons on the left side for outgoing messages
+        if (isOutgoing) {
+            AnimatedVisibility(visible = isSelected) {
+                Row(
+                    modifier = Modifier.padding(end = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(0.dp)
+                ) {
+                    MiniActionIcon(Icons.Default.ContentCopy, "Copy", onCopy)
+                    MiniActionIcon(Icons.Outlined.ElectricBolt, "Zap", onZap)
+                    MiniActionIcon(Icons.Outlined.EmojiEmotions, "React", onReact)
+                    MiniActionIcon(Icons.AutoMirrored.Filled.Reply, "Reply", onReply)
+                }
+            }
+        }
+
+        // The bubble
         Surface(
-            modifier = Modifier.fillMaxWidth(0.78f),
+            modifier = Modifier
+                .widthIn(max = 300.dp)
+                .combinedClickable(
+                    onClick = onTap,
+                    onLongClick = onLongPress,
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null
+                ),
             shape = bubbleShape,
             color = bubbleColor
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                // Show quoted reply reference if this message is a reply
+                if (message.replyToId != null) {
+                    val replyContent = DirectMessageRepository.activeMessages.value
+                        .firstOrNull { it.id == message.replyToId }
+                    if (replyContent != null) {
+                        Surface(
+                            color = textColor.copy(alpha = 0.08f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp)
+                        ) {
+                            Row(modifier = Modifier.padding(8.dp)) {
+                                Box(
+                                    modifier = Modifier
+                                        .width(2.dp)
+                                        .height(24.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+                                            RoundedCornerShape(1.dp)
+                                        )
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = replyContent.content,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = textColor.copy(alpha = 0.6f),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
                 Text(
                     text = message.content,
                     style = MaterialTheme.typography.bodyMedium,
                     color = textColor,
                     lineHeight = 20.sp
                 )
-                if (isLastInGroup) {
-                    Spacer(Modifier.height(2.dp))
+                Spacer(Modifier.height(2.dp))
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    if (message.relayUrls.isNotEmpty()) {
+                        social.mycelium.android.ui.components.RelayOrbs(
+                            relayUrls = message.relayUrls,
+                            onNavigateToRelayList = { onNavigateToRelayList(message.relayUrls) },
+                            modifier = Modifier
+                        )
+                    }
                     Text(
                         text = formatMessageTime(message.createdAt),
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                        color = textColor.copy(alpha = 0.45f),
-                        modifier = Modifier.align(Alignment.End)
+                        color = textColor.copy(alpha = 0.45f)
                     )
                 }
             }
         }
+
+        // Action icons on the right side for incoming messages
+        if (!isOutgoing) {
+            AnimatedVisibility(visible = isSelected) {
+                Row(
+                    modifier = Modifier.padding(start = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(0.dp)
+                ) {
+                    MiniActionIcon(Icons.AutoMirrored.Filled.Reply, "Reply", onReply)
+                    MiniActionIcon(Icons.Outlined.EmojiEmotions, "React", onReact)
+                    MiniActionIcon(Icons.Outlined.ElectricBolt, "Zap", onZap)
+                    MiniActionIcon(Icons.Default.ContentCopy, "Copy", onCopy)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniActionIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier.size(32.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+        )
     }
 }
 

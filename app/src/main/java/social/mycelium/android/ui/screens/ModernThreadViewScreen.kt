@@ -1978,6 +1978,14 @@ private fun ReplyContentBody(
                     relayHints = block.relayHints
                 )
             }
+            is social.mycelium.android.utils.NoteContentBlock.Article -> {
+                social.mycelium.android.ui.components.EmbeddedArticlePreview(
+                    author = block.author,
+                    dTag = block.dTag,
+                    relayHints = block.relayHints,
+                    onNoteClick = onNoteClick
+                )
+            }
             is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
                 val qProfileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
                 val qLinkStyle = androidx.compose.ui.text.SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
@@ -2187,8 +2195,9 @@ private fun ReplyControlsPanel(
                                 },
                                 onCustomEmojiSelected = { shortcode, url ->
                                     showReactionMenu = false
-                                    selectedEmoji = shortcode
-                                    onReact(reply.toNote(), shortcode)
+                                    val emojiKey = ":$shortcode:"
+                                    selectedEmoji = emojiKey
+                                    onReact(reply.toNote(), emojiKey)
                                 },
                                 onOpenFullPicker = {
                                     showReactionMenu = false
@@ -2208,8 +2217,9 @@ private fun ReplyControlsPanel(
                                 },
                                 onCustomEmojiSelected = { shortcode, url ->
                                     showFullPicker = false
-                                    selectedEmoji = shortcode
-                                    onReact(reply.toNote(), shortcode)
+                                    val emojiKey = ":$shortcode:"
+                                    selectedEmoji = emojiKey
+                                    onReact(reply.toNote(), emojiKey)
                                 },
                                 onGifSelected = { gifUrl ->
                                     showFullPicker = false

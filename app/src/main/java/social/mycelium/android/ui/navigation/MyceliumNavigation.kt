@@ -1293,16 +1293,20 @@ fun MyceliumNavigation(
             }
             // Load kind:30073 anchor subscriptions (favorites) for this user
             accountStateViewModel.requestMySubscriptions()
+            // Start DM subscription (fetch-only) — raw kind-1059 gift wraps are buffered
+            // without any Amber interaction. Decryption is triggered by the user visiting
+            // the DM page (ConversationsScreen).
+            val dmSigner = accountStateViewModel.getCurrentSigner()
+            if (dmSigner != null) {
+                social.mycelium.android.repository.DirectMessageRepository.startSubscription(
+                    pubkey, dmSigner, inboxUrls, outboxUrls
+                )
+                Log.d("MyceliumNav", "DM subscription started (fetch-only): inbox=${inboxUrls.size}, outbox=${outboxUrls.size} relays")
+            }
         } else {
             Log.w("MyceliumNav", "Notif subscription skipped: no relay URLs found for ${pubkey.take(8)}")
         }
     }
-
-    // DM subscription: disabled until user-configured DM relays are implemented.
-    // DM relays are a distinct category (not inbox/outbox) specifically for NIP-17 gift wraps.
-    // Without explicit DM relays, we don't start a subscription — avoids unnecessary Amber
-    // decrypt calls on general/fallback relays.
-    // TODO: Re-enable when DM relay configuration UI is added to relay settings.
 
     // onboardingComplete is the single source of truth for whether the user can see the feed.
     // It's persisted per-account and set in AccountStateViewModel during login/switch.
@@ -1709,6 +1713,10 @@ fun MyceliumNavigation(
                                                 },
                                                 onProfileClick = { pubkey ->
                                                     overlayProfilePubkeyStack.add(pubkey)
+                                                },
+                                                onNoteClick = { clickedNote ->
+                                                    overlayThreadStack.add(clickedNote)
+                                                    overlayThreadHighlightIds.add(null)
                                                 }
                                             )
                                         } else {
@@ -3158,6 +3166,7 @@ fun MyceliumNavigation(
                                 launchSingleTop = true
                             }
                         },
+                        isScreenVisible = currentRoute == "messages",
                         isGuest = authState.isGuest,
                         userDisplayName = authState.userProfile?.displayName ?: authState.userProfile?.name,
                         userAvatarUrl = authState.userProfile?.picture,
@@ -3172,21 +3181,6 @@ fun MyceliumNavigation(
                         },
                         onLoginClick = {
                             navController.navigate("login") { launchSingleTop = true }
-                        },
-                        onNavigateToTopics = {
-                            navController.navigate("topics") {
-                                popUpTo("messages") { inclusive = false }
-                                launchSingleTop = true
-                            }
-                        },
-                        onNavigateToHome = {
-                            navController.navigate("dashboard") {
-                                popUpTo("messages") { inclusive = false }
-                                launchSingleTop = true
-                            }
-                        },
-                        onNavigateToLive = {
-                            navController.navigate("live_explorer") { launchSingleTop = true }
                         }
                     )
                 }
@@ -3225,7 +3219,11 @@ fun MyceliumNavigation(
                         userPubkey = chatPubkey,
                         relayUrls = chatRelayUrls,
                         onBackClick = { navController.popBackStack() },
-                        onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) }
+                        onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) },
+                        onNavigateToRelayList = { urls ->
+                            val encoded = urls.joinToString(",") { android.net.Uri.encode(it) }
+                            navController.navigate("note_relays/$encoded") { launchSingleTop = true }
+                        }
                     )
                 }
 
@@ -4529,6 +4527,10 @@ fun MyceliumNavigation(
                             onBack = { navController.popBackStack() },
                             onProfileClick = { pubkey ->
                                 overlayProfilePubkeyStack.add(normalizeAuthorIdForCache(pubkey))
+                            },
+                            onNoteClick = { clickedNote ->
+                                overlayThreadStack.add(clickedNote)
+                                overlayThreadHighlightIds.add(null)
                             }
                         )
                     } else {

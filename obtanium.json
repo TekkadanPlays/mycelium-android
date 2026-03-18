@@ -19,6 +19,26 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.97",
+      "versionCode": 34,
+      "releaseDate": "2026-03-18",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.97-beta/Mycelium-v0.4.97-beta.apk",
+      "changelog": "NIP-19 references in long-form articles, themed hyperlinks, outbox relay coverage improvements.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "NIP-19 references in articles: nostr:npub, nostr:note, nostr:nevent, nostr:naddr rendered as clickable markdown links with resolved display names",
+        "Article hyperlinks styled with theme primary color and underline (no more default blue)",
+        "Outbox relay coverage: indexer fallback for followed authors missing NIP-65 data",
+        "Coverage gap diagnostics logging for outbox relay discovery"
+      ]
+    },
+    {
       "version": "0.4.96",
       "versionCode": 33,
       "releaseDate": "2026-03-18",

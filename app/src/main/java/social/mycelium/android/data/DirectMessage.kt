@@ -20,7 +20,9 @@ data class DirectMessage(
     /** Optional subject (subject tag in rumor). */
     val subject: String? = null,
     /** Whether this message was sent by us. */
-    val isOutgoing: Boolean = false
+    val isOutgoing: Boolean = false,
+    /** Relay URLs where this gift wrap was seen (for relay orbs). */
+    val relayUrls: List<String> = emptyList()
 )
 
 /** A DM conversation with a specific user. */

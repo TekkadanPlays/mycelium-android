@@ -204,8 +204,8 @@ class OutboxFeedManager private constructor() {
                 val cached = followedPubkeys.count {
                     Nip65RelayListRepository.getCachedOutboxRelays(it) != null
                 }
-                // Good enough when 80% are cached or all are done
-                if (cached >= followedPubkeys.size * 0.8 || cached >= followedPubkeys.size) {
+                // Good enough when 90% are cached or all are done
+                if (cached >= followedPubkeys.size * 0.9 || cached >= followedPubkeys.size) {
                     Log.d(TAG, "Discovery sufficient: $cached/${followedPubkeys.size} cached after ${waited}ms")
                     break
                 }
@@ -328,10 +328,29 @@ class OutboxFeedManager private constructor() {
         Log.d(TAG, "Subscribing to ${ranked.size} outbox relays covering $totalAuthors authors " +
             "(${relayToAuthors.size} total discovered, greedy=$MAX_OUTBOX_RELAYS + diversity=${diversityRelays.size})")
 
+        // Coverage gap report: identify followed authors with NO outbox relay coverage
+        val coveredByOutbox = ranked.flatMap { it.value }.toSet()
+        val uncoveredAuthors = followedPubkeys.filter { pk ->
+            pk !in coveredByOutbox && Nip65RelayListRepository.getCachedOutboxRelays(pk).isNullOrEmpty()
+        }
+        val coveredByInboxOnly = followedPubkeys.filter { pk ->
+            pk !in coveredByOutbox && !Nip65RelayListRepository.getCachedOutboxRelays(pk).isNullOrEmpty()
+        }
+        if (uncoveredAuthors.isNotEmpty()) {
+            Log.w(TAG, "⚠️ ${uncoveredAuthors.size} followed authors have NO outbox relay (no NIP-65): ${uncoveredAuthors.take(10).joinToString { it.take(8) + "…" }}")
+        }
+        if (coveredByInboxOnly.isNotEmpty()) {
+            Log.w(TAG, "⚠️ ${coveredByInboxOnly.size} followed authors' outbox relays not in selected set (rely on inbox only): ${coveredByInboxOnly.take(10).joinToString { it.take(8) + "…" }}")
+        }
+        Log.d(TAG, "Coverage: ${coveredByOutbox.size}/${followedPubkeys.size} via outbox, ${followedPubkeys.size - uncoveredAuthors.size - coveredByInboxOnly.size} via inbox overlap")
+
         // Phase 5: Self-healing — add indexer fallback for chronically missed authors
         val missedAuthors = RelayDeliveryTracker.getMissedAuthors()
             .filter { it in followedPubkeys }.toSet() // only care about current follows
-        val healingRelay = if (missedAuthors.isNotEmpty()) {
+        // Also include authors with NO NIP-65 data at all — they have zero outbox coverage
+        val noNip65Authors = uncoveredAuthors.toSet()
+        val allFallbackAuthors = (missedAuthors + noNip65Authors).filter { it in followedPubkeys }.toSet()
+        val healingRelay = if (allFallbackAuthors.isNotEmpty()) {
             // Pick the first indexer relay not already in our selection
             val selectedRelayUrls = ranked.map { it.key }.toSet()
             NotesRepository.getInstance().INDEXER_RELAYS.firstOrNull { it !in selectedRelayUrls }
@@ -350,25 +369,25 @@ class OutboxFeedManager private constructor() {
             )
         }.toMutableMap()
 
-        // Inject healing relay with missed authors' filter
-        if (healingRelay != null && missedAuthors.isNotEmpty()) {
+        // Inject healing relay with fallback authors' filter (missed + no-NIP-65)
+        if (healingRelay != null && allFallbackAuthors.isNotEmpty()) {
             relayFilters[healingRelay] = listOf(
                 Filter(
                     kinds = listOf(1),
-                    authors = missedAuthors.toList(),
+                    authors = allFallbackAuthors.toList(),
                     since = sevenDaysAgo,
                     limit = OUTBOX_PER_RELAY_LIMIT
                 )
             )
-            Log.d(TAG, "Self-healing: added $healingRelay as fallback for ${missedAuthors.size} missed authors")
+            Log.d(TAG, "Indexer fallback: added $healingRelay for ${allFallbackAuthors.size} authors (${missedAuthors.size} missed + ${noNip65Authors.size} no-NIP-65)")
         }
 
         _outboxRelayCount.value = relayFilters.size
 
         // Save relay→authors assignment for delivery attribution (include healing relay)
         val assignmentMap = ranked.associate { (url, authors) -> url to authors.toSet() }.toMutableMap()
-        if (healingRelay != null && missedAuthors.isNotEmpty()) {
-            assignmentMap[healingRelay] = missedAuthors
+        if (healingRelay != null && allFallbackAuthors.isNotEmpty()) {
+            assignmentMap[healingRelay] = allFallbackAuthors
         }
         currentRelayAssignment = assignmentMap
 
@@ -468,11 +487,13 @@ class OutboxFeedManager private constructor() {
     companion object {
         private const val TAG = "OutboxFeedManager"
 
-        /** Max outbox relays to subscribe to. Prevents opening hundreds of WebSockets. */
-        private const val MAX_OUTBOX_RELAYS = 12
+        /** Max outbox relays to subscribe to. Prevents opening hundreds of WebSockets.
+         *  Raised from 12→18 for better per-author coverage across diverse relay sets. */
+        private const val MAX_OUTBOX_RELAYS = 18
 
-        /** Per-relay note limit for outbox subscriptions. */
-        private const val OUTBOX_PER_RELAY_LIMIT = 50
+        /** Per-relay note limit for outbox subscriptions.
+         *  Raised from 50→100 so each outbox relay returns more notes from followed authors. */
+        private const val OUTBOX_PER_RELAY_LIMIT = 100
 
         /** Only fetch notes from the last 7 days. */
         private const val SINCE_WINDOW_SECS = 7 * 24 * 3600L
@@ -483,8 +504,9 @@ class OutboxFeedManager private constructor() {
         /** Delay before measuring delivery outcomes. Gives relays time to send events. */
         private const val DELIVERY_MEASUREMENT_DELAY_MS = 30_000L
 
-        /** Extra relay slots beyond MAX_OUTBOX_RELAYS for per-author diversity coverage. */
-        private const val DIVERSITY_BUDGET = 4
+        /** Extra relay slots beyond MAX_OUTBOX_RELAYS for per-author diversity coverage.
+         *  Raised from 4→8 to ensure niche-relay authors aren't left uncovered. */
+        private const val DIVERSITY_BUDGET = 8
 
         @Volatile
         private var instance: OutboxFeedManager? = null

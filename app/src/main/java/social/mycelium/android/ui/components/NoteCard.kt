@@ -518,6 +518,14 @@ internal fun QuotedNoteBody(
                     relayHints = qBlock.relayHints
                 )
             }
+            is NoteContentBlock.Article -> {
+                EmbeddedArticlePreview(
+                    author = qBlock.author,
+                    dTag = qBlock.dTag,
+                    relayHints = qBlock.relayHints,
+                    onNoteClick = onNoteClick
+                )
+            }
         }
     }
 
@@ -1703,7 +1711,11 @@ internal fun NoteActionRow(
     isZapMenuExpanded: Boolean,
     onZapMenuToggle: () -> Unit,
     onShowCustomZapDialog: () -> Unit,
-    onShowReactionPicker: () -> Unit,
+    recentEmojis: List<String>,
+    onReactWithEmoji: (String) -> Unit,
+    onReactWithCustomEmoji: (shortcode: String, url: String) -> Unit,
+    onReactWithGif: (String) -> Unit,
+    onSaveDefaultEmoji: (String) -> Unit,
     onComment: (String) -> Unit,
     onBoost: ((Note) -> Unit)?,
     onQuote: ((Note) -> Unit)?,
@@ -1816,10 +1828,62 @@ internal fun NoteActionRow(
         }
 
         // Likes / React button (NIP-25) — all schemas
-        ReactionButton(
-            emoji = reactionEmoji,
-            onClick = onShowReactionPicker
-        )
+        Box {
+            var showReactionPicker by remember { mutableStateOf(false) }
+            var showFullPicker by remember { mutableStateOf(false) }
+
+            ReactionButton(
+                emoji = reactionEmoji,
+                onClick = { showReactionPicker = true }
+            )
+
+            // Compact favorites bar (dropdown) — anchored to the reaction button
+            if (showReactionPicker && !showFullPicker) {
+                androidx.compose.material3.DropdownMenu(
+                    expanded = true,
+                    onDismissRequest = { showReactionPicker = false }
+                ) {
+                    ReactionFavoritesBar(
+                        recentEmojis = recentEmojis,
+                        onEmojiSelected = { emoji ->
+                            showReactionPicker = false
+                            onReactWithEmoji(emoji)
+                        },
+                        onCustomEmojiSelected = { shortcode, url ->
+                            showReactionPicker = false
+                            onReactWithCustomEmoji(shortcode, url)
+                        },
+                        onOpenFullPicker = {
+                            showReactionPicker = false
+                            showFullPicker = true
+                        }
+                    )
+                }
+            }
+
+            // Full emoji picker dialog (opened via "..." in the favorites bar)
+            if (showFullPicker) {
+                EmojiPickerDialog(
+                    recentEmojis = recentEmojis,
+                    onDismiss = { showFullPicker = false },
+                    onEmojiSelected = { emoji ->
+                        showFullPicker = false
+                        onReactWithEmoji(emoji)
+                    },
+                    onCustomEmojiSelected = { shortcode, url ->
+                        showFullPicker = false
+                        onReactWithCustomEmoji(shortcode, url)
+                    },
+                    onGifSelected = { gifUrl ->
+                        showFullPicker = false
+                        onReactWithGif(gifUrl)
+                    },
+                    onSaveDefaultEmoji = { emoji ->
+                        onSaveDefaultEmoji(emoji)
+                    }
+                )
+            }
+        }
 
         // Reply — kind-1111 replies only
         if (showReply) {
@@ -2192,7 +2256,6 @@ fun NoteCard(
     modifier: Modifier = Modifier
 ) {
     var isZapMenuExpanded by remember { mutableStateOf(false) }
-    var showReactionPicker by remember { mutableStateOf(false) }
     var showCustomZapDialog by remember { mutableStateOf(false) }
     var isDetailsExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -2922,6 +2985,14 @@ fun NoteCard(
                             relayHints = block.relayHints
                         )
                     }
+                    is NoteContentBlock.Article -> {
+                        EmbeddedArticlePreview(
+                            author = block.author,
+                            dTag = block.dTag,
+                            relayHints = block.relayHints,
+                            onNoteClick = onNoteClick
+                        )
+                    }
                     is NoteContentBlock.QuotedNote -> {
                         val eventId = block.eventId
                         val density = LocalDensity.current
@@ -3060,7 +3131,28 @@ fun NoteCard(
                 isZapMenuExpanded = isZapMenuExpanded,
                 onZapMenuToggle = { isZapMenuExpanded = !isZapMenuExpanded },
                 onShowCustomZapDialog = { showCustomZapDialog = true },
-                onShowReactionPicker = { showReactionPicker = true },
+                recentEmojis = recentEmojis,
+                onReactWithEmoji = { emoji ->
+                    ReactionsRepository.recordEmoji(context, accountNpub, emoji)
+                    recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                    reactionEmoji = emoji
+                    onReact(note, emoji)
+                },
+                onReactWithCustomEmoji = { shortcode, url ->
+                    val emojiKey = ":$shortcode:"
+                    ReactionsRepository.recordEmoji(context, accountNpub, emojiKey)
+                    recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                    reactionEmoji = emojiKey
+                    onReact(note, emojiKey)
+                },
+                onReactWithGif = { gifUrl ->
+                    reactionEmoji = "GIF"
+                    onReact(note, gifUrl)
+                },
+                onSaveDefaultEmoji = { emoji ->
+                    ReactionsRepository.recordEmoji(context, accountNpub, emoji)
+                    recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                },
                 onComment = onComment,
                 onBoost = onBoost,
                 onQuote = onQuote,
@@ -3125,62 +3217,6 @@ fun NoteCard(
                 )
             }
 
-            // Compact favorites bar (dropdown) — first-line reaction UI
-            if (showReactionPicker) {
-                var showFullPicker by remember { mutableStateOf(false) }
-                if (!showFullPicker) {
-                    androidx.compose.material3.DropdownMenu(
-                        expanded = true,
-                        onDismissRequest = { showReactionPicker = false }
-                    ) {
-                        ReactionFavoritesBar(
-                            recentEmojis = recentEmojis,
-                            onEmojiSelected = { emoji ->
-                                showReactionPicker = false
-                                ReactionsRepository.recordEmoji(context, accountNpub, emoji)
-                                recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
-                                onReact(note, emoji)
-                            },
-                            onCustomEmojiSelected = { shortcode, url ->
-                                showReactionPicker = false
-                                ReactionsRepository.recordEmoji(context, accountNpub, shortcode)
-                                recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
-                                onReact(note, shortcode)
-                            },
-                            onOpenFullPicker = {
-                                showFullPicker = true
-                            }
-                        )
-                    }
-                }
-                // Full emoji picker dialog (opened via "..." in the favorites bar)
-                if (showFullPicker) {
-                    EmojiPickerDialog(
-                        recentEmojis = recentEmojis,
-                        onDismiss = { showReactionPicker = false },
-                        onEmojiSelected = { emoji ->
-                            showReactionPicker = false
-                            ReactionsRepository.recordEmoji(context, accountNpub, emoji)
-                            recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
-                            onReact(note, emoji)
-                        },
-                        onCustomEmojiSelected = { shortcode, url ->
-                            showReactionPicker = false
-                            ReactionsRepository.recordEmoji(context, accountNpub, shortcode)
-                            recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
-                            onReact(note, shortcode)
-                        },
-                        onGifSelected = { gifUrl ->
-                            showReactionPicker = false
-                            onReact(note, gifUrl)
-                        },
-                        onSaveDefaultEmoji = { emoji ->
-                            ReactionsRepository.recordEmoji(context, accountNpub, emoji)
-                            recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
-                        }
-                    )
-                }
-            }
         }
     }
 
@@ -3235,12 +3271,210 @@ private fun ReactionButton(
     }
 }
 
-/** Returns the first grapheme (code point) of the string, or null if empty/blank. */
+/** Returns the trimmed emoji string with spaces removed, or null if empty/blank.
+ *  Allows multi-emoji combos like "🤙🔥" — Amethyst remembers these as a single reaction. */
 internal fun firstGrapheme(s: String): String? {
-    val t = s.trim()
-    if (t.isEmpty()) return null
-    val end = Character.offsetByCodePoints(t, 0, 1).coerceIn(1, t.length)
-    return t.substring(0, end)
+    val t = s.trim().replace(" ", "")
+    return t.ifEmpty { null }
+}
+
+/**
+ * Compact embedded article preview for kind-30023 naddr references inside kind-1 notes.
+ * Fetches the article via [ArticleEmbedCache] and renders a card with title, author, summary,
+ * cover image, and counts (reactions, zaps, replies). Tapping navigates to the full article view.
+ */
+@Composable
+internal fun EmbeddedArticlePreview(
+    author: String,
+    dTag: String,
+    relayHints: List<String>,
+    onNoteClick: (Note) -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+    var articleNote by remember(author, dTag) {
+        mutableStateOf(social.mycelium.android.repository.ArticleEmbedCache.getCached(author, dTag))
+    }
+    if (articleNote == null) {
+        LaunchedEffect(author, dTag) {
+            kotlinx.coroutines.delay(200)
+            articleNote = social.mycelium.android.repository.ArticleEmbedCache.get(author, dTag, relayHints)
+        }
+    }
+    val note = articleNote
+    if (note == null) {
+        // Loading placeholder
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Article,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+            Text(
+                text = "Loading article\u2026",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            )
+        }
+        return
+    }
+
+    val title = note.topicTitle ?: "Untitled"
+    val summary = note.summary ?: note.content.take(200).let {
+        if (it.length >= 200) "$it\u2026" else it
+    }
+    val coverImage = note.imageUrl
+    val displayAuthor = remember(note.author.id) { profileCache.resolveAuthor(note.author.id) }
+    val authorLabel = displayAuthor.displayName.ifBlank { displayAuthor.username }.ifBlank { note.author.id.take(8) + "\u2026" }
+    val wordCount = note.content.split(Regex("\\s+")).size
+    val readMinutes = (wordCount / 200).coerceAtLeast(1)
+
+    // Counts from NoteCountsRepository (reactive)
+    val allCounts by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+    val counts = allCounts[note.id]
+
+    val accentColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .drawBehind {
+                drawRoundRect(
+                    color = accentColor,
+                    topLeft = androidx.compose.ui.geometry.Offset(0f, 0f),
+                    size = androidx.compose.ui.geometry.Size(3.dp.toPx(), size.height),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(2.dp.toPx())
+                )
+            }
+            .padding(start = 10.dp)
+            .clickable { onNoteClick(note) }
+    ) {
+        // Author + article badge row
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            ProfilePicture(author = displayAuthor, size = 18.dp, onClick = {})
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = authorLabel,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(
+                imageVector = Icons.Outlined.Article,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.width(3.dp))
+            Text(
+                text = "$readMinutes min read",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = 10.sp
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Title
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+
+        // Summary
+        if (summary.isNotBlank()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // Cover image
+        if (coverImage != null) {
+            Spacer(modifier = Modifier.height(4.dp))
+            coil.compose.AsyncImage(
+                model = coverImage,
+                contentDescription = title,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 140.dp)
+                    .clip(RoundedCornerShape(6.dp))
+            )
+        }
+
+        // Counts row: reactions, zaps, replies
+        if (counts != null) {
+            val hasAnyCounts = counts.reactions.isNotEmpty() || counts.zapCount > 0 || counts.replyCount > 0 || counts.repostCount > 0
+            if (hasAnyCounts) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    val countStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, color = mutedColor)
+                    if (counts.reactions.isNotEmpty()) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(text = counts.reactions.first(), fontSize = 10.sp)
+                            val totalReactions = counts.reactionAuthors.values.sumOf { it.size }
+                            if (totalReactions > 1) Text(text = "$totalReactions", style = countStyle)
+                        }
+                    }
+                    if (counts.zapCount > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Icon(Icons.Outlined.Bolt, contentDescription = null, modifier = Modifier.size(11.dp), tint = androidx.compose.ui.graphics.Color(0xFFFFA500))
+                            val satsLabel = if (counts.zapTotalSats >= 1000) "${counts.zapTotalSats / 1000}k" else "${counts.zapTotalSats}"
+                            Text(text = satsLabel, style = countStyle)
+                        }
+                    }
+                    if (counts.replyCount > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(11.dp), tint = mutedColor)
+                            Text(text = "${counts.replyCount}", style = countStyle)
+                        }
+                    }
+                    if (counts.repostCount > 0) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(11.dp), tint = mutedColor)
+                            Text(text = "${counts.repostCount}", style = countStyle)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Hashtags
+        if (note.hashtags.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = note.hashtags.take(3).joinToString(" ") { "#$it" },
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
 }
 
 @Composable

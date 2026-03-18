@@ -1183,6 +1183,7 @@ fun DashboardScreen(
             // When notes are already present, ensureSubscriptionToNotes only re-applies subscription and does not clear the feed.
             viewModel.loadNotesFromFavoriteCategory(relayUrlsToUse, displayUrls)
             social.mycelium.android.repository.QuotedNoteCache.setRelayUrls(relayUrlsToUse)
+            social.mycelium.android.repository.ArticleEmbedCache.setRelayUrls(relayUrlsToUse)
             currentAccount?.toHexKey()?.let { pk ->
                 social.mycelium.android.repository.QuotedNoteCache.setIndexerRelayUrls(
                     storageManager.loadIndexerRelays(pk).map { it.url }

@@ -145,12 +145,17 @@ fun buildNoteContentAnnotatedString(
         try {
             val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@forEach
             val naddr = parsed.entity as? NAddress ?: return@forEach
-            // kind 30030 = NIP-30 emoji pack; kind 34550 = NIP-72 community
+            // kind 30030 = NIP-30 emoji pack; kind 34550 = NIP-72 community; kind 30023 = NIP-23 article
             if (naddr.kind == 30030) {
                 val author = naddr.author ?: ""
                 val dTag = naddr.dTag
                 val relays = naddr.relays ?: emptyList()
                 segments.add(Segment(match.range.first, match.range.last + 1, SEG_EMOJI_PACK, Triple(author, dTag, relays)))
+                return@forEach
+            }
+            if (naddr.kind == 30023) {
+                // Article — hide from inline text; rendered as embedded article block
+                segments.add(Segment(match.range.first, match.range.last + 1, SEG_NEVENT, null))
                 return@forEach
             }
             val label = if (naddr.kind == 34550) "Community" else "Addressable event"
@@ -386,6 +391,8 @@ sealed class NoteContentBlock {
     data class LiveEventReference(val eventId: String, val author: String?, val relays: List<String>) : NoteContentBlock()
     /** An inline NIP-30 emoji pack reference (naddr with kind=30030). */
     data class EmojiPack(val author: String, val dTag: String, val relayHints: List<String>) : NoteContentBlock()
+    /** An inline NIP-23 article reference (naddr with kind=30023). */
+    data class Article(val author: String, val dTag: String, val relayHints: List<String>) : NoteContentBlock()
 }
 
 /**
@@ -410,7 +417,7 @@ fun buildNoteContentWithInlinePreviews(
     val previewByUrl = urlPreviews.associateBy { it.url }
 
     // Build an ordered list of "markers" – each is either a media URL or a link-preview URL at a position
-    data class Marker(val start: Int, val end: Int, val url: String, val isMedia: Boolean, val preview: UrlPreviewInfo?, val quotedEventId: String? = null, val liveEventAuthor: String? = null, val liveEventRelays: List<String>? = null, val emojiPackAuthor: String? = null, val emojiPackDTag: String? = null, val emojiPackRelays: List<String>? = null)
+    data class Marker(val start: Int, val end: Int, val url: String, val isMedia: Boolean, val preview: UrlPreviewInfo?, val quotedEventId: String? = null, val liveEventAuthor: String? = null, val liveEventRelays: List<String>? = null, val emojiPackAuthor: String? = null, val emojiPackDTag: String? = null, val emojiPackRelays: List<String>? = null, val articleAuthor: String? = null, val articleDTag: String? = null, val articleRelays: List<String>? = null)
     // consumedUrls are hidden from text (like media) but not rendered as media groups
     val allHiddenUrls = mediaUrls + consumedUrls
 
@@ -439,18 +446,24 @@ fun buildNoteContentWithInlinePreviews(
         } catch (_: Exception) { null }
     }.toList()
 
-    // Detect nostr:naddr1... references to kind-30030 emoji packs
-    val emojiPackMarkers = naddrPattern.findAll(content).mapNotNull { match ->
+    // Detect nostr:naddr1... references to kind-30030 emoji packs and kind-30023 articles
+    val emojiPackMarkers = mutableListOf<Marker>()
+    val articleMarkers = mutableListOf<Marker>()
+    naddrPattern.findAll(content).forEach { match ->
         val fullUri = if (match.value.startsWith("nostr:", ignoreCase = true)) match.value else "nostr:${match.value}"
         try {
-            val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@mapNotNull null
-            val naddr = parsed.entity as? NAddress ?: return@mapNotNull null
-            if (naddr.kind != 30030) return@mapNotNull null
-            Marker(match.range.first, match.range.last + 1, match.value, false, null,
-                emojiPackAuthor = naddr.author ?: "", emojiPackDTag = naddr.dTag,
-                emojiPackRelays = naddr.relays)
-        } catch (_: Exception) { null }
-    }.toList()
+            val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@forEach
+            val naddr = parsed.entity as? NAddress ?: return@forEach
+            when (naddr.kind) {
+                30030 -> emojiPackMarkers.add(Marker(match.range.first, match.range.last + 1, match.value, false, null,
+                    emojiPackAuthor = naddr.author ?: "", emojiPackDTag = naddr.dTag,
+                    emojiPackRelays = naddr.relays))
+                30023 -> articleMarkers.add(Marker(match.range.first, match.range.last + 1, match.value, false, null,
+                    articleAuthor = naddr.author ?: "", articleDTag = naddr.dTag,
+                    articleRelays = naddr.relays ?: emptyList()))
+            }
+        } catch (_: Exception) { }
+    }
 
     val urlMarkers = urlPositions.map { (range, url) ->
         val isMed = url in mediaUrls
@@ -458,13 +471,13 @@ fun buildNoteContentWithInlinePreviews(
         Marker(range.first, range.last + 1, url, isMed || isConsumed, if (!isMed && !isConsumed) previewByUrl[url] else null)
     }
 
-    // Merge and sort all markers by position; quote/emoji-pack markers take priority over URL markers at same position
-    val specialRanges = (quoteMarkers + emojiPackMarkers).map { it.start..it.end }.toSet()
+    // Merge and sort all markers by position; quote/emoji-pack/article markers take priority over URL markers at same position
+    val specialRanges = (quoteMarkers + emojiPackMarkers + articleMarkers).map { it.start..it.end }.toSet()
     val filteredUrlMarkers = urlMarkers.filter { m -> specialRanges.none { qr -> m.start in qr || m.end - 1 in qr } }
-    val markers = (filteredUrlMarkers + quoteMarkers + emojiPackMarkers).sortedBy { it.start }
+    val markers = (filteredUrlMarkers + quoteMarkers + emojiPackMarkers + articleMarkers).sortedBy { it.start }
 
-    // Also hide quote/emoji-pack URIs from text rendering
-    val hiddenUris = (quoteMarkers + emojiPackMarkers).map { it.url }.toSet()
+    // Also hide quote/emoji-pack/article URIs from text rendering
+    val hiddenUris = (quoteMarkers + emojiPackMarkers + articleMarkers).map { it.url }.toSet()
     val allHiddenUrlsWithQuotes = allHiddenUrls + hiddenUris
 
     if (markers.isEmpty()) {
@@ -488,7 +501,13 @@ fun buildNoteContentWithInlinePreviews(
     var i = 0
     while (i < markers.size) {
         val m = markers[i]
-        if (m.emojiPackAuthor != null && m.emojiPackDTag != null) {
+        if (m.articleAuthor != null && m.articleDTag != null) {
+            // Inline article reference (kind-30023) – emit text before it, then the article block
+            emitTextBlock(cursor, m.start)
+            blocks.add(NoteContentBlock.Article(m.articleAuthor, m.articleDTag, m.articleRelays ?: emptyList()))
+            cursor = m.end
+            i++
+        } else if (m.emojiPackAuthor != null && m.emojiPackDTag != null) {
             // Inline emoji pack reference – emit text before it, then the pack block
             emitTextBlock(cursor, m.start)
             blocks.add(NoteContentBlock.EmojiPack(m.emojiPackAuthor, m.emojiPackDTag, m.emojiPackRelays ?: emptyList()))

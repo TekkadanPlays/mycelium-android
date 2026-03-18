@@ -380,18 +380,41 @@ fun EmojiPickerDialog(
                         horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         items(displayEmojis) { emoji ->
+                            val isCustom = emoji.startsWith(":") && emoji.endsWith(":") && emoji.length > 2
+                            val customUrl = if (isCustom) allPacksMap.values
+                                .flatMap { it.emojis.entries }
+                                .firstOrNull { ":${it.key}:" == emoji || it.key == emoji }
+                                ?.value
+                                ?: EmojiPackSelectionRepository.allSavedEmojis.value[emoji]
+                            else null
+
                             Box(
                                 modifier = Modifier
                                     .aspectRatio(1f)
                                     .clip(RoundedCornerShape(8.dp))
-                                    .clickable { onEmojiSelected(emoji) },
+                                    .clickable {
+                                        if (isCustom && customUrl != null && onCustomEmojiSelected != null) {
+                                            onCustomEmojiSelected(emoji.removeSurrounding(":"), customUrl)
+                                        } else {
+                                            onEmojiSelected(emoji)
+                                        }
+                                    },
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = emoji,
-                                    fontSize = 24.sp,
-                                    textAlign = TextAlign.Center
-                                )
+                                if (customUrl != null) {
+                                    AsyncImage(
+                                        model = customUrl,
+                                        contentDescription = emoji.removeSurrounding(":"),
+                                        modifier = Modifier.size(32.dp),
+                                        contentScale = ContentScale.Fit
+                                    )
+                                } else {
+                                    Text(
+                                        text = emoji,
+                                        fontSize = 24.sp,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
                             }
                         }
                     }

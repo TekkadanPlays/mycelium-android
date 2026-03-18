@@ -431,6 +431,14 @@ private fun NoteCardContent(
                                     relayHints = block.relayHints
                                 )
                             }
+                            is NoteContentBlock.Article -> {
+                                EmbeddedArticlePreview(
+                                    author = block.author,
+                                    dTag = block.dTag,
+                                    relayHints = block.relayHints,
+                                    onNoteClick = onNoteClick
+                                )
+                            }
                         }
                     }
                     if (note.quotedEventIds.isNotEmpty()) {
@@ -671,6 +679,14 @@ private fun NoteCardContent(
                                                             author = qBlock.author,
                                                             dTag = qBlock.dTag,
                                                             relayHints = qBlock.relayHints
+                                                        )
+                                                    }
+                                                    is NoteContentBlock.Article -> {
+                                                        EmbeddedArticlePreview(
+                                                            author = qBlock.author,
+                                                            dTag = qBlock.dTag,
+                                                            relayHints = qBlock.relayHints,
+                                                            onNoteClick = onNoteClick
                                                         )
                                                     }
                                                 }

@@ -65,15 +65,25 @@ fun ConversationsScreen(
     onSettingsClick: () -> Unit = {},
     onRelaysClick: () -> Unit = {},
     onLoginClick: (() -> Unit)? = null,
-    onNavigateToTopics: (() -> Unit)? = null,
-    onNavigateToHome: (() -> Unit)? = null,
-    onNavigateToLive: (() -> Unit)? = null,
-    hasFollowedLiveActivity: Boolean = false,
+    isScreenVisible: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val conversations by DirectMessageRepository.conversations.collectAsState()
+    val pendingCount by DirectMessageRepository.pendingGiftWrapCount.collectAsState()
+    val isDecrypting by DirectMessageRepository.isDecrypting.collectAsState()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+
+    // Trigger decryption when user visits this screen or when new gift wraps arrive.
+    // isScreenVisible changes when the user navigates to/from this tab.
+    // pendingCount changes when new encrypted events are buffered.
+    // If the user declines Amber, decryptPending() stops. Navigating away and back
+    // triggers a fresh attempt.
+    LaunchedEffect(isScreenVisible, pendingCount) {
+        if (isScreenVisible && pendingCount > 0) {
+            DirectMessageRepository.decryptPending()
+        }
+    }
 
     // Drop-down toggle: conversations vs requests
     var showRequests by remember { mutableStateOf(false) }
@@ -111,10 +121,6 @@ fun ConversationsScreen(
                 onRelaysClick = onRelaysClick,
                 onLoginClick = onLoginClick,
                 scrollBehavior = scrollBehavior,
-                onNavigateToTopics = onNavigateToTopics,
-                onNavigateToHome = onNavigateToHome,
-                onNavigateToLive = onNavigateToLive,
-                hasFollowedLiveActivity = hasFollowedLiveActivity,
                 onMoreOptionClick = { option ->
                     when (option) {
                         "requests" -> showRequests = true
@@ -125,6 +131,7 @@ fun ConversationsScreen(
         },
         floatingActionButton = {
             DmFab(
+                onNewMessage = onNewMessage,
                 sortNewest = sortNewest,
                 onToggleSort = { sortNewest = !sortNewest },
                 onScrollUp = {
@@ -148,7 +155,7 @@ fun ConversationsScreen(
         modifier = modifier
     ) { paddingValues ->
         if (sortedList.isEmpty()) {
-            EmptyMessagesState(isRequests = showRequests)
+            EmptyMessagesState(isRequests = showRequests, pendingCount = pendingCount, isDecrypting = isDecrypting)
         } else {
             LazyColumn(
                 state = listState,
@@ -205,6 +212,7 @@ fun ConversationsScreen(
  */
 @Composable
 private fun DmFab(
+    onNewMessage: () -> Unit,
     sortNewest: Boolean,
     onToggleSort: () -> Unit,
     onScrollUp: () -> Unit,
@@ -233,6 +241,17 @@ private fun DmFab(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
+                // New message
+                DmFabItem(
+                    label = "New message",
+                    icon = Icons.Outlined.Email,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    onClick = {
+                        expanded = false
+                        onNewMessage()
+                    }
+                )
                 // Mark all as read
                 DmFabItem(
                     label = "Read all",
@@ -330,7 +349,7 @@ private fun DmFabItem(
 }
 
 @Composable
-private fun EmptyMessagesState(isRequests: Boolean) {
+private fun EmptyMessagesState(isRequests: Boolean, pendingCount: Int = 0, isDecrypting: Boolean = false) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -362,6 +381,8 @@ private fun EmptyMessagesState(isRequests: Boolean) {
             Spacer(Modifier.height(6.dp))
             Text(
                 if (isRequests) "First messages from unknown senders appear here"
+                else if (isDecrypting) "Decrypting messages…"
+                else if (pendingCount > 0) "$pendingCount encrypted message${if (pendingCount != 1) "s" else ""} waiting"
                 else "Start a conversation — messages are end-to-end encrypted with NIP-17 gift wrapping",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
@@ -369,6 +390,12 @@ private fun EmptyMessagesState(isRequests: Boolean) {
                 lineHeight = 18.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
+            if (isDecrypting) {
+                Spacer(Modifier.height(12.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    modifier = Modifier.width(120.dp)
+                )
+            }
             if (BuildConfig.DEBUG) {
                 val debugStatus by DirectMessageRepository.debugStatus.collectAsState()
                 Spacer(Modifier.height(16.dp))

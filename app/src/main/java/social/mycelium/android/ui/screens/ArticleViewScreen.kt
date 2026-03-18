@@ -11,14 +11,25 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import com.example.cybin.nip19.NAddress
+import com.example.cybin.nip19.NEvent
+import com.example.cybin.nip19.NNote
+import com.example.cybin.nip19.NPub
+import com.example.cybin.nip19.NProfile
+import com.example.cybin.nip19.Nip19Parser
 import com.halilibo.richtext.commonmark.CommonmarkAstNodeParser
 import com.halilibo.richtext.markdown.BasicMarkdown
+import com.halilibo.richtext.ui.RichTextStyle
 import com.halilibo.richtext.ui.material3.RichText
+import com.halilibo.richtext.ui.string.RichTextStringStyle
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ProfilePicture
@@ -34,6 +45,7 @@ fun ArticleViewScreen(
     note: Note,
     onBack: () -> Unit,
     onProfileClick: (String) -> Unit = {},
+    onNoteClick: (Note) -> Unit = {},
 ) {
     val title = note.topicTitle ?: "Untitled"
     val coverImage = note.imageUrl
@@ -147,19 +159,92 @@ fun ArticleViewScreen(
             )
 
             // ── Article body (markdown) ──
-            val astNode = remember(note.content) {
-                CommonmarkAstNodeParser().parse(note.content)
+            val processedContent = remember(note.content) {
+                preprocessNostrReferences(note.content, profileCache)
+            }
+            val astNode = remember(processedContent) {
+                CommonmarkAstNodeParser().parse(processedContent)
+            }
+
+            val linkColor = MaterialTheme.colorScheme.primary
+            val articleRichTextStyle = remember(linkColor) {
+                RichTextStyle(
+                    stringStyle = RichTextStringStyle(
+                        linkStyle = TextLinkStyles(
+                            style = SpanStyle(
+                                color = linkColor,
+                                textDecoration = TextDecoration.Underline
+                            )
+                        )
+                    )
+                )
             }
 
             RichText(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                style = articleRichTextStyle
             ) {
                 BasicMarkdown(astNode)
             }
 
             Spacer(modifier = Modifier.height(48.dp))
+        }
+    }
+}
+
+/**
+ * Pre-process article markdown to convert nostr: NIP-19 references into markdown links.
+ * - nostr:npub1... / nostr:nprofile1... → [@DisplayName](nostr:npub1...)
+ * - nostr:note1... / nostr:nevent1... → [Referenced note](nostr:note1...)
+ * - nostr:naddr1... → [Referenced article](nostr:naddr1...) or similar
+ */
+private val nostrRefPattern = Regex(
+    "(nostr:)(npub1|nprofile1|note1|nevent1|naddr1)([qpzry9x8gf2tvdw0s3jn54khce6mua7l]+)",
+    RegexOption.IGNORE_CASE
+)
+
+private fun preprocessNostrReferences(
+    content: String,
+    profileCache: ProfileMetadataCache
+): String {
+    return nostrRefPattern.replace(content) { match ->
+        val fullUri = match.value
+        try {
+            val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@replace fullUri
+            when (val entity = parsed.entity) {
+                is NPub -> {
+                    val author = profileCache.resolveAuthor(entity.hex)
+                    val name = author.displayName.ifBlank { author.username }
+                        .ifBlank { entity.hex.take(8) + "\u2026" }
+                    "[@$name]($fullUri)"
+                }
+                is NProfile -> {
+                    val author = profileCache.resolveAuthor(entity.hex)
+                    val name = author.displayName.ifBlank { author.username }
+                        .ifBlank { entity.hex.take(8) + "\u2026" }
+                    "[@$name]($fullUri)"
+                }
+                is NNote -> {
+                    "[Referenced note]($fullUri)"
+                }
+                is NEvent -> {
+                    "[Referenced note]($fullUri)"
+                }
+                is NAddress -> {
+                    val label = when (entity.kind) {
+                        30023 -> "Referenced article"
+                        34550 -> "Community"
+                        30030 -> "Emoji pack"
+                        else -> "Referenced event"
+                    }
+                    "[$label]($fullUri)"
+                }
+                else -> fullUri
+            }
+        } catch (_: Exception) {
+            fullUri
         }
     }
 }

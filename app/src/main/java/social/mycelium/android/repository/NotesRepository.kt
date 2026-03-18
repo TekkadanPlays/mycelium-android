@@ -640,8 +640,9 @@ class NotesRepository private constructor() {
         private const val TAG = "NotesRepository"
         /** Max notes kept in memory; oldest dropped to keep feed bounded (scroll/layout performance). */
         private const val MAX_NOTES_IN_MEMORY = 5000
-        /** Limit for following feed; relays return only notes from followed authors so we can ask for more. */
-        private const val FOLLOWING_FEED_LIMIT = 1000
+        /** Limit for following feed; relays return only notes from followed authors so we can ask for more.
+         *  Raised from 1000→2000 to reduce crowding out of less active followed users by prolific posters. */
+        private const val FOLLOWING_FEED_LIMIT = 2000
         private const val FEED_SINCE_DAYS = 7
         /** Debounce display updates so hundreds of events/sec don't thrash the UI. */
         private const val DISPLAY_UPDATE_DEBOUNCE_MS = 150L

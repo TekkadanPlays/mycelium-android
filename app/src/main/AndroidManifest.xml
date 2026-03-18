@@ -32,6 +32,13 @@
                 android:value="Maintains persistent WebSocket connections to Nostr relays for real-time note delivery" />
         </service>
         <receiver
+            android:name="social.mycelium.android.services.KillAppReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="social.mycelium.android.KILL_APP" />
+            </intent-filter>
+        </receiver>
+        <receiver
             android:name="social.mycelium.android.services.ScheduleReceiver"
             android:exported="false">
             <intent-filter>

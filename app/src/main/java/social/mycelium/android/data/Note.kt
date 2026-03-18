@@ -140,11 +140,58 @@ data class Note(
     val imageUrl: String? = null,
     /** Parameterized replaceable event d-tag identifier (NIP-23 kind 30023, NIP-33). */
     val dTag: String? = null,
+    /** NIP-88 poll data; non-null when kind == 1068. */
+    val pollData: PollData? = null,
     /** Publish progress for locally-published notes; null for notes from subscriptions. Not serialized. */
     @Transient val publishState: PublishState? = null
 ) {
     /** First (most recent) reposter, or null if not a repost. Convenience for UI. */
     val repostedBy: Author? get() = repostedByAuthors.firstOrNull()
+}
+
+/** NIP-88 poll option (["option", "code", "label"]). */
+@Immutable
+@Serializable
+data class PollOption(
+    val code: String,
+    val label: String
+)
+
+/** NIP-88 poll metadata parsed from kind-1068 event tags. */
+@Immutable
+@Serializable
+data class PollData(
+    val options: List<PollOption>,
+    /** "singlechoice" or "multiplechoice". */
+    val pollType: String = "singlechoice",
+    /** Unix epoch seconds when poll closes; null = open-ended. */
+    val endsAt: Long? = null,
+    /** Relay URLs where responses should be collected. */
+    val relays: List<String> = emptyList()
+) {
+    val isMultipleChoice: Boolean get() = pollType == "multiplechoice"
+    val hasEnded: Boolean get() = endsAt != null && endsAt < System.currentTimeMillis() / 1000
+
+    companion object {
+        /** Parse NIP-88 poll tags from raw event tags. Returns null if not a poll. */
+        fun parseFromTags(tags: List<List<String>>): PollData? {
+            val options = mutableListOf<PollOption>()
+            var pollType = "singlechoice"
+            var endsAt: Long? = null
+            val relays = mutableListOf<String>()
+            for (tag in tags) {
+                if (tag.size < 2) continue
+                when (tag[0]) {
+                    "option" -> if (tag.size >= 3) options.add(PollOption(tag[1], tag[2]))
+                    "polltype" -> pollType = tag[1]
+                    "endsAt" -> endsAt = tag[1].toLongOrNull()
+                    "relay" -> relays.add(tag[1])
+                }
+            }
+            if (options.isEmpty()) return null
+            return PollData(options, pollType, endsAt, relays)
+        }
+    }
 }
 
 @Immutable
@@ -189,6 +236,7 @@ data class WebSocketMessage(
 
 /** Metadata for a quoted note (event id, author id, full content + snippet for preview). */
 @Immutable
+@Serializable
 data class QuotedNoteMeta(
     val eventId: String,
     val authorId: String,

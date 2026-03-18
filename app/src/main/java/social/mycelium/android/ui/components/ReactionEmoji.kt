@@ -27,9 +27,17 @@ fun ReactionEmoji(
 ) {
     val url = customEmojiUrls[emoji]
     if (url != null) {
+        // NIP-30 custom emoji with resolved URL
         AsyncImage(
             model = url,
             contentDescription = emoji.removeSurrounding(":"),
+            modifier = modifier.size(imageSize)
+        )
+    } else if (isImageUrl(emoji)) {
+        // GIF/image reaction: content is a direct image URL
+        AsyncImage(
+            model = emoji,
+            contentDescription = "Image reaction",
             modifier = modifier.size(imageSize)
         )
     } else if (emoji.startsWith(":") && emoji.endsWith(":") && emoji.length > 2) {
@@ -46,4 +54,12 @@ fun ReactionEmoji(
             modifier = modifier
         )
     }
+}
+
+/** Check if a string looks like an image URL (http(s) ending with common image extensions). */
+private fun isImageUrl(s: String): Boolean {
+    if (!s.startsWith("http://") && !s.startsWith("https://")) return false
+    val lower = s.lowercase().split("?").first()
+    return lower.endsWith(".gif") || lower.endsWith(".webp") || lower.endsWith(".png") ||
+        lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".svg")
 }

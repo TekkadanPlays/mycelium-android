@@ -46,6 +46,8 @@ object NotificationPreferences {
     private const val KEY_NOTIFY_MENTIONS = "notify_mentions"
     private const val KEY_NOTIFY_REPLIES = "notify_replies"
     private const val KEY_NOTIFY_DMS = "notify_dms"
+    private const val KEY_NOTIFY_POLLS = "notify_polls"
+    private const val KEY_NOTIFY_QUOTES = "notify_quotes"
     private const val KEY_MUTE_STRANGERS = "mute_strangers"
 
     /** Active account hex pubkey (lowercase). Null = guest / no account. */
@@ -92,6 +94,12 @@ object NotificationPreferences {
 
     private val _notifyDMs = MutableStateFlow(true)
     val notifyDMs: StateFlow<Boolean> = _notifyDMs.asStateFlow()
+
+    private val _notifyPolls = MutableStateFlow(true)
+    val notifyPolls: StateFlow<Boolean> = _notifyPolls.asStateFlow()
+
+    private val _notifyQuotes = MutableStateFlow(true)
+    val notifyQuotes: StateFlow<Boolean> = _notifyQuotes.asStateFlow()
 
     private val _muteStrangers = MutableStateFlow(false)
     val muteStrangers: StateFlow<Boolean> = _muteStrangers.asStateFlow()
@@ -146,6 +154,8 @@ object NotificationPreferences {
         _notifyMentions.value = getAccountBool(KEY_NOTIFY_MENTIONS, true)
         _notifyReplies.value = getAccountBool(KEY_NOTIFY_REPLIES, true)
         _notifyDMs.value = getAccountBool(KEY_NOTIFY_DMS, true)
+        _notifyPolls.value = getAccountBool(KEY_NOTIFY_POLLS, true)
+        _notifyQuotes.value = getAccountBool(KEY_NOTIFY_QUOTES, true)
         _muteStrangers.value = getAccountBool(KEY_MUTE_STRANGERS, false)
     }
 
@@ -197,6 +207,18 @@ object NotificationPreferences {
     fun setNotifyDMs(enabled: Boolean) {
         _notifyDMs.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_DMS), enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+    }
+
+    fun setNotifyPolls(enabled: Boolean) {
+        _notifyPolls.value = enabled
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_POLLS), enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+    }
+
+    fun setNotifyQuotes(enabled: Boolean) {
+        _notifyQuotes.value = enabled
+        prefs.edit().putBoolean(acctKey(KEY_NOTIFY_QUOTES), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 

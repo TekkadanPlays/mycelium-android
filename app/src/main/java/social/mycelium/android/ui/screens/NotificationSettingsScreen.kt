@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.outlined.BatteryChargingFull
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.RestartAlt
 import social.mycelium.android.ui.settings.ConnectionMode
 import social.mycelium.android.ui.settings.NotificationPreferences
 
@@ -39,6 +40,8 @@ fun NotificationSettingsScreen(
     val notifyMentions by NotificationPreferences.notifyMentions.collectAsState()
     val notifyReplies by NotificationPreferences.notifyReplies.collectAsState()
     val notifyDMs by NotificationPreferences.notifyDMs.collectAsState()
+    val notifyPolls by NotificationPreferences.notifyPolls.collectAsState()
+    val notifyQuotes by NotificationPreferences.notifyQuotes.collectAsState()
     val muteStrangers by NotificationPreferences.muteStrangers.collectAsState()
 
 
@@ -168,6 +171,22 @@ fun NotificationSettingsScreen(
                 description = "When you receive a direct message",
                 checked = notifyDMs,
                 onCheckedChange = { NotificationPreferences.setNotifyDMs(it) },
+                enabled = pushEnabled
+            )
+
+            SettingsToggleRow(
+                title = "Poll votes",
+                description = "When someone votes on your polls",
+                checked = notifyPolls,
+                onCheckedChange = { NotificationPreferences.setNotifyPolls(it) },
+                enabled = pushEnabled
+            )
+
+            SettingsToggleRow(
+                title = "Quotes",
+                description = "When someone quotes your notes",
+                checked = notifyQuotes,
+                onCheckedChange = { NotificationPreferences.setNotifyQuotes(it) },
                 enabled = pushEnabled
             )
 
@@ -386,6 +405,62 @@ fun PowerSettingsScreen(
                 selected = connectionMode == ConnectionMode.WHEN_ACTIVE,
                 onClick = { NotificationPreferences.setConnectionMode(ConnectionMode.WHEN_ACTIVE) }
             )
+
+            HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+
+            PowerSectionHeader("Troubleshooting")
+
+            var showKillConfirm by remember { mutableStateOf(false) }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { showKillConfirm = true }
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Outlined.RestartAlt,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp),
+                    tint = MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Force stop Mycelium",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        "Kills the app process so you can restart fresh. Use if the app is misbehaving.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            if (showKillConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showKillConfirm = false },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showKillConfirm = false
+                            val killIntent = android.content.Intent(social.mycelium.android.services.KillAppReceiver.ACTION_KILL_APP).apply {
+                                setPackage(context.packageName)
+                            }
+                            context.sendBroadcast(killIntent)
+                        }) {
+                            Text("Stop", color = MaterialTheme.colorScheme.error)
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { showKillConfirm = false }) {
+                            Text("Cancel")
+                        }
+                    },
+                    title = { Text("Force stop Mycelium?") },
+                    text = { Text("This will immediately kill the app. You can relaunch it from your home screen.") }
+                )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
         }

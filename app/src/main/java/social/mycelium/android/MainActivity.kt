@@ -227,6 +227,10 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         social.mycelium.android.utils.ZapAmountManager.initialize(applicationContext)
         social.mycelium.android.repository.ContactListRepository.init(applicationContext)
 
+        // Load disk caches so feed renders without relay re-fetches / HTTP re-requests
+        social.mycelium.android.repository.QuotedNoteCache.init(applicationContext)
+        social.mycelium.android.services.UrlPreviewCache.init(applicationContext)
+
         // Create all notification channels (relay service, social, DMs) — idempotent
         social.mycelium.android.services.NotificationChannelManager.createChannels(applicationContext)
 

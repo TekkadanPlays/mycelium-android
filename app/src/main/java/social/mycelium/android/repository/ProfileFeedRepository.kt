@@ -473,8 +473,40 @@ class ProfileFeedRepository(
             }
         }
 
-        val merged = currentNotes
-            .distinctBy { it.id }
+        // Final dedup: collapse repost entries whose original note is the profile user's
+        // own note (others boosted MY note → show original + boost info). Reposts of
+        // OTHER people's notes stay as separate entries (I boosted THEIR note → show as boost).
+        val ownOriginalIds = currentNotes.mapNotNullTo(HashSet()) {
+            if (it.originalNoteId == null && it.author.id.lowercase() == authorPubkey.lowercase()) it.id else null
+        }
+        // Pass 1: collect boost info from repost entries of the user's own notes
+        val boostInfoByOrigId = HashMap<String, Pair<List<Author>, Long>>()
+        for (note in currentNotes) {
+            val origId = note.originalNoteId ?: continue
+            if (origId !in ownOriginalIds) continue
+            val (prevAuthors, prevTs) = boostInfoByOrigId[origId] ?: (emptyList<Author>() to 0L)
+            boostInfoByOrigId[origId] = (prevAuthors + note.repostedByAuthors) to maxOf(prevTs, note.repostTimestamp ?: 0L)
+        }
+        // Pass 2: build deduped list — skip repost entries of own notes, apply boost info
+        val deduped = mutableListOf<Note>()
+        val seenDedupIds = HashSet<String>()
+        for (note in currentNotes) {
+            // Skip repost entries only when the original is the profile user's own note
+            if (note.originalNoteId != null && note.originalNoteId in ownOriginalIds) continue
+            if (!seenDedupIds.add(note.id)) continue // skip exact id dupes
+            val boostInfo = boostInfoByOrigId[note.id]
+            if (boostInfo != null) {
+                val mergedAuthors = (note.repostedByAuthors + boostInfo.first).distinctBy { it.id }
+                deduped.add(note.copy(
+                    repostedByAuthors = mergedAuthors,
+                    repostTimestamp = maxOf(note.repostTimestamp ?: 0L, boostInfo.second)
+                ))
+            } else {
+                deduped.add(note)
+            }
+        }
+
+        val merged = deduped
             .sortedByDescending { it.repostTimestamp ?: it.timestamp }
 
         _notes.value = merged

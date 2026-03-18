@@ -67,6 +67,8 @@ fun ComposeTopicScreen(
     val coroutineScope = rememberCoroutineScope()
     val mentionState = remember(myAuthor?.id) { MentionSuggestionState(coroutineScope, myAuthor?.id) }
     DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
+    val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
+    DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
     val onBackWithDraft = {
         if (title.isNotBlank() || content.isNotBlank()) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
@@ -194,6 +196,7 @@ fun ComposeTopicScreen(
                 onValueChange = { newValue ->
                     textFieldValue = newValue
                     mentionState.onTextChanged(newValue.text, newValue.selection.end)
+                    emojiState.onTextChanged(newValue.text, newValue.selection.end)
                 },
                 placeholder = "What's this topic about?",
                 modifier = Modifier
@@ -209,6 +212,13 @@ fun ComposeTopicScreen(
             )
             MentionSuggestionList(
                 mentionState = mentionState,
+                currentText = content,
+                onTextUpdated = { newText, newCursor ->
+                    textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+                }
+            )
+            social.mycelium.android.ui.components.EmojiShortcodeSuggestionList(
+                emojiState = emojiState,
                 currentText = content,
                 onTextUpdated = { newText, newCursor ->
                     textFieldValue = TextFieldValue(newText, TextRange(newCursor))
@@ -249,17 +259,11 @@ fun ComposeTopicScreen(
                 },
                 onScheduleClick = {
                     Toast.makeText(context, "Topic scheduling coming soon", Toast.LENGTH_SHORT).show()
-                }
+                },
+                publishEnabled = title.isNotBlank() && !isUploading,
+                publishLabel = "Publish topic",
+                onPublish = { showRelayPicker = true }
             )
-            Button(
-                onClick = { showRelayPicker = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp, bottom = 16.dp),
-                enabled = title.isNotBlank() && !isUploading
-            ) {
-                Text("Publish")
-            }
         }
     }
 }

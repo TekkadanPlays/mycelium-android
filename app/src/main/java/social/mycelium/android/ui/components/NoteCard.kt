@@ -109,21 +109,20 @@ import java.util.concurrent.TimeUnit
 /**
  * Persistent expanded state for quoted notes — survives LazyColumn recycling and
  * fullscreen navigation (e.g. video player back gesture).
- * Keyed by composite "parentNoteId:quotedEventId" so expanding a quote in one card
- * does not expand the same quoted event embedded in a different card.
- * Bounded to avoid unbounded growth.
+ * Keyed by rootParentNoteId so that all nested quotes in a tree expand/collapse
+ * together. Bounded to avoid unbounded growth.
  */
 object QuotedNoteExpandedState {
     private const val MAX_ENTRIES = 500
     private val map = mutableStateMapOf<String, Boolean>()
 
-    private fun key(parentNoteId: String, eventId: String) = "$parentNoteId:$eventId"
+    /** Check if the entire quote tree under [rootParentNoteId] is expanded. */
+    fun isExpanded(rootParentNoteId: String, @Suppress("UNUSED_PARAMETER") eventId: String): Boolean =
+        map[rootParentNoteId] ?: false
 
-    fun isExpanded(parentNoteId: String, eventId: String): Boolean = map[key(parentNoteId, eventId)] ?: false
-
-    fun toggle(parentNoteId: String, eventId: String) {
-        val k = key(parentNoteId, eventId)
-        map[k] = !(map[k] ?: false)
+    /** Toggle the entire quote tree under [rootParentNoteId]. */
+    fun toggle(rootParentNoteId: String, @Suppress("UNUSED_PARAMETER") eventId: String) {
+        map[rootParentNoteId] = !(map[rootParentNoteId] ?: false)
         if (map.size > MAX_ENTRIES) {
             val keysToRemove = map.keys.take(map.size - MAX_ENTRIES)
             keysToRemove.forEach { map.remove(it) }
@@ -176,6 +175,7 @@ internal fun QuotedNoteBody(
     navigateToQuotedNote: () -> Unit = {},
     countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     depth: Int = 0,
+    rootParentNoteId: String = "",
 ) {
     val uriHandler = LocalUriHandler.current
     contentBlocks.forEach { qBlock ->
@@ -246,7 +246,15 @@ internal fun QuotedNoteBody(
                         val qPagerState = rememberPagerState(pageCount = { qImageUrls.size })
                         val currentImgUrl = qImageUrls.getOrNull(qPagerState.currentPage)
                         val knownImgRatio = currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
-                        val imgRatio = (knownImgRatio ?: (16f / 9f)).coerceIn(0.5f, 2.0f)
+                        val qImgInitiallyKnown = knownImgRatio != null
+                        var qImgContainerRatio by remember(qImageUrls) {
+                            mutableFloatStateOf((knownImgRatio ?: (16f / 9f)).coerceIn(0.5f, 2.0f))
+                        }
+                        if (qImgInitiallyKnown && knownImgRatio != null) {
+                            val clamped = knownImgRatio.coerceIn(0.5f, 2.0f)
+                            if (clamped != qImgContainerRatio) qImgContainerRatio = clamped
+                        }
+                        val imgRatio = qImgContainerRatio
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -434,6 +442,7 @@ internal fun QuotedNoteBody(
                             onRelayClick = onRelayClick,
                             countsByNoteId = countsByNoteId,
                             depth = depth + 1,
+                            rootParentNoteId = rootParentNoteId,
                         )
                     } else {
                         // Loading or failed — show placeholder
@@ -549,9 +558,11 @@ internal fun QuotedNoteContent(
     onRelayClick: (String) -> Unit = {},
     countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     depth: Int = 0,
+    rootParentNoteId: String = parentNoteId,
 ) {
     val uriHandler = LocalUriHandler.current
-    val quotedExpanded = QuotedNoteExpandedState.isExpanded(parentNoteId, meta.eventId)
+    // All nesting levels share the root parent's expand state so they toggle together
+    val quotedExpanded = QuotedNoteExpandedState.isExpanded(rootParentNoteId, meta.eventId)
     val hasMore = meta.fullContent.length > meta.contentSnippet.length
 
     val quotedDisplayContent = if (quotedExpanded) meta.fullContent else meta.contentSnippet
@@ -605,10 +616,8 @@ internal fun QuotedNoteContent(
         onNoteClick(quotedNote)
     }
 
-    // Borderless quoted note: left accent bar + content, edge-to-edge.
-    // Outer Row is clickable to navigateToQuotedNote so tapping anywhere in the
-    // quoted area opens the quoted note's thread (not the parent's).
-    // Inner ClickableNoteContent still resolves @mention annotations first.
+    // Borderless quoted note: left accent bar + content.
+    // Every nesting level draws its own accent bar with consistent padding.
     val accentColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
     val accentWidthPx = with(LocalDensity.current) { 3.dp.toPx() }
     val accentCornerPx = with(LocalDensity.current) { 1.5.dp.toPx() }
@@ -618,8 +627,8 @@ internal fun QuotedNoteContent(
             .padding(
                 start = if (depth == 0) 16.dp else 0.dp,
                 end = if (depth == 0) 16.dp else 0.dp,
-                top = 4.dp,
-                bottom = 4.dp
+                top = if (depth == 0) 4.dp else 6.dp,
+                bottom = if (depth == 0) 4.dp else 2.dp
             )
             .clickable(onClick = navigateToQuotedNote)
             .drawBehind {
@@ -632,7 +641,7 @@ internal fun QuotedNoteContent(
             }
     ) {
         Column(modifier = Modifier
-            .padding(start = if (depth == 0) 10.dp else 6.dp, top = 2.dp, bottom = 2.dp)
+            .padding(start = 10.dp, top = 2.dp, bottom = 2.dp)
             .fillMaxWidth()
             .animateContentSize(animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = FastOutSlowInEasing))
         ) {
@@ -702,7 +711,7 @@ internal fun QuotedNoteContent(
                 quotedAuthor = quotedAuthor,
                 quotedMediaUrls = quotedMediaUrls,
                 isVisible = isVisible,
-                onExpandToggle = { QuotedNoteExpandedState.toggle(parentNoteId, meta.eventId) },
+                onExpandToggle = { QuotedNoteExpandedState.toggle(rootParentNoteId, meta.eventId) },
                 onProfileClick = onProfileClick,
                 onNoteClick = onNoteClick,
                 onVideoClick = onVideoClick,
@@ -711,6 +720,7 @@ internal fun QuotedNoteContent(
                 navigateToQuotedNote = navigateToQuotedNote,
                 countsByNoteId = countsByNoteId,
                 depth = depth,
+                rootParentNoteId = rootParentNoteId,
             )
         }
     }
@@ -757,11 +767,17 @@ internal fun NoteMediaCarousel(
     val knownContainerRatio = if (currentUrl != null) {
         mediaMeta[currentUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(currentUrl)
     } else null
+    // ratioLocked: true when the initial ratio came from imeta/cache (known at first composition).
+    // When locked, we allow cache syncs (e.g. page swipes). When unlocked (defaulted to 16/9),
+    // we do NOT sync from cache mid-lifecycle — this prevents the container from resizing
+    // while the user is looking at it. Scroll-back resets remember → picks up cache on re-enter.
+    val initiallyKnown = knownContainerRatio != null
     var containerRatio by remember(mediaList, mediaMeta) {
         mutableFloatStateOf(knownContainerRatio ?: (16f / 9f))
     }
-    // Sync with cache if it was populated externally (fullscreen, re-scroll)
-    if (knownContainerRatio != null && knownContainerRatio != containerRatio) {
+    // Only sync from cache for items that had a known ratio at first composition
+    // (e.g. page swipe changes currentUrl) — never for items that defaulted to 16/9
+    if (initiallyKnown && knownContainerRatio != null && knownContainerRatio != containerRatio) {
         containerRatio = knownContainerRatio
     }
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
@@ -2169,6 +2185,10 @@ fun NoteCard(
     compactMedia: Boolean = false,
     /** Hoisted from MediaPreferences.showSensitiveContent so each card doesn't subscribe independently. */
     showSensitiveContent: Boolean = false,
+    /** NIP-88 poll vote callback: (noteId, authorPubkey, selectedOptions, relayHint). */
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
+    /** Current user hex pubkey for detecting own poll votes. */
+    myPubkeyHex: String? = null,
     modifier: Modifier = Modifier
 ) {
     var isZapMenuExpanded by remember { mutableStateOf(false) }
@@ -2585,6 +2605,20 @@ fun NoteCard(
                 Spacer(modifier = Modifier.height(2.dp))
             }
 
+            // NIP-88 Poll block (kind-1068)
+            if (note.pollData != null) {
+                PollBlock(
+                    pollData = note.pollData,
+                    noteId = note.id,
+                    noteAuthorPubkey = note.author.id,
+                    relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
+                    myPubkey = myPubkeyHex,
+                    onVote = { nId, authorPk, selections, relayHint ->
+                        onPollVote?.invoke(nId, authorPk, selections, relayHint)
+                    }
+                )
+            }
+
             // Body zone: only when there is text or quoted notes; otherwise embed/media only
             val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
             // When firstPreview is shown as the top-level embed, pass its URL as "consumed"
@@ -2931,6 +2965,7 @@ fun NoteCard(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 72.dp)
                                     .padding(horizontal = 16.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -2952,6 +2987,7 @@ fun NoteCard(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .defaultMinSize(minHeight = 72.dp)
                                     .padding(horizontal = 16.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -3089,22 +3125,61 @@ fun NoteCard(
                 )
             }
 
+            // Compact favorites bar (dropdown) — first-line reaction UI
             if (showReactionPicker) {
-                EmojiPickerDialog(
-                    recentEmojis = recentEmojis,
-                    onDismiss = { showReactionPicker = false },
-                    onEmojiSelected = { emoji ->
-                        showReactionPicker = false
-                        ReactionsRepository.recordEmoji(context, accountNpub, emoji)
-                        recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
-                        onReact(note, emoji)
-                    },
-                    onSaveDefaultEmoji = { emoji ->
-                        // Save as a default (adds to front of recent list)
-                        ReactionsRepository.recordEmoji(context, accountNpub, emoji)
-                        recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                var showFullPicker by remember { mutableStateOf(false) }
+                if (!showFullPicker) {
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = true,
+                        onDismissRequest = { showReactionPicker = false }
+                    ) {
+                        ReactionFavoritesBar(
+                            recentEmojis = recentEmojis,
+                            onEmojiSelected = { emoji ->
+                                showReactionPicker = false
+                                ReactionsRepository.recordEmoji(context, accountNpub, emoji)
+                                recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                                onReact(note, emoji)
+                            },
+                            onCustomEmojiSelected = { shortcode, url ->
+                                showReactionPicker = false
+                                ReactionsRepository.recordEmoji(context, accountNpub, shortcode)
+                                recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                                onReact(note, shortcode)
+                            },
+                            onOpenFullPicker = {
+                                showFullPicker = true
+                            }
+                        )
                     }
-                )
+                }
+                // Full emoji picker dialog (opened via "..." in the favorites bar)
+                if (showFullPicker) {
+                    EmojiPickerDialog(
+                        recentEmojis = recentEmojis,
+                        onDismiss = { showReactionPicker = false },
+                        onEmojiSelected = { emoji ->
+                            showReactionPicker = false
+                            ReactionsRepository.recordEmoji(context, accountNpub, emoji)
+                            recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                            onReact(note, emoji)
+                        },
+                        onCustomEmojiSelected = { shortcode, url ->
+                            showReactionPicker = false
+                            ReactionsRepository.recordEmoji(context, accountNpub, shortcode)
+                            recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                            onReact(note, shortcode)
+                        },
+                        onGifSelected = { gifUrl ->
+                            showReactionPicker = false
+                            onReact(note, gifUrl)
+                        },
+                        onSaveDefaultEmoji = { emoji ->
+                            ReactionsRepository.recordEmoji(context, accountNpub, emoji)
+                            recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
+                        }
+                    )
+                }
             }
         }
     }

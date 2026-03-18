@@ -26,6 +26,8 @@ import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ProfilePicture
 import social.mycelium.android.ui.components.ReactionEmoji
 import social.mycelium.android.viewmodel.ReactionsData
+import androidx.compose.material.icons.outlined.HowToVote
+import androidx.compose.material.icons.filled.Check
 
 /**
  * Full-screen reactions viewer with tabs for Reactions, Zaps, and Boosts.
@@ -38,7 +40,15 @@ fun ReactionsScreen(
     onBackClick: () -> Unit,
     onProfileClick: (String) -> Unit,
 ) {
-    val tabs = remember { listOf(RxTab.REACTIONS, RxTab.ZAPS, RxTab.BOOSTS) }
+    val hasPollVotes = data.pollVotesByOption.isNotEmpty()
+    val tabs = remember(hasPollVotes) {
+        buildList {
+            if (hasPollVotes) add(RxTab.POLL_VOTES)
+            add(RxTab.REACTIONS)
+            add(RxTab.ZAPS)
+            add(RxTab.BOOSTS)
+        }
+    }
 
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
@@ -72,6 +82,7 @@ fun ReactionsScreen(
                         text = {
                             Text(
                                 when (tab) {
+                                    RxTab.POLL_VOTES -> "Votes (${data.pollTotalVoters})"
                                     RxTab.REACTIONS -> {
                                         val count = if (data.reactionAuthors.isNotEmpty()) data.reactionAuthors.values.sumOf { it.size } else data.reactions.size
                                         "Likes ($count)"
@@ -84,6 +95,7 @@ fun ReactionsScreen(
                         },
                         icon = {
                             when (tab) {
+                                RxTab.POLL_VOTES -> Icon(Icons.Outlined.HowToVote, null, Modifier.size(16.dp), tint = Color(0xFF8FBC8F))
                                 RxTab.REACTIONS -> Icon(Icons.Filled.Favorite, null, Modifier.size(16.dp), tint = Color(0xFFE91E63))
                                 RxTab.ZAPS -> Icon(Icons.Filled.Bolt, null, Modifier.size(16.dp), tint = Color(0xFFF59E0B))
                                 RxTab.BOOSTS -> Icon(Icons.Filled.Repeat, null, Modifier.size(16.dp), tint = Color(0xFF4CAF50))
@@ -98,6 +110,12 @@ fun ReactionsScreen(
                 modifier = Modifier.fillMaxSize()
             ) { page ->
                 when (tabs[page]) {
+                    RxTab.POLL_VOTES -> RxPollVotesTab(
+                        pollVotesByOption = data.pollVotesByOption,
+                        pollOptionLabels = data.pollOptionLabels,
+                        totalVoters = data.pollTotalVoters,
+                        onProfileClick = onProfileClick,
+                    )
                     RxTab.REACTIONS -> RxReactionsTab(
                         reactions = data.reactions,
                         reactionAuthors = data.reactionAuthors,
@@ -120,7 +138,101 @@ fun ReactionsScreen(
     }
 }
 
-private enum class RxTab { REACTIONS, ZAPS, BOOSTS }
+private enum class RxTab { POLL_VOTES, REACTIONS, ZAPS, BOOSTS }
+
+@Composable
+private fun RxPollVotesTab(
+    pollVotesByOption: Map<String, List<String>>,
+    pollOptionLabels: Map<String, String>,
+    totalVoters: Int,
+    onProfileClick: (String) -> Unit,
+) {
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+    var profileRevision by remember { mutableIntStateOf(0) }
+    val allPubkeys = remember(pollVotesByOption) { pollVotesByOption.values.flatten().toSet() }
+    LaunchedEffect(allPubkeys) {
+        val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
+        if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+    }
+    LaunchedEffect(allPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
+    @Suppress("UNUSED_EXPRESSION") profileRevision
+
+    val pollGreen = Color(0xFF8FBC8F)
+
+    // Sort options by vote count descending
+    val sortedOptions = remember(pollVotesByOption) {
+        pollVotesByOption.entries.sortedByDescending { it.value.size }
+    }
+
+    if (totalVoters == 0) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No votes yet", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        // Summary header
+        item(key = "poll_summary") {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(bottom = 12.dp)
+            ) {
+                Icon(Icons.Outlined.HowToVote, null, Modifier.size(20.dp), tint = pollGreen)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "$totalVoters voter${if (totalVoters != 1) "s" else ""} across ${sortedOptions.size} option${if (sortedOptions.size != 1) "s" else ""}",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = pollGreen,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+        }
+
+        sortedOptions.forEach { (optionCode, voterPubkeys) ->
+            val label = pollOptionLabels[optionCode] ?: optionCode
+            val percentage = if (totalVoters > 0) (voterPubkeys.size.toFloat() / totalVoters * 100).toInt() else 0
+
+            item(key = "opt_hdr_$optionCode") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 12.dp, bottom = 6.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Check, null,
+                        Modifier.size(16.dp),
+                        tint = pollGreen
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        label,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "${voterPubkeys.size} vote${if (voterPubkeys.size != 1) "s" else ""} ($percentage%)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            }
+            items(voterPubkeys, key = { "pv_${optionCode}_$it" }) { pubkey ->
+                val author = profileCache.resolveAuthor(pubkey)
+                RxAuthorRow(author = author, onProfileClick = onProfileClick) {
+                    // No trailing content needed for poll votes
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun RxReactionsTab(

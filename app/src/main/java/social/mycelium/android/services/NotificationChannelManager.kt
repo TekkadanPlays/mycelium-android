@@ -40,6 +40,7 @@ object NotificationChannelManager {
     const val CHANNEL_ZAPS = "mycelium_zaps"
     const val CHANNEL_REPOSTS = "mycelium_reposts_v2"
     const val CHANNEL_DMS = "mycelium_dms"
+    const val CHANNEL_POLLS = "mycelium_polls"
 
     // ── Channel Group IDs ──
     private const val GROUP_SOCIAL = "mycelium_social"
@@ -154,6 +155,15 @@ object NotificationChannelManager {
             description = "Private messages from other users"
         }
 
+        val pollsChannel = NotificationChannel(
+            CHANNEL_POLLS,
+            "Poll Votes",
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            group = GROUP_SOCIAL
+            description = "When someone votes on your polls"
+        }
+
         manager.createNotificationChannels(
             listOf(
                 relayChannel,
@@ -163,7 +173,8 @@ object NotificationChannelManager {
                 reactionsChannel,
                 zapsChannel,
                 repostsChannel,
-                dmsChannel
+                dmsChannel,
+                pollsChannel
             )
         )
     }
@@ -188,12 +199,22 @@ object NotificationChannelManager {
             )
         } else null
 
+        // "Stop Mycelium" action — kills the process so the user can restart fresh
+        val killIntent = Intent(KillAppReceiver.ACTION_KILL_APP).apply {
+            setPackage(context.packageName)
+        }
+        val killPendingIntent = PendingIntent.getBroadcast(
+            context, 0, killIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         return NotificationCompat.Builder(context, CHANNEL_RELAY_SERVICE)
             .setContentTitle("Mycelium is running")
             .setContentText(contentText)
             .setSmallIcon(social.mycelium.android.R.drawable.ic_notification_network)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(0, "Stop Mycelium", killPendingIntent)
             .apply { if (pendingIntent != null) setContentIntent(pendingIntent) }
             .build()
     }

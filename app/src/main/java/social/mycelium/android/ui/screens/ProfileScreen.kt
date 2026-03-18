@@ -7,8 +7,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -46,6 +44,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -138,7 +137,44 @@ fun ProfileScreen(
             } catch (_: Exception) { null }
         }
     }
-    val slideBackActive = social.mycelium.android.ui.components.LocalSlideBackActive.current
+    // ── Guard: prevent pager from stealing leftward gestures during ThreadSlideBackBox mid-slide ──
+    // This NestedScrollConnection sits on the pager. When rightward overscroll passes
+    // through (meaning ThreadSlideBackBox is sliding), it locks and consumes ALL
+    // horizontal pre-scroll so the pager can't reverse into a tab swipe.
+    var slideBackEngaged by remember { mutableStateOf(false) }
+    val slideBackGuardConnection = remember {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (slideBackEngaged && available.x < 0f) {
+                    // Consume only leftward scroll — pager can't reverse into tab swipe
+                    return Offset(available.x, 0f)
+                }
+                return Offset.Zero
+            }
+
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource
+            ): Offset {
+                // If rightward overscroll is available (pager can't scroll right),
+                // it means ThreadSlideBackBox will consume it → engage guard
+                if (available.x > 0f) {
+                    slideBackEngaged = true
+                }
+                return Offset.Zero // pass through to ThreadSlideBackBox
+            }
+
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (slideBackEngaged) {
+                    slideBackEngaged = false
+                    // Consume horizontal fling so pager doesn't animate to next page
+                    return Velocity(available.x, 0f)
+                }
+                return Velocity.Zero
+            }
+        }
+    }
 
     // Profile zap dialog state
     var showProfileZapDialog by remember { mutableStateOf(false) }
@@ -264,6 +300,7 @@ fun ProfileScreen(
                 state = pagerState,
                 modifier = Modifier
                     .fillMaxSize()
+                    .nestedScroll(slideBackGuardConnection)
                     .layout { measurable, constraints ->
                         val topPx = topOffsetPx.roundToInt().coerceAtLeast(0)
                         val availableHeight = (constraints.maxHeight - topPx).coerceAtLeast(0)
@@ -277,7 +314,7 @@ fun ProfileScreen(
                         }
                     },
                 beyondViewportPageCount = 1,
-                userScrollEnabled = !slideBackActive,
+                userScrollEnabled = true,
                 key = { it }
             ) { page ->
                 val isPageVisible = pagerState.currentPage == page
@@ -433,8 +470,6 @@ fun ProfileScreen(
                         .onGloballyPositioned { coords ->
                             headerHeightPx = coords.size.height.toFloat()
                         }
-                        .nestedScroll(collapsingConnection)
-                        .verticalScroll(rememberScrollState())
                 ) {
                     // Back / title / menu bar — collapses with the header
                     Row(

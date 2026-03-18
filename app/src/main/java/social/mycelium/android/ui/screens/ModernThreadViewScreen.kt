@@ -945,6 +945,7 @@ fun ModernThreadViewScreen(
                             collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
                             isScrolling = listState.isScrollInProgress,
                             compactMedia = compactMedia,
+                            accountNpub = accountNpub,
                             modifier = Modifier.fillMaxWidth()
                         )
 
@@ -2042,7 +2043,9 @@ private fun ReplyControlsPanel(
     onRelayClick: (String) -> Unit = {},
     onNavigateToRelayList: ((List<String>) -> Unit)? = null,
     isScrolling: Boolean = false,
+    accountNpub: String? = null,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var isDetailsExpanded by remember { mutableStateOf(false) }
     val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
     val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
@@ -2139,6 +2142,7 @@ private fun ReplyControlsPanel(
                     // Likes / React button — shows actual emoji when user has reacted
                     Box {
                         var showReactionMenu by remember { mutableStateOf(false) }
+                        var showFullPicker by remember { mutableStateOf(false) }
                         var selectedEmoji by remember(reply.id) {
                             mutableStateOf(social.mycelium.android.repository.ReactionsRepository.getLastReaction(reply.id))
                         }
@@ -2173,25 +2177,46 @@ private fun ReplyControlsPanel(
                             expanded = showReactionMenu,
                             onDismissRequest = { showReactionMenu = false }
                         ) {
-                            val reactionEmojis = listOf("🤙", "❤️", "🔥", "😂", "😢", "🫡", "👀", "🚀", "🤔", "💯")
-                            Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(2.dp)
-                            ) {
-                                reactionEmojis.forEach { emoji ->
-                                    Text(
-                                        text = emoji,
-                                        fontSize = 22.sp,
-                                        modifier = Modifier
-                                            .clickable {
-                                                showReactionMenu = false
-                                                selectedEmoji = emoji
-                                                onReact(reply.toNote(), emoji)
-                                            }
-                                            .padding(4.dp)
-                                    )
+                            val recentEmojis = remember { social.mycelium.android.repository.ReactionsRepository.getRecentEmojis(context, accountNpub) }
+                            social.mycelium.android.ui.components.ReactionFavoritesBar(
+                                recentEmojis = recentEmojis,
+                                onEmojiSelected = { emoji ->
+                                    showReactionMenu = false
+                                    selectedEmoji = emoji
+                                    onReact(reply.toNote(), emoji)
+                                },
+                                onCustomEmojiSelected = { shortcode, url ->
+                                    showReactionMenu = false
+                                    selectedEmoji = shortcode
+                                    onReact(reply.toNote(), shortcode)
+                                },
+                                onOpenFullPicker = {
+                                    showReactionMenu = false
+                                    showFullPicker = true
                                 }
-                            }
+                            )
+                        }
+                        if (showFullPicker) {
+                            val recentEmojis = remember { social.mycelium.android.repository.ReactionsRepository.getRecentEmojis(context, accountNpub) }
+                            social.mycelium.android.ui.components.EmojiPickerDialog(
+                                recentEmojis = recentEmojis,
+                                onDismiss = { showFullPicker = false },
+                                onEmojiSelected = { emoji ->
+                                    showFullPicker = false
+                                    selectedEmoji = emoji
+                                    onReact(reply.toNote(), emoji)
+                                },
+                                onCustomEmojiSelected = { shortcode, url ->
+                                    showFullPicker = false
+                                    selectedEmoji = shortcode
+                                    onReact(reply.toNote(), shortcode)
+                                },
+                                onGifSelected = { gifUrl ->
+                                    showFullPicker = false
+                                    selectedEmoji = "GIF"
+                                    onReact(reply.toNote(), gifUrl)
+                                }
+                            )
                         }
                     }
                     // Reply
@@ -2574,6 +2599,7 @@ private fun ThreadedReplyCard(
     /** When true, suppress click/longClick to prevent accidental triggers during fast fling. */
     isScrolling: Boolean = false,
     compactMedia: Boolean = false,
+    accountNpub: String? = null,
     modifier: Modifier = Modifier
 ) {
     val reply = threadedReply.reply
@@ -2763,6 +2789,7 @@ private fun ThreadedReplyCard(
                             onRelayClick = onRelayClick,
                             onNavigateToRelayList = onNavigateToRelayList,
                             isScrolling = isScrolling,
+                            accountNpub = accountNpub,
                         )
                     }  // Column (weight 1f, padding)
 
@@ -2798,6 +2825,7 @@ private fun ThreadedReplyCard(
             onVideoClick = onVideoClick,
             isScrolling = isScrolling,
             compactMedia = compactMedia,
+            accountNpub = accountNpub,
         )
 
         }
@@ -2851,6 +2879,7 @@ private fun ThreadedReplyChildren(
     onVideoClick: (List<String>, Int) -> Unit,
     isScrolling: Boolean,
     compactMedia: Boolean = false,
+    accountNpub: String? = null,
 ) {
     val reply = threadedReply.reply
     val level = threadedReply.level
@@ -2938,6 +2967,7 @@ private fun ThreadedReplyChildren(
                     onVideoClick = onVideoClick,
                     isScrolling = isScrolling,
                     compactMedia = compactMedia,
+                    accountNpub = accountNpub,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

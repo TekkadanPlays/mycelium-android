@@ -47,6 +47,7 @@ object NotificationsRepository {
     private const val NOTIFICATION_KIND_HIGHLIGHT = 9802
     private const val NOTIFICATION_KIND_BADGE_AWARD = 8
     private const val NOTIFICATION_KIND_TOPIC_REPLY = 1111
+    private const val NOTIFICATION_KIND_POLL_RESPONSE = 1018
     private const val ONE_WEEK_SEC = 7 * 24 * 60 * 60L
     private const val PREFS_NAME = "notifications_seen"
     private const val PREFS_KEY_SEEN_IDS = "seen_ids"
@@ -127,13 +128,14 @@ object NotificationsRepository {
     private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
     private const val TARGET_FETCH_TIMEOUT_MS = 4000L
     private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 6000L
-    private const val MAX_TARGET_FETCH_RETRIES = 1
+    private const val MAX_TARGET_FETCH_RETRIES = 2
 
-    /** Call once from Application or Activity to enable persistent seen IDs. */
+    /** Call once from Application or Activity to provide app context. */
     fun init(context: Context) {
         appContext = context.applicationContext
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        loadSeenIds()
+        // Seen IDs are NOT persisted — system notifications are cleared when read,
+        // and on restart all notifications are re-fetched fresh with a clean unseen state.
         // Restore last-known pubkey so cold-start of the same user isn't treated as "new user"
         myPubkeyHex = prefs?.getString(PREFS_KEY_PUBKEY, null)
         if (myPubkeyHex != null) Log.d(TAG, "init: restored myPubkeyHex=${myPubkeyHex?.take(8)}")
@@ -189,13 +191,12 @@ object NotificationsRepository {
             NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS to prefs.notifyZaps.value
             NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS to prefs.notifyReposts.value
             NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
-            NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
+            NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyQuotes.value
             NotificationType.HIGHLIGHT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
             NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS to prefs.notifyDMs.value
-            else -> {
-                Log.d(TAG, "fireNotif SKIPPED (no channel for type): type=$type suffix=${notifIdSuffix.take(8)}")
-                return
-            }
+            NotificationType.POLL_VOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_POLLS to prefs.notifyPolls.value
+            NotificationType.REPORT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
+            NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS to prefs.notifyReactions.value
         }
         if (!allowed) {
             Log.d(TAG, "fireNotif SUPPRESSED (channel disabled): type=$type channel=$channelId suffix=${notifIdSuffix.take(8)}")
@@ -209,17 +210,8 @@ object NotificationsRepository {
         )
     }
 
-    private fun loadSeenIds() {
-        val stored = prefs?.getStringSet(PREFS_KEY_SEEN_IDS, emptySet()) ?: emptySet()
-        _seenIds.value = stored.toSet()
-        Log.d(TAG, "loadSeenIds: loaded ${stored.size} seen IDs from prefs")
-    }
-
-    private fun persistSeenIds() {
-        scope.launch(Dispatchers.IO) {
-            prefs?.edit()?.putStringSet(PREFS_KEY_SEEN_IDS, _seenIds.value)?.apply()
-        }
-    }
+    // Seen IDs are in-memory only — no persistence needed.
+    // System notifications are cleared on read; on restart everything is fresh.
 
     fun setCacheRelayUrls(urls: List<String>) {
         cacheRelayUrls = urls
@@ -235,7 +227,6 @@ object NotificationsRepository {
     fun markAllAsSeen() {
         _seenIds.value = _seenIds.value + _notifications.value.mapTo(mutableSetOf()) { it.id }
         markAllSeenEpochMs = System.currentTimeMillis()
-        persistSeenIds()
         scope.launch(Dispatchers.IO) { prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply() }
         cancelAllSystemNotifications()
         Log.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
@@ -255,7 +246,6 @@ object NotificationsRepository {
     /** Mark one notification as seen (e.g. when user taps it to open thread). */
     fun markAsSeen(notificationId: String) {
         _seenIds.value = _seenIds.value + notificationId
-        persistSeenIds()
         cancelSystemNotification(notificationId)
     }
 
@@ -264,7 +254,6 @@ object NotificationsRepository {
         val idsForType = _notifications.value.filter { it.type == type }.map { it.id }.toSet()
         if (idsForType.isNotEmpty()) {
             _seenIds.value = _seenIds.value + idsForType
-            persistSeenIds()
             idsForType.forEach { cancelSystemNotification(it) }
         }
     }
@@ -295,7 +284,6 @@ object NotificationsRepository {
         val trimmed = _seenIds.value.intersect(currentIds)
         if (trimmed.size != _seenIds.value.size) {
             _seenIds.value = trimmed
-            persistSeenIds()
         }
     }
 
@@ -314,10 +302,10 @@ object NotificationsRepository {
      * note IDs, then subscribe for kind-1111 thread replies (E-tag) and quote posts (q-tag)
      * on inbox relays.
      *
-     * All subscriptions use [SubscriptionPriority.BACKGROUND] so foreground UI (feed,
-     * threads, profiles) always wins relay slots via preemption. Connections to new relays
-     * are jittered at the pool level ([CybinRelayPool.connectWithJitter]) to avoid
-     * thundering-herd on startup.
+     * All subscriptions use [SubscriptionPriority.HIGH] so notifications arrive promptly
+     * alongside feed and profile subs, preempting lower-priority enrichment queries.
+     * Connections to new relays are jittered at the pool level ([CybinRelayPool.connectWithJitter])
+     * to avoid thundering-herd on startup.
      *
      * @param inboxRelayUrls  NIP-65 read relays (where others send events TO us)
      * @param outboxRelayUrls NIP-65 write relays (where our notes live)
@@ -364,7 +352,7 @@ object NotificationsRepository {
         val inboxFilters = listOf(
             // High-volume: text, reaction, repost, zap, topic reply — complete history
             Filter(
-                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD),
+                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL_RESPONSE),
                 tags = mapOf("p" to listOf(pubkey)),
                 limit = 5000
             ),
@@ -376,10 +364,10 @@ object NotificationsRepository {
             ),
         )
         val inboxHandle = stateMachine.requestTemporarySubscription(
-            inboxUrls, inboxFilters, priority = SubscriptionPriority.BACKGROUND
+            inboxUrls, inboxFilters, priority = SubscriptionPriority.HIGH
         ) { event -> handleEvent(event) }
         notificationHandles.add(inboxHandle)
-        Log.d(TAG, "Phase 1: Deep inbox fetch on ${inboxUrls.size} relays (${inboxFilters.size} filters, BACKGROUND)")
+        Log.d(TAG, "Phase 1: Deep inbox fetch on ${inboxUrls.size} relays (${inboxFilters.size} filters, HIGH)")
 
         // ── Phase 2: Sweep non-inbox relays (delayed) ────────────────────────
         val sweepUrls = (outboxRelayUrls + categoryRelayUrls)
@@ -392,7 +380,7 @@ object NotificationsRepository {
                 val sweepSince = (System.currentTimeMillis() / 1000) - ONE_WEEK_SEC
                 val sweepFilters = listOf(
                     Filter(
-                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD),
+                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL_RESPONSE),
                         tags = mapOf("p" to listOf(pubkey)),
                         since = sweepSince,
                         limit = 200
@@ -405,10 +393,10 @@ object NotificationsRepository {
                     ),
                 )
                 val sweepHandle = stateMachine.requestTemporarySubscription(
-                    sweepUrls, sweepFilters, priority = SubscriptionPriority.BACKGROUND
+                    sweepUrls, sweepFilters, priority = SubscriptionPriority.HIGH
                 ) { event -> handleEvent(event) }
                 notificationHandles.add(sweepHandle)
-                Log.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1w, BACKGROUND)")
+                Log.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1w, HIGH)")
             }
         }
 
@@ -441,7 +429,7 @@ object NotificationsRepository {
             }
             if (extraFilters.isNotEmpty()) {
                 val extraHandle = stateMachine.requestTemporarySubscription(
-                    inboxUrls, extraFilters, priority = SubscriptionPriority.BACKGROUND
+                    inboxUrls, extraFilters, priority = SubscriptionPriority.HIGH
                 ) { event -> handleEvent(event) }
                 notificationHandles.add(extraHandle)
                 Log.d(TAG, "Phase 3: Thread reply + quote filters on ${inboxUrls.size} inbox relays")
@@ -460,7 +448,8 @@ object NotificationsRepository {
     private val ACCEPTED_KINDS = setOf(
         NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST,
         NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY,
-        NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT, NOTIFICATION_KIND_BADGE_AWARD
+        NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT, NOTIFICATION_KIND_BADGE_AWARD,
+        NOTIFICATION_KIND_POLL_RESPONSE
     )
 
     /**
@@ -495,10 +484,37 @@ object NotificationsRepository {
         if (!seenEventIds.add(event.id)) return
         // Skip notifications from muted/blocked users
         if (MuteListRepository.isHidden(event.pubKey)) return
+        val profileIsCached = profileCache.getAuthor(event.pubKey) != null
         val author = profileCache.resolveAuthor(event.pubKey)
-        if (profileCache.getAuthor(event.pubKey) == null && cacheRelayUrls.isNotEmpty()) {
-            scope.launch { profileCache.requestProfiles(listOf(event.pubKey), cacheRelayUrls) }
+        if (!profileIsCached && cacheRelayUrls.isNotEmpty()) {
+            // Profile not cached — request it and schedule a deferred notification
+            // so the Android system notification shows the real display name instead of hex.
+            scope.launch {
+                profileCache.requestProfiles(listOf(event.pubKey), cacheRelayUrls)
+                // Wait for the profile to arrive (up to 2s), polling every 200ms
+                var resolved: Author? = null
+                for (i in 0 until 10) {
+                    kotlinx.coroutines.delay(200L)
+                    val fetched = profileCache.getAuthor(event.pubKey)
+                    if (fetched != null) { resolved = fetched; break }
+                }
+                val finalAuthor = resolved ?: author
+                // Update the in-memory NotificationData if it was already created with the stub
+                if (resolved != null) {
+                    notificationsById[event.id]?.let { existing ->
+                        if (existing.author?.displayName != resolved.displayName) {
+                            notificationsById[event.id] = existing.copy(author = resolved)
+                        }
+                    }
+                }
+                dispatchEvent(event, finalAuthor)
+            }
+        } else {
+            dispatchEvent(event, author)
         }
+    }
+
+    private fun dispatchEvent(event: Event, author: Author) {
         val ts = event.createdAt * 1000L
         when (event.kind) {
             NOTIFICATION_KIND_REACTION -> handleLike(event, author, ts)
@@ -518,6 +534,7 @@ object NotificationsRepository {
             NOTIFICATION_KIND_HIGHLIGHT -> handleHighlight(event, author, ts)
             NOTIFICATION_KIND_REPORT -> handleReport(event, author, ts)
             NOTIFICATION_KIND_BADGE_AWARD -> handleBadgeAward(event, author, ts)
+            NOTIFICATION_KIND_POLL_RESPONSE -> handlePollVote(event, author, ts)
             else -> { }
         }
     }
@@ -796,7 +813,7 @@ object NotificationsRepository {
             )
             var bestEvent: Event? = null
             val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.LOW) { ev ->
+                .requestTemporarySubscription(subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.NORMAL) { ev ->
                     if (ev.kind == 30009 && (bestEvent == null || ev.createdAt > (bestEvent?.createdAt ?: 0))) {
                         bestEvent = ev
                     }
@@ -823,6 +840,86 @@ object NotificationsRepository {
             Log.d(TAG, "Enriched badge notification $notificationId: name=$name image=${imageUrl?.take(40)}")
         } catch (e: Exception) {
             Log.e(TAG, "resolveBadgeDefinition failed: ${e.message}", e)
+        }
+    }
+
+    private fun handlePollVote(event: Event, author: Author, ts: Long) {
+        // Parse e-tag to find which poll was voted on
+        val pollId = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: return
+        // Parse response tags to find which options were chosen
+        val responseCodes = event.tags
+            .filter { it.size >= 2 && it[0] == "response" }
+            .map { it[1] }
+        if (responseCodes.isEmpty()) return
+
+        val text = "${author.displayName ?: "Someone"} voted on your poll"
+        val data = NotificationData(
+            id = event.id,
+            type = NotificationType.POLL_VOTE,
+            text = text,
+            author = author,
+            targetNoteId = pollId,
+            pollId = pollId,
+            pollOptionCodes = responseCodes,
+            sortTimestamp = ts
+        )
+        notificationsById[event.id] = data
+        emitSorted()
+        fireAndroidNotification(NotificationType.POLL_VOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = pollId)
+        // Asynchronously fetch the poll event to enrich with question + option labels
+        if (subscriptionRelayUrls.isNotEmpty()) {
+            scope.launch { enrichPollVoteNotification(event.id, pollId, responseCodes) }
+        }
+    }
+
+    /** Fetch the kind-1068 poll event and enrich the POLL_VOTE notification with question and option labels. */
+    private suspend fun enrichPollVoteNotification(notificationId: String, pollId: String, responseCodes: List<String>) {
+        try {
+            val filter = Filter(
+                ids = listOf(pollId),
+                limit = 1
+            )
+            var pollEvent: Event? = null
+            val handle = RelayConnectionStateMachine.getInstance()
+                .requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL) { ev ->
+                    if (ev.id == pollId) pollEvent = ev
+                }
+            delay(3000)
+            handle.cancel()
+
+            val ev = pollEvent ?: return
+            val question = ev.content.takeIf { it.isNotBlank() }
+            val allOptions = ev.tags
+                .filter { it.size >= 3 && it[0] == "option" }
+                .map { it[2] }
+            val optionLabels = ev.tags
+                .filter { it.size >= 3 && it[0] == "option" && it[1] in responseCodes }
+                .map { it[2] }
+            val isMulti = ev.tags.any { it.size >= 2 && it[0] == "polltype" && it[1] == "multiplechoice" }
+
+            val current = notificationsById[notificationId] ?: return
+            val enrichedText = buildString {
+                append(current.author?.displayName ?: "Someone")
+                append(" voted")
+                if (optionLabels.isNotEmpty()) {
+                    append(" \"${optionLabels.joinToString("\", \"")}\"")
+                }
+                if (question != null) {
+                    append(" on: ${question.take(80)}")
+                    if (question.length > 80) append("…")
+                }
+            }
+            notificationsById[notificationId] = current.copy(
+                text = enrichedText,
+                pollQuestion = question,
+                pollOptionLabels = optionLabels,
+                pollAllOptions = allOptions,
+                pollIsMultipleChoice = isMulti
+            )
+            emitSorted()
+            Log.d(TAG, "Enriched poll vote notification $notificationId: q=${question?.take(30)} opts=$optionLabels")
+        } catch (e: Exception) {
+            Log.e(TAG, "enrichPollVoteNotification failed: ${e.message}", e)
         }
     }
 
@@ -1026,7 +1123,7 @@ object NotificationsRepository {
             limit = 500
         )
         val handle = stateMachine.requestOneShotSubscription(relayUrls, filter,
-            priority = SubscriptionPriority.BACKGROUND, settleMs = 300L, maxWaitMs = 4_000L,
+            priority = SubscriptionPriority.NORMAL, settleMs = 300L, maxWaitMs = 4_000L,
         ) { ev ->
             if (ev.kind == 11) {
                 synchronized(topicIds) { topicIds.add(ev.id) }
@@ -1052,7 +1149,7 @@ object NotificationsRepository {
             limit = 2000
         )
         val handle = stateMachine.requestOneShotSubscription(allRelays, filter,
-            priority = SubscriptionPriority.BACKGROUND, settleMs = 300L, maxWaitMs = 5_000L,
+            priority = SubscriptionPriority.NORMAL, settleMs = 300L, maxWaitMs = 5_000L,
         ) { ev ->
             if (ev.kind == 1) {
                 synchronized(noteIds) { noteIds.add(ev.id) }
@@ -1121,16 +1218,32 @@ object NotificationsRepository {
         val timeoutMs = if (maxRetry > 0) TARGET_FETCH_RETRY_TIMEOUT_MS else TARGET_FETCH_TIMEOUT_MS
         Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (retry=$maxRetry, timeout=${timeoutMs}ms)")
 
-        // No kinds restriction: kind-1111 comments can target ANY event kind
-        val filter = Filter(ids = allNoteIds, limit = allNoteIds.size)
+        // ── Step 1: Check local caches before hitting relays ──────────────
         val fetched = java.util.concurrent.ConcurrentHashMap<String, Note>()
-        val stateMachine = RelayConnectionStateMachine.getInstance()
-        val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.LOW) { ev ->
-            fetched[ev.id] = eventToNote(ev)
+        val notesRepo = NotesRepository.getInstance()
+        val remainingIds = mutableListOf<String>()
+        for (noteId in allNoteIds) {
+            val cached = notesRepo.getNoteFromCache(noteId)
+            if (cached != null) {
+                fetched[noteId] = cached
+            } else {
+                remainingIds.add(noteId)
+            }
         }
-        delay(timeoutMs)
-        handle.cancel()
-        // Apply fetched notes to their notifications; verify replies are actually TO us
+        if (remainingIds.isNotEmpty()) Log.d(TAG, "Cache hit ${fetched.size}/${allNoteIds.size}, fetching ${remainingIds.size} from relays")
+
+        // ── Step 2: Fetch remaining from relays ──────────────────────────
+        if (remainingIds.isNotEmpty()) {
+            val filter = Filter(ids = remainingIds, limit = remainingIds.size)
+            val stateMachine = RelayConnectionStateMachine.getInstance()
+            val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL) { ev ->
+                fetched[ev.id] = eventToNote(ev)
+            }
+            delay(timeoutMs)
+            handle.cancel()
+        }
+
+        // ── Step 3: Apply fetched notes; verify reactions are to our notes ─
         var removedCount = 0
         val retryQueue = mutableListOf<PendingTargetFetch>()
         for ((noteId, pendingList) in batch) {
@@ -1138,22 +1251,16 @@ object NotificationsRepository {
             for (pending in pendingList) {
                 val current = notificationsById[pending.notificationId] ?: continue
                 if (note == null) {
-                    // Parent note not fetched. For reactions/reposts we MUST verify the target
-                    // is ours — without the parent we can't, so retry or remove.
-                    val needsVerification = current.type == NotificationType.LIKE ||
-                        current.type == NotificationType.REPOST
-                    if (needsVerification && pending.retryCount < MAX_TARGET_FETCH_RETRIES) {
-                        // Schedule a retry with longer timeout
+                    // Target note not fetched. Retry with longer timeout before giving up.
+                    if (pending.retryCount < MAX_TARGET_FETCH_RETRIES) {
                         retryQueue.add(pending.copy(retryCount = pending.retryCount + 1))
                         Log.d(TAG, "Re-queuing ${current.type} ${pending.notificationId.take(8)} for retry (attempt ${pending.retryCount + 1})")
-                    } else if (needsVerification) {
-                        // Max retries exhausted — remove unverifiable reaction/repost
-                        notificationsById.remove(pending.notificationId)
-                        removedCount++
-                        Log.d(TAG, "Removing unverifiable ${current.type} ${pending.notificationId.take(8)} after ${pending.retryCount} retries")
+                    } else {
+                        // Max retries exhausted. Keep the notification (it passed relay-side
+                        // p-tag filtering so it IS relevant) but without a target note preview.
+                        // Previously we deleted likes/reposts here, causing silent notification loss.
+                        Log.d(TAG, "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview")
                     }
-                    // For replies/mentions/other types, keep the notification even without
-                    // the parent — removing creates false negatives for slow relays.
                     continue
                 }
                 val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)

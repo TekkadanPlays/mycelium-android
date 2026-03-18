@@ -44,7 +44,19 @@ data class NotificationData(
     /** NIP-58 badge name (from kind 30009 definition) for BADGE_AWARD notifications. */
     val badgeName: String? = null,
     /** NIP-58 badge image URL (thumb or image from kind 30009 definition) for BADGE_AWARD notifications. */
-    val badgeImageUrl: String? = null
+    val badgeImageUrl: String? = null,
+    /** NIP-88: The kind-1068 poll event ID that was voted on (for POLL_VOTE type). */
+    val pollId: String? = null,
+    /** NIP-88: The poll question text (content of kind-1068 event). */
+    val pollQuestion: String? = null,
+    /** NIP-88: The option code(s) the voter chose. */
+    val pollOptionCodes: List<String> = emptyList(),
+    /** NIP-88: The option label(s) the voter chose (human-readable). */
+    val pollOptionLabels: List<String> = emptyList(),
+    /** NIP-88: All options on the poll, for context display. */
+    val pollAllOptions: List<String> = emptyList(),
+    /** NIP-88: Whether the poll is multiple choice. */
+    val pollIsMultipleChoice: Boolean = false
 )
 
 enum class NotificationType {
@@ -58,5 +70,6 @@ enum class NotificationType {
     HIGHLIGHT,
     REPORT,
     QUOTE,
-    BADGE_AWARD
+    BADGE_AWARD,
+    POLL_VOTE
 }

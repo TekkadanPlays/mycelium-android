@@ -141,7 +141,7 @@ fun NotificationsScreen(
     modifier: Modifier = Modifier
 ) {
     // Per-tab scroll states so each tab remembers its own position
-    val tabListStates = remember { List(10) { LazyListState() } }
+    val tabListStates = remember { List(13) { LazyListState() } }
     val currentListState = tabListStates.getOrElse(selectedTabIndex) { tabListStates[0] }
     val coroutineScope = rememberCoroutineScope()
     val allNotifications by NotificationsRepository.notifications.collectAsState()
@@ -182,6 +182,7 @@ fun NotificationsScreen(
             NotifTab("Zaps", { Icon(Icons.Default.Bolt, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.ZAP },
             NotifTab("Reposts", { Icon(Icons.Default.Repeat, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPOST },
             NotifTab("Mentions", { Icon(Icons.Outlined.AlternateEmail, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.MENTION },
+            NotifTab("Polls", { Icon(Icons.Outlined.HowToVote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.POLL_VOTE },
             NotifTab("Quotes", { Icon(Icons.Default.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.QUOTE },
             NotifTab("Highlights", { Icon(Icons.Outlined.FormatQuote, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.HIGHLIGHT },
             NotifTab("Reports", { Icon(Icons.Outlined.Flag, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.REPORT },
@@ -454,45 +455,60 @@ fun NotificationsScreen(
                             key = { it.id }
                         ) { notification ->
                             val isSeen = notification.id in seenIds
-                            val isCompact = notification.type in listOf(
-                                NotificationType.LIKE,
-                                NotificationType.REPOST,
-                                NotificationType.ZAP
-                            )
-                            if (isCompact) {
-                                CompactNotificationRow(
-                                    notification = notification,
-                                    isSeen = isSeen,
-                                    timeTick = timeTick,
-                                    onProfileClick = onProfileClick,
-                                    onClick = {
-                                        NotificationsRepository.markAsSeen(notification.id)
-                                        val target = notification.targetNote ?: notification.note
-                                        if (target != null && target.rootNoteId != null) {
-                                            onOpenThreadForRootId(target.rootNoteId!!, 1, null, target)
-                                        } else if (target != null) {
-                                            onNoteClick(target)
+                            when {
+                                notification.type == NotificationType.POLL_VOTE -> {
+                                    PollVoteNotificationCard(
+                                        notification = notification,
+                                        isSeen = isSeen,
+                                        timeTick = timeTick,
+                                        onProfileClick = onProfileClick,
+                                        onClick = {
+                                            NotificationsRepository.markAsSeen(notification.id)
+                                            val target = notification.targetNote
+                                            if (target != null) onNoteClick(target)
                                         }
-                                    }
-                                )
-                            } else {
-                                FullNotificationCard(
-                                    notification = notification,
-                                    isSeen = isSeen,
-                                    timeTick = timeTick,
-                                    onProfileClick = onProfileClick,
-                                    onClick = {
-                                        NotificationsRepository.markAsSeen(notification.id)
-                                        when {
-                                            notification.type == NotificationType.REPLY && notification.rootNoteId != null ->
-                                                onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
-                                            notification.type == NotificationType.MENTION && notification.note != null ->
-                                                onNoteClick(notification.note!!)
-                                            notification.targetNote != null -> onNoteClick(notification.targetNote!!)
-                                            notification.note != null -> onNoteClick(notification.note!!)
+                                    )
+                                }
+                                notification.type in listOf(
+                                    NotificationType.LIKE,
+                                    NotificationType.REPOST,
+                                    NotificationType.ZAP
+                                ) -> {
+                                    CompactNotificationRow(
+                                        notification = notification,
+                                        isSeen = isSeen,
+                                        timeTick = timeTick,
+                                        onProfileClick = onProfileClick,
+                                        onClick = {
+                                            NotificationsRepository.markAsSeen(notification.id)
+                                            val target = notification.targetNote ?: notification.note
+                                            if (target != null && target.rootNoteId != null) {
+                                                onOpenThreadForRootId(target.rootNoteId!!, 1, null, target)
+                                            } else if (target != null) {
+                                                onNoteClick(target)
+                                            }
                                         }
-                                    }
-                                )
+                                    )
+                                }
+                                else -> {
+                                    FullNotificationCard(
+                                        notification = notification,
+                                        isSeen = isSeen,
+                                        timeTick = timeTick,
+                                        onProfileClick = onProfileClick,
+                                        onClick = {
+                                            NotificationsRepository.markAsSeen(notification.id)
+                                            when {
+                                                notification.type == NotificationType.REPLY && notification.rootNoteId != null ->
+                                                    onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
+                                                notification.type == NotificationType.MENTION && notification.note != null ->
+                                                    onNoteClick(notification.note!!)
+                                                notification.targetNote != null -> onNoteClick(notification.targetNote!!)
+                                                notification.note != null -> onNoteClick(notification.note!!)
+                                            }
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
@@ -1268,6 +1284,154 @@ private fun NotificationTargetPreview(
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
                             )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ─── Poll vote notification card ─────────────────────────────────────────────
+
+@Composable
+private fun PollVoteNotificationCard(
+    notification: NotificationData,
+    isSeen: Boolean,
+    timeTick: Long,
+    onProfileClick: (String) -> Unit,
+    onClick: () -> Unit
+) {
+    val profileCache = ProfileMetadataCache.getInstance()
+    val authorId = notification.author?.id ?: ""
+    val cacheKey = remember(authorId) { normalizeAuthorIdForCache(authorId) }
+    var displayAuthor by remember(authorId) {
+        mutableStateOf(profileCache.getAuthor(cacheKey) ?: notification.author ?: placeholderAuthor)
+    }
+    LaunchedEffect(cacheKey) {
+        if (cacheKey.isBlank()) return@LaunchedEffect
+        profileCache.profileUpdated
+            .filter { it == cacheKey }
+            .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+    }
+
+    val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)
+    val pollGreen = Color(0xFF8FBC8F)
+
+    NotificationCardShell(isSeen = isSeen, onClick = onClick) {
+        // Row 1: type icon + action + timestamp
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.HowToVote,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = pollGreen
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = "voted on your poll",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = timeAgo,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
+
+        Spacer(Modifier.height(6.dp))
+
+        // Row 2: voter avatar + name + what they voted
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ProfilePicture(
+                author = displayAuthor,
+                size = 28.dp,
+                onClick = { notification.author?.id?.let { onProfileClick(it) } }
+            )
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" },
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (notification.pollOptionLabels.isNotEmpty()) {
+                    Text(
+                        text = "Chose: ${notification.pollOptionLabels.joinToString(", ")}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = pollGreen,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // Row 3: poll question preview (if enriched)
+        if (!notification.pollQuestion.isNullOrBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                shape = RectangleShape,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .height(IntrinsicSize.Min)
+                            .background(pollGreen.copy(alpha = 0.5f))
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = notification.pollQuestion!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        // Mini option list
+                        if (notification.pollAllOptions.isNotEmpty()) {
+                            Spacer(Modifier.height(4.dp))
+                            notification.pollAllOptions.forEach { optLabel ->
+                                val isChosen = optLabel in notification.pollOptionLabels
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(vertical = 1.dp)
+                                ) {
+                                    if (isChosen) {
+                                        Icon(
+                                            imageVector = Icons.Filled.Check,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(12.dp),
+                                            tint = pollGreen
+                                        )
+                                    } else {
+                                        Spacer(Modifier.width(12.dp))
+                                    }
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = optLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isChosen) pollGreen
+                                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                                        fontWeight = if (isChosen) FontWeight.SemiBold else FontWeight.Normal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
                         }
                     }
                 }

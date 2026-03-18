@@ -19,6 +19,33 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.4.96",
+      "versionCode": 33,
+      "releaseDate": "2026-03-18",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.96-beta/Mycelium-v0.4.96-beta.apk",
+      "changelog": "Subscription priority rebalancing, feed layout shift fixes for media and quoted notes, profile swipe-back guard, force-close on exit, emoji packs, NIP-88 polls, GIF search, notification settings overhaul.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Subscription priority rebalancing: notifications NORMAL→HIGH, feed load-more CRITICAL→HIGH",
+        "Media layout shift fix: lock container ratio when imeta dimensions unknown (no mid-view resize)",
+        "Quoted note placeholder height (72dp) prevents feed jump on async load",
+        "Profile swipe-back guard: mid-swipe reversal no longer triggers pager tab swipe",
+        "Force-close app on double-back exit (finishAffinity + killProcess)",
+        "NIP-88 poll rendering and voting (kind-1068)",
+        "Emoji pack browser with NIP-30 custom emoji selection",
+        "GIF search via Tenor API in compose toolbar",
+        "Notification settings overhaul with per-kind toggles",
+        "Emoji shortcode suggestions in compose (:emoji: autocomplete)",
+        "Reaction favorites bar for quick emoji access"
+      ]
+    },
+    {
       "version": "0.4.95",
       "versionCode": 32,
       "releaseDate": "2026-03-17",

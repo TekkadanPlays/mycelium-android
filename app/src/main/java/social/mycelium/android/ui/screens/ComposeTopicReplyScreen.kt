@@ -61,6 +61,8 @@ fun ComposeTopicReplyScreen(
     val coroutineScope = rememberCoroutineScope()
     val mentionState = remember(myAuthor?.id) { MentionSuggestionState(coroutineScope, myAuthor?.id) }
     DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
+    val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
+    DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
     val onBackWithDraft = {
         if (content.isNotBlank()) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
@@ -267,6 +269,7 @@ fun ComposeTopicReplyScreen(
                 onValueChange = { newValue ->
                     textFieldValue = newValue
                     mentionState.onTextChanged(newValue.text, newValue.selection.end)
+                    emojiState.onTextChanged(newValue.text, newValue.selection.end)
                 },
                 placeholder = "Share your thoughts...",
                 modifier = Modifier
@@ -279,6 +282,13 @@ fun ComposeTopicReplyScreen(
             )
             MentionSuggestionList(
                 mentionState = mentionState,
+                currentText = content,
+                onTextUpdated = { newText, newCursor ->
+                    textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+                }
+            )
+            social.mycelium.android.ui.components.EmojiShortcodeSuggestionList(
+                emojiState = emojiState,
                 currentText = content,
                 onTextUpdated = { newText, newCursor ->
                     textFieldValue = TextFieldValue(newText, TextRange(newCursor))

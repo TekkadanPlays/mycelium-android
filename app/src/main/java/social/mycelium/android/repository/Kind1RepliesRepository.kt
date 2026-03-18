@@ -367,12 +367,13 @@ class Kind1RepliesRepository {
     private fun handleReplyEvent(noteId: String, event: Event, relayUrl: String = "") {
         try {
             if (event.kind != 1) return
-            // Accept if event references the root note OR any reply already in this thread.
+            // Accept if event is a REPLY to the root note OR any reply already in this thread.
+            // Exclude "mention" e-tags — those are inline quotes/citations, not reply markers.
             // Deep-fetch replies only tag their direct parent (a reply ID), not the root.
-            val referencedNoteIds = extractReferencedNoteIds(event)
+            val threadParentIds = extractThreadParentIds(event)
             val threadCache = threadReplyCache[noteId]
-            val belongsToThread = noteId in referencedNoteIds ||
-                (threadCache != null && referencedNoteIds.any { it in threadCache })
+            val belongsToThread = noteId in threadParentIds ||
+                (threadCache != null && threadParentIds.any { it in threadCache })
             if (!belongsToThread) return
 
             val reply = convertEventToNote(event, relayUrl)
@@ -541,7 +542,7 @@ class Kind1RepliesRepository {
                     val note = convertEventToNote(event, relayUrl)
                     val referencesRoot = note.rootNoteId == rootNoteId ||
                         note.replyToId == rootNoteId ||
-                        extractReferencedNoteIds(event).contains(rootNoteId)
+                        extractThreadParentIds(event).contains(rootNoteId)
                     if (!referencesRoot) {
                         pendingParentFetches[rootNoteId]?.remove(event.id)
                         return@requestTemporarySubscriptionWithRelay
@@ -572,7 +573,39 @@ class Kind1RepliesRepository {
     }
 
     /**
-     * Extract all note IDs referenced in "e" tags
+     * Extract note IDs from "e" tags that represent thread relationships (root/reply/positional),
+     * excluding "mention" e-tags which are inline quotes/citations — NOT thread parents.
+     */
+    private fun extractThreadParentIds(event: Event): List<String> {
+        val eTags = event.tags.filter { it.size >= 2 && it[0] == "e" }
+        if (eTags.isEmpty()) return emptyList()
+
+        // If any e-tag has a marker, use marked style: only root/reply tags count
+        val hasAnyMarker = eTags.any { tag ->
+            val m = pickETagMarker(tag) ?: isMentionTagMarker(tag)
+            m != null
+        }
+        return if (hasAnyMarker) {
+            // Marked style: only include root/reply markers, exclude mention
+            eTags.filter { tag -> !isMentionTag(tag) && (pickETagMarker(tag) != null || tag.size <= 3) }
+                .mapNotNull { it.getOrNull(1) }
+        } else {
+            // Pure positional (no markers at all): all e-tags are thread parents
+            eTags.mapNotNull { it.getOrNull(1) }
+        }
+    }
+
+    /** Check if tag has a "mention" marker at standard positions (returns marker string or null). */
+    private fun isMentionTagMarker(tag: Array<out String>): String? {
+        if (tag.getOrNull(3) == "mention") return "mention"
+        if (tag.getOrNull(4) == "mention") return "mention"
+        if (tag.getOrNull(2) == "mention") return "mention"
+        return null
+    }
+
+    /**
+     * Extract ALL note IDs referenced in "e" tags (including mentions).
+     * Used only for relay filter matching, NOT for thread membership decisions.
      */
     private fun extractReferencedNoteIds(event: Event): List<String> {
         val referencedIds = mutableListOf<String>()

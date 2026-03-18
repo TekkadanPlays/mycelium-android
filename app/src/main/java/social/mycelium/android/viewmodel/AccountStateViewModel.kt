@@ -22,6 +22,9 @@ import social.mycelium.android.repository.NotesRepository
 import social.mycelium.android.repository.TopicsPublishService
 import social.mycelium.android.repository.TopicsRepository
 import social.mycelium.android.repository.VoteRepository
+import social.mycelium.android.repository.PollResponseRepository
+import social.mycelium.android.repository.EmojiPackSelectionRepository
+import social.mycelium.android.repository.EmojiPackRepository
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.bechToBytes
 import com.example.cybin.nip19.NPub
@@ -899,6 +902,23 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
+     * Extract NIP-30 emoji tags from content text.
+     * Scans for `:shortcode:` patterns and resolves URLs from saved emoji packs.
+     * Returns list of ["emoji", "shortcode", "url"] tag arrays.
+     */
+    private fun extractEmojiTags(content: String): List<Array<String>> {
+        val allEmojis = EmojiPackSelectionRepository.allSavedEmojis.value
+        if (allEmojis.isEmpty()) return emptyList()
+        val regex = Regex(":([a-zA-Z0-9_-]+):")
+        return regex.findAll(content).mapNotNull { match ->
+            val shortcode = match.groupValues[1]
+            val key = ":$shortcode:"
+            val url = allEmojis[key]
+            if (url != null) arrayOf("emoji", shortcode, url) else null
+        }.distinctBy { it[1] }.toList()
+    }
+
+    /**
      * Send a NIP-25 reaction (kind-7) using the external signer (Amber).
      * Returns null on success, or an error message for synchronous failures.
      * Async failures are emitted via [toastMessage].
@@ -931,7 +951,11 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             sig = ""
         )
         val relayHint = note.relayUrl?.let { RelayUrlNormalizer.normalizeOrNull(it)?.url }
-        val template = ReactionEvent.build(emoji, targetEvent, relayHint)
+        // Look up custom emoji URL from saved packs for NIP-30 custom emoji reactions
+        val customEmojiUrl = if (emoji.startsWith(":") && emoji.endsWith(":") && emoji.length > 2) {
+            EmojiPackSelectionRepository.allSavedEmojis.value[emoji]
+        } else null
+        val template = ReactionEvent.build(emoji, targetEvent, relayHint, customEmojiUrl)
 
         viewModelScope.launch {
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
@@ -957,6 +981,224 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     _toastMessage.value = "Reaction failed: ${result.message}"
                     // Emit failure animation — NoteCard will flash the red strobe
                     ReactionsRepository.emitAnimation(note.id, emoji, success = false)
+                }
+            }
+        }
+        return null
+    }
+
+    // ── NIP-30 Emoji Pack Selection (kind-10030) ─────────────────────────
+
+    /**
+     * Add an emoji pack to the user's saved selection (kind-10030).
+     * Publishes a new replaceable event with the pack's a-tag added.
+     */
+    fun addEmojiPack(author: String, dTag: String, relayHint: String? = null): String? {
+        val account = _currentAccount.value ?: return "Sign in to save emoji packs"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        val tags = EmojiPackSelectionRepository.buildAddPackTags(author, dTag, relayHint)
+            ?: return "Pack already saved"
+
+        val relaySet = relayStorageManager.loadOutboxRelays(accountHex)
+            .mapNotNull { com.example.cybin.relay.RelayUrlNormalizer.normalizeOrNull(it.url)?.url }
+            .toSet()
+        if (relaySet.isEmpty()) return "No outbox relays configured"
+
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                context = getApplication(),
+                signer = signer,
+                relayUrls = relaySet,
+                kind = 10030,
+                content = "",
+                tags = {
+                    for (tag in tags) add(tag)
+                }
+            )
+            when (result) {
+                is PublishResult.Success -> {
+                    EmojiPackSelectionRepository.onPublished(result.event)
+                    // Fetch the newly-added pack's content
+                    EmojiPackRepository.fetchIfNeeded(author, dTag, listOfNotNull(relayHint))
+                    Log.d("AccountStateViewModel", "Emoji pack added: $author:$dTag")
+                    _toastMessage.value = "Emoji pack saved"
+                }
+                is PublishResult.Error -> {
+                    Log.e("AccountStateViewModel", "Failed to add emoji pack: ${result.message}")
+                    _toastMessage.value = "Failed to save emoji pack"
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Remove an emoji pack from the user's saved selection (kind-10030).
+     * Publishes a new replaceable event with the pack's a-tag removed.
+     */
+    fun removeEmojiPack(author: String, dTag: String): String? {
+        val account = _currentAccount.value ?: return "Sign in to manage emoji packs"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        val tags = EmojiPackSelectionRepository.buildRemovePackTags(author, dTag)
+            ?: return "Pack not saved"
+
+        val relaySet = relayStorageManager.loadOutboxRelays(accountHex)
+            .mapNotNull { com.example.cybin.relay.RelayUrlNormalizer.normalizeOrNull(it.url)?.url }
+            .toSet()
+        if (relaySet.isEmpty()) return "No outbox relays configured"
+
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                context = getApplication(),
+                signer = signer,
+                relayUrls = relaySet,
+                kind = 10030,
+                content = "",
+                tags = {
+                    for (tag in tags) add(tag)
+                }
+            )
+            when (result) {
+                is PublishResult.Success -> {
+                    EmojiPackSelectionRepository.onPublished(result.event)
+                    EmojiPackSelectionRepository.rebuildMergedEmojis()
+                    Log.d("AccountStateViewModel", "Emoji pack removed: $author:$dTag")
+                    _toastMessage.value = "Emoji pack removed"
+                }
+                is PublishResult.Error -> {
+                    Log.e("AccountStateViewModel", "Failed to remove emoji pack: ${result.message}")
+                    _toastMessage.value = "Failed to remove emoji pack"
+                }
+            }
+        }
+        return null
+    }
+
+    // ── NIP-88 Poll voting ──────────────────────────────────────────────
+
+    /**
+     * Submit a NIP-88 poll vote (kind-1018).
+     * Builds event with ["e", pollId], ["p", pollAuthor], ["response", optionCode]... tags.
+     * Signs via current signer (Amber/nsec) and publishes to outbox relays.
+     */
+    fun sendPollVote(
+        pollNoteId: String,
+        pollAuthorPubkey: String,
+        selectedOptions: Set<String>,
+        relayHint: String?
+    ): String? {
+        val account = _currentAccount.value ?: return "Sign in to vote"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        val relaySet = getPublishRelayUrlSet()
+        if (relaySet.isEmpty()) return "No outbox relays configured"
+
+        // Optimistically record local vote
+        PollResponseRepository.recordLocalVote(pollNoteId, accountHex, selectedOptions)
+
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                context = getApplication(),
+                signer = signer,
+                relayUrls = relaySet,
+                kind = 1018,
+                content = ""
+            ) {
+                // Reference the poll event
+                if (relayHint != null) {
+                    add(arrayOf("e", pollNoteId, relayHint))
+                } else {
+                    add(arrayOf("e", pollNoteId))
+                }
+                // Notify poll author
+                add(arrayOf("p", pollAuthorPubkey))
+                // Selected options
+                for (option in selectedOptions) {
+                    add(arrayOf("response", option))
+                }
+                // Alt tag for clients that don't understand kind-1018
+                add(arrayOf("alt", "Poll Response"))
+            }
+            when (result) {
+                is PublishResult.Success -> {
+                    Log.d("AccountStateViewModel", "Poll vote published: ${result.eventId.take(8)} for poll ${pollNoteId.take(8)}")
+                }
+                is PublishResult.Error -> {
+                    Log.e("AccountStateViewModel", "Poll vote failed: ${result.message}")
+                    _toastMessage.value = "Vote failed: ${result.message}"
+                }
+            }
+        }
+        return null
+    }
+
+    // ── NIP-88 Poll creation ─────────────────────────────────────────────
+
+    /**
+     * Publish a NIP-88 poll (kind-1068).
+     * @param question Poll question / description text (becomes event content).
+     * @param options List of (code, label) pairs for poll options.
+     * @param isMultipleChoice true for "multiplechoice", false for "singlechoice".
+     * @param endsAtEpochSeconds Optional deadline (Unix seconds). Null = open-ended.
+     * @param relayUrls Relay URLs to publish to.
+     */
+    fun publishPoll(
+        question: String,
+        options: List<Pair<String, String>>,
+        isMultipleChoice: Boolean,
+        endsAtEpochSeconds: Long?,
+        relayUrls: Set<String>
+    ): String? {
+        if (question.isBlank()) return "Poll question is empty"
+        if (options.size < 2) return "Add at least 2 options"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val pubkey = currentAccount.value?.toHexKey()
+
+        viewModelScope.launch {
+            when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1068, content = question) {
+                for ((code, label) in options) {
+                    add(arrayOf("option", code, label))
+                }
+                add(arrayOf("polltype", if (isMultipleChoice) "multiplechoice" else "singlechoice"))
+                if (endsAtEpochSeconds != null) {
+                    add(arrayOf("endsAt", endsAtEpochSeconds.toString()))
+                }
+                // Include publish relays so voters know where to send responses
+                for (url in relayUrls) {
+                    add(arrayOf("relay", url))
+                }
+                add(arrayOf("alt", "Poll"))
+            }) {
+                is PublishResult.Success -> {
+                    val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                        ?: social.mycelium.android.data.Author(id = result.event.pubKey, username = "", displayName = "You")
+                    val pollData = social.mycelium.android.data.PollData(
+                        options = options.map { social.mycelium.android.data.PollOption(it.first, it.second) },
+                        pollType = if (isMultipleChoice) "multiplechoice" else "singlechoice",
+                        endsAt = endsAtEpochSeconds,
+                        relays = relayUrls.toList()
+                    )
+                    val note = social.mycelium.android.data.Note(
+                        id = result.event.id,
+                        author = author,
+                        content = question,
+                        timestamp = result.event.createdAt * 1000L,
+                        kind = 1068,
+                        relayUrls = relayUrls.toList(),
+                        tags = result.event.tags.map { it.toList() },
+                        pollData = pollData
+                    )
+                    NotesRepository.getInstance().injectOwnNote(note)
+                    NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
+                    Log.d("AccountStateViewModel", "Poll published: ${result.eventId.take(8)} with ${options.size} options")
+                }
+                is PublishResult.Error -> {
+                    _toastMessage.value = "Poll publish failed: ${result.message}"
                 }
             }
         }
@@ -1093,6 +1335,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(content)
         val hashtagRegex = Regex("""(?:^|\s)#(\w+)""")
         val hashtags = hashtagRegex.findAll(content).map { it.groupValues[1] }.toList().distinct()
+        val emojiTags = extractEmojiTags(content)
         // Extract mentioned pubkeys from nostr:npub1.../nostr:nprofile1... in content
         val mentionedPubkeys = com.example.cybin.nip19.Nip19Parser.parseAll(content).mapNotNull { entity ->
             when (entity) {
@@ -1132,6 +1375,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 if (zapRaiserAmount != null && zapRaiserAmount > 0) {
                     add(arrayOf("zapraiser", zapRaiserAmount.toString()))
                 }
+                // NIP-30 custom emoji tags
+                for (emojiTag in emojiTags) { add(emojiTag) }
             }) {
                 is PublishResult.Success -> {
                     // Build a Note from the signed event and inject into feed optimistically
@@ -1288,8 +1533,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
+        val emojiTags = extractEmojiTags(content)
         viewModelScope.launch {
-            val template = TopicsPublishService.buildTopicEventTemplate(title, content, hashtags)
+            val template = TopicsPublishService.buildTopicEventTemplate(title, content, hashtags, emojiTags)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
                 is PublishResult.Success -> {
                     Log.d("AccountStateViewModel", "Topic published: ${result.eventId.take(8)}")
@@ -1320,9 +1566,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
+        val emojiTags = extractEmojiTags(content)
         viewModelScope.launch {
             val template = TopicsPublishService.buildThreadReplyEventTemplate(
-                rootThreadId, rootThreadPubkey, parentReplyId, parentReplyPubkey, content, taggedPubkeys
+                rootThreadId, rootThreadPubkey, parentReplyId, parentReplyPubkey, content, taggedPubkeys, emojiTags
             )
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
                 is PublishResult.Success -> Log.d("AccountStateViewModel", "Thread reply published: ${result.eventId.take(8)}")
@@ -1350,6 +1597,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val signer = getSignerOrNull() ?: return signerUnavailableMessage()
         val relaySet = relayUrls.ifEmpty { getPublishRelayUrlSet() }
         if (relaySet.isEmpty()) return "No relays configured"
+        val emojiTags = extractEmojiTags(content)
         viewModelScope.launch {
             val result = EventPublisher.publish(getApplication(), signer, relaySet, kind = 1, content = content) {
                 // NIP-10 e-tags: root marker always points to the thread root
@@ -1368,6 +1616,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         add(arrayOf("p", parentPubkey))
                     }
                 }
+                // NIP-30 custom emoji tags
+                for (emojiTag in emojiTags) { add(emojiTag) }
             }
             when (result) {
                 is PublishResult.Success -> {

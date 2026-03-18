@@ -13,14 +13,23 @@ android {
     namespace = "social.mycelium.android"
     compileSdk = 36
 
+    // Load local.properties for API keys (gitignored)
+    val localPropertiesFile = rootProject.file("local.properties")
+    val localProperties = Properties()
+    if (localPropertiesFile.exists()) {
+        localProperties.load(FileInputStream(localPropertiesFile))
+    }
+
     defaultConfig {
         applicationId = "social.mycelium.android"
         minSdk = 35
         targetSdk = 36
-        versionCode = 32
-        versionName = "0.4.95-beta"
+        versionCode = 33
+        versionName = "0.4.96-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "TENOR_API_KEY", "\"${localProperties.getProperty("tenor.api.key", "")}\"")
     }
 
     // Load keystore properties

@@ -69,6 +69,8 @@ fun ComposeArticleScreen(
     val coroutineScope = rememberCoroutineScope()
     val mentionState = remember(myAuthor?.id) { MentionSuggestionState(coroutineScope, myAuthor?.id) }
     DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
+    val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
+    DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
 
     val onBackWithDraft = {
         if (title.isNotBlank() || content.isNotBlank()) {
@@ -247,6 +249,7 @@ fun ComposeArticleScreen(
                 onValueChange = { newValue ->
                     textFieldValue = newValue
                     mentionState.onTextChanged(newValue.text, newValue.selection.end)
+                    emojiState.onTextChanged(newValue.text, newValue.selection.end)
                 },
                 placeholder = "Write your article in Markdown...",
                 modifier = Modifier
@@ -262,6 +265,13 @@ fun ComposeArticleScreen(
 
             MentionSuggestionList(
                 mentionState = mentionState,
+                currentText = content,
+                onTextUpdated = { newText, newCursor ->
+                    textFieldValue = TextFieldValue(newText, TextRange(newCursor))
+                }
+            )
+            social.mycelium.android.ui.components.EmojiShortcodeSuggestionList(
+                emojiState = emojiState,
                 currentText = content,
                 onTextUpdated = { newText, newCursor ->
                     textFieldValue = TextFieldValue(newText, TextRange(newCursor))
@@ -289,7 +299,7 @@ fun ComposeArticleScreen(
                 }
             }
 
-            // Compose toolbar (media upload)
+            // Compose toolbar (media upload + publish)
             ComposeToolbar(
                 blossomServers = blossomServers,
                 nip96Servers = nip96Servers,
@@ -305,18 +315,11 @@ fun ComposeArticleScreen(
                 onApplyUnicodeStyle = { /* no unicode styling for articles */ },
                 onScheduleClick = {
                     Toast.makeText(context, "Article scheduling coming soon", Toast.LENGTH_SHORT).show()
-                }
+                },
+                publishEnabled = title.isNotBlank() && content.isNotBlank(),
+                publishLabel = "Publish article",
+                onPublish = { showRelayPicker = true }
             )
-
-            Button(
-                onClick = { showRelayPicker = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp, bottom = 16.dp),
-                enabled = title.isNotBlank() && content.isNotBlank()
-            ) {
-                Text("Publish Article")
-            }
         }
     }
 }

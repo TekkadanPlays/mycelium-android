@@ -999,10 +999,26 @@ class NotesRepository private constructor() {
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
                 Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")
             }
+            // Skip emission if the note ID list is identical — prevents unnecessary
+            // LazyColumn re-layout that causes scroll jumps and nav bar reappearing.
+            val currentIds = _displayedNotes.value
+            val newList = filtered.toList()
+            val idsMatch = newList.size == currentIds.size &&
+                newList.indices.all { i -> newList[i].id == currentIds[i].id }
+            if (idsMatch) {
+                // IDs match but note data may have updated (relay URLs, author info) —
+                // only emit if any note object actually differs (referential check).
+                val dataChanged = newList.indices.any { i -> newList[i] !== currentIds[i] }
+                if (dataChanged) {
+                    _displayedNotes.value = newList
+                }
+                updateDisplayedNewNotesCount()
+                return
+            }
             // Log relay orb stats for diagnostics
-            val multiOrb = filtered.count { it.relayUrls.size > 1 }
-            if (multiOrb > 0) Log.d(TAG, "\uD83D\uDD35 Display update: $multiOrb/${filtered.size} notes have 2+ relay orbs")
-            _displayedNotes.value = filtered.toList()
+            val multiOrb = newList.count { it.relayUrls.size > 1 }
+            if (multiOrb > 0) Log.d(TAG, "\uD83D\uDD35 Display update: $multiOrb/${newList.size} notes have 2+ relay orbs")
+            _displayedNotes.value = newList
             updateDisplayedNewNotesCount()
             // Debounce counts subscription so we don't re-subscribe on every note; cap at 150 note IDs
             countsSubscriptionJob?.cancel()
@@ -1302,7 +1318,7 @@ class NotesRepository private constructor() {
         olderNotesHandle = relayStateMachine.requestTemporarySubscriptionWithRelay(
             relayUrls = relays,
             filters = listOf(filter),
-            priority = SubscriptionPriority.CRITICAL,
+            priority = SubscriptionPriority.HIGH,
         ) { event, relayUrl ->
             if (event.kind == 1) {
                 lastEventAt.set(System.currentTimeMillis())
@@ -2206,6 +2222,9 @@ class NotesRepository private constructor() {
         val articleImage = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "image" }?.getOrNull(1) else null
         val dTag = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1) else null
 
+        // NIP-88 poll data (kind 1068)
+        val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
+
         val note = Note(
             id = event.id,
             author = author,
@@ -2233,7 +2252,8 @@ class NotesRepository private constructor() {
                 .distinct(),
             summary = articleSummary,
             imageUrl = articleImage,
-            dTag = dTag
+            dTag = dTag,
+            pollData = pollData
         )
         android.os.Trace.endSection()
         return note
@@ -2493,10 +2513,20 @@ class NotesRepository private constructor() {
                         profileCache.getAuthor(key)?.let { key to it }
                     }.toMap()
                     if (authorMap.isEmpty()) return@launch
-                    _notes.value = _notes.value.map { note ->
+                    var changedCount = 0
+                    val updatedNotes = _notes.value.map { note ->
                         val key = normalizeAuthorIdForCache(note.author.id)
-                        authorMap[key]?.let { note.copy(author = it) } ?: note
+                        val cached = authorMap[key]
+                        if (cached != null && cached != note.author) {
+                            changedCount++
+                            note.copy(author = cached)
+                        } else note
                     }
+                    if (changedCount == 0) {
+                        Log.d(TAG, "refreshAuthorsFromCache: no author changes detected, skipping")
+                        return@launch
+                    }
+                    _notes.value = updatedNotes
                     synchronized(pendingNotesLock) {
                         val updated = _pendingNewNotes.map { note ->
                             val key = normalizeAuthorIdForCache(note.author.id)
@@ -2506,7 +2536,7 @@ class NotesRepository private constructor() {
                         _pendingNewNotes.addAll(updated)
                     }
                     scheduleDisplayUpdate()
-                    Log.d(TAG, "refreshAuthorsFromCache: updated feed with ${authorMap.size} profiles")
+                    Log.d(TAG, "refreshAuthorsFromCache: updated $changedCount/${_notes.value.size} notes with ${authorMap.size} profiles")
                 } catch (e: Throwable) {
                     Log.e(TAG, "refreshAuthorsFromCache failed: ${e.message}", e)
                 }

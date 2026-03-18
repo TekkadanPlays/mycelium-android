@@ -482,8 +482,11 @@ class RelayConnectionStateMachine {
                     Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (custom filter)")
                 } else {
                     val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
-                    val filterKind1 = kind1Filter ?: Filter(
-                        kinds = listOf(1),
+                    val filterKind1 = kind1Filter?.let {
+                        // Add kind-1068 (NIP-88 polls) alongside kind-1 in Following mode
+                        it.copy(kinds = (it.kinds ?: listOf(1)) + 1068)
+                    } ?: Filter(
+                        kinds = listOf(1, 1068),
                         limit = GLOBAL_FEED_LIMIT,
                         since = sevenDaysAgo
                     )
@@ -528,6 +531,10 @@ class RelayConnectionStateMachine {
                             1 -> {
                                 onKind1WithRelay?.invoke(event, relayUrl)
                                 social.mycelium.android.repository.NoteCountsRepository.onLiveEvent(event)
+                            }
+                            1068 -> {
+                                // NIP-88 polls: route to kind-1 handler so they appear in feed
+                                onKind1WithRelay?.invoke(event, relayUrl)
                             }
                             6 -> onKind6WithRelay?.invoke(event, relayUrl)
                             11 -> onKind11?.invoke(event, relayUrl)

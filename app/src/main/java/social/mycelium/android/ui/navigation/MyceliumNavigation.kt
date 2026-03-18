@@ -195,6 +195,12 @@ private fun buildReactionsData(
     val existingIds = noteBoostAuthors.map { it.id }.toSet()
     val extra = repostPubkeys.filter { it !in existingIds }.map { profileCache.resolveAuthor(it) }
     val mergedBoosts = (noteBoostAuthors + extra).distinctBy { it.id }
+    // NIP-88: Include poll tally data if available
+    val pollTally = social.mycelium.android.repository.PollResponseRepository.tallies.value[noteId]
+    val pollVotesByOption = pollTally?.votesByOption?.mapValues { it.value.toList() } ?: emptyMap()
+    val pollOptionLabels = pollTally?.optionLabels ?: emptyMap()
+    val pollTotalVoters = pollTally?.totalVoters ?: 0
+
     return social.mycelium.android.viewmodel.ReactionsData(
         noteId = noteId,
         reactions = counts?.reactions ?: noteReactions,
@@ -204,6 +210,9 @@ private fun buildReactionsData(
         zapAmountByAuthor = counts?.zapAmountByAuthor ?: emptyMap(),
         zapTotalSats = counts?.zapTotalSats ?: 0L,
         boostAuthors = mergedBoosts,
+        pollVotesByOption = pollVotesByOption,
+        pollOptionLabels = pollOptionLabels,
+        pollTotalVoters = pollTotalVoters,
     )
 }
 
@@ -550,10 +559,34 @@ private fun OverlayProfilePanel(
         else profileFeedRepo.resume()
         onDispose { profileFeedRepo.pause() }
     }
-    val authorNotes = remember(profileFeedNotes, dashboardAuthorNotes) {
+    val authorNotesRaw = remember(profileFeedNotes, dashboardAuthorNotes) {
         (dashboardAuthorNotes + profileFeedNotes)
             .distinctBy { it.id }
             .sortedByDescending { it.repostTimestamp ?: it.timestamp }
+    }
+    // URL preview enrichment for profile notes (mirrors DashboardViewModel enrichment pipeline)
+    val profileUrlPreviewManager = remember { social.mycelium.android.services.UrlPreviewManager(social.mycelium.android.services.UrlPreviewService(), social.mycelium.android.services.UrlPreviewCache) }
+    var profileUrlPreviews by remember { mutableStateOf<Map<String, List<social.mycelium.android.data.UrlPreviewInfo>>>(emptyMap()) }
+    val profileEnrichedIds = remember { mutableSetOf<String>() }
+    LaunchedEffect(authorNotesRaw) {
+        if (authorNotesRaw.isEmpty()) return@LaunchedEffect
+        kotlinx.coroutines.delay(400)
+        val toEnrich = authorNotesRaw.take(30).filter { it.id !in profileEnrichedIds }
+        if (toEnrich.isEmpty()) return@LaunchedEffect
+        toEnrich.forEach { profileEnrichedIds.add(it.id) }
+        val previews = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            profileUrlPreviewManager.enrichTopNotes(toEnrich, limit = 30)
+        }
+        if (previews.isNotEmpty()) {
+            profileUrlPreviews = profileUrlPreviews + previews
+        }
+    }
+    val authorNotes = remember(authorNotesRaw, profileUrlPreviews) {
+        if (profileUrlPreviews.isEmpty()) authorNotesRaw
+        else authorNotesRaw.map { n ->
+            val p = profileUrlPreviews[n.id]
+            if (p != null && p != n.urlPreviews) n.copy(urlPreviews = p) else n
+        }
     }
     // Counts
     LaunchedEffect(cacheKey, profileRelayUrls) {
@@ -916,18 +949,17 @@ fun MyceliumNavigation(
                 timestamp = 0L
             )
         }
-        appViewModel.storeNoteForThread(noteForThread)
-        // Also store the reply note if different from the root (for highlight scroll)
-        if (highlightReplyId != null && notifData?.note != null && notifData.note.id == highlightReplyId) {
-            appViewModel.storeNoteForThread(notifData.note)
-        }
-        val route = if (highlightReplyId != null) {
-            "thread/$targetNoteId?replyKind=1&highlightReplyId=$highlightReplyId"
-        } else {
-            "thread/$targetNoteId?replyKind=1"
-        }
-        navController.navigate(route) { launchSingleTop = true }
-        Log.d("MyceliumNav", "Deep-link from notification: route=$route type=${nav.notifType} notifFound=${notifData != null} realNote=${realNote != null}")
+        // Navigate to notifications screen and open the thread as an overlay stack
+        // (instead of navigating to thread/ route which replaces the feed view)
+        appViewModel.setPendingNotifThread(
+            social.mycelium.android.viewmodel.PendingNotifThread(
+                note = noteForThread,
+                replyKind = 1,
+                highlightReplyId = highlightReplyId,
+            )
+        )
+        navController.navigate("notifications") { launchSingleTop = true }
+        Log.d("MyceliumNav", "Deep-link from notification: navigating to notifications overlay, type=${nav.notifType} notifFound=${notifData != null} realNote=${realNote != null}")
     }
 
     // Observe async toast messages (e.g. reaction failures, publish results)
@@ -1251,6 +1283,14 @@ fun MyceliumNavigation(
             // Fetch mute list (NIP-51 kind 10000) and bookmarks (kind 10003)
             social.mycelium.android.repository.MuteListRepository.fetchMuteList(pubkey, allUserRelayUrls)
             social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(pubkey, allUserRelayUrls)
+            // Fetch saved emoji packs (NIP-30 kind 10030)
+            social.mycelium.android.repository.EmojiPackSelectionRepository.start(pubkey, allUserRelayUrls)
+            social.mycelium.android.repository.EmojiPackSelectionRepository.onAddPackAction = { author, dTag, relayHint ->
+                accountStateViewModel.addEmojiPack(author, dTag, relayHint)
+            }
+            social.mycelium.android.repository.EmojiPackSelectionRepository.onRemovePackAction = { author, dTag ->
+                accountStateViewModel.removeEmojiPack(author, dTag)
+            }
             // Load kind:30073 anchor subscriptions (favorites) for this user
             accountStateViewModel.requestMySubscriptions()
         } else {
@@ -1303,8 +1343,11 @@ fun MyceliumNavigation(
     BackHandler(enabled = isMainScreen(currentRoute)) {
         val currentTime = System.currentTimeMillis()
         if (currentTime - backPressedTime < 2000) {
-            // Double tap detected - exit app
-            (context as? android.app.Activity)?.finish()
+            // Double tap detected - exit app and kill process
+            (context as? android.app.Activity)?.let { activity ->
+                activity.finishAffinity()
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
         } else {
             // First tap - show toast
             backPressedTime = currentTime
@@ -3789,6 +3832,18 @@ fun MyceliumNavigation(
                             },
                             topAppBarState = topAppBarState
                     )
+
+                    // ── Consume pending deep-link thread (from system notification tap) ──
+                    val pendingNotifThread by appViewModel.pendingNotifThread.collectAsState()
+                    LaunchedEffect(pendingNotifThread) {
+                        val pending = appViewModel.consumePendingNotifThread() ?: return@LaunchedEffect
+                        overlayNotifThreadStack.clear()
+                        overlayNotifReplyKinds.clear()
+                        overlayNotifThreadHighlightIds.clear()
+                        overlayNotifThreadStack.add(pending.note)
+                        overlayNotifReplyKinds.add(pending.replyKind)
+                        overlayNotifThreadHighlightIds.add(pending.highlightReplyId)
+                    }
 
                     // ── Notifications thread overlay (stack-based) ──────────────────────
                     BackHandler(enabled = overlayNotifThreadStack.isNotEmpty()) {

@@ -16,13 +16,15 @@ object TopicsPublishService {
     fun buildTopicEventTemplate(
         title: String,
         content: String,
-        hashtags: List<String>
+        hashtags: List<String>,
+        extraTags: List<Array<String>> = emptyList()
     ): EventTemplate {
         return Event.build(11, content) {
             add(arrayOf("title", title))
             hashtags.forEach { tag ->
                 add(arrayOf("t", tag.removePrefix("#").trim()))
             }
+            for (tag in extraTags) { add(tag) }
         }
     }
 
@@ -89,7 +91,8 @@ object TopicsPublishService {
         parentReplyId: String?,
         parentReplyPubkey: String?,
         content: String,
-        taggedPubkeys: List<String> = emptyList()
+        taggedPubkeys: List<String> = emptyList(),
+        extraTags: List<Array<String>> = emptyList()
     ): EventTemplate {
         return Event.build(1111, content) {
             add(arrayOf("E", rootThreadId, "", rootThreadPubkey))
@@ -110,6 +113,8 @@ object TopicsPublishService {
             taggedPubkeys.distinct()
                 .filter { it != primaryPubkey }
                 .forEach { pk -> add(arrayOf("p", pk, "")) }
+            // Extra tags (e.g. NIP-30 emoji tags)
+            for (tag in extraTags) { add(tag) }
         }
     }
 }

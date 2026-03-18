@@ -644,6 +644,10 @@ private fun DashboardFeedContent(
             val encoded = android.net.Uri.encode(android.net.Uri.encode(n.content))
             onNavigateTo("compose?initialContent=$encoded")
         }}
+        val stableOnPollVote = remember<(String, String, Set<String>, String?) -> Unit> {{ noteId, authorPk, selections, relayHint ->
+            val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+        }}
         val stableOnNoteClick = remember<(Note) -> Unit> {{ n -> onThreadClick(n, null) }}
         val stableOnLike = remember<(String) -> Unit> {{ noteId -> viewModel.toggleLike(noteId) }}
         val stableOnShare = remember<(String) -> Unit> {{ _ -> }}
@@ -822,6 +826,8 @@ private fun DashboardFeedContent(
                     isVisible = isDashboardVisible && note.id in visibleKeys,
                     compactMedia = compactMedia,
                     showSensitiveContent = showSensitiveContent,
+                    onPollVote = stableOnPollVote,
+                    myPubkeyHex = currentUserHex,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

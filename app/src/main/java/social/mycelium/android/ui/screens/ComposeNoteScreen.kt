@@ -6,9 +6,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.HowToVote
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
@@ -64,6 +69,8 @@ fun ComposeNoteScreen(
     val myPubkeyHex = currentAccount?.toHexKey()
     val mentionState = remember(myPubkeyHex) { MentionSuggestionState(coroutineScope, myPubkeyHex) }
     DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
+    val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
+    DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
     val onBackWithDraft = {
         if (content.isNotBlank() && content != initialContent) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
@@ -85,6 +92,11 @@ fun ComposeNoteScreen(
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
     val markdownTransformation = remember { MarkdownVisualTransformation() }
     var isUploading by remember { mutableStateOf(false) }
+
+    // ── NIP-88 Poll mode ──────────────────────────────────────────────
+    var isPollMode by remember { mutableStateOf(false) }
+    var pollOptions by remember { mutableStateOf(listOf("", "")) }
+    var isMultipleChoice by remember { mutableStateOf(false) }
 
     // Image picker → EXIF strip → Blossom upload → insert URL
     val mediaPicker = rememberLauncherForActivityResult(
@@ -130,11 +142,23 @@ fun ComposeNoteScreen(
 
     if (showRelayPicker) {
         RelaySelectionScreen(
-            title = "Publish note",
+            title = if (isPollMode) "Publish poll" else "Publish note",
             sections = sections,
             onConfirm = { selectedUrls ->
                 showRelayPicker = false
-                val err = accountStateViewModel.publishKind1(content, selectedUrls, zapRaiserAmount = zapRaiserAmount)
+                val err = if (isPollMode) {
+                    val validOptions = pollOptions.filter { it.isNotBlank() }
+                    val optionPairs = validOptions.mapIndexed { i, label -> i.toString() to label }
+                    accountStateViewModel.publishPoll(
+                        question = content,
+                        options = optionPairs,
+                        isMultipleChoice = isMultipleChoice,
+                        endsAtEpochSeconds = null,
+                        relayUrls = selectedUrls
+                    )
+                } else {
+                    accountStateViewModel.publishKind1(content, selectedUrls, zapRaiserAmount = zapRaiserAmount)
+                }
                 if (err != null) {
                     Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
                 } else {
@@ -151,7 +175,7 @@ fun ComposeNoteScreen(
         topBar = {
             Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
                 TopAppBar(
-                    title = { Text("New note") },
+                    title = { Text(if (isPollMode) "New poll" else "New note") },
                     navigationIcon = {
                         IconButton(onClick = onBackWithDraft) {
                             Icon(
@@ -172,25 +196,123 @@ fun ComposeNoteScreen(
                 .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
-            social.mycelium.android.ui.components.ModernTextField(
-                value = textFieldValue,
-                onValueChange = { newValue ->
-                    textFieldValue = newValue
-                    mentionState.onTextChanged(newValue.text, newValue.selection.end)
-                },
-                placeholder = "What's on your mind?",
+            // ── Scrollable content area ──
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .padding(vertical = 16.dp),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                    keyboardType = KeyboardType.Text
-                ),
-                visualTransformation = if (markdownEnabled) markdownTransformation
-                    else androidx.compose.ui.text.input.VisualTransformation.None,
-            )
-            // @mention autocomplete suggestions
+                    .verticalScroll(rememberScrollState())
+            ) {
+                // Text input — always at the top (question for poll mode, content for note mode)
+                social.mycelium.android.ui.components.ModernTextField(
+                    value = textFieldValue,
+                    onValueChange = { newValue ->
+                        textFieldValue = newValue
+                        mentionState.onTextChanged(newValue.text, newValue.selection.end)
+                        emojiState.onTextChanged(newValue.text, newValue.selection.end)
+                    },
+                    placeholder = if (isPollMode) "Ask a question…" else "What's on your mind?",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(if (isPollMode) Modifier.heightIn(min = 56.dp, max = 120.dp) else Modifier.heightIn(min = 200.dp))
+                        .padding(vertical = 12.dp),
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                        keyboardType = KeyboardType.Text
+                    ),
+                    visualTransformation = if (markdownEnabled) markdownTransformation
+                        else androidx.compose.ui.text.input.VisualTransformation.None,
+                )
+
+                // ── Poll options editor (below the question) ──
+                if (isPollMode) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        pollOptions.forEachIndexed { index, option ->
+                            OutlinedTextField(
+                                value = option,
+                                onValueChange = { newValue ->
+                                    pollOptions = pollOptions.toMutableList().also { it[index] = newValue }
+                                },
+                                placeholder = { Text("Option ${index + 1}") },
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth(),
+                                trailingIcon = {
+                                    if (pollOptions.size > 2) {
+                                        androidx.compose.material3.IconButton(onClick = {
+                                            pollOptions = pollOptions.toMutableList().also { it.removeAt(index) }
+                                        }) {
+                                            Icon(
+                                                imageVector = Icons.Filled.Close,
+                                                contentDescription = "Remove option",
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                        if (pollOptions.size < 10) {
+                            TextButton(
+                                onClick = { pollOptions = pollOptions + "" }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Add,
+                                    contentDescription = "Add option",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Add option")
+                            }
+                        }
+                        // Multiple choice toggle
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(top = 4.dp)
+                        ) {
+                            Checkbox(
+                                checked = isMultipleChoice,
+                                onCheckedChange = { isMultipleChoice = it }
+                            )
+                            Text(
+                                text = "Allow multiple selections",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                }
+
+                // Upload progress indicator
+                AnimatedVisibility(visible = isUploading) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text("Uploading media…", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+
+                // Zapraiser input (shown when toggled from toolbar)
+                AnimatedVisibility(visible = showZapRaiser) {
+                    OutlinedTextField(
+                        value = zapRaiserAmount?.toString() ?: "",
+                        onValueChange = { zapRaiserAmount = it.toLongOrNull() },
+                        label = { Text("Zap goal (sats)") },
+                        placeholder = { Text("1000") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                    )
+                }
+            }
+
+            // @mention and :emoji: autocomplete suggestions
             MentionSuggestionList(
                 mentionState = mentionState,
                 currentText = content,
@@ -198,30 +320,15 @@ fun ComposeNoteScreen(
                     textFieldValue = TextFieldValue(newText, TextRange(newCursor))
                 }
             )
-            // Upload progress indicator
-            AnimatedVisibility(visible = isUploading) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Text("Uploading media…", style = MaterialTheme.typography.bodySmall)
+            social.mycelium.android.ui.components.EmojiShortcodeSuggestionList(
+                emojiState = emojiState,
+                currentText = content,
+                onTextUpdated = { newText, newCursor ->
+                    textFieldValue = TextFieldValue(newText, TextRange(newCursor))
                 }
-            }
-            // Zapraiser input (shown when toggled from toolbar)
-            AnimatedVisibility(visible = showZapRaiser) {
-                OutlinedTextField(
-                    value = zapRaiserAmount?.toString() ?: "",
-                    onValueChange = { zapRaiserAmount = it.toLongOrNull() },
-                    label = { Text("Zap goal (sats)") },
-                    placeholder = { Text("1000") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
-                )
-            }
-            // Compose toolbar with media server picker, markdown toggle, zapraiser, schedule
+            )
+
+            // ── Bottom toolbar: icons + send ──
             ComposeToolbar(
                 blossomServers = blossomServers,
                 nip96Servers = nip96Servers,
@@ -241,18 +348,14 @@ fun ComposeNoteScreen(
                     textFieldValue = TextFieldValue(UnicodeStylizer.stylize(content, style))
                 },
                 onScheduleClick = {
-                    // TODO: Show date/time picker → sign event → store in draft → schedule alarm
                     Toast.makeText(context, "Note scheduling coming soon", Toast.LENGTH_SHORT).show()
-                }
+                },
+                isPollMode = isPollMode,
+                onPollToggle = { isPollMode = !isPollMode },
+                publishEnabled = content.isNotBlank() && !isUploading && (!isPollMode || pollOptions.count { it.isNotBlank() } >= 2),
+                publishLabel = if (isPollMode) "Publish poll" else "Publish",
+                onPublish = { showRelayPicker = true }
             )
-            Button(
-                onClick = { showRelayPicker = true },
-                modifier = Modifier
-                    .padding(top = 8.dp, bottom = 16.dp),
-                enabled = content.isNotBlank() && !isUploading
-            ) {
-                Text("Publish")
-            }
         }
     }
 }

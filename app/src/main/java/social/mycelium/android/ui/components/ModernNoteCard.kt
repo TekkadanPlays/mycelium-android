@@ -717,11 +717,13 @@ private fun NoteCardContent(
                     note.mediaMeta[currentMediaUrl]?.aspectRatio()
                         ?: social.mycelium.android.utils.MediaAspectRatioCache.get(currentMediaUrl)
                 } else null
+                val mediaInitiallyKnown = knownMediaRatio != null
                 var mediaContainerRatio by remember(mediaList, note.mediaMeta) {
                     mutableFloatStateOf(knownMediaRatio ?: (16f / 9f))
                 }
-                // Sync with cache if populated externally (fullscreen, re-scroll)
-                if (knownMediaRatio != null && knownMediaRatio != mediaContainerRatio) {
+                // Only sync from cache when ratio was known at first composition
+                // (page swipes, scroll-back) — never for items that defaulted to 16/9
+                if (mediaInitiallyKnown && knownMediaRatio != null && knownMediaRatio != mediaContainerRatio) {
                     mediaContainerRatio = knownMediaRatio
                 }
                 val modernCompactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()

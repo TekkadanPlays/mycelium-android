@@ -1,10 +1,12 @@
 package social.mycelium.android.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -12,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -19,11 +22,10 @@ import social.mycelium.android.data.MediaServer
 import social.mycelium.android.utils.UnicodeStylizer
 
 /**
- * Unified compose toolbar for note/topic composition screens.
- * Includes: media server picker, markdown toggle, unicode styles,
- * zapraiser toggle, and schedule button.
- *
- * Placed above the publish button in compose screens.
+ * Compact compose toolbar — a single clean row of small icons.
+ * Dropdowns (server picker, unicode styles) expand above the row.
+ * Optional onPublish adds a tinted send button on the right.
+ * Optional onPollToggle adds a poll icon toggle.
  */
 @Composable
 fun ComposeToolbar(
@@ -38,13 +40,18 @@ fun ComposeToolbar(
     onToggleZapRaiser: (Boolean) -> Unit,
     onApplyUnicodeStyle: ((UnicodeStylizer.Style) -> Unit)? = null,
     onScheduleClick: (() -> Unit)? = null,
-    modifier: Modifier = Modifier
+    isPollMode: Boolean = false,
+    onPollToggle: (() -> Unit)? = null,
+    publishEnabled: Boolean = false,
+    publishLabel: String = "Publish",
+    onPublish: (() -> Unit)? = null,
+    modifier: Modifier = Modifier.fillMaxWidth()
 ) {
     var showServerPicker by remember { mutableStateOf(false) }
     var showUnicodePicker by remember { mutableStateOf(false) }
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        // Server picker dropdown
+    Column(modifier = modifier) {
+        // Expandable panels above the icon row
         AnimatedVisibility(visible = showServerPicker) {
             MediaServerPicker(
                 blossomServers = blossomServers,
@@ -57,8 +64,6 @@ fun ComposeToolbar(
                 onDismiss = { showServerPicker = false }
             )
         }
-
-        // Unicode style picker dropdown
         AnimatedVisibility(visible = showUnicodePicker && onApplyUnicodeStyle != null) {
             UnicodeStylePicker(
                 onSelect = { style ->
@@ -69,93 +74,123 @@ fun ComposeToolbar(
             )
         }
 
-        // Toolbar row
+        // ── Main icon row ──
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp),
+                .height(44.dp)
+                .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Media attach + server picker
-            IconButton(onClick = onAttachMedia) {
-                Icon(
-                    Icons.Outlined.Image,
-                    contentDescription = "Attach media",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // Server selection chip
-            AssistChip(
-                onClick = { showServerPicker = !showServerPicker },
-                label = {
-                    Text(
-                        selectedServer?.name ?: "Select server",
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        Icons.Outlined.CloudUpload,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                },
-                modifier = Modifier.padding(end = 4.dp)
+            // Left icons
+            ToolbarIcon(Icons.Outlined.Image, "Attach", onClick = onAttachMedia)
+            ToolbarIcon(
+                Icons.Outlined.CloudUpload, "Server",
+                tint = if (showServerPicker) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                onClick = { showServerPicker = !showServerPicker }
             )
 
-            VerticalDivider(
-                modifier = Modifier.height(24.dp).padding(horizontal = 4.dp),
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+            ToolbarDivider()
+
+            ToolbarIcon(
+                Icons.Outlined.Code, "Markdown",
+                tint = if (markdownEnabled) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                onClick = { onToggleMarkdown(!markdownEnabled) }
             )
-
-            // Markdown toggle
-            IconButton(onClick = { onToggleMarkdown(!markdownEnabled) }) {
-                Icon(
-                    Icons.Outlined.Code,
-                    contentDescription = "Markdown preview",
-                    tint = if (markdownEnabled) MaterialTheme.colorScheme.primary
-                           else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // Unicode text styles
             if (onApplyUnicodeStyle != null) {
-                IconButton(onClick = { showUnicodePicker = !showUnicodePicker }) {
-                    Icon(
-                        Icons.Outlined.TextFormat,
-                        contentDescription = "Text styles",
-                        tint = if (showUnicodePicker) MaterialTheme.colorScheme.primary
-                               else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                ToolbarIcon(
+                    Icons.Outlined.TextFormat, "Styles",
+                    tint = if (showUnicodePicker) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick = { showUnicodePicker = !showUnicodePicker }
+                )
             }
-
-            // Zapraiser toggle
-            IconButton(onClick = { onToggleZapRaiser(!showZapRaiser) }) {
-                Icon(
-                    Icons.AutoMirrored.Filled.ShowChart,
-                    contentDescription = "Zapraiser",
-                    tint = if (showZapRaiser) Color(0xFFF59E0B)
-                           else MaterialTheme.colorScheme.onSurfaceVariant
+            ToolbarIcon(
+                Icons.AutoMirrored.Filled.ShowChart, "Zapraiser",
+                tint = if (showZapRaiser) Color(0xFFF59E0B)
+                       else MaterialTheme.colorScheme.onSurfaceVariant,
+                onClick = { onToggleZapRaiser(!showZapRaiser) }
+            )
+            if (onPollToggle != null) {
+                ToolbarIcon(
+                    Icons.Outlined.HowToVote, "Poll",
+                    tint = if (isPollMode) MaterialTheme.colorScheme.primary
+                           else MaterialTheme.colorScheme.onSurfaceVariant,
+                    onClick = onPollToggle
+                )
+            }
+            if (onScheduleClick != null) {
+                ToolbarIcon(
+                    Icons.Outlined.Schedule, "Schedule",
+                    onClick = onScheduleClick
                 )
             }
 
-            // Schedule button (only for notes/topics, not replies)
-            if (onScheduleClick != null) {
-                IconButton(onClick = onScheduleClick) {
+            Spacer(Modifier.weight(1f))
+
+            // Publish / send button
+            if (onPublish != null) {
+                FilledIconButton(
+                    onClick = onPublish,
+                    enabled = publishEnabled,
+                    modifier = Modifier.size(36.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        disabledContainerColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                        disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    )
+                ) {
                     Icon(
-                        Icons.Outlined.Schedule,
-                        contentDescription = "Schedule",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        Icons.AutoMirrored.Filled.Send,
+                        contentDescription = publishLabel,
+                        modifier = Modifier.size(18.dp)
                     )
                 }
             }
         }
     }
+}
+
+/** Compact toolbar icon — 36dp touch target, 20dp icon. */
+@Composable
+private fun ToolbarIcon(
+    icon: ImageVector,
+    contentDescription: String,
+    tint: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = ripple(bounded = false, radius = 18.dp),
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            modifier = Modifier.size(20.dp),
+            tint = tint
+        )
+    }
+}
+
+/** Thin vertical divider between icon groups. */
+@Composable
+private fun ToolbarDivider() {
+    Spacer(
+        modifier = Modifier
+            .padding(horizontal = 3.dp)
+            .width(1.dp)
+            .height(20.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+    )
 }
 
 @Composable

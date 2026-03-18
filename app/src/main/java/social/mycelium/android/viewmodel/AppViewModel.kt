@@ -19,6 +19,13 @@ data class PendingNotificationNav(
     val notifType: String? = null
 )
 
+/** Thread to open as overlay on the notifications screen (set by deep-link, consumed by composable). */
+data class PendingNotifThread(
+    val note: Note,
+    val replyKind: Int = 1,
+    val highlightReplyId: String? = null,
+)
+
 /** Holds reaction/zap/boost data for the dedicated ReactionsScreen. */
 data class ReactionsData(
     val noteId: String,
@@ -29,6 +36,12 @@ data class ReactionsData(
     val zapAmountByAuthor: Map<String, Long> = emptyMap(),
     val zapTotalSats: Long = 0L,
     val boostAuthors: List<Author> = emptyList(),
+    /** NIP-88: poll vote data — non-empty when the note is a kind-1068 poll. */
+    val pollVotesByOption: Map<String, List<String>> = emptyMap(),
+    /** NIP-88: poll option labels keyed by option code. */
+    val pollOptionLabels: Map<String, String> = emptyMap(),
+    /** NIP-88: total unique voters on this poll. */
+    val pollTotalVoters: Int = 0,
 )
 
 data class AppState(
@@ -136,6 +149,20 @@ class AppViewModel : ViewModel() {
         val nav = _pendingNotificationNav.value
         _pendingNotificationNav.value = null
         return nav
+    }
+
+    /** Pending thread to open as overlay on the notifications screen (set by deep-link handler). */
+    private val _pendingNotifThread = MutableStateFlow<PendingNotifThread?>(null)
+    val pendingNotifThread: StateFlow<PendingNotifThread?> = _pendingNotifThread.asStateFlow()
+
+    fun setPendingNotifThread(thread: PendingNotifThread) {
+        _pendingNotifThread.value = thread
+    }
+
+    fun consumePendingNotifThread(): PendingNotifThread? {
+        val t = _pendingNotifThread.value
+        _pendingNotifThread.value = null
+        return t
     }
 
     /** Store the current album page for a note so it persists across feed/thread/viewer. */

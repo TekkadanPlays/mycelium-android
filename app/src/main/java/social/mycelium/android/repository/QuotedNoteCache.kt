@@ -1,5 +1,7 @@
 package social.mycelium.android.repository
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import social.mycelium.android.data.QuotedNoteMeta
 import social.mycelium.android.relay.RelayConnectionStateMachine
@@ -7,7 +9,13 @@ import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -25,12 +33,20 @@ object QuotedNoteCache {
     private const val FETCH_TIMEOUT_MS = 6000L
     private const val SNIPPET_MAX_LEN = 500
     private const val MAX_ENTRIES = 200
+    private const val DISK_CACHE_MAX = 150
+    private const val PREFS_NAME = "quoted_note_cache"
+    private const val PREFS_KEY = "entries"
 
     /** Size to trim to when UI is hidden. */
     const val TRIM_SIZE_UI_HIDDEN = 100
 
     /** Size to trim to when app is in background. */
     const val TRIM_SIZE_BACKGROUND = 50
+
+    private val diskScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val diskJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    @Volatile private var prefs: SharedPreferences? = null
+    @Volatile private var diskDirty = false
 
     /** IDs currently being fetched — prevents duplicate concurrent requests. */
     private val inFlightIds = Collections.synchronizedSet(HashSet<String>())
@@ -46,6 +62,20 @@ object QuotedNoteCache {
                 size > MAX_ENTRIES
         }
     )
+
+    private const val PREFS_VERSION_KEY = "cache_version"
+    private const val CURRENT_CACHE_VERSION = 3 // v3: fix NIP-10 mention e-tags falsely setting rootNoteId
+
+    /** Call once from Application/Activity to load disk cache into memory. */
+    fun init(context: Context) {
+        prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val storedVersion = prefs?.getInt(PREFS_VERSION_KEY, 1) ?: 1
+        if (storedVersion < CURRENT_CACHE_VERSION) {
+            Log.d(TAG, "Cache version $storedVersion < $CURRENT_CACHE_VERSION — clearing stale entries")
+            prefs?.edit()?.remove(PREFS_KEY)?.putInt(PREFS_VERSION_KEY, CURRENT_CACHE_VERSION)?.apply()
+        }
+        loadFromDisk()
+    }
 
     /** No hardcoded fallback relays — user's configured relays are used exclusively. */
     private val fallbackRelays = emptyList<String>()
@@ -142,6 +172,7 @@ object QuotedNoteCache {
                 )
                 memoryCache[eventId] = meta
                 failedIds.remove(eventId)
+                scheduleDiskSave()
                 meta
             } ?: run {
                 failedIds[eventId] = System.currentTimeMillis()
@@ -188,6 +219,7 @@ object QuotedNoteCache {
         relayHintsCache.clear()
         inFlightIds.clear()
         failedIds.clear()
+        prefs?.edit()?.remove(PREFS_KEY)?.apply()
     }
 
     /**
@@ -206,6 +238,44 @@ object QuotedNoteCache {
                 val eldest = relayHintsCache.keys.iterator().next()
                 relayHintsCache.remove(eldest)
             }
+        }
+    }
+
+    // ── Disk persistence ─────────────────────────────────────────────────
+
+    private fun loadFromDisk() {
+        try {
+            val json = prefs?.getString(PREFS_KEY, null) ?: return
+            val list = diskJson.decodeFromString<List<QuotedNoteMeta>>(json)
+            synchronized(memoryCache) {
+                for (meta in list) memoryCache[meta.eventId] = meta
+            }
+            Log.d(TAG, "Loaded ${list.size} quoted notes from disk cache")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load disk cache: ${e.message}")
+        }
+    }
+
+    private var diskSaveJob: kotlinx.coroutines.Job? = null
+
+    private fun scheduleDiskSave() {
+        diskSaveJob?.cancel()
+        diskSaveJob = diskScope.launch {
+            kotlinx.coroutines.delay(2000)
+            saveToDisk()
+        }
+    }
+
+    private fun saveToDisk() {
+        try {
+            val entries = synchronized(memoryCache) {
+                memoryCache.values.toList().takeLast(DISK_CACHE_MAX)
+            }
+            val json = diskJson.encodeToString(entries)
+            prefs?.edit()?.putString(PREFS_KEY, json)?.apply()
+            Log.d(TAG, "Saved ${entries.size} quoted notes to disk cache")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save disk cache: ${e.message}")
         }
     }
 }

@@ -185,6 +185,247 @@ class SubscriptionMultiplexer private constructor(
     ): MultiplexHandle = subscribe(relayUrls, listOf(filter), priority)
 
     /**
+     * Callback-based subscribe for incremental migration from direct relay subscriptions.
+     * Events are forwarded to [onEvent] as they arrive (deduped, ref-counted).
+     * Returns a [TemporarySubscriptionHandle] compatible with existing cancel/pause patterns.
+     */
+    fun subscribeCallback(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event) -> Unit,
+    ): TemporarySubscriptionHandle {
+        var handle: MultiplexHandle? = null
+        var collectJob: Job? = null
+        val job = scope.launch {
+            val h = subscribe(relayUrls, filters, priority)
+            handle = h
+            collectJob = scope.launch {
+                h.events.collect { event -> onEvent(event) }
+            }
+        }
+        return object : TemporarySubscriptionHandle {
+            override fun cancel() {
+                collectJob?.cancel()
+                job.cancel()
+                val h = handle ?: return
+                scope.launch { h.cancel() }
+            }
+            override fun pause() {}
+            override fun resume() {}
+            override val isPaused: Boolean get() = false
+        }
+    }
+
+    /**
+     * Callback-based subscribe with relay URL passthrough.
+     * Use when the caller needs to know which relay delivered each event.
+     */
+    fun subscribeCallbackWithRelay(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event, String) -> Unit,
+    ): TemporarySubscriptionHandle {
+        val consumerId = "mux-${nextConsumerId.incrementAndGet()}"
+        val filterKey = FilterKey.of(relayUrls, filters)
+        scope.launch {
+            mutex.withLock {
+                val consumer = ConsumerSubscription(consumerId, filterKey, relayUrls, filters, priority)
+                consumers[consumerId] = consumer
+                val merged = mergedSubs.getOrPut(filterKey) {
+                    MergedSubscription(filterKey, relayUrls, filters, priority)
+                }
+                merged.consumerIds.add(consumerId)
+                if (priority.level > merged.priority.level) {
+                    merged.priority = priority; merged.needsRefresh = true
+                }
+                scheduleDebouncedFlush()
+            }
+        }
+        // Collect events with relay URL from the shared flow
+        val collectJob = scope.launch {
+            _events.collect { muxEvent ->
+                if (muxEvent.consumerId == consumerId || muxEvent.filterKey == filterKey) {
+                    onEvent(muxEvent.event, muxEvent.relayUrl)
+                }
+            }
+        }
+        return object : TemporarySubscriptionHandle {
+            override fun cancel() {
+                collectJob.cancel()
+                scope.launch { unsubscribe(consumerId) }
+            }
+            override fun pause() {}
+            override fun resume() {}
+            override val isPaused: Boolean get() = false
+        }
+    }
+
+    /**
+     * Per-relay filter map subscription (outbox model).
+     * Each relay gets its own set of filters. Returns a callback-based handle.
+     */
+    fun subscribePerRelayCallback(
+        relayFilters: Map<String, List<Filter>>,
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event) -> Unit,
+    ): TemporarySubscriptionHandle {
+        if (relayFilters.isEmpty()) return NoOpTemporaryHandle
+        val consumerId = "mux-${nextConsumerId.incrementAndGet()}"
+        val filterKey = FilterKey.ofPerRelay(relayFilters)
+        scope.launch {
+            mutex.withLock {
+                val consumer = ConsumerSubscription(consumerId, filterKey, emptyList(), emptyList(), priority, relayFilters)
+                consumers[consumerId] = consumer
+                val merged = mergedSubs.getOrPut(filterKey) {
+                    MergedSubscription(filterKey, emptyList(), emptyList(), priority, relayFilterMap = relayFilters)
+                }
+                merged.consumerIds.add(consumerId)
+                if (priority.level > merged.priority.level) {
+                    merged.priority = priority; merged.needsRefresh = true
+                }
+                scheduleDebouncedFlush()
+            }
+        }
+        val collectJob = scope.launch {
+            _events.collect { muxEvent ->
+                if (muxEvent.consumerId == consumerId || muxEvent.filterKey == filterKey) {
+                    onEvent(muxEvent.event)
+                }
+            }
+        }
+        return object : TemporarySubscriptionHandle {
+            override fun cancel() {
+                collectJob.cancel()
+                scope.launch { unsubscribe(consumerId) }
+            }
+            override fun pause() {}
+            override fun resume() {}
+            override val isPaused: Boolean get() = false
+        }
+    }
+
+    /**
+     * Per-relay filter map subscription with relay URL passthrough.
+     */
+    fun subscribePerRelayCallbackWithRelay(
+        relayFilters: Map<String, List<Filter>>,
+        priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEvent: (Event, String) -> Unit,
+    ): TemporarySubscriptionHandle {
+        if (relayFilters.isEmpty()) return NoOpTemporaryHandle
+        val consumerId = "mux-${nextConsumerId.incrementAndGet()}"
+        val filterKey = FilterKey.ofPerRelay(relayFilters)
+        scope.launch {
+            mutex.withLock {
+                val consumer = ConsumerSubscription(consumerId, filterKey, emptyList(), emptyList(), priority, relayFilters)
+                consumers[consumerId] = consumer
+                val merged = mergedSubs.getOrPut(filterKey) {
+                    MergedSubscription(filterKey, emptyList(), emptyList(), priority, relayFilterMap = relayFilters)
+                }
+                merged.consumerIds.add(consumerId)
+                if (priority.level > merged.priority.level) {
+                    merged.priority = priority; merged.needsRefresh = true
+                }
+                scheduleDebouncedFlush()
+            }
+        }
+        val collectJob = scope.launch {
+            _events.collect { muxEvent ->
+                if (muxEvent.consumerId == consumerId || muxEvent.filterKey == filterKey) {
+                    onEvent(muxEvent.event, muxEvent.relayUrl)
+                }
+            }
+        }
+        return object : TemporarySubscriptionHandle {
+            override fun cancel() {
+                collectJob.cancel()
+                scope.launch { unsubscribe(consumerId) }
+            }
+            override fun pause() {}
+            override fun resume() {}
+            override val isPaused: Boolean get() = false
+        }
+    }
+
+    /**
+     * EOSE-based one-shot subscription. Opens REQ, collects events, auto-CLOSEs
+     * after all relays send EOSE (+ settle window), or after hard timeout.
+     */
+    fun subscribeOneShotCallback(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event) -> Unit,
+    ): TemporarySubscriptionHandle {
+        if (relayUrls.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
+        val consumerId = "mux-os-${nextConsumerId.incrementAndGet()}"
+        val filterKey = FilterKey.of(relayUrls, filters)
+
+        // One-shot subs are NOT merged — each gets its own relay subscription
+        // because they auto-close and the lifecycle is per-caller
+        val collectJob = scope.launch {
+            val h = subscribe(relayUrls, filters, priority)
+
+            // Collect events in background
+            val eventJob = launch { h.events.collect { onEvent(it) } }
+
+            // Wait for EOSE or timeout
+            val eoseJob = launch {
+                h.eose.collect { isEose ->
+                    if (isEose) {
+                        delay(settleMs)
+                        return@collect
+                    }
+                }
+            }
+
+            // Hard timeout
+            val timeoutJob = launch { delay(maxWaitMs) }
+
+            // Whichever finishes first
+            kotlinx.coroutines.selects.select<Unit> {
+                eoseJob.onJoin {}
+                timeoutJob.onJoin {}
+            }
+
+            eventJob.cancel()
+            eoseJob.cancel()
+            timeoutJob.cancel()
+            h.cancel()
+        }
+
+        return object : TemporarySubscriptionHandle {
+            override fun cancel() { collectJob.cancel() }
+            override fun pause() {}
+            override fun resume() {}
+            override val isPaused: Boolean get() = false
+        }
+    }
+
+    /**
+     * Clear all subscriptions and state. Call on account switch / logout.
+     */
+    fun clear() {
+        scope.launch {
+            mutex.withLock {
+                for ((_, merged) in mergedSubs) {
+                    merged.cybinSub?.close()
+                }
+                mergedSubs.clear()
+                consumers.clear()
+                _eoseReceived.value = emptySet()
+                eoseByRelay.clear()
+                synchronized(seenEventIds) { seenEventIds.clear() }
+                Log.d(TAG, "Cleared all multiplexed subscriptions")
+            }
+        }
+    }
+
+    /**
      * Get current stats for diagnostics.
      */
     fun stats(): MultiplexerStats = MultiplexerStats(
@@ -245,33 +486,30 @@ class SubscriptionMultiplexer private constructor(
     private suspend fun flushSubscriptions() {
         mutex.withLock {
             for ((key, merged) in mergedSubs) {
-                if (merged.cybinSub == null) {
-                    // New merged subscription — create relay sub
-                    val sub = pool.subscribe(
-                        relayUrls = merged.relayUrls,
-                        filters = merged.filters,
-                        priority = merged.priority,
-                    ) { event, relayUrl ->
-                        handleEvent(key, event, relayUrl)
+                if (merged.cybinSub == null || merged.needsRefresh) {
+                    // Close existing if refreshing
+                    if (merged.needsRefresh) merged.cybinSub?.close()
+
+                    // Create relay sub — route to per-relay or uniform variant
+                    val sub = if (merged.relayFilterMap != null) {
+                        pool.subscribe(
+                            relayFilters = merged.relayFilterMap,
+                            priority = merged.priority,
+                        ) { event, relayUrl -> handleEvent(key, event, relayUrl) }
+                    } else {
+                        pool.subscribe(
+                            relayUrls = merged.relayUrls,
+                            filters = merged.filters,
+                            priority = merged.priority,
+                        ) { event, relayUrl -> handleEvent(key, event, relayUrl) }
                     }
                     merged.cybinSub = sub
                     merged.needsRefresh = false
-                    Log.d(TAG, "Created merged sub ${key.hash.take(8)} " +
-                        "(${merged.consumerIds.size} consumers, ${merged.priority.name}, " +
-                        "${merged.relayUrls.size} relays, ${merged.filters.size} filters)")
-                } else if (merged.needsRefresh) {
-                    // Priority changed — close and recreate
-                    merged.cybinSub?.close()
-                    val sub = pool.subscribe(
-                        relayUrls = merged.relayUrls,
-                        filters = merged.filters,
-                        priority = merged.priority,
-                    ) { event, relayUrl ->
-                        handleEvent(key, event, relayUrl)
-                    }
-                    merged.cybinSub = sub
-                    merged.needsRefresh = false
-                    Log.d(TAG, "Refreshed merged sub ${key.hash.take(8)} (priority → ${merged.priority.name})")
+
+                    val relayCount = merged.relayFilterMap?.size ?: merged.relayUrls.size
+                    val label = if (merged.relayFilterMap != null) "per-relay" else "uniform"
+                    Log.d(TAG, "${if (merged.needsRefresh) "Refreshed" else "Created"} merged sub ${key.hash.take(8)} " +
+                        "($label, ${merged.consumerIds.size} consumers, ${merged.priority.name}, $relayCount relays)")
                 }
             }
             pool.connect()
@@ -321,8 +559,8 @@ class SubscriptionMultiplexer private constructor(
         relaySet.add(relayUrl)
 
         // Check if all relays have EOSE'd
-        val totalRelays = merged.relayUrls.size
-        if (relaySet.size >= totalRelays) {
+        val totalRelays = merged.relayFilterMap?.size ?: merged.relayUrls.size
+        if (totalRelays > 0 && relaySet.size >= totalRelays) {
             // All relays caught up — mark all consumers as EOSE'd
             val consumerIds = merged.consumerIds.toSet()
             _eoseReceived.value = _eoseReceived.value + consumerIds
@@ -343,8 +581,16 @@ class SubscriptionMultiplexer private constructor(
                 val relayPart = relayUrls.sorted().joinToString("|")
                 val filterPart = filters.joinToString("|") { it.toJson() }
                 val combined = "$relayPart::$filterPart"
-                // Use a stable hash for map key
                 val hash = combined.hashCode().toUInt().toString(16).padStart(8, '0')
+                return FilterKey(hash)
+            }
+
+            /** Key for per-relay filter maps (outbox model). */
+            fun ofPerRelay(relayFilters: Map<String, List<Filter>>): FilterKey {
+                val parts = relayFilters.entries.sortedBy { it.key }.joinToString(";") { (url, filters) ->
+                    "$url=${filters.joinToString(",") { it.toJson() }}"
+                }
+                val hash = parts.hashCode().toUInt().toString(16).padStart(8, '0')
                 return FilterKey(hash)
             }
         }
@@ -359,6 +605,8 @@ class SubscriptionMultiplexer private constructor(
         var cybinSub: CybinSubscription? = null,
         val consumerIds: MutableSet<String> = mutableSetOf(),
         var needsRefresh: Boolean = false,
+        /** Per-relay filter map (outbox model). When set, relayUrls/filters are ignored. */
+        val relayFilterMap: Map<String, List<Filter>>? = null,
     )
 
     /** Internal: a single consumer's subscription request. */
@@ -368,6 +616,7 @@ class SubscriptionMultiplexer private constructor(
         val relayUrls: List<String>,
         val filters: List<Filter>,
         val priority: SubscriptionPriority,
+        val relayFilterMap: Map<String, List<Filter>>? = null,
     )
 
     /** Internal: event routed to a specific consumer. */

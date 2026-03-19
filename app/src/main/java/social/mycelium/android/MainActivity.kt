@@ -109,19 +109,21 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // onConfigurationChanged on Android 15 foldable devices.
 
         // Configure Coil with GIF decoder, optimized caching, and crossfade for smooth feed rendering.
-        // Custom OkHttpClient provides a User-Agent so servers (e.g. Lemmy pictrs) don't 403.
-        val coilHttpClient = okhttp3.OkHttpClient.Builder()
-            .addInterceptor { chain ->
-                chain.proceed(
-                    chain.request().newBuilder()
-                        .header("User-Agent", "Mycelium/${social.mycelium.android.BuildConfig.VERSION_NAME} Android")
-                        .build()
-                )
-            }
-            .build()
+        // User-Agent header set via OkHttp interceptor so servers (e.g. Lemmy pictrs) don't 403.
+        // Coil 2.x bundles OkHttp internally; we configure it via callFactory without explicit import.
         Coil.setImageLoader(
             ImageLoader.Builder(this)
-                .okHttpClient(coilHttpClient)
+                .callFactory {
+                    okhttp3.OkHttpClient.Builder()
+                        .addInterceptor { chain ->
+                            chain.proceed(
+                                chain.request().newBuilder()
+                                    .header("User-Agent", "Mycelium/${social.mycelium.android.BuildConfig.VERSION_NAME} Android")
+                                    .build()
+                            )
+                        }
+                        .build()
+                }
                 .components {
                     add(social.mycelium.android.utils.BlossomFallbackInterceptor())
                     if (android.os.Build.VERSION.SDK_INT >= 28) {

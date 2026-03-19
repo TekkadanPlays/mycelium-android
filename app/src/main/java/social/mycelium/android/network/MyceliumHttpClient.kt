@@ -2,19 +2,19 @@ package social.mycelium.android.network
 
 import android.util.Log
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.logging.LogLevel
 import io.ktor.client.plugins.logging.Logger
 import io.ktor.client.plugins.logging.Logging
 import io.ktor.client.plugins.websocket.WebSockets
 import kotlinx.serialization.json.Json
-import java.util.concurrent.TimeUnit
 
 /**
  * Shared Ktor [HttpClient] singleton for all HTTP and WebSocket operations in Mycelium.
  *
- * Replaces the 13+ scattered [okhttp3.OkHttpClient] instances with a single connection pool.
- * Uses the OkHttp engine for Android compatibility and connection reuse.
+ * Uses the CIO (Coroutine I/O) engine — Ktor's native non-blocking engine.
+ * No OkHttp dependency. Supports WebSockets with ping/pong keepalive.
  *
  * Usage:
  * ```
@@ -42,17 +42,16 @@ object MyceliumHttpClient {
     }
 
     val instance: HttpClient by lazy {
-        HttpClient(OkHttp) {
+        HttpClient(CIO) {
             engine {
-                config {
-                    connectTimeout(10, TimeUnit.SECONDS)
-                    readTimeout(30, TimeUnit.SECONDS)
-                    writeTimeout(10, TimeUnit.SECONDS)
-                    retryOnConnectionFailure(true)
-                    // OkHttp-level WebSocket ping: detects dead sockets after idle/background.
-                    // Ktor's WebSockets.pingIntervalMillis is ignored by the OkHttp engine.
-                    pingInterval(30, TimeUnit.SECONDS)
-                }
+                requestTimeout = 30_000
+                maxConnectionsCount = 1000
+            }
+
+            install(HttpTimeout) {
+                requestTimeoutMillis = 30_000
+                connectTimeoutMillis = 10_000
+                socketTimeoutMillis = 30_000
             }
 
             install(WebSockets) {

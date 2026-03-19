@@ -2,6 +2,10 @@ package social.mycelium.android.repository
 
 import android.util.Log
 import androidx.compose.runtime.mutableStateMapOf
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.isSuccess
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -9,10 +13,8 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import social.mycelium.android.network.MyceliumHttpClient
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 
 /**
  * NIP-05 DNS-based verification, modeled after Amethyst's approach.
@@ -42,11 +44,7 @@ object Nip05Verifier {
     )
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .build()
+    private val client = MyceliumHttpClient.instance
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -109,7 +107,7 @@ object Nip05Verifier {
      * Parses `name@domain` → fetches `https://domain/.well-known/nostr.json?name=name`
      * → checks `names[name] == pubkeyHex`.
      */
-    private fun checkNip05(pubkeyHex: String, nip05: String): Boolean {
+    private suspend fun checkNip05(pubkeyHex: String, nip05: String): Boolean {
         val parts = nip05.trim().split("@")
         val name: String
         val domain: String
@@ -121,12 +119,13 @@ object Nip05Verifier {
         if (domain.isBlank()) return false
 
         val url = "https://$domain/.well-known/nostr.json?name=$name"
-        val request = Request.Builder().url(url).get().build()
-        val response = client.newCall(request).execute()
+        val response = client.get(url) {
+            header("Accept", "application/json")
+        }
 
-        if (!response.isSuccessful) return false
+        if (!response.status.isSuccess()) return false
 
-        val body = response.body?.string() ?: return false
+        val body = response.bodyAsText()
         val root = json.parseToJsonElement(body)
         val hex = root.jsonObject["names"]
             ?.jsonObject?.get(name)

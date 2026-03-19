@@ -404,7 +404,7 @@ class OutboxFeedManager private constructor() {
 
         outboxHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
             relayFilters = relayFilters.mapValues { it.value },
-            priority = SubscriptionPriority.LOW,
+            priority = SubscriptionPriority.NORMAL,
         ) { event, relayUrl ->
             if (event.kind == 1) {
                 _outboxNotesReceived.value = _outboxNotesReceived.value + 1

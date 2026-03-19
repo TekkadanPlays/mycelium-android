@@ -24,8 +24,8 @@ android {
         applicationId = "social.mycelium.android"
         minSdk = 35
         targetSdk = 36
-        versionCode = 35
-        versionName = "0.4.98-beta"
+        versionCode = 36
+        versionName = "0.4.99-beta"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -129,7 +129,6 @@ dependencies {
     // Ktor HTTP + WebSocket client
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.cio)
-    implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.websockets)
     implementation(libs.ktor.client.logging)
     implementation(libs.ktor.client.content.negotiation)
@@ -149,7 +148,6 @@ dependencies {
     // Encrypted storage for wallet seed
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("io.coil-kt:coil-compose:2.5.0")
     implementation("io.coil-kt:coil-gif:2.5.0")

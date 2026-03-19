@@ -27,3 +27,27 @@
 ### Media & Navigation
 - **Image loading**: Added proper request headers so stricter CDNs no longer reject image requests with HTTP 403.
 - **Thread swipe-back with galleries**: Swiping right on the first image in a thread gallery now dismisses the thread instead of being consumed by the gallery pager.
+
+## Architecture — Performance & Networking
+
+### OkHttp Removal
+- **Replaced OkHttp with Ktor CIO engine**: `MyceliumHttpClient` now uses Ktor's native coroutine-based CIO engine instead of the OkHttp Ktor engine wrapper. Zero OkHttp code in our codebase.
+- **BlossomClient migrated to Ktor**: File uploads and deletes now use Ktor `HttpClient` with `ChannelProvider` streaming body instead of raw OkHttpClient.
+- **Nip05Verifier migrated to Ktor**: NIP-05 verification now uses the shared `MyceliumHttpClient` instance instead of a standalone OkHttpClient.
+- **Coil uses built-in OkHttp**: Coil 2.x's transitive OkHttp dependency handles image loading; we no longer manage an explicit OkHttpClient for it.
+- **Removed explicit OkHttp dependencies**: `ktor-client-okhttp` and `com.squareup.okhttp3:okhttp` removed from `build.gradle.kts` and `libs.versions.toml`.
+
+### SubscriptionMultiplexer — Centralized Subscription Gateway
+- **All 48+ subscription callsites now route through the multiplexer**: `RelayConnectionStateMachine` temporary subscription methods delegate to `SubscriptionMultiplexer` internally — no callsite changes needed.
+- **Global event deduplication**: Bounded LRU set (10K event IDs) prevents duplicate event processing across all subscriptions.
+- **Ref-counted subscription lifecycle**: Identical filters from multiple consumers share one relay subscription; CLOSE sent only when the last consumer unsubscribes.
+- **Per-relay filter map support**: Outbox model subscriptions (e.g. NoteCountsRepository) are first-class citizens in the multiplexer.
+- **EOSE-based one-shot support**: Auto-closing subscriptions with settle window and hard timeout, routed through the multiplexer.
+- **Relay URL passthrough**: Callbacks that need relay attribution (`WithRelay` variants) are fully supported.
+- **50ms debounced REQ flush**: Rapid subscribe/unsubscribe calls are batched to reduce relay churn.
+- **Account switch cleanup**: `mux.clear()` called on account switch to reset all dedup state, ref-counts, and merged subscriptions.
+
+### Subscription Efficiency
+- **EOSE-based one-shot subscriptions**: `PollResponseRepository` and `ProfileMetadataCache` fallback fetch converted from blind timeouts to EOSE-based auto-close — relay slots freed as soon as stored events are delivered.
+- **Removed dead CybinSubscriptionHandle**: Subscription handle class replaced by multiplexer-managed handles.
+- **Outbox feed priority upgrade**: OutboxFeedManager priority upgraded from LOW to NORMAL for better delivery reliability.

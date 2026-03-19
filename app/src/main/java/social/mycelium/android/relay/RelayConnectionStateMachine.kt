@@ -51,54 +51,17 @@ interface TemporarySubscriptionHandle {
     val isPaused: Boolean
 }
 
-private class CybinSubscriptionHandle(
-    private var subscription: CybinSubscription,
-    private val pool: CybinRelayPool,
-    private val onEvent: (Event) -> Unit
-) : TemporarySubscriptionHandle {
-    private val savedRelayFilters = subscription.relayFilters
-    private val savedPriority = subscription.priority
-    private var _isPaused = false
-    override val isPaused get() = _isPaused
-
-    override fun cancel() {
-        val relayUrls = subscription.relayFilters.keys.toSet()
-        subscription.close()
-        _isPaused = false
-        // Only disconnect relays that belonged to THIS subscription and are now idle.
-        // The pool-wide disconnectIdleRelays() would kill outbox relay connections
-        // that have their own active subscriptions.
-        pool.disconnectIdleRelays(relayUrls)
-    }
-
-    override fun pause() {
-        if (!_isPaused) {
-            subscription.close()
-            _isPaused = true
-        }
-    }
-
-    override fun resume() {
-        if (_isPaused) {
-            subscription = pool.subscribe(savedRelayFilters, savedPriority) { event, _ -> onEvent(event) }
-            pool.connect()
-            _isPaused = false
-        }
-    }
-}
-
-private object NoOpTemporaryHandle : TemporarySubscriptionHandle {
+internal object NoOpTemporaryHandle : TemporarySubscriptionHandle {
     override fun cancel() {}
     override fun pause() {}
     override fun resume() {}
     override val isPaused: Boolean get() = false
 }
 
-/** Current subscription config (relayUrls + kind1Filter + countsNoteIds) for idempotent feed change and UI. */
+/** Current subscription config (relayUrls + kind1Filter) for idempotent feed change and UI. */
 data class CurrentSubscription(
     val relayUrls: List<String>,
-    val kind1Filter: Filter?,
-    val countsNoteIds: Set<String> = emptySet()
+    val kind1Filter: Filter?
 )
 
 /**
@@ -114,9 +77,7 @@ sealed class RelayEvent {
         val customFilter: Filter? = null,
         val customOnEvent: ((Event) -> Unit)? = null,
         /** When set, used for kind-1 in default path (relay-aware); e.g. authors=followList for Following feed. */
-        val kind1Filter: Filter? = null,
-        /** When non-empty, subscribe to kind-7 and kind-9735 for these note IDs (reactions/zaps). */
-        val countsNoteIds: Set<String>? = null
+        val kind1Filter: Filter? = null
     ) : RelayEvent()
     object DisconnectRequested : RelayEvent()
 }
@@ -132,8 +93,7 @@ sealed class RelaySideEffect {
         val relayUrls: List<String>,
         val customFilter: Filter? = null,
         val customOnEvent: ((Event) -> Unit)? = null,
-        val kind1Filter: Filter? = null,
-        val countsNoteIds: Set<String>? = null
+        val kind1Filter: Filter? = null
     ) : RelaySideEffect()
     object DisconnectClient : RelaySideEffect()
 }
@@ -245,13 +205,12 @@ class RelayConnectionStateMachine {
         private set
 
     @Volatile private var pendingKind1FilterForRetry: Filter? = null
-    @Volatile private var pendingCountsNoteIdsForRetry: Set<String> = emptySet()
     @Volatile private var pendingWasSubscribe = false
 
     private var retryAttempt = 0
 
-    /** Current subscription (relayUrls + kind1Filter + countsNoteIds) for idempotent feed change and UI. */
-    private val _currentSubscription = MutableStateFlow(CurrentSubscription(emptyList(), null, emptySet()))
+    /** Current subscription (relayUrls + kind1Filter) for idempotent feed change and UI. */
+    private val _currentSubscription = MutableStateFlow(CurrentSubscription(emptyList(), null))
     val currentSubscription: StateFlow<CurrentSubscription> = _currentSubscription.asStateFlow()
 
     /** Per-relay status for UI (e.g. "3/5 relays"). Updated when we subscribe (Connecting) and when events arrive (Connected); Failed on ConnectFailed. */
@@ -268,7 +227,7 @@ class RelayConnectionStateMachine {
             on<RelayEvent.FeedChangeRequested> {
                 transitionTo(
                     RelayState.Subscribed,
-                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter, it.countsNoteIds)
+                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter)
                 )
             }
         }
@@ -293,7 +252,7 @@ class RelayConnectionStateMachine {
                 } else if (pendingWasSubscribe) {
                     transitionTo(
                         RelayState.Subscribed,
-                        RelaySideEffect.UpdateSubscription(urls, null, null, pendingKind1FilterForRetry, pendingCountsNoteIdsForRetry)
+                        RelaySideEffect.UpdateSubscription(urls, null, null, pendingKind1FilterForRetry)
                     )
                 } else {
                     transitionTo(RelayState.Connecting, RelaySideEffect.ConnectRelays(urls))
@@ -303,7 +262,7 @@ class RelayConnectionStateMachine {
                 // Retry by going to Subscribed with the requested config
                 transitionTo(
                     RelayState.Subscribed,
-                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter, it.countsNoteIds)
+                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter)
                 )
             }
             on<RelayEvent.DisconnectRequested> {
@@ -315,7 +274,7 @@ class RelayConnectionStateMachine {
             on<RelayEvent.FeedChangeRequested> {
                 transitionTo(
                     RelayState.Subscribed,
-                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter, it.countsNoteIds)
+                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter)
                 )
             }
             on<RelayEvent.DisconnectRequested> {
@@ -327,7 +286,7 @@ class RelayConnectionStateMachine {
             on<RelayEvent.FeedChangeRequested> {
                 transitionTo(
                     RelayState.Subscribed,
-                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter, it.countsNoteIds)
+                    RelaySideEffect.UpdateSubscription(it.relayUrls, it.customFilter, it.customOnEvent, it.kind1Filter)
                 )
             }
             on<RelayEvent.ConnectFailed> {
@@ -361,14 +320,12 @@ class RelayConnectionStateMachine {
                     is RelaySideEffect.UpdateSubscription -> {
                         pendingRelayUrlsForRetry = effect.relayUrls
                         pendingKind1FilterForRetry = effect.kind1Filter
-                        pendingCountsNoteIdsForRetry = effect.countsNoteIds ?: emptySet()
                         pendingWasSubscribe = true
                         executeUpdateSubscription(
                             effect.relayUrls,
                             effect.customFilter,
                             effect.customOnEvent,
-                            effect.kind1Filter,
-                            effect.countsNoteIds
+                            effect.kind1Filter
                         )
                     }
                     is RelaySideEffect.DisconnectClient -> {
@@ -437,8 +394,7 @@ class RelayConnectionStateMachine {
         relayUrls: List<String>,
         customFilter: Filter? = null,
         customOnEvent: ((Event) -> Unit)? = null,
-        kind1Filter: Filter? = null,
-        countsNoteIds: Set<String>? = null
+        kind1Filter: Filter? = null
     ) {
         scope.launch {
             android.os.Trace.beginSection("Relay.updateSubscription(${relayUrls.size})")
@@ -477,8 +433,7 @@ class RelayConnectionStateMachine {
                     )
                     currentSubscriptionRelayUrls = effectiveRelayUrls
                     currentKind1Filter = null
-                    currentCountsNoteIds = emptySet()
-                    _currentSubscription.value = CurrentSubscription(effectiveRelayUrls, null, emptySet())
+                    _currentSubscription.value = CurrentSubscription(effectiveRelayUrls, null)
                     Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (custom filter)")
                 } else {
                     val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
@@ -503,15 +458,7 @@ class RelayConnectionStateMachine {
                     } else {
                         Filter(kinds = listOf(30023), limit = 50, since = sevenDaysAgo)
                     }
-                    val countsIds = countsNoteIds?.takeIf { it.isNotEmpty() } ?: emptySet()
-                    val countsFilters = if (countsIds.isNotEmpty()) {
-                        val noteIdList = countsIds.take(200).toList()
-                        listOf(
-                            Filter(kinds = listOf(7), tags = mapOf("e" to noteIdList)),
-                            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIdList))
-                        )
-                    } else emptyList()
-                    val allFilters = listOf(filterKind1, filterKind6, filterKind11, filterKind1011, filterKind30311, filterKind30023) + countsFilters
+                    val allFilters = listOf(filterKind1, filterKind6, filterKind11, filterKind1011, filterKind30311, filterKind30023)
                     currentSubId = CybinUtils.randomChars(10)
                     val subId = currentSubId!!
                     val relayFilterMap = effectiveRelayUrls.associateWith { allFilters }
@@ -547,13 +494,12 @@ class RelayConnectionStateMachine {
                         }
                     }
                     val mode = if (kind1Filter != null) "following (authors filter)" else "global"
-                    Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-11${if (countsIds.isNotEmpty()) " + counts(${countsIds.size})" else ""}, $mode)")
+                    Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-6 + kind-11 + kind-30023, $mode)")
                 }
                 val previousRelayUrls = currentSubscriptionRelayUrls
                 currentSubscriptionRelayUrls = effectiveRelayUrls
                 currentKind1Filter = kind1Filter
-                currentCountsNoteIds = countsNoteIds?.toSet() ?: emptySet()
-                _currentSubscription.value = CurrentSubscription(effectiveRelayUrls, kind1Filter, currentCountsNoteIds)
+                _currentSubscription.value = CurrentSubscription(effectiveRelayUrls, kind1Filter)
                 _connectionError.value = null
                 retryAttempt = 0
                 relayPool.connect(priorityRelayUrls)
@@ -588,7 +534,6 @@ class RelayConnectionStateMachine {
     /** Last relay set and kind-1 filter used for subscription; preserved so Topics does not overwrite Following mode. */
     @Volatile private var currentSubscriptionRelayUrls: List<String> = emptyList()
     @Volatile private var currentKind1Filter: Filter? = null
-    @Volatile private var currentCountsNoteIds: Set<String> = emptySet()
 
     /** Relay URLs that should be connected first (no jitter/cooldown). Typically outbox relays. */
     @Volatile private var priorityRelayUrls: Set<String> = emptySet()
@@ -616,10 +561,10 @@ class RelayConnectionStateMachine {
      *
      * Strategy:
      * 1. Every 2 min: check which subscription relays have dead sockets → reconnect only those.
-     *    OkHttp's 30s ping/pong already detects most dead sockets, but this catches any that
-     *    slipped through (e.g. pool-level reconnect attempts exhausted).
+     *    Ktor CIO's 30s WebSocket ping/pong already detects most dead sockets, but this catches
+     *    any that slipped through (e.g. pool-level reconnect attempts exhausted).
      * 2. Every 30 min (no events at all): full reconnect as last-resort fallback for half-open
-     *    sockets that OkHttp ping didn't detect.
+     *    sockets that ping didn't detect.
      *
      * This avoids the old behavior of tearing down all connections every 5 minutes
      * just because nobody posted (e.g. overnight), which wasted battery and relay goodwill.
@@ -722,8 +667,7 @@ class RelayConnectionStateMachine {
                 mainFeedSubscription = null
                 currentSubscriptionRelayUrls = emptyList()
                 currentKind1Filter = null
-                currentCountsNoteIds = emptySet()
-                _currentSubscription.value = CurrentSubscription(emptyList(), null, emptySet())
+                _currentSubscription.value = CurrentSubscription(emptyList(), null)
                 _perRelayState.value = emptyMap()
                 relayPool.disconnect()
                 Log.d(TAG, "Disconnected from all relays")
@@ -752,28 +696,16 @@ class RelayConnectionStateMachine {
     /**
      * Request feed with optional kind-1 filter (e.g. authors=followList for Following).
      * Uses relay-aware subscription so note.relayUrl is set. Pass null for global feed.
-     * [countsNoteIds] when non-empty adds kind-7 and kind-9735 filters for those note IDs.
      * Skips transition if subscription is unchanged (idempotent).
      */
-    fun requestFeedChange(relayUrls: List<String>, kind1Filter: Filter?, countsNoteIds: Set<String>? = null) {
+    fun requestFeedChange(relayUrls: List<String>, kind1Filter: Filter?) {
         if (relayUrls.isEmpty()) return
         val cur = currentSubscriptionRelayUrls
-        val counts = countsNoteIds?.toSet() ?: emptySet()
-        if (cur.sorted() == relayUrls.sorted() && kind1FiltersEqual(kind1Filter, currentKind1Filter) && currentCountsNoteIds == counts && isSubscriptionActive()) {
+        if (cur.sorted() == relayUrls.sorted() && kind1FiltersEqual(kind1Filter, currentKind1Filter) && isSubscriptionActive()) {
             Log.d(TAG, "Subscription unchanged (${relayUrls.size} relays) and active, skipping")
             return
         }
-        stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter, counts.takeIf { it.isNotEmpty() }))
-    }
-
-    /**
-     * Update only the counts subscription (kind-7, kind-9735) for the given note IDs.
-     * Uses current relay URLs and kind-1 filter. Call when feed note IDs change (e.g. from NoteCountsRepository).
-     */
-    fun requestFeedChangeWithCounts(countsNoteIds: Set<String>) {
-        val cur = _currentSubscription.value
-        if (cur.relayUrls.isEmpty()) return
-        requestFeedChange(cur.relayUrls, cur.kind1Filter, countsNoteIds)
+        stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter))
     }
 
     /**
@@ -789,7 +721,7 @@ class RelayConnectionStateMachine {
 
     /** Request feed with custom filter (e.g. author notes); replaces combined subscription while active. */
     fun requestFeedChange(relayUrls: List<String>, filter: Filter, onEvent: (Event) -> Unit) {
-        stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, filter, onEvent, null, null))
+        stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, filter, onEvent, null))
     }
 
     /** Request full disconnect (e.g. on screen exit or app shutdown). */
@@ -809,7 +741,7 @@ class RelayConnectionStateMachine {
         // The new account's ensureSubscriptionToNotes() will re-register it.
         resumeSubscriptionProvider = null
         currentSubscriptionRelayUrls = emptyList()
-        _currentSubscription.value = CurrentSubscription(emptyList(), null, emptySet())
+        _currentSubscription.value = CurrentSubscription(emptyList(), null)
         // Clear NIP-42 auth tracking immediately (signer will be re-set by caller)
         nip42AuthHandler.setSigner(null)
         // Clear NIP-65 so stale relay lists from the previous user don't persist
@@ -818,6 +750,8 @@ class RelayConnectionStateMachine {
         social.mycelium.android.repository.NotesRepository.getInstance().clearNotes()
         // Clear notification subscription handle so it can be re-created after reconnect
         social.mycelium.android.repository.NotificationsRepository.stopSubscription()
+        // Clear all multiplexed subscriptions (dedup state, ref-counts, merged subs)
+        mux.clear()
     }
 
     /** User- or pull-to-refresh–triggered retry when in ConnectFailed. Resets backoff and sends RetryRequested. */
@@ -884,7 +818,7 @@ class RelayConnectionStateMachine {
         // earlier offline period.
         retryAttempt = 0
         Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (${effectiveUrls.size} healthy, following=${kind1Filter != null})")
-        stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter, null))
+        stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter))
     }
 
     /**
@@ -897,9 +831,18 @@ class RelayConnectionStateMachine {
         return relayUrls.filter { !cache.shouldSkipRelay(it) }
     }
 
+    // ── Temporary subscriptions (all routed through SubscriptionMultiplexer) ──────
+    //
+    // Every temporary subscription now goes through the multiplexer for:
+    // • Global event deduplication across all subscriptions
+    // • Ref-counted subscription lifecycle (identical filters share one relay sub)
+    // • Centralized clear() on account switch
+    // • Debounced REQ batching (50ms)
+
+    private val mux: SubscriptionMultiplexer get() = SubscriptionMultiplexer.getInstance()
+
     /**
-     * One-off subscription using the shared relay pool. Use for thread replies so we don't open
-     * duplicate connections to the same relays. Call handle.cancel() when done (thread closed, timeout).
+     * One-off subscription using the shared relay pool. Call handle.cancel() when done.
      */
     fun requestTemporarySubscription(
         relayUrls: List<String>,
@@ -909,19 +852,11 @@ class RelayConnectionStateMachine {
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty()) return NoOpTemporaryHandle
-        val wrappedOnEvent: (Event) -> Unit = onEvent
-        val subscription = relayPool.subscribe(
-            relayUrls = usable,
-            filters = listOf(filter),
-            priority = priority,
-        ) { event, _ -> wrappedOnEvent(event) }
-        relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+        return mux.subscribeCallback(usable, listOf(filter), priority, onEvent)
     }
 
     /**
      * One-off subscription with multiple filters (e.g. kind-7 + kind-9735 for counts).
-     * All filters are sent to every relay in the list.
      */
     fun requestTemporarySubscription(
         relayUrls: List<String>,
@@ -931,19 +866,11 @@ class RelayConnectionStateMachine {
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
-        val wrappedOnEvent: (Event) -> Unit = onEvent
-        val subscription = relayPool.subscribe(
-            relayUrls = usable,
-            filters = filters,
-            priority = priority,
-        ) { event, _ -> wrappedOnEvent(event) }
-        relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+        return mux.subscribeCallback(usable, filters, priority, onEvent)
     }
 
     /**
      * One-off subscription that passes the source relay URL to the callback.
-     * Use when the caller needs to know which relay delivered each event (e.g. for RelayOrbs).
      */
     fun requestTemporarySubscriptionWithRelay(
         relayUrls: List<String>,
@@ -953,14 +880,7 @@ class RelayConnectionStateMachine {
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty()) return NoOpTemporaryHandle
-        val wrappedOnEvent: (Event) -> Unit = { event -> onEvent(event, "") }
-        val subscription = relayPool.subscribe(
-            relayUrls = usable,
-            filters = listOf(filter),
-            priority = priority,
-        ) { event, relayUrl -> onEvent(event, relayUrl) }
-        relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+        return mux.subscribeCallbackWithRelay(usable, listOf(filter), priority, onEvent)
     }
 
     /**
@@ -974,67 +894,38 @@ class RelayConnectionStateMachine {
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
-        val wrappedOnEvent: (Event) -> Unit = { event -> onEvent(event, "") }
-        val subscription = relayPool.subscribe(
-            relayUrls = usable,
-            filters = filters,
-            priority = priority,
-        ) { event, relayUrl -> onEvent(event, relayUrl) }
-        relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+        return mux.subscribeCallbackWithRelay(usable, filters, priority, onEvent)
     }
 
     /**
      * One-off subscription with per-relay filter maps (outbox model).
-     * Each relay gets its own set of filters based on which notes it knows about.
-     * Used by NoteCountsRepository to send kind-7/9735 filters to the relays
-     * where each note was actually seen.
      */
     fun requestTemporarySubscriptionPerRelay(
         relayFilters: Map<String, List<Filter>>,
         priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
         onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
-        val filtered = relayFilters.filterKeys { !filterUsableRelays(listOf(it)).isEmpty() }
+        val filtered = relayFilters.filterKeys { filterUsableRelays(listOf(it)).isNotEmpty() }
         if (filtered.isEmpty()) return NoOpTemporaryHandle
-        val wrappedOnEvent: (Event) -> Unit = onEvent
-        val subscription = relayPool.subscribe(
-            relayFilters = filtered,
-            priority = priority,
-        ) { event, _ -> wrappedOnEvent(event) }
-        relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+        return mux.subscribePerRelayCallback(filtered, priority, onEvent)
     }
 
     /**
-     * Per-relay filter map subscription that passes the source relay URL to the callback.
-     * Use when the caller needs relay attribution (e.g. OutboxFeedManager for relay orbs).
+     * Per-relay filter map subscription with relay URL passthrough.
      */
     fun requestTemporarySubscriptionPerRelayWithRelay(
         relayFilters: Map<String, List<Filter>>,
         priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
         onEvent: (Event, String) -> Unit,
     ): TemporarySubscriptionHandle {
-        val filtered = relayFilters.filterKeys { !filterUsableRelays(listOf(it)).isEmpty() }
+        val filtered = relayFilters.filterKeys { filterUsableRelays(listOf(it)).isNotEmpty() }
         if (filtered.isEmpty()) return NoOpTemporaryHandle
-        val wrappedOnEvent: (Event) -> Unit = { event -> onEvent(event, "") }
-        val subscription = relayPool.subscribe(
-            relayFilters = filtered,
-            priority = priority,
-        ) { event, relayUrl -> onEvent(event, relayUrl) }
-        relayPool.connect()
-        return CybinSubscriptionHandle(subscription, relayPool, wrappedOnEvent)
+        return mux.subscribePerRelayCallbackWithRelay(filtered, priority, onEvent)
     }
 
     /**
      * EOSE-based one-shot subscription: opens REQ, collects events until all relays send EOSE,
      * then auto-CLOSEs after a short settle window. **No timers, no slot leaks.**
-     *
-     * Use for: bookmarks, mute list, contact list, profile metadata, anchor subs — anything
-     * that fetches stored data and doesn't need to stay open for live events.
-     *
-     * @param settleMs After EOSE, wait this long for stragglers before closing (default 500ms).
-     * @param maxWaitMs Hard timeout if EOSE never arrives (default 8s). Prevents permanent slot leak.
      */
     fun requestOneShotSubscription(
         relayUrls: List<String>,
@@ -1046,42 +937,7 @@ class RelayConnectionStateMachine {
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty()) return NoOpTemporaryHandle
-        val subscription = relayPool.subscribe(
-            relayUrls = usable,
-            filters = listOf(filter),
-            priority = priority,
-        ) { event, _ -> onEvent(event) }
-        relayPool.connect()
-        val handle = CybinSubscriptionHandle(subscription, relayPool, onEvent)
-
-        // Auto-close on EOSE + settle
-        val subId = subscription.id
-        val eoseRelays = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-        val targetRelayCount = usable.size
-        // Holder so the listener can remove itself from inside the callback
-        val listenerHolder = arrayOfNulls<com.example.cybin.relay.RelayConnectionListener>(1)
-        val eoseListener = object : com.example.cybin.relay.RelayConnectionListener {
-            override fun onEose(url: String, subscriptionId: String) {
-                if (subscriptionId != subId) return
-                eoseRelays.add(url)
-                if (eoseRelays.size >= targetRelayCount) {
-                    scope.launch {
-                        delay(settleMs)
-                        handle.cancel()
-                        listenerHolder[0]?.let { relayPool.removeListener(it) }
-                    }
-                }
-            }
-        }
-        listenerHolder[0] = eoseListener
-        relayPool.addListener(eoseListener)
-        // Hard timeout fallback
-        scope.launch {
-            delay(maxWaitMs)
-            handle.cancel()
-            relayPool.removeListener(eoseListener)
-        }
-        return handle
+        return mux.subscribeOneShotCallback(usable, listOf(filter), priority, settleMs, maxWaitMs, onEvent)
     }
 
     /**
@@ -1097,39 +953,7 @@ class RelayConnectionStateMachine {
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
-        val subscription = relayPool.subscribe(
-            relayUrls = usable,
-            filters = filters,
-            priority = priority,
-        ) { event, _ -> onEvent(event) }
-        relayPool.connect()
-        val handle = CybinSubscriptionHandle(subscription, relayPool, onEvent)
-
-        val subId = subscription.id
-        val eoseRelays = java.util.Collections.synchronizedSet(mutableSetOf<String>())
-        val targetRelayCount = usable.size
-        val listenerHolder = arrayOfNulls<com.example.cybin.relay.RelayConnectionListener>(1)
-        val eoseListener = object : com.example.cybin.relay.RelayConnectionListener {
-            override fun onEose(url: String, subscriptionId: String) {
-                if (subscriptionId != subId) return
-                eoseRelays.add(url)
-                if (eoseRelays.size >= targetRelayCount) {
-                    scope.launch {
-                        delay(settleMs)
-                        handle.cancel()
-                        listenerHolder[0]?.let { relayPool.removeListener(it) }
-                    }
-                }
-            }
-        }
-        listenerHolder[0] = eoseListener
-        relayPool.addListener(eoseListener)
-        scope.launch {
-            delay(maxWaitMs)
-            handle.cancel()
-            relayPool.removeListener(eoseListener)
-        }
-        return handle
+        return mux.subscribeOneShotCallback(usable, filters, priority, settleMs, maxWaitMs, onEvent)
     }
 
     companion object {

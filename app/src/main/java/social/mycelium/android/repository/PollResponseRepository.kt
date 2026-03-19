@@ -78,13 +78,14 @@ object PollResponseRepository {
                     limit = 500
                 )
                 val stateMachine = RelayConnectionStateMachine.getInstance()
-                val handle = stateMachine.requestTemporarySubscription(
-                    relayUrls, filter, priority = SubscriptionPriority.LOW
+                stateMachine.requestOneShotSubscription(
+                    relayUrls, filter, priority = SubscriptionPriority.LOW,
+                    settleMs = 500L, maxWaitMs = FETCH_TIMEOUT_MS
                 ) { event ->
-                    if (event.kind != RESPONSE_KIND) return@requestTemporarySubscription
+                    if (event.kind != RESPONSE_KIND) return@requestOneShotSubscription
                     val voterPubkey = event.pubKey
                     // Only count first response per voter (prevent double-voting)
-                    if (!votersSeen.add(voterPubkey)) return@requestTemporarySubscription
+                    if (!votersSeen.add(voterPubkey)) return@requestOneShotSubscription
 
                     // Parse response tags: ["response", "<option_code>"]
                     val responses = event.tags
@@ -97,8 +98,8 @@ object PollResponseRepository {
                         }
                     }
                 }
-                delay(FETCH_TIMEOUT_MS)
-                handle.cancel()
+                // Wait for EOSE-based auto-close (maxWaitMs + buffer)
+                delay(FETCH_TIMEOUT_MS + 500L)
 
                 val tally = PollTally(
                     pollId = pollId,

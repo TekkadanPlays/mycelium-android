@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import social.mycelium.android.data.Author
 import social.mycelium.android.relay.RelayConnectionStateMachine
-import social.mycelium.android.relay.TemporarySubscriptionHandle
 import com.example.cybin.relay.SubscriptionPriority
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -430,8 +429,9 @@ class ProfileMetadataCache {
             Log.d(TAG, "Kind-0 fallback: ${stillMissing.size} missing, trying ${fallback.size} outbox relays")
             val fbFilter = Filter(kinds = listOf(0), authors = stillMissing, limit = stillMissing.size)
             val fbReceived = AtomicInteger(0)
-            val fbHandle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(fallback, fbFilter, priority = SubscriptionPriority.LOW) { event: Event ->
+            RelayConnectionStateMachine.getInstance()
+                .requestOneShotSubscription(fallback, fbFilter, priority = SubscriptionPriority.LOW,
+                    settleMs = 300L, maxWaitMs = KIND0_FETCH_TIMEOUT_MS) { event: Event ->
                     if (event.kind == 0) {
                         val pk = event.pubKey
                         val ct = event.content
@@ -444,8 +444,7 @@ class ProfileMetadataCache {
                         }
                     }
                 }
-            delay(KIND0_FETCH_TIMEOUT_MS)
-            fbHandle.cancel()
+            delay(KIND0_FETCH_TIMEOUT_MS + 500L)
             Log.d(TAG, "Kind-0 fallback done: ${fbReceived.get()}/${stillMissing.size} from ${fallback.size} outbox relays")
         }
     }

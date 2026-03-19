@@ -6,17 +6,23 @@ import android.util.Base64
 import android.util.Log
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.request.delete
+import io.ktor.client.request.header
+import io.ktor.client.request.post
+import io.ktor.client.request.put
+import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.contentType
+import io.ktor.http.isSuccess
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
-import okio.source
 import org.json.JSONObject
 import java.io.InputStream
 import java.security.MessageDigest
-import java.util.concurrent.TimeUnit
 
 /**
  * Blossom (BUD-01/02/04) HTTP blob storage client for media uploads.
@@ -33,11 +39,16 @@ import java.util.concurrent.TimeUnit
  * @see <a href="https://github.com/vitorpamplona/amethyst">Amethyst</a>
  */
 class BlossomClient(
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+    private val client: HttpClient = HttpClient(CIO) {
+        engine {
+            requestTimeout = 120_000
+        }
+        install(HttpTimeout) {
+            requestTimeoutMillis = 120_000
+            connectTimeoutMillis = 30_000
+            socketTimeoutMillis = 120_000
+        }
+    }
 ) {
 
     companion object {
@@ -147,47 +158,29 @@ class BlossomClient(
         val authHeader = encodeAuthHeader(authEvent)
         Log.d(TAG, "Auth event signed: ${authEvent.id.take(8)}")
 
-        // Helper: create a streaming RequestBody from the URI
-        fun newRequestBody(): RequestBody {
-            val mediaType = effectiveMime.toMediaTypeOrNull()
-            val contentLength = try {
-                context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
-            } catch (_: Exception) { -1L }
-
-            return object : RequestBody() {
-                override fun contentType() = mediaType
-                override fun contentLength() = contentLength
-                override fun writeTo(sink: okio.BufferedSink) {
-                    context.contentResolver.openInputStream(uri)?.use { source ->
-                        sink.writeAll(source.source())
-                    }
-                }
-            }
-        }
+        // Helper: read file bytes from URI for upload body
+        val fileBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: throw Exception("Cannot read file")
+        val contentType = ContentType.parse(effectiveMime)
 
         var lastError = ""
 
         // Strategy 1: PUT /upload (Amethyst alignment)
         try {
-            val request = Request.Builder()
-                .url("$cleanServer/upload")
-                .put(newRequestBody())
-                .header("Authorization", authHeader)
-                .header("Content-Type", effectiveMime)
-                .header("Content-Length", size.toString())
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: throw Exception("Empty response body")
+            val response = client.put("$cleanServer/upload") {
+                header("Authorization", authHeader)
+                header("Content-Length", size.toString())
+                contentType(contentType)
+                setBody(fileBytes)
+            }
+            if (response.status.isSuccess()) {
+                val body = response.bodyAsText()
                 val result = parseUploadResponse(body, hash)
                 Log.d(TAG, "Upload success (PUT /upload): ${result.url}")
                 return@withContext result
             } else {
-                val errorBody = response.body?.string() ?: "No body"
-                lastError = "PUT /upload failed (${response.code}): $errorBody"
+                lastError = "PUT /upload failed (${response.status.value}): ${response.bodyAsText()}"
                 Log.w(TAG, lastError)
-                response.close()
             }
         } catch (e: Exception) {
             lastError = "PUT /upload error: ${e.message}"
@@ -196,21 +189,16 @@ class BlossomClient(
 
         // Strategy 2: POST /upload (some servers prefer POST)
         try {
-            val request = Request.Builder()
-                .url("$cleanServer/upload")
-                .post(newRequestBody())
-                .header("Authorization", authHeader)
-                .header("Content-Type", effectiveMime)
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: throw Exception("Empty response body")
+            val response = client.post("$cleanServer/upload") {
+                header("Authorization", authHeader)
+                contentType(contentType)
+                setBody(fileBytes)
+            }
+            if (response.status.isSuccess()) {
+                val body = response.bodyAsText()
                 val result = parseUploadResponse(body, hash)
                 Log.d(TAG, "Upload success (POST /upload): ${result.url}")
                 return@withContext result
-            } else {
-                response.close()
             }
         } catch (e: Exception) {
             Log.w(TAG, "POST /upload error: ${e.message}")
@@ -218,25 +206,20 @@ class BlossomClient(
 
         // Strategy 3: PUT /media (BUD spec alternative)
         try {
-            val request = Request.Builder()
-                .url("$cleanServer/media")
-                .put(newRequestBody())
-                .header("Authorization", authHeader)
-                .header("Content-Type", effectiveMime)
-                .header("Content-Length", size.toString())
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
-                val body = response.body?.string() ?: throw Exception("Empty response body")
+            val response = client.put("$cleanServer/media") {
+                header("Authorization", authHeader)
+                header("Content-Length", size.toString())
+                contentType(contentType)
+                setBody(fileBytes)
+            }
+            if (response.status.isSuccess()) {
+                val body = response.bodyAsText()
                 val result = parseUploadResponse(body, hash)
                 Log.d(TAG, "Upload success (PUT /media): ${result.url}")
                 return@withContext result
             } else {
-                val errorBody = response.body?.string() ?: "No body"
-                lastError = "PUT /media failed (${response.code}): $errorBody"
+                lastError = "PUT /media failed (${response.status.value}): ${response.bodyAsText()}"
                 Log.w(TAG, lastError)
-                response.close()
             }
         } catch (e: Exception) {
             lastError = "PUT /media error: ${e.message}"
@@ -267,34 +250,24 @@ class BlossomClient(
 
         // Strategy 1: DELETE /<hash> (Standard Blossom)
         try {
-            val request = Request.Builder()
-                .url("$cleanServer/$hash")
-                .delete()
-                .header("Authorization", authHeader)
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
+            val response = client.delete("$cleanServer/$hash") {
+                header("Authorization", authHeader)
+            }
+            if (response.status.isSuccess()) {
                 Log.d(TAG, "Delete success: ${hash.take(12)}")
                 return@withContext true
             }
-            response.close()
         } catch (_: Exception) { }
 
         // Strategy 2: DELETE /media/<hash>
         try {
-            val request = Request.Builder()
-                .url("$cleanServer/media/$hash")
-                .delete()
-                .header("Authorization", authHeader)
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (response.isSuccessful) {
+            val response = client.delete("$cleanServer/media/$hash") {
+                header("Authorization", authHeader)
+            }
+            if (response.status.isSuccess()) {
                 Log.d(TAG, "Delete success (legacy): ${hash.take(12)}")
                 return@withContext true
             }
-            response.close()
         } catch (_: Exception) { }
 
         Log.w(TAG, "Delete failed for hash: ${hash.take(12)}")

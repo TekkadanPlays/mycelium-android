@@ -419,6 +419,11 @@ class OutboxFeedManager private constructor() {
         _phase.value = Phase.ACTIVE
         Log.d(TAG, "Outbox subscriptions active: ${relayFilters.size} relays")
 
+        // Batch preload NIP-11 for all outbox relay URLs so relay orb icons
+        // are ready when notes arrive (avoids per-orb waterfall fetch on scroll).
+        social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+            ?.preloadRelayInfo(relayFilters.keys.toList(), scope)
+
         // Log top 5 relays for diagnostics
         ranked.take(5).forEach { (url, authors) ->
             val stats = RelayDeliveryTracker.getStats()[url]

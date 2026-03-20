@@ -389,7 +389,7 @@ fun TopicsScreen(
     val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
     val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
     val troubleRelayCount = remember(flaggedRelays, blockedRelays) {
-        (flaggedRelays + blockedRelays).distinct().size
+        (flaggedRelays - blockedRelays).size
     }
 
     GlobalSidebar(

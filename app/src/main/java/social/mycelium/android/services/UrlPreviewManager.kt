@@ -5,6 +5,8 @@ import social.mycelium.android.data.UrlPreviewInfo
 import social.mycelium.android.utils.UrlDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -65,38 +67,45 @@ class UrlPreviewManager(
      * Enrich the top N notes with URL previews. Returns a map of noteId → previews.
      * Uses cache for already-fetched URLs so re-runs after cancellation are fast.
      * Only processes notes that have non-media URLs and don't already have previews.
+     *
+     * Notes are processed **concurrently** (up to [limit] in parallel) so a feed page
+     * with 20 link-containing notes doesn't wait 20 × network-RTT sequentially.
      */
     suspend fun enrichTopNotes(notes: List<Note>, limit: Int = 20): Map<String, List<UrlPreviewInfo>> = withContext(Dispatchers.IO) {
-        val result = mutableMapOf<String, List<UrlPreviewInfo>>()
-        var processed = 0
-        for (note in notes) {
-            if (processed >= limit) break
+        // Identify notes that need enrichment (up to limit)
+        val candidates = notes.mapNotNull { note ->
             val urls = UrlDetector.findUrls(note.content)
             val embeddedMedia = note.mediaUrls.toSet()
             val linkUrls = urls.filter { it !in embeddedMedia && !UrlDetector.isImageUrl(it) && !UrlDetector.isVideoUrl(it) }.take(2)
-            if (linkUrls.isEmpty()) continue
+            if (linkUrls.isEmpty()) null else note to linkUrls
+        }.take(limit)
 
-            processed++
-            val previews = mutableListOf<UrlPreviewInfo>()
-            for (url in linkUrls) {
-                try {
-                    val cached = urlPreviewCache.get(url)
-                    if (cached != null) {
-                        previews.add(cached)
-                    } else {
-                        val state = urlPreviewService.fetchPreview(url)
-                        if (state is social.mycelium.android.data.UrlPreviewState.Loaded) {
-                            urlPreviewCache.put(url, state.previewInfo)
-                            previews.add(state.previewInfo)
-                        }
+        if (candidates.isEmpty()) return@withContext emptyMap()
+
+        // Fetch all notes' previews concurrently
+        coroutineScope {
+            val deferreds = candidates.map { (note, linkUrls) ->
+                async {
+                    val previews = mutableListOf<UrlPreviewInfo>()
+                    for (url in linkUrls) {
+                        try {
+                            val cached = urlPreviewCache.get(url)
+                            if (cached != null) {
+                                previews.add(cached)
+                            } else {
+                                val state = urlPreviewService.fetchPreview(url)
+                                if (state is social.mycelium.android.data.UrlPreviewState.Loaded) {
+                                    urlPreviewCache.put(url, state.previewInfo)
+                                    previews.add(state.previewInfo)
+                                }
+                            }
+                        } catch (_: Exception) { }
                     }
-                } catch (_: Exception) { }
+                    if (previews.isNotEmpty()) note.id to previews else null
+                }
             }
-            if (previews.isNotEmpty()) {
-                result[note.id] = previews
-            }
+            deferreds.mapNotNull { it.await() }.toMap()
         }
-        result
     }
     
     /**

@@ -16,7 +16,11 @@ import kotlinx.coroutines.launch
 data class PendingNotificationNav(
     val noteId: String,
     val rootNoteId: String? = null,
-    val notifType: String? = null
+    val notifType: String? = null,
+    /** Hex pubkey of the account that received this notification.
+     *  When non-null and different from the active account, triggers an account switch
+     *  so the user views the notification "as the account that received it". */
+    val accountPubkey: String? = null,
 )
 
 /** Thread to open as overlay on the notifications screen (set by deep-link, consumed by composable). */

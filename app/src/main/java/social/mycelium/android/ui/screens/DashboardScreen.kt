@@ -651,6 +651,12 @@ private fun DashboardFeedContent(
         val stableOnNoteClick = remember<(Note) -> Unit> {{ n -> onThreadClick(n, null) }}
         val stableOnLike = remember<(String) -> Unit> {{ noteId -> viewModel.toggleLike(noteId) }}
         val stableOnShare = remember<(String) -> Unit> {{ _ -> }}
+        val stableOnZap = remember<(Note, Long) -> Unit> {{ n, amount ->
+            val err = accountStateViewModel.sendZap(n, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+        }}
+        val stableOnComment = remember<(Note) -> Unit> {{ n -> onThreadClick(n, null) }}
+        val stableOnSeeAllReactions = remember<(Note) -> Unit> {{ n -> onSeeAllReactions(n) }}
         val stableOnCustomZapSend = remember<(Note, Long, social.mycelium.android.repository.ZapType, String) -> Unit> {{ n, amount, zapType, msg ->
             val err = accountStateViewModel.sendZap(n, amount, zapType, msg)
             if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
@@ -751,10 +757,7 @@ private fun DashboardFeedContent(
                         onBoost = stableOnBoost,
                         onQuote = stableOnQuote,
                         onFork = stableOnFork,
-                        onZap = { _, amount ->
-                            val err = accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
-                            if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                        },
+                        onZap = { _, amount -> stableOnZap(note, amount) },
                         onCustomZapSend = stableOnCustomZapSend,
                         onZapSettings = onShowZapConfig,
                         onDelete = if (currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == currentUserHex) stableOnDelete else null,
@@ -779,7 +782,7 @@ private fun DashboardFeedContent(
                     note = note,
                     onLike = stableOnLike,
                     onShare = stableOnShare,
-                    onComment = { _ -> onThreadClick(note, null) },
+                    onComment = { _ -> stableOnComment(note) },
                     onReact = stableOnReact,
                     onBoost = stableOnBoost,
                     onQuote = stableOnQuote,
@@ -789,10 +792,7 @@ private fun DashboardFeedContent(
                     onImageTap = onImageTap,
                     onOpenImageViewer = onOpenImageViewer,
                     onVideoClick = onVideoClick,
-                    onZap = { _, amount ->
-                        val err = accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
-                        if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
-                    },
+                    onZap = { _, amount -> stableOnZap(note, amount) },
                     onCustomZapSend = stableOnCustomZapSend,
                     onZapSettings = onShowZapConfig,
                     shouldCloseZapMenus = shouldCloseZapMenus,
@@ -819,7 +819,7 @@ private fun DashboardFeedContent(
                     overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
                     overrideCustomEmojiUrls = counts?.customEmojiUrls,
                     countsByNoteId = countsByNoteId,
-                    onSeeAllReactions = { onSeeAllReactions(note) },
+                    onSeeAllReactions = { stableOnSeeAllReactions(note) },
                     showHashtagsSection = false,
                     initialMediaPage = mediaPageForNote(note.id),
                     onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
@@ -1150,15 +1150,23 @@ fun DashboardScreen(
     // Sidebar relay/category selection is handled by setDisplayFilterOnly in onItemClick — NOT here.
     // Key on allCategoryRelayUrls (stable URL list) instead of relayCategories (object list that
     // changes on every NIP-11 info update, causing cascading re-fires that delay feed loading).
+    // Gated on userStateReady from StartupOrchestrator to ensure settings + follow list are
+    // applied before the feed renders (prevents 8s of wrong UI on fresh install).
+    val userStateReady by social.mycelium.android.repository.StartupOrchestrator.userStateReady.collectAsState()
     LaunchedEffect(
         currentAccount,
         subscribedCategoryRelayUrls,
         relayUiState.outboxRelays,
         homeFeedState.isGlobal,
-        onboardingComplete
+        onboardingComplete,
+        userStateReady
     ) {
         if (!onboardingComplete) return@LaunchedEffect
         if (subscribedCategoryRelayUrls.isEmpty() && relayUiState.outboxRelays.isEmpty()) return@LaunchedEffect
+        // Wait for Phase 0 (settings) + Phase 1 (follow list) before firing the feed subscription.
+        // On returning users (settings already applied), userStateReady is set immediately by skipPhase0().
+        // On fresh install, this blocks until settings are fetched or timeout (8s max).
+        if (!userStateReady) return@LaunchedEffect
         // Debounce: keys settle in rapid succession (visibility, categories, outbox);
         // wait briefly so we only fire the subscription once.
         kotlinx.coroutines.delay(150)
@@ -1182,6 +1190,9 @@ fun DashboardScreen(
             // Always run subscription path so connections resume after app close (notes may be from cache).
             // When notes are already present, ensureSubscriptionToNotes only re-applies subscription and does not clear the feed.
             viewModel.loadNotesFromFavoriteCategory(relayUrlsToUse, displayUrls)
+            // Signal the startup orchestrator that the feed subscription is live.
+            // This gates Phase 3 (enrichment) — notifications, outbox, counts, etc.
+            social.mycelium.android.repository.StartupOrchestrator.markFeedStarted()
             social.mycelium.android.repository.QuotedNoteCache.setRelayUrls(relayUrlsToUse)
             social.mycelium.android.repository.ArticleEmbedCache.setRelayUrls(relayUrlsToUse)
             currentAccount?.toHexKey()?.let { pk ->
@@ -1225,13 +1236,26 @@ fun DashboardScreen(
         }
     }
 
-    // Apply follow filter when Following/Global or follow list changes.
+    // Apply follow filter when Following/Global, follow list, or active people list changes.
     // Always call setFollowFilter — the repository handles the empty-list case safely
     // (drops all notes + uses lastAppliedKind1Filter for subscription). Skipping the call
     // when followList is empty was causing the filter to never be applied on cold start,
     // allowing global notes to bleed into the Following feed.
-    LaunchedEffect(homeFeedState.isFollowing, uiState.followList) {
-        viewModel.setFollowFilter(homeFeedState.isFollowing)
+    val activePeopleListPubkeys by remember(homeFeedState.activeListDTag) {
+        derivedStateOf {
+            homeFeedState.activeListDTag?.let {
+                social.mycelium.android.repository.PeopleListRepository.getPubkeysForList(it)
+            }
+        }
+    }
+    LaunchedEffect(homeFeedState.isFollowing, uiState.followList, homeFeedState.activeListDTag, activePeopleListPubkeys) {
+        if (homeFeedState.activeListDTag != null) {
+            // People list active: filter by its pubkeys (empty set = blank feed, intentional)
+            viewModel.setFollowFilterWithCustomList(activePeopleListPubkeys ?: emptySet())
+        } else {
+            // Normal Following/Global mode
+            viewModel.setFollowFilter(homeFeedState.isFollowing)
+        }
     }
 
     // Pending notes build up in the background. User pulls down to refresh to see them.
@@ -1350,21 +1374,10 @@ fun DashboardScreen(
         }
     }
 
-    // Merge enrichment side channel (url previews) into notes — only copy notes that actually have new previews
-    val notesWithPreviews by remember(uiState.notes, uiState.urlPreviewsByNoteId) {
-        derivedStateOf {
-            val previews = uiState.urlPreviewsByNoteId
-            if (previews.isEmpty()) {
-                uiState.notes
-            } else {
-                uiState.notes.map { n ->
-                    val newPreviews = previews[n.id]
-                    if (newPreviews != null && newPreviews != n.urlPreviews) n.copy(urlPreviews = newPreviews) else n
-                }
-            }
-        }
-    }
-    val notesList = notesWithPreviews
+    // URL previews are passed as a side channel to avoid copying the entire note list
+    // every time a single preview resolves. Previews are looked up per-item in the LazyColumn.
+    val urlPreviewsByNoteId = uiState.urlPreviewsByNoteId
+    val notesList = uiState.notes
     // Home feed sort: Latest (by time) or Popular (cumulative engagement score)
     // distinctBy(id) prevents duplicate-key crashes in LazyColumn when the same note arrives from multiple relays
     // Popular score = total reactions + zap count + reply count (simple cumulative; later becomes WoT-extensible)
@@ -1443,7 +1456,7 @@ fun DashboardScreen(
     val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
     val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
     val troubleRelayCount = remember(flaggedRelays, blockedRelays) {
-        (flaggedRelays + blockedRelays).distinct().size
+        (flaggedRelays - blockedRelays).size
     }
 
     GlobalSidebar(
@@ -1737,6 +1750,9 @@ fun DashboardScreen(
                             // Show account switcher
                             showAccountSwitcher = true
                         },
+                        onListsClick = {
+                            onNavigateTo("lists")
+                        },
                         onSettingsClick = {
                             // Navigate to settings
                             onNavigateTo("settings")
@@ -1764,6 +1780,18 @@ fun DashboardScreen(
                         activeEngagementFilter = engagementFilter,
                         onEngagementFilterChange = { newFilter ->
                             feedStateViewModel.setHomeEngagementFilter(newFilter)
+                            scrollToTopTrigger++
+                        },
+                        peopleLists = remember(social.mycelium.android.repository.PeopleListRepository.peopleLists.collectAsState().value) {
+                            social.mycelium.android.repository.PeopleListRepository.peopleLists.value.map { it.dTag to it.title }
+                        },
+                        activeListDTag = homeFeedState.activeListDTag,
+                        onPeopleListSelected = { dTag, title ->
+                            if (dTag != null && title != null) {
+                                feedStateViewModel.setHomeActiveList(dTag, title)
+                            } else {
+                                feedStateViewModel.clearHomeActiveList()
+                            }
                             scrollToTopTrigger++
                         },
                         onNavigateToTopics = { onNavigateTo("topics") },

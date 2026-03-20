@@ -139,6 +139,16 @@ class RelayManagementViewModel(
                 RelayConnectionStateMachine.getInstance().setPriorityRelayUrls(outboxUrls)
             }
 
+            // Mark inbox + outbox + subscribed category relays as persistent so they stay
+            // connected even when temporarily idle (avoids connect/disconnect churn).
+            val inboxUrls = inbox.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val subscribedCategoryUrls = categories.filter { it.isSubscribed }
+                .flatMap { it.relays }.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val persistentUrls = outboxUrls + inboxUrls + subscribedCategoryUrls
+            if (persistentUrls.isNotEmpty()) {
+                RelayConnectionStateMachine.getInstance().setPersistentRelayUrls(persistentUrls)
+            }
+
             // Fetch NIP-11 info in background for all relays (personal + category + profile categories)
             val allCategoryUrls = categories.flatMap { it.relays }.map { it.url }
             val allProfileCategoryUrls = profiles.flatMap { it.categories }.flatMap { it.relays }.map { it.url }
@@ -180,6 +190,33 @@ class RelayManagementViewModel(
         return map { relay ->
             if (relay.url == url) relay.copy(info = info, isOnline = true, lastChecked = System.currentTimeMillis())
             else relay
+        }
+    }
+
+    /** Force-fetch NIP-11 info for a newly added relay and update all UI state lists that contain it. */
+    private fun fetchAndApplyNip11(relayUrl: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val freshInfo = nip11Cache.getRelayInfo(relayUrl, forceRefresh = true) ?: return@launch
+                _uiState.update { state ->
+                    state.copy(
+                        relayCategories = state.relayCategories.map { cat ->
+                            cat.copy(relays = cat.relays.updateRelayInfo(relayUrl, freshInfo))
+                        },
+                        relayProfiles = state.relayProfiles.map { profile ->
+                            profile.copy(categories = profile.categories.map { cat ->
+                                cat.copy(relays = cat.relays.updateRelayInfo(relayUrl, freshInfo))
+                            })
+                        },
+                        outboxRelays = state.outboxRelays.updateRelayInfo(relayUrl, freshInfo),
+                        inboxRelays = state.inboxRelays.updateRelayInfo(relayUrl, freshInfo),
+                        indexerRelays = state.indexerRelays.updateRelayInfo(relayUrl, freshInfo),
+                        announcementRelays = state.announcementRelays.updateRelayInfo(relayUrl, freshInfo),
+                        draftsRelays = state.draftsRelays.updateRelayInfo(relayUrl, freshInfo)
+                    )
+                }
+                saveToStorage()
+            } catch (_: Exception) { /* ignore — keep existing info */ }
         }
     }
 
@@ -231,6 +268,13 @@ class RelayManagementViewModel(
         // get a clean AUTH handshake (no stale cooldowns or consumed challenges)
         val authHandler = RelayConnectionStateMachine.getInstance().nip42AuthHandler
         relayUrls.forEach { authHandler.clearAuthStateForRelay(it) }
+        // Update the NIP-42 allowed relay set so newly added relays can authenticate.
+        // Without this, AUTH challenges from new relays are silently ignored.
+        val allRelayUrls = (subscribedRelayUrls + profileRelayUrls + outboxUrls +
+            state.inboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) } +
+            state.indexerRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+        ).toSet()
+        authHandler.setAllowedRelayUrls(allRelayUrls)
         // Invalidate the idempotency guard so the feed re-subscribes with the new relay set
         social.mycelium.android.repository.NotesRepository.getInstance().invalidateSubscriptionGuard()
         // Mark outbox relays as priority so they connect first (no jitter, cooldown cleared)
@@ -244,6 +288,9 @@ class RelayManagementViewModel(
         // Update NotesRepository relay set so NoteCountsRepository (kind-30011 votes,
         // kind-1111 replies) picks up the new relay for existing subscriptions
         social.mycelium.android.repository.NotesRepository.getInstance().setSubscriptionRelays(relayUrls)
+        // Preload NIP-11 info for all relay URLs so relay orbs get icons immediately
+        social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+            ?.preloadRelayInfo(relayUrls, viewModelScope)
     }
 
     fun showAddRelayDialog() {
@@ -355,21 +402,7 @@ class RelayManagementViewModel(
         }
         saveToStorage()
         refreshActiveSubscription()
-
-        // Fetch NIP-11 info for the newly added relay
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val freshInfo = nip11Cache.getRelayInfo(relay.url)
-                if (freshInfo != null) {
-                    _uiState.update { state ->
-                        state.copy(relayCategories = state.relayCategories.map { cat ->
-                            cat.copy(relays = cat.relays.updateRelayInfo(relay.url, freshInfo))
-                        })
-                    }
-                    saveToStorage()
-                }
-            } catch (_: Exception) { /* ignore */ }
-        }
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeRelayFromCategory(categoryId: String, relayUrl: String) {
@@ -388,6 +421,7 @@ class RelayManagementViewModel(
         _uiState.update { it.copy(outboxRelays = it.outboxRelays + relay) }
         saveToStorage()
         refreshActiveSubscription()
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeOutboxRelay(url: String) {
@@ -399,6 +433,7 @@ class RelayManagementViewModel(
         _uiState.update { it.copy(inboxRelays = it.inboxRelays + relay) }
         saveToStorage()
         refreshActiveSubscription()
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeInboxRelay(url: String) {
@@ -410,6 +445,7 @@ class RelayManagementViewModel(
         _uiState.update { it.copy(indexerRelays = it.indexerRelays + relay) }
         saveToStorage()
         refreshActiveSubscription()
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeIndexerRelay(url: String) {
@@ -421,6 +457,7 @@ class RelayManagementViewModel(
     fun addAnnouncementRelay(relay: UserRelay) {
         _uiState.update { it.copy(announcementRelays = it.announcementRelays + relay) }
         saveToStorage()
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeAnnouncementRelay(url: String) {
@@ -431,6 +468,7 @@ class RelayManagementViewModel(
     fun addDraftsRelay(relay: UserRelay) {
         _uiState.update { it.copy(draftsRelays = it.draftsRelays + relay) }
         saveToStorage()
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeDraftsRelay(url: String) {
@@ -567,6 +605,7 @@ class RelayManagementViewModel(
         }
         saveToStorage()
         refreshActiveSubscription()
+        fetchAndApplyNip11(relay.url)
     }
 
     fun removeRelayFromProfileCategory(profileId: String, categoryId: String, relayUrl: String) {

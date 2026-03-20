@@ -116,15 +116,15 @@ object BadgeRepository {
                 limit = 5
             )
             val sm = RelayConnectionStateMachine.getInstance()
-            val handle1 = sm.requestTemporarySubscription(
-                relayUrls, profileBadgesFilter, priority = SubscriptionPriority.LOW
+            sm.requestOneShotSubscription(
+                relayUrls, profileBadgesFilter, priority = SubscriptionPriority.LOW,
+                settleMs = 300L, maxWaitMs = 2_000L
             ) { event ->
                 if (event.kind == KIND_PROFILE_BADGES && event.pubKey.lowercase() == pubkeyHex.lowercase()) {
                     profileBadgesEvents.add(event)
                 }
             }
-            delay(2000)
-            handle1.cancel()
+            delay(2_500L) // wait for EOSE-based auto-close + buffer
 
             // Pick the latest kind 30008 event
             val profileBadgesEvent = profileBadgesEvents.maxByOrNull { it.createdAt }
@@ -160,8 +160,9 @@ object BadgeRepository {
                 kinds = listOf(KIND_BADGE_AWARD),
                 limit = awardEventIds.size
             )
-            val handle2 = sm.requestTemporarySubscription(
-                relayUrls, awardFilter, priority = SubscriptionPriority.LOW
+            sm.requestOneShotSubscription(
+                relayUrls, awardFilter, priority = SubscriptionPriority.LOW,
+                settleMs = 300L, maxWaitMs = 1_500L
             ) { event ->
                 if (event.kind == KIND_BADGE_AWARD) {
                     awardEvents[event.id] = event
@@ -175,19 +176,15 @@ object BadgeRepository {
                     }
                 }
             }
-
-            // Wait for awards, then start definition fetch
-            delay(1500)
+            delay(2_000L) // wait for EOSE-based auto-close + buffer
 
             if (awardEvents.isEmpty()) {
-                handle2.cancel()
                 Log.d(TAG, "No kind 8 award events fetched for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
             }
 
             if (defRefs.isEmpty()) {
-                handle2.cancel()
                 Log.d(TAG, "No badge definition a-tags in award events for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
@@ -210,8 +207,9 @@ object BadgeRepository {
                 tags = mapOf("d" to defDTags),
                 limit = defKeys.size * 2
             )
-            val handle3 = sm.requestTemporarySubscription(
-                relayUrls, defFilter, priority = SubscriptionPriority.LOW
+            sm.requestOneShotSubscription(
+                relayUrls, defFilter, priority = SubscriptionPriority.LOW,
+                settleMs = 300L, maxWaitMs = 1_500L
             ) { event ->
                 if (event.kind == KIND_BADGE_DEFINITION) {
                     val dTagVal = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: ""
@@ -222,9 +220,7 @@ object BadgeRepository {
                     }
                 }
             }
-            delay(1500)
-            handle2.cancel()
-            handle3.cancel()
+            delay(2_000L) // wait for EOSE-based auto-close + buffer
 
             // ── Step 4: Resolve and emit ────────────────────────────────────
             val badges = defRefs.mapNotNull { ref ->

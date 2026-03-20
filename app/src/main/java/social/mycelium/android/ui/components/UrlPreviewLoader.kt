@@ -26,23 +26,28 @@ fun UrlPreviewLoader(
 ) {
     val scope = rememberCoroutineScope()
 
-    // ✅ FIX: Use stable state management to prevent recomposition
-    val previewState by remember(url) {
-        derivedStateOf {
-            urlPreviewCache.getLoadingState(url) ?: UrlPreviewState.Loading
-        }
+    // Use mutableStateOf so Compose recomposes when the fetch completes.
+    // derivedStateOf + ConcurrentHashMap was broken: HashMap mutations don't
+    // trigger Compose snapshots, so the preview stayed on "Loading..." forever.
+    var previewState by remember(url) {
+        val cached = urlPreviewCache.get(url)
+        mutableStateOf<UrlPreviewState>(
+            if (cached != null) UrlPreviewState.Loaded(cached) else UrlPreviewState.Loading
+        )
     }
 
-    // ✅ FIX: Use LaunchedEffect with proper key to prevent unnecessary recomposition
     LaunchedEffect(url) {
+        if (previewState is UrlPreviewState.Loaded) return@LaunchedEffect
         val cached = urlPreviewCache.get(url)
-        if (cached == null && !urlPreviewCache.isLoading(url)) {
-            // Start loading if not already loading
-            scope.launch {
-                urlPreviewCache.setLoadingState(url, UrlPreviewState.Loading)
-                val result = urlPreviewService.fetchPreview(url)
-                urlPreviewCache.setLoadingState(url, result)
-            }
+        if (cached != null) {
+            previewState = UrlPreviewState.Loaded(cached)
+            return@LaunchedEffect
+        }
+        if (!urlPreviewCache.isLoading(url)) {
+            urlPreviewCache.setLoadingState(url, UrlPreviewState.Loading)
+            val result = urlPreviewService.fetchPreview(url)
+            urlPreviewCache.setLoadingState(url, result)
+            previewState = result
         }
     }
 

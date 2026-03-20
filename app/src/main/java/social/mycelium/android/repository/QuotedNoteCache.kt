@@ -31,6 +31,8 @@ object QuotedNoteCache {
 
     private const val TAG = "QuotedNoteCache"
     private const val FETCH_TIMEOUT_MS = 6000L
+    private const val BATCH_DEBOUNCE_MS = 300L
+    private const val MAX_BATCH_SIZE = 40
     private const val SNIPPET_MAX_LEN = 500
     private const val MAX_ENTRIES = 200
     private const val DISK_CACHE_MAX = 150
@@ -121,6 +123,9 @@ object QuotedNoteCache {
     /**
      * Get quoted note metadata by event id (hex). Returns from memory cache or fetches from relays.
      * Relay hints registered via [putRelayHints] are used automatically; explicit hints take priority.
+     *
+     * **Batched**: IDs are collected over a [BATCH_DEBOUNCE_MS] window and fetched in a single
+     * relay subscription with `ids=[all pending]`, collapsing N subscriptions into 1.
      */
     suspend fun get(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
         if (eventId.isBlank() || eventId.length != 64) return null
@@ -129,66 +134,125 @@ object QuotedNoteCache {
         if (eventId in inFlightIds) return null
         val failedAt = failedIds[eventId]
         if (failedAt != null && System.currentTimeMillis() - failedAt < FAILED_TTL_MS) return null
+        if (!inFlightIds.add(eventId)) return null
         // Merge explicit hints with any previously registered hints from nevent1 TLV
         val allHints = (relayHints + (relayHintsCache[eventId] ?: emptyList())).distinct()
-        return fetchAndCache(eventId, allHints)
-    }
-
-    private suspend fun fetchAndCache(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
-        if (!inFlightIds.add(eventId)) return null // Another coroutine is already fetching this
+        // Enqueue into batch and wait for the result
+        val deferred = CompletableDeferred<QuotedNoteMeta?>()
+        synchronized(pendingBatch) {
+            pendingBatch[eventId] = PendingQuoteFetch(eventId, allHints, deferred)
+        }
+        scheduleBatchFlush()
         return try {
-            // Relay hints from nevent1 TLV first (most likely to have the event), then user relays as fallback
-            val relays = (relayHints + userRelayUrls).distinct().filter { it.isNotBlank() }.take(8)
-            if (relays.isEmpty()) {
-                Log.w(TAG, "No relays available to fetch quoted note ${eventId.take(8)}")
-                return null
-            }
-            val filter = Filter(
-                kinds = listOf(1, 11, 1111),
-                ids = listOf(eventId),
-                limit = 1
-            )
-            val deferred = CompletableDeferred<Pair<Event, String>>()
-            val stateMachine = RelayConnectionStateMachine.getInstance()
-            val handle = stateMachine.requestTemporarySubscriptionWithRelay(relays, filter, priority = SubscriptionPriority.LOW) { e, relayUrl ->
-                if (e.id == eventId) deferred.complete(e to relayUrl)
-            }
-            // Wait until event arrives or timeout — whichever comes first
-            val result = withTimeoutOrNull(FETCH_TIMEOUT_MS) { deferred.await() }
-            handle.cancel()
-            result?.let { (e, sourceRelay) ->
-                val snippet = buildSmartSnippet(e.content, SNIPPET_MAX_LEN)
-                // Extract NIP-10 root id so navigation can open the full thread for kind-1 replies
-                val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(e)
-                val meta = QuotedNoteMeta(
-                    eventId = e.id,
-                    authorId = e.pubKey,
-                    contentSnippet = snippet,
-                    fullContent = e.content,
-                    createdAt = e.createdAt,
-                    relayUrl = sourceRelay.ifBlank { relays.firstOrNull() },
-                    rootNoteId = rootId,
-                    kind = e.kind
-                )
-                memoryCache[eventId] = meta
-                failedIds.remove(eventId)
-                scheduleDiskSave()
-                meta
-            } ?: run {
-                failedIds[eventId] = System.currentTimeMillis()
-                null
-            }
+            deferred.await()
         } catch (e: CancellationException) {
-            // Normal: composable left composition while fetch was in-flight. Don't mark as failed.
             Log.d(TAG, "Quoted note fetch cancelled for ${eventId.take(8)} (scrolled away)")
-            null
-        } catch (e: Exception) {
-            Log.e(TAG, "Quoted note fetch failed for ${eventId.take(8)}: ${e.message}")
-            failedIds[eventId] = System.currentTimeMillis()
+            synchronized(pendingBatch) { pendingBatch.remove(eventId) }
             null
         } finally {
             inFlightIds.remove(eventId)
         }
+    }
+
+    // ── Batched fetch infrastructure ─────────────────────────────────────────
+
+    private data class PendingQuoteFetch(
+        val eventId: String,
+        val relayHints: List<String>,
+        val deferred: CompletableDeferred<QuotedNoteMeta?>,
+    )
+
+    private val pendingBatch = LinkedHashMap<String, PendingQuoteFetch>()
+    private val batchScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @Volatile private var batchFlushJob: kotlinx.coroutines.Job? = null
+
+    private fun scheduleBatchFlush() {
+        // If the batch is full, flush immediately; otherwise debounce.
+        val shouldFlushNow = synchronized(pendingBatch) { pendingBatch.size >= MAX_BATCH_SIZE }
+        if (shouldFlushNow) {
+            batchFlushJob?.cancel()
+            batchScope.launch { flushBatch() }
+            return
+        }
+        if (batchFlushJob?.isActive == true) return // Already scheduled
+        batchFlushJob = batchScope.launch {
+            kotlinx.coroutines.delay(BATCH_DEBOUNCE_MS)
+            flushBatch()
+        }
+    }
+
+    private suspend fun flushBatch() {
+        // Snapshot and clear the pending batch
+        val batch: Map<String, PendingQuoteFetch>
+        synchronized(pendingBatch) {
+            if (pendingBatch.isEmpty()) return
+            batch = LinkedHashMap(pendingBatch)
+            pendingBatch.clear()
+        }
+        Log.d(TAG, "Flushing batch of ${batch.size} quoted note IDs")
+
+        // Collect all relay hints + user relays into one set
+        val allRelayHints = batch.values.flatMap { it.relayHints }.distinct()
+        val relays = (allRelayHints + userRelayUrls).distinct().filter { it.isNotBlank() }.take(10)
+        if (relays.isEmpty()) {
+            Log.w(TAG, "No relays available for batch fetch")
+            for ((_, entry) in batch) {
+                entry.deferred.complete(null)
+                inFlightIds.remove(entry.eventId)
+            }
+            return
+        }
+
+        // Single subscription with all IDs
+        val ids = batch.keys.toList()
+        val filter = Filter(
+            kinds = listOf(1, 11, 1111),
+            ids = ids,
+            limit = ids.size
+        )
+
+        val fulfilled = ConcurrentHashMap<String, Boolean>()
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        try {
+            stateMachine.awaitOneShotSubscription(
+                relays, filter, priority = SubscriptionPriority.LOW,
+                settleMs = 500L, maxWaitMs = FETCH_TIMEOUT_MS
+            ) { event ->
+                val entry = batch[event.id] ?: return@awaitOneShotSubscription
+                if (fulfilled.putIfAbsent(event.id, true) != null) return@awaitOneShotSubscription
+                val snippet = buildSmartSnippet(event.content, SNIPPET_MAX_LEN)
+                val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
+                val meta = QuotedNoteMeta(
+                    eventId = event.id,
+                    authorId = event.pubKey,
+                    contentSnippet = snippet,
+                    fullContent = event.content,
+                    createdAt = event.createdAt,
+                    relayUrl = relays.firstOrNull(),
+                    rootNoteId = rootId,
+                    kind = event.kind
+                )
+                memoryCache[event.id] = meta
+                failedIds.remove(event.id)
+                entry.deferred.complete(meta)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Batch fetch error: ${e.message}")
+        }
+
+        // Complete any unfulfilled deferreds as null (not found on any relay)
+        var savedAny = false
+        for ((id, entry) in batch) {
+            if (!fulfilled.containsKey(id)) {
+                failedIds[id] = System.currentTimeMillis()
+                entry.deferred.complete(null)
+            } else {
+                savedAny = true
+            }
+            inFlightIds.remove(id)
+        }
+        if (savedAny) scheduleDiskSave()
+        Log.d(TAG, "Batch complete: ${fulfilled.size}/${batch.size} found")
     }
 
     /**

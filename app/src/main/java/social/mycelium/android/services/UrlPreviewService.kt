@@ -162,9 +162,12 @@ class UrlPreviewService {
                         title = json.optString("title", title)
                         authorName = json.optString("author_name", "")
                     }
-                } catch (_: Exception) { /* fall back to generic title */ }
+                } catch (e: Exception) {
+                    Log.w("UrlPreviewService", "YouTube oEmbed failed for $videoId: ${e.message}")
+                }
+                Log.d("UrlPreviewService", "YouTube preview: videoId=$videoId, title=$title, author=$authorName")
                 UrlPreviewInfo(
-                    url = url,
+                    url = canonicalUrl,
                     title = title,
                     description = if (authorName.isNotBlank()) authorName else "",
                     imageUrl = "https://img.youtube.com/vi/$videoId/hqdefault.jpg",
@@ -186,18 +189,22 @@ class UrlPreviewService {
             header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36")
             header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             header("Accept-Language", "en-US,en;q=0.9")
+            // Some sites require a Referer or return 403
+            header("Referer", url)
         }
         
         if (!response.status.isSuccess()) {
-            throw IOException("HTTP ${response.status}")
+            throw IOException("HTTP ${response.status.value} for $url")
         }
         
         val contentType = response.contentType()?.toString() ?: ""
-        // Accept text/html, application/xhtml+xml, application/xml, or missing content-type
+        // Accept text/html, application/xhtml+xml, application/xml, or missing content-type.
+        // Some servers return "text/html; charset=utf-8" so check with contains().
         val isHtmlLike = contentType.isEmpty()
-                || contentType.contains("text/html")
-                || contentType.contains("xhtml")
-                || contentType.contains("application/xml")
+                || contentType.contains("text/html", ignoreCase = true)
+                || contentType.contains("xhtml", ignoreCase = true)
+                || contentType.contains("application/xml", ignoreCase = true)
+                || contentType.contains("text/xml", ignoreCase = true)
         if (!isHtmlLike) {
             throw IOException("Content is not HTML: $contentType")
         }
@@ -206,6 +213,10 @@ class UrlPreviewService {
         val channel = response.bodyAsChannel()
         val packet = channel.readRemaining(MAX_PREVIEW_BYTES)
         val text = packet.readString()
+        
+        if (text.isBlank()) {
+            throw IOException("Empty response body from $url")
+        }
         
         return text to contentType
     }

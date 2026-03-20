@@ -16,6 +16,7 @@ import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,8 +24,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -35,27 +39,106 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Parses e-tags for target note, root/reply for replies; consolidates reposts by reposted note id.
  * Seen IDs are persisted to SharedPreferences so badge survives app restart.
  */
-object NotificationsRepository {
+class NotificationsRepository(
+    /** Hex pubkey of the account this instance belongs to. */
+    private val ownerPubkeyHex: String,
+    /** Parent coroutine scope — cancelled when the AccountScope is destroyed. */
+    private val parentScope: CoroutineScope,
+) {
 
-    private const val TAG = "NotificationsRepository"
-    private const val NOTIFICATION_KIND_TEXT = 1
-    private const val NOTIFICATION_KIND_REPOST = 6
-    private const val NOTIFICATION_KIND_REACTION = 7
-    private const val NOTIFICATION_KIND_GENERIC_REPOST = 16
-    private const val NOTIFICATION_KIND_REPORT = 1984
-    private const val NOTIFICATION_KIND_ZAP = 9735
-    private const val NOTIFICATION_KIND_HIGHLIGHT = 9802
-    private const val NOTIFICATION_KIND_BADGE_AWARD = 8
-    private const val NOTIFICATION_KIND_TOPIC_REPLY = 1111
-    private const val NOTIFICATION_KIND_POLL_RESPONSE = 1018
-    private const val ONE_WEEK_SEC = 7 * 24 * 60 * 60L
-    private const val PREFS_NAME = "notifications_seen"
-    private const val PREFS_KEY_SEEN_IDS = "seen_ids"
-    private const val PREFS_KEY_PUBKEY = "my_pubkey_hex"
-    private const val PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS = "mark_all_seen_epoch_ms"
-
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(
+        parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[kotlinx.coroutines.Job]) +
+        CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+    )
     private val profileCache = ProfileMetadataCache.getInstance()
+
+    companion object {
+        private const val TAG = "NotificationsRepository"
+        private const val NOTIFICATION_KIND_TEXT = 1
+        private const val NOTIFICATION_KIND_REPOST = 6
+        private const val NOTIFICATION_KIND_REACTION = 7
+        private const val NOTIFICATION_KIND_GENERIC_REPOST = 16
+        private const val NOTIFICATION_KIND_REPORT = 1984
+        private const val NOTIFICATION_KIND_ZAP = 9735
+        private const val NOTIFICATION_KIND_HIGHLIGHT = 9802
+        private const val NOTIFICATION_KIND_BADGE_AWARD = 8
+        private const val NOTIFICATION_KIND_TOPIC_REPLY = 1111
+        private const val NOTIFICATION_KIND_POLL = 1068
+        private const val NOTIFICATION_KIND_POLL_RESPONSE = 1018
+        private const val ONE_MONTH_SEC = 30 * 24 * 60 * 60L
+        private const val PREFS_NAME = "notifications_seen"
+        private const val PREFS_KEY_SEEN_IDS = "seen_ids"
+        private const val PREFS_KEY_PUBKEY = "my_pubkey_hex"
+        private const val PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS = "mark_all_seen_epoch_ms"
+        private const val SWEEP_FALLBACK_DELAY_MS = 15_000L
+        private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
+        private const val TARGET_FETCH_TIMEOUT_MS = 4000L
+        private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 6000L
+        private const val MAX_TARGET_FETCH_RETRIES = 2
+
+        // ── Backward-compatible static shim ──────────────────────────────────
+        // Delegates to the active account's instance via AccountScopedRegistry.
+        // All existing call sites (MyceliumNavigation, NotificationsScreen, etc.)
+        // continue working without changes.
+
+        /** Get the active account's NotificationsRepository instance, or null. */
+        private fun active(): NotificationsRepository? =
+            AccountScopedRegistry.getActiveScope()?.notificationsRepository
+
+        // ── Static property shims ──
+        val notifications: StateFlow<List<NotificationData>> get() = active()?.notifications ?: MutableStateFlow(emptyList())
+        val seenIds: StateFlow<Set<String>> get() = active()?.seenIds ?: MutableStateFlow(emptySet())
+        val unseenCount: StateFlow<Int> get() = active()?.unseenCount ?: MutableStateFlow(0)
+        val todayReplies: StateFlow<Int> get() = active()?.todayReplies ?: MutableStateFlow(0)
+        val todayBoosts: StateFlow<Int> get() = active()?.todayBoosts ?: MutableStateFlow(0)
+        val todayReactions: StateFlow<Int> get() = active()?.todayReactions ?: MutableStateFlow(0)
+        val todayZapSats: StateFlow<Long> get() = active()?.todayZapSats ?: MutableStateFlow(0L)
+
+        // ── Static method shims ──
+        fun init(context: Context) { active()?.init(context) }
+        fun enableAndroidNotifications() { active()?.enableAndroidNotifications() }
+        fun setCacheRelayUrls(urls: List<String>) { active()?.setCacheRelayUrls(urls) }
+        fun getCacheRelayUrls(): List<String> = active()?.getCacheRelayUrls() ?: emptyList()
+        fun getMyPubkeyHex(): String? = active()?.getMyPubkeyHex()
+        fun markAllAsSeen() { active()?.markAllAsSeen() }
+        fun markAsSeen(notificationId: String) { active()?.markAsSeen(notificationId) }
+        fun markAsSeenByType(type: NotificationType) { active()?.markAsSeenByType(type) }
+        fun findNotificationByNoteId(noteId: String): NotificationData? = active()?.findNotificationByNoteId(noteId)
+        fun startSubscription(pubkey: String, inboxRelayUrls: List<String>, outboxRelayUrls: List<String>, categoryRelayUrls: List<String>) {
+            // Route to the correct account's repo by pubkey (not just active).
+            // This enables starting subscriptions for background accounts too.
+            val target = AccountScopedRegistry.getScope(pubkey)?.notificationsRepository
+                ?: active() // Fallback to active if scope not found (legacy path)
+            target?.startSubscription(pubkey, inboxRelayUrls, outboxRelayUrls, categoryRelayUrls)
+        }
+        fun stopSubscription() { active()?.stopSubscription() }
+        /**
+         * Fan out cross-pollinated events to ALL loaded account repos.
+         * Each instance's own p-tag/E-tag/q-tag gate rejects events that
+         * don't reference its owner pubkey — preventing cross-account leakage.
+         */
+        fun ingestEvent(event: Event) {
+            val scopes = AccountScopedRegistry.allScopes.value
+            if (scopes.isEmpty()) return
+            for ((_, scope) in scopes) {
+                if (scope.initialized) {
+                    scope.notificationsRepository.ingestEvent(event)
+                }
+            }
+        }
+        /** Ingest a historical event (e.g. from DeepHistoryFetcher) into all loaded account repos.
+         *  Auto-marks as seen so it populates the list but does NOT increment the badge. */
+        fun ingestEventAsHistorical(event: Event) {
+            val scopes = AccountScopedRegistry.allScopes.value
+            if (scopes.isEmpty()) return
+            for ((_, scope) in scopes) {
+                if (scope.initialized) {
+                    scope.notificationsRepository.ingestEventAsHistorical(event)
+                }
+            }
+        }
+    }
+
     private val json = Json { ignoreUnknownKeys = true }
 
     private val _notifications = MutableStateFlow<List<NotificationData>>(emptyList())
@@ -64,8 +147,11 @@ object NotificationsRepository {
     /** IDs of notifications the user has "seen" (opened notifications screen or tapped one). Badge and dropdown use unseen count. */
     private val _seenIds = MutableStateFlow<Set<String>>(emptySet())
     val seenIds: StateFlow<Set<String>> = _seenIds.asStateFlow()
-    val unseenCount: StateFlow<Int> = combine(_notifications, _seenIds) { list, seen ->
-        list.count { it.id !in seen }
+    /** Suppresses unseen count during initial relay replay so the badge doesn't flicker
+     *  as historical events arrive before the markAllSeen watermark auto-marks them. */
+    private val _replaySettled = MutableStateFlow(false)
+    val unseenCount: StateFlow<Int> = combine(_notifications, _seenIds, _replaySettled) { list, seen, settled ->
+        if (!settled) 0 else list.count { it.id !in seen }
     }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     private val notificationsById = ConcurrentHashMap<String, NotificationData>()
@@ -77,9 +163,6 @@ object NotificationsRepository {
         "wss://relay.damus.io", "wss://relay.primal.net", "wss://nos.lol",
         "wss://nostr.mom", "wss://relay.nostr.band",
     )
-    /** Delay before starting the non-inbox sweep phase (ms). */
-    private const val SWEEP_DELAY_MS = 3_000L
-
     /** Event IDs already processed — prevents re-processing on relay reconnect (which replays all stored events). */
     private val seenEventIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
@@ -94,8 +177,10 @@ object NotificationsRepository {
     val todayZapSats: StateFlow<Long> = _todayZapSats.asStateFlow()
     private var cacheRelayUrls = listOf<String>()
     private var subscriptionRelayUrls = listOf<String>()
-    /** Current user hex pubkey (p-tag); used to filter kind-7 so we only show reactions to our notes. */
-    private var myPubkeyHex: String? = null
+    /** Current user hex pubkey (p-tag); used to filter kind-7 so we only show reactions to our notes.
+     *  Initialized from [ownerPubkeyHex] — immutable for the lifetime of this instance.
+     *  This is the primary cross-account leakage guard: events that don't reference this pubkey are rejected. */
+    private var myPubkeyHex: String? = ownerPubkeyHex
     /** Our kind-11 topic IDs — replies to these are "Thread replies" (replyKind=11), not "Comments" (1111). */
     private val myTopicIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     /** Our kind-1 note IDs — used to detect quotes (q-tag references to our notes). */
@@ -125,10 +210,7 @@ object NotificationsRepository {
     private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, MutableList<PendingTargetFetch>>()
     /** Debounce job for batched target note flush. */
     private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
-    private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
-    private const val TARGET_FETCH_TIMEOUT_MS = 4000L
-    private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 6000L
-    private const val MAX_TARGET_FETCH_RETRIES = 2
+    private val targetFetchMutex = kotlinx.coroutines.sync.Mutex()
 
     /** Call once from Application or Activity to provide app context. */
     fun init(context: Context) {
@@ -184,29 +266,32 @@ object NotificationsRepository {
             Log.d(TAG, "fireNotif SUPPRESSED (push disabled): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
-        val (channelId, allowed) = when (type) {
-            NotificationType.REPLY -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPLIES to prefs.notifyReplies.value
-            NotificationType.COMMENT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_COMMENTS to prefs.notifyReplies.value
-            NotificationType.LIKE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS to prefs.notifyReactions.value
-            NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS to prefs.notifyZaps.value
-            NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS to prefs.notifyReposts.value
-            NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
-            NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyQuotes.value
-            NotificationType.HIGHLIGHT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
-            NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS to prefs.notifyDMs.value
-            NotificationType.POLL_VOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_POLLS to prefs.notifyPolls.value
-            NotificationType.REPORT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS to prefs.notifyMentions.value
-            NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS to prefs.notifyReactions.value
-        }
-        if (!allowed) {
-            Log.d(TAG, "fireNotif SUPPRESSED (channel disabled): type=$type channel=$channelId suffix=${notifIdSuffix.take(8)}")
+        // Use per-account preference lookup so background accounts respect their own settings
+        // (not the active account's in-memory state flows).
+        if (!prefs.isNotificationAllowedForAccount(ownerPubkeyHex, type)) {
+            Log.d(TAG, "fireNotif SUPPRESSED (channel disabled for ${ownerPubkeyHex.take(8)}): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
+        val channelId = when (type) {
+            NotificationType.REPLY -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPLIES
+            NotificationType.COMMENT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_COMMENTS
+            NotificationType.LIKE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
+            NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS
+            NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS
+            NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+            NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+            NotificationType.HIGHLIGHT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+            NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS
+            NotificationType.POLL_VOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_POLLS
+            NotificationType.REPORT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+            NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
+        }
         val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
-        Log.d(TAG, "fireNotif POSTING: type=$type channel=$channelId id=$notifId noteId=${noteId?.take(8)} title=$title")
+        Log.d(TAG, "fireNotif POSTING: type=$type channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${ownerPubkeyHex.take(8)} title=$title")
         social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
             ctx, channelId, notifId, title, body,
-            noteId = noteId, rootNoteId = rootNoteId, notifType = type.name
+            noteId = noteId, rootNoteId = rootNoteId, notifType = type.name,
+            accountPubkey = ownerPubkeyHex
         )
     }
 
@@ -317,6 +402,13 @@ object NotificationsRepository {
         outboxRelayUrls: List<String>,
         categoryRelayUrls: List<String>,
     ) {
+        // ── Strict owner gate ────────────────────────────────────────────────
+        // Each NotificationsRepository instance is bound to ownerPubkeyHex.
+        // Reject any attempt to start a subscription for a different pubkey.
+        if (pubkey != ownerPubkeyHex) {
+            Log.e(TAG, "startSubscription REJECTED: pubkey ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — use the correct account's repo")
+            return
+        }
         val allRelays = (inboxRelayUrls + outboxRelayUrls + categoryRelayUrls)
             .map { it.trim().removeSuffix("/") }
             .distinct()
@@ -333,11 +425,14 @@ object NotificationsRepository {
         stopSubscription()
         // Re-suppress push notifications until enableAndroidNotifications() is called
         sessionStartEpochSec = Long.MAX_VALUE
+        // Suppress badge count during initial replay (unmasked after Phase 1 EOSE)
+        _replaySettled.value = false
         if (isNewUser) {
             notificationsById.clear()
             seenEventIds.clear()
             myTopicIds.clear()
             myNoteIds.clear()
+            targetFetchExhaustedIds.clear()
             _notifications.value = emptyList()
         }
         subscriptionRelayUrls = allRelays
@@ -350,9 +445,9 @@ object NotificationsRepository {
         val inboxUrls = inboxRelayUrls.map { it.trim().removeSuffix("/") }.distinct()
             .ifEmpty { BOOTSTRAP_INBOX_RELAYS }
         val inboxFilters = listOf(
-            // High-volume: text, reaction, repost, zap, topic reply — complete history
+            // High-volume: text, reaction, repost, zap, topic reply, polls — complete history
             Filter(
-                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL_RESPONSE),
+                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL, NOTIFICATION_KIND_POLL_RESPONSE),
                 tags = mapOf("p" to listOf(pubkey)),
                 limit = 5000
             ),
@@ -363,49 +458,67 @@ object NotificationsRepository {
                 limit = 1000
             ),
         )
+        // Signal that Phase 1 EOSE has fired — Phase 2, 3, and re-enrichment chain off this
+        val phase1Eose = kotlinx.coroutines.CompletableDeferred<Unit>()
+
         val inboxHandle = stateMachine.requestTemporarySubscription(
-            inboxUrls, inboxFilters, priority = SubscriptionPriority.HIGH
+            inboxUrls, inboxFilters, priority = SubscriptionPriority.HIGH,
+            onEose = {
+                Log.d(TAG, "Phase 1 EOSE received — unblocking Phase 2/3 + re-enrichment")
+                phase1Eose.complete(Unit)
+                // Replay is done — unseen count can now reflect real state.
+                // emitSorted() already ran for each event, so the watermark auto-marking
+                // has already happened. Safe to unmask the badge.
+                _replaySettled.value = true
+                scope.launch { reEnrichOrphanedNotifications() }
+            }
         ) { event -> handleEvent(event) }
         notificationHandles.add(inboxHandle)
         Log.d(TAG, "Phase 1: Deep inbox fetch on ${inboxUrls.size} relays (${inboxFilters.size} filters, HIGH)")
 
-        // ── Phase 2: Sweep non-inbox relays (delayed) ────────────────────────
+        // ── Phase 2: Sweep non-inbox relays — starts after Phase 1 EOSE ──────
         val sweepUrls = (outboxRelayUrls + categoryRelayUrls)
             .map { it.trim().removeSuffix("/") }
             .distinct()
             .filter { it !in inboxUrls }
         if (sweepUrls.isNotEmpty()) {
             scope.launch {
-                delay(SWEEP_DELAY_MS)
-                val sweepSince = (System.currentTimeMillis() / 1000) - ONE_WEEK_SEC
+                // Await Phase 1 EOSE (or safety-net timeout)
+                kotlinx.coroutines.withTimeoutOrNull(SWEEP_FALLBACK_DELAY_MS) { phase1Eose.await() }
+                val sweepSince = (System.currentTimeMillis() / 1000) - ONE_MONTH_SEC
                 val sweepFilters = listOf(
                     Filter(
-                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL_RESPONSE),
+                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL, NOTIFICATION_KIND_POLL_RESPONSE),
                         tags = mapOf("p" to listOf(pubkey)),
                         since = sweepSince,
-                        limit = 200
+                        limit = 500
                     ),
                     Filter(
                         kinds = listOf(NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT),
                         tags = mapOf("p" to listOf(pubkey)),
                         since = sweepSince,
-                        limit = 50
+                        limit = 100
                     ),
                 )
                 val sweepHandle = stateMachine.requestTemporarySubscription(
-                    sweepUrls, sweepFilters, priority = SubscriptionPriority.HIGH
+                    sweepUrls, sweepFilters, priority = SubscriptionPriority.HIGH,
+                    onEose = {
+                        Log.d(TAG, "Phase 2 EOSE received — triggering sweep re-enrichment")
+                        scope.launch { reEnrichOrphanedNotifications() }
+                    }
                 ) { event -> handleEvent(event) }
                 notificationHandles.add(sweepHandle)
-                Log.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1w, HIGH)")
+                Log.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1mo, HIGH)")
             }
         }
 
         Log.d(TAG, "Tiered notification sub started for ${pubkey.take(8)}...: " +
-            "inbox=${inboxUrls.size} (deep), sweep=${sweepUrls.size} (delayed ${SWEEP_DELAY_MS}ms)")
+            "inbox=${inboxUrls.size} (deep), sweep=${sweepUrls.size}")
 
         // ── Phase 3: Discover user content IDs → thread reply + quote subs ───
+        // Chains off Phase 1 EOSE so topic/note IDs are fetched after inbox events arrive
         scope.launch {
-            delay(2_000L) // Let inbox phase settle first
+            kotlinx.coroutines.withTimeoutOrNull(SWEEP_FALLBACK_DELAY_MS) { phase1Eose.await() }
             val topicIds = fetchUserTopicIds(pubkey, allRelays, null)
             myTopicIds.addAll(topicIds)
             val noteIds = fetchUserNoteIds(pubkey, allRelays, null)
@@ -416,46 +529,70 @@ object NotificationsRepository {
                 extraFilters.add(Filter(
                     kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
                     tags = mapOf("E" to topicIds),
-                    limit = 2000
+                    limit = 5000
                 ))
             }
             if (noteIds.isNotEmpty()) {
-                Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes filter")
+                Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes + comment replies filters")
                 extraFilters.add(Filter(
                     kinds = listOf(NOTIFICATION_KIND_TEXT),
                     tags = mapOf("q" to noteIds),
-                    limit = 2000
+                    limit = 5000
+                ))
+                // NIP-22: kind-1111 comments can reply to kind-1 notes too (E-tag = root note ID).
+                // Phase 1 only catches kind-1111 with p-tag; comments that don't p-tag the
+                // root author are missed. Subscribe for E-tag matches on our kind-1 note IDs.
+                extraFilters.add(Filter(
+                    kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
+                    tags = mapOf("E" to noteIds),
+                    limit = 5000
                 ))
             }
             if (extraFilters.isNotEmpty()) {
                 val extraHandle = stateMachine.requestTemporarySubscription(
-                    inboxUrls, extraFilters, priority = SubscriptionPriority.HIGH
+                    inboxUrls, extraFilters, priority = SubscriptionPriority.HIGH,
+                    onEose = {
+                        Log.d(TAG, "Phase 3 EOSE received — triggering thread reply re-enrichment")
+                        scope.launch { reEnrichOrphanedNotifications() }
+                    }
                 ) { event -> handleEvent(event) }
                 notificationHandles.add(extraHandle)
                 Log.d(TAG, "Phase 3: Thread reply + quote filters on ${inboxUrls.size} inbox relays")
             }
         }
 
-        // ── Phase 4: Re-enrich notifications that missed target notes on cold start ──
+        // ── Safety-net: unmask badge after timeout if EOSE never fires ──
         scope.launch {
-            delay(8_000L) // Wait for relays to fully connect and feed to settle
+            delay(SWEEP_FALLBACK_DELAY_MS)
+            if (!_replaySettled.value) {
+                Log.d(TAG, "Safety-net: unmasking badge (Phase 1 EOSE not received in ${SWEEP_FALLBACK_DELAY_MS}ms)")
+                _replaySettled.value = true
+            }
+        }
+
+        // ── Safety-net re-enrichment ──
+        // EOSE-driven callbacks above handle the normal case. This is a fallback
+        // for edge cases where EOSE never fires (relay disconnect, slow relay, etc).
+        scope.launch {
+            delay(60_000L)
             reEnrichOrphanedNotifications()
         }
     }
 
     fun stopSubscription() {
+        val count = notificationHandles.size
         for (handle in notificationHandles) {
             try { handle.cancel() } catch (_: Exception) { }
         }
         notificationHandles.clear()
-        Log.d(TAG, "Notifications subscription stopped (${notificationHandles.size} handles)")
+        Log.d(TAG, "Notifications subscription stopped ($count handles)")
     }
 
     private val ACCEPTED_KINDS = setOf(
         NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST,
         NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY,
         NOTIFICATION_KIND_REPORT, NOTIFICATION_KIND_HIGHLIGHT, NOTIFICATION_KIND_BADGE_AWARD,
-        NOTIFICATION_KIND_POLL_RESPONSE
+        NOTIFICATION_KIND_POLL, NOTIFICATION_KIND_POLL_RESPONSE
     )
 
     /**
@@ -472,15 +609,32 @@ object NotificationsRepository {
     fun ingestEvent(event: Event) {
         if (event.kind !in ACCEPTED_KINDS) return
         val pubkey = myPubkeyHex ?: return
-        // Skip own events — we don't notify ourselves
-        if (event.pubKey == pubkey) return
         // Check relevance: does this event reference us?
         val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
         val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
-                event.tags.any { it.size >= 2 && it[0] == "E" && it[1] in myTopicIds }
+                event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
         if (!hasPTag && !hasETag && !hasQTag) return
+        handleEvent(event)
+    }
+
+    /**
+     * Ingest a historical event (e.g. from DeepHistoryFetcher) and auto-mark it as seen.
+     * The notification populates the list for browsing but does NOT increment the badge
+     * or trigger a system notification. This prevents badge flicker during deep fetch.
+     */
+    fun ingestEventAsHistorical(event: Event) {
+        if (event.kind !in ACCEPTED_KINDS) return
+        val pubkey = myPubkeyHex ?: return
+        val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
+        val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
+                event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
+        val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
+                event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
+        if (!hasPTag && !hasETag && !hasQTag) return
+        // Suppress push notification by pre-marking the event ID as seen
+        _seenIds.value = _seenIds.value + event.id
         handleEvent(event)
     }
 
@@ -488,16 +642,22 @@ object NotificationsRepository {
         if (event.kind !in ACCEPTED_KINDS) return
         // Deduplicate: skip events already processed (relay reconnects replay all stored events)
         if (!seenEventIds.add(event.id)) return
-        // Skip own events — we don't notify ourselves
         val pubkey = myPubkeyHex ?: return
-        if (event.pubKey == pubkey) return
+        // ── STRICT OWNER GATE ──────────────────────────────────────────
+        // This instance only processes events for ownerPubkeyHex.
+        // Reject events from another account's subscription that leaked here.
+        if (pubkey != ownerPubkeyHex) {
+            Log.w(TAG, "handleEvent REJECTED: myPubkeyHex ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — stale state")
+            return
+        }
         // ── Client-side relevance gate ──────────────────────────────────────
         // Relays may return events that don't match our subscription filters
         // (buggy filter implementations, extra events, etc.). Validate that
         // the event actually references us before creating a notification.
         val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
         val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
-                event.tags.any { it.size >= 2 && it[0] == "E" && it[1] in myTopicIds }
+                (event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) } ||
+                 (myTopicIds.isEmpty() && myNoteIds.isEmpty())) // Accept kind-1111 before Phase 3 populates IDs
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
         // For kind-1 replies: also accept if user is directly cited in content (mention)
@@ -511,31 +671,30 @@ object NotificationsRepository {
         if (MuteListRepository.isHidden(event.pubKey)) return
         val profileIsCached = profileCache.getAuthor(event.pubKey) != null
         val author = profileCache.resolveAuthor(event.pubKey)
+        // Dispatch immediately with whatever author info we have.
+        // If profile isn't cached, request it and update the notification when it arrives.
+        dispatchEvent(event, author)
         if (!profileIsCached && cacheRelayUrls.isNotEmpty()) {
-            // Profile not cached — request it and schedule a deferred notification
-            // so the Android system notification shows the real display name instead of hex.
             scope.launch {
                 profileCache.requestProfiles(listOf(event.pubKey), cacheRelayUrls)
-                // Wait for the profile to arrive (up to 2s), polling every 200ms
-                var resolved: Author? = null
-                for (i in 0 until 10) {
-                    kotlinx.coroutines.delay(200L)
-                    val fetched = profileCache.getAuthor(event.pubKey)
-                    if (fetched != null) { resolved = fetched; break }
-                }
-                val finalAuthor = resolved ?: author
-                // Update the in-memory NotificationData if it was already created with the stub
+                // Wait for profile arrival via Flow signal (up to 3s)
+                try {
+                    kotlinx.coroutines.withTimeoutOrNull(3_000L) {
+                        profileCache.profileUpdated
+                            .filter { it == event.pubKey || normalizeAuthorIdForCache(it) == normalizeAuthorIdForCache(event.pubKey) }
+                            .first()
+                    }
+                } catch (_: Exception) { }
+                val resolved = profileCache.getAuthor(event.pubKey)
                 if (resolved != null) {
                     notificationsById[event.id]?.let { existing ->
                         if (existing.author?.displayName != resolved.displayName) {
                             notificationsById[event.id] = existing.copy(author = resolved)
+                            emitSorted()
                         }
                     }
                 }
-                dispatchEvent(event, finalAuthor)
             }
-        } else {
-            dispatchEvent(event, author)
         }
     }
 
@@ -559,6 +718,7 @@ object NotificationsRepository {
             NOTIFICATION_KIND_HIGHLIGHT -> handleHighlight(event, author, ts)
             NOTIFICATION_KIND_REPORT -> handleReport(event, author, ts)
             NOTIFICATION_KIND_BADGE_AWARD -> handleBadgeAward(event, author, ts)
+            NOTIFICATION_KIND_POLL -> handlePollMention(event, author, ts)
             NOTIFICATION_KIND_POLL_RESPONSE -> handlePollVote(event, author, ts)
             else -> { }
         }
@@ -617,7 +777,9 @@ object NotificationsRepository {
         if (rootId == null && !isDirectlyCitedInContent) return
         val note = eventToNote(event)
         val replyId = event.id
-        val isMention = rootId == null
+        // Classify: if no root → pure mention. If root exists but user is cited → mention-in-reply.
+        // If root exists and user is NOT cited → reply (will be verified via target fetch).
+        val isMention = rootId == null || isDirectlyCitedInContent
         val text = if (isMention) "${author.displayName} mentioned you" else "${author.displayName} replied to your post"
         val notifType = if (isMention) NotificationType.MENTION else NotificationType.REPLY
         val data = NotificationData(
@@ -629,15 +791,15 @@ object NotificationsRepository {
             rootNoteId = rootId,
             replyNoteId = replyId,
             replyKind = NOTIFICATION_KIND_TEXT,
-            sortTimestamp = ts
+            sortTimestamp = ts,
+            rawContent = event.content
         )
         notificationsById[event.id] = data
         emitSorted()
         fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = rootId)
-        if (rootId != null) {
-            // Fetch the direct parent to verify the reply is TO one of our notes.
-            // If the parent note author isn't us AND we're not cited in content,
-            // the notification will be removed in flushTargetFetchBatch.
+        if (rootId != null && !isMention) {
+            // Only fetch parent for verification if this is a REPLY (not already classified as MENTION).
+            // Mentions-in-replies are already correctly classified and don't need parent verification.
             val parentId = replyToId ?: rootId
             scope.launch { fetchAndSetTargetNote(parentId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         }
@@ -837,14 +999,13 @@ object NotificationsRepository {
                 limit = 5
             )
             var bestEvent: Event? = null
-            val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.NORMAL) { ev ->
+            RelayConnectionStateMachine.getInstance()
+                .awaitOneShotSubscription(subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.NORMAL,
+                    settleMs = 300L, maxWaitMs = 3_000L) { ev ->
                     if (ev.kind == 30009 && (bestEvent == null || ev.createdAt > (bestEvent?.createdAt ?: 0))) {
                         bestEvent = ev
                     }
                 }
-            delay(3000)
-            handle.cancel()
 
             val defEvent = bestEvent ?: return
             val name = defEvent.tags.firstOrNull { it.size >= 2 && it[0] == "name" }?.get(1)
@@ -866,6 +1027,26 @@ object NotificationsRepository {
         } catch (e: Exception) {
             Log.e(TAG, "resolveBadgeDefinition failed: ${e.message}", e)
         }
+    }
+
+    /** Handle a kind-1068 poll event that mentions this user (p-tag). */
+    private fun handlePollMention(event: Event, author: Author, ts: Long) {
+        val question = event.content.takeIf { it.isNotBlank() }?.take(120) ?: "a poll"
+        val text = "${author.displayName ?: "Someone"} mentioned you in $question"
+        val note = eventToNote(event)
+        val data = NotificationData(
+            id = event.id,
+            type = NotificationType.MENTION,
+            text = text,
+            note = note,
+            author = author,
+            sortTimestamp = ts,
+            rawContent = event.content
+        )
+        notificationsById[event.id] = data
+        emitSorted()
+        fireAndroidNotification(NotificationType.MENTION, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id)
+        updateTodaySummary(NotificationType.MENTION, ts, 0L)
     }
 
     private fun handlePollVote(event: Event, author: Author, ts: Long) {
@@ -907,12 +1088,11 @@ object NotificationsRepository {
                 limit = 1
             )
             var pollEvent: Event? = null
-            val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL) { ev ->
+            RelayConnectionStateMachine.getInstance()
+                .awaitOneShotSubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL,
+                    settleMs = 300L, maxWaitMs = 3_000L) { ev ->
                     if (ev.id == pollId) pollEvent = ev
                 }
-            delay(3000)
-            handle.cancel()
 
             val ev = pollEvent ?: return
             val question = ev.content.takeIf { it.isNotBlank() }
@@ -1048,12 +1228,9 @@ object NotificationsRepository {
         // Kind-9735 pubkey is the wallet/LNURL service (e.g. Coinos), NOT the actual zapper.
         // The real zapper's pubkey is inside the "description" tag which contains the kind-9734 zap request JSON.
         val realZapperPubkey = parseZapSenderPubkey(event)
+        val needsProfileFetch = realZapperPubkey != null && profileCache.getAuthor(realZapperPubkey) == null
         val zapperAuthor = if (realZapperPubkey != null) {
-            val resolved = profileCache.resolveAuthor(realZapperPubkey)
-            if (profileCache.getAuthor(realZapperPubkey) == null && cacheRelayUrls.isNotEmpty()) {
-                scope.launch { profileCache.requestProfiles(listOf(realZapperPubkey), cacheRelayUrls) }
-            }
-            resolved
+            profileCache.resolveAuthor(realZapperPubkey)
         } else author
         val satsLabel = if (amountSats > 0) formatSats(amountSats) else ""
         val text = "${zapperAuthor.displayName ?: "Someone"} ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
@@ -1072,6 +1249,29 @@ object NotificationsRepository {
         fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = eTag)
         scope.launch { fetchAndSetTargetNote(eTag, event.id) { d -> { note -> d.copy(targetNote = note) } } }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
+        // If the zapper's profile isn't cached yet, fetch it and re-enrich the notification
+        // once it resolves so the display name shows the real sender, not the wallet service.
+        if (needsProfileFetch && realZapperPubkey != null && cacheRelayUrls.isNotEmpty()) {
+            scope.launch {
+                profileCache.requestProfiles(listOf(realZapperPubkey), cacheRelayUrls)
+                // requestProfiles is async (queues for debounced batch fetch).
+                // Wait for profileUpdated to signal this pubkey has resolved,
+                // then re-enrich the notification with the real display name.
+                val normalizedPk = realZapperPubkey.lowercase()
+                val resolved = kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+                    profileCache.profileUpdated.first { it.lowercase() == normalizedPk }
+                    profileCache.getAuthor(realZapperPubkey)
+                }
+                if (resolved != null) {
+                    val current = notificationsById[event.id] ?: return@launch
+                    val newName = resolved.displayName ?: "Someone"
+                    val newText = "$newName ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
+                    notificationsById[event.id] = current.copy(text = newText, author = resolved)
+                    emitSorted()
+                    Log.d(TAG, "Zap sender re-enriched: ${event.id.take(8)} -> $newName")
+                }
+            }
+        }
     }
 
     /** Parse the real zapper's pubkey from the kind-9734 zap request embedded in the "description" tag. */
@@ -1149,15 +1349,13 @@ object NotificationsRepository {
             since = since,
             limit = 500
         )
-        val handle = stateMachine.requestOneShotSubscription(relayUrls, filter,
+        stateMachine.awaitOneShotSubscription(relayUrls, filter,
             priority = SubscriptionPriority.NORMAL, settleMs = 300L, maxWaitMs = 4_000L,
         ) { ev ->
             if (ev.kind == 11) {
                 synchronized(topicIds) { topicIds.add(ev.id) }
             }
         }
-        // Wait for EOSE-based auto-close (maxWaitMs + buffer)
-        delay(4_500L)
         Log.d(TAG, "fetchUserTopicIds: found ${topicIds.size} topics for ${pubkey.take(8)}...")
         return topicIds.distinct()
     }
@@ -1175,14 +1373,13 @@ object NotificationsRepository {
             since = since,
             limit = 2000
         )
-        val handle = stateMachine.requestOneShotSubscription(allRelays, filter,
+        stateMachine.awaitOneShotSubscription(allRelays, filter,
             priority = SubscriptionPriority.NORMAL, settleMs = 300L, maxWaitMs = 5_000L,
         ) { ev ->
             if (ev.kind == 1) {
                 synchronized(noteIds) { noteIds.add(ev.id) }
             }
         }
-        delay(5_500L)
         Log.d(TAG, "fetchUserNoteIds: found ${noteIds.size} notes for ${pubkey.take(8)}...")
         return noteIds.distinct()
     }
@@ -1237,6 +1434,10 @@ object NotificationsRepository {
     /** Flush all pending target note fetches as ONE batched subscription. */
     private suspend fun flushTargetFetchBatch() {
         if (pendingTargetFetches.isEmpty() || subscriptionRelayUrls.isEmpty()) return
+        // Mutex ensures only one flush runs at a time — prevents duplicate retry processing
+        // when a new flush fires while the previous one is waiting on its one-shot delay.
+        targetFetchMutex.withLock {
+        if (pendingTargetFetches.isEmpty()) return
         val batch = pendingTargetFetches.toMap()
         pendingTargetFetches.clear()
 
@@ -1259,15 +1460,14 @@ object NotificationsRepository {
         }
         if (remainingIds.isNotEmpty()) Log.d(TAG, "Cache hit ${fetched.size}/${allNoteIds.size}, fetching ${remainingIds.size} from relays")
 
-        // ── Step 2: Fetch remaining from relays ──────────────────────────
+        // ── Step 2: Fetch remaining from relays (EOSE-driven, no blind delay) ──
         if (remainingIds.isNotEmpty()) {
             val filter = Filter(ids = remainingIds, limit = remainingIds.size)
-            val stateMachine = RelayConnectionStateMachine.getInstance()
-            val handle = stateMachine.requestTemporarySubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL) { ev ->
-                fetched[ev.id] = eventToNote(ev)
-            }
-            delay(timeoutMs)
-            handle.cancel()
+            RelayConnectionStateMachine.getInstance()
+                .awaitOneShotSubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL,
+                    settleMs = 500L, maxWaitMs = timeoutMs) { ev ->
+                    fetched[ev.id] = eventToNote(ev)
+                }
         }
 
         // ── Step 3: Apply fetched notes; verify reactions are to our notes ─
@@ -1286,12 +1486,14 @@ object NotificationsRepository {
                         // Max retries exhausted. Keep the notification (it passed relay-side
                         // p-tag filtering so it IS relevant) but without a target note preview.
                         // Previously we deleted likes/reposts here, causing silent notification loss.
+                        targetFetchExhaustedIds.add(pending.notificationId)
                         Log.d(TAG, "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview")
                         // If this is a REPLY and user is cited in content, reclassify as MENTION
                         // so it appears in the Mentions tab even without target note resolution.
+                        val rawCheck = current.rawContent ?: current.note?.content ?: ""
                         if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT &&
-                            myPubkeyHex != null && current.note != null &&
-                            isUserCitedInContent(current.note.content, myPubkeyHex!!)) {
+                            myPubkeyHex != null && rawCheck.isNotBlank() &&
+                            isUserCitedInContent(rawCheck, myPubkeyHex!!)) {
                             val mentionUpdate = current.copy(
                                 type = NotificationType.MENTION,
                                 text = "${current.author?.displayName ?: "Someone"} mentioned you"
@@ -1319,8 +1521,11 @@ object NotificationsRepository {
                 }
                 // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
                 if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
-                    val isCitedInContent = myPubkeyHex != null && current.note != null &&
-                        isUserCitedInContent(current.note.content, myPubkeyHex!!)
+                    // Use rawContent (original event content with nostr: URIs intact) for cite check.
+                    // note.content has nostr:npub→@displayName resolved, which breaks the regex.
+                    val contentToCheck = current.rawContent ?: current.note?.content ?: ""
+                    val isCitedInContent = myPubkeyHex != null && contentToCheck.isNotBlank() &&
+                        isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                     if (!isCitedInContent) {
                         notificationsById.remove(pending.notificationId)
                         removedCount++
@@ -1354,7 +1559,12 @@ object NotificationsRepository {
             }
             scheduleTargetFetchFlush()
         }
+        } // end mutex
     }
+
+    /** Notification IDs whose target fetch has been exhausted (MAX_TARGET_FETCH_RETRIES reached).
+     *  Prevents reEnrichOrphanedNotifications from re-queuing them indefinitely. */
+    private val targetFetchExhaustedIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     /**
      * Phase 4: Re-enrich notifications that were created during cold start before relays
@@ -1364,14 +1574,94 @@ object NotificationsRepository {
     private fun reEnrichOrphanedNotifications() {
         val orphans = notificationsById.values.filter { data ->
             data.targetNoteId != null && data.targetNote == null &&
+            !targetFetchExhaustedIds.contains(data.id) && // Skip already-exhausted
+            !pendingTargetFetches.containsKey(data.targetNoteId) && // Skip already-pending
             data.type in listOf(NotificationType.LIKE, NotificationType.REPOST, NotificationType.REPLY,
-                NotificationType.COMMENT, NotificationType.QUOTE)
+                NotificationType.COMMENT, NotificationType.QUOTE, NotificationType.POLL_VOTE, NotificationType.ZAP)
         }
-        if (orphans.isEmpty()) return
+        if (orphans.isEmpty()) {
+            // Even if no target note orphans, still sweep zap sender profiles
+            reEnrichZapSenderProfiles()
+            return
+        }
         Log.d(TAG, "Phase 4: Re-enriching ${orphans.size} orphaned notifications (missing targetNote)")
         for (orphan in orphans) {
             val targetId = orphan.targetNoteId ?: continue
             fetchAndSetTargetNote(targetId, orphan.id) { d -> { note -> d.copy(targetNote = note) } }
+        }
+        // Also sweep zap sender profiles after target notes
+        reEnrichZapSenderProfiles()
+    }
+
+    /**
+     * Phase 4b: Re-enrich zap notifications whose sender still shows a placeholder
+     * (wallet service name like "CoinOS" or hex prefix like "a1b2c3d4...").
+     * Collects unique unresolved sender pubkeys, requests profiles in one batch,
+     * then updates notification text as profiles resolve.
+     */
+    private fun reEnrichZapSenderProfiles() {
+        if (cacheRelayUrls.isEmpty()) return
+        // Find zap notifications where the author looks like a placeholder (hex prefix ending with ...)
+        val zapOrphans = notificationsById.values.filter { data ->
+            data.type == NotificationType.ZAP &&
+            data.author?.displayName?.endsWith("...") == true &&
+            data.author?.id?.length == 64
+        }
+        if (zapOrphans.isEmpty()) return
+        val uniquePubkeys = zapOrphans.mapNotNull { it.author?.id?.lowercase() }.distinct()
+        val uncached = uniquePubkeys.filter { profileCache.getAuthor(it) == null }
+        if (uncached.isEmpty()) {
+            // Profiles are cached but notifications weren't updated yet — update them now
+            var updated = 0
+            for (data in zapOrphans) {
+                val authorId = data.author?.id ?: continue
+                val resolved = profileCache.getAuthor(authorId) ?: continue
+                if (resolved.displayName == data.author?.displayName) continue
+                val newName = resolved.displayName ?: "Someone"
+                val oldName = data.author?.displayName ?: ""
+                val newText = data.text.replaceFirst(oldName, newName)
+                notificationsById[data.id] = data.copy(text = newText, author = resolved)
+                updated++
+            }
+            if (updated > 0) {
+                emitSorted()
+                Log.d(TAG, "Phase 4b: Updated $updated zap sender names from cache")
+            }
+            return
+        }
+        Log.d(TAG, "Phase 4b: Re-enriching ${zapOrphans.size} zap sender profiles (${uncached.size} unique pubkeys)")
+        val uncachedSet = uncached.map { it.lowercase() }.toSet()
+        scope.launch {
+            profileCache.requestProfiles(uncached, cacheRelayUrls)
+            // Wait for profiles to resolve (up to 15s), then update notifications
+            val resolvedPubkeys = mutableSetOf<String>()
+            kotlinx.coroutines.withTimeoutOrNull(15_000L) {
+                profileCache.profileUpdated
+                    .filter { it.lowercase() in uncachedSet }
+                    .collect { pk ->
+                        resolvedPubkeys.add(pk.lowercase())
+                        if (resolvedPubkeys.size >= uncached.size) {
+                            // All resolved
+                            throw kotlinx.coroutines.CancellationException("all resolved")
+                        }
+                    }
+            }
+            // Update all zap notifications with newly resolved profiles
+            var updated = 0
+            for (data in zapOrphans) {
+                val authorId = data.author?.id ?: continue
+                val resolved = profileCache.getAuthor(authorId) ?: continue
+                if (resolved.displayName == data.author?.displayName) continue
+                val newName = resolved.displayName ?: "Someone"
+                val oldName = data.author?.displayName ?: ""
+                val newText = data.text.replaceFirst(oldName, newName)
+                notificationsById[data.id] = data.copy(text = newText, author = resolved)
+                updated++
+            }
+            if (updated > 0) {
+                emitSorted()
+                Log.d(TAG, "Phase 4b: Updated $updated zap sender display names")
+            }
         }
     }
 
@@ -1397,6 +1687,8 @@ object NotificationsRepository {
         // NIP-88 poll data (kind 1068)
         val tags = event.tags.map { it.toList() }
         val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
+        // Zap poll data (kind 6969)
+        val zapPollData = if (event.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(tags) else null
         return Note(
             id = event.id,
             author = author,
@@ -1413,7 +1705,8 @@ object NotificationsRepository {
             rootNoteId = rootId,
             replyToId = replyToId,
             kind = event.kind,
-            pollData = pollData
+            pollData = pollData,
+            zapPollData = zapPollData
         )
     }
 

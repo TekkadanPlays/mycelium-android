@@ -83,6 +83,8 @@ class Kind1RepliesRepository {
 
     /** Per-thread cache: rootNoteId -> (replyId -> Note) for fast lookup and tree building. */
     private val threadReplyCache = mutableMapOf<String, MutableMap<String, Note>>()
+    /** Parent IDs that were fetched but not found (timed out). Prevents infinite re-queue loop. */
+    private val exhaustedParentIds = mutableMapOf<String, MutableSet<String>>()
 
     /** Buffer for relay confirmations that arrived before their reply was injected. eventId → set of relay URLs. */
     private val pendingRelayConfirmations = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
@@ -221,10 +223,14 @@ class Kind1RepliesRepository {
 
         // Cancel previous subscription FIRST to stop stale events from arriving
         flushJob?.cancel()
+        parentBatchJob?.cancel()
         pendingEvents.clear()
+        pendingParentBatch.clear()
         batchStartMs = 0L
         replySubscriptionHandle?.cancel()
         replySubscriptionHandle = null
+        // Reset exhausted parent tracking for the new fetch
+        exhaustedParentIds.remove(noteId)
 
         _isLoading.value = true
         _error.value = null
@@ -235,7 +241,7 @@ class Kind1RepliesRepository {
         val staleKeys = _replies.value.keys.filter { it != noteId }
         if (staleKeys.isNotEmpty()) {
             _replies.value = _replies.value - staleKeys.toSet()
-            staleKeys.forEach { threadReplyCache.remove(it); pendingParentFetches.remove(it) }
+            staleKeys.forEach { threadReplyCache.remove(it); pendingParentFetches.remove(it); exhaustedParentIds.remove(it) }
         }
 
         // Seed from ThreadReplyCache (populated by the feed) for instant display
@@ -272,10 +278,15 @@ class Kind1RepliesRepository {
             val countsFilter = Filter(kinds = listOf(7, 9735), tags = mapOf("e" to listOf(noteId)), limit = 500)
 
             val rsm = RelayConnectionStateMachine.getInstance()
+            val rawEventCount = java.util.concurrent.atomic.AtomicInteger(0)
             replySubscriptionHandle = rsm.requestTemporarySubscriptionWithRelay(
                 relayUrls = allRelays,
                 filter = replyFilter,
                 onEvent = { event, relayUrl ->
+                    val count = rawEventCount.incrementAndGet()
+                    if (count <= 5 || count % 10 == 0) {
+                        Log.d(TAG, "RAW event #$count for thread ${noteId.take(8)}: kind=${event.kind} id=${event.id.take(8)} from=$relayUrl")
+                    }
                     NotificationsRepository.ingestEvent(event)
                     NoteCountsRepository.onLiveEvent(event)
                     if (event.kind == 1) handleReplyEvent(noteId, event, relayUrl)
@@ -374,7 +385,16 @@ class Kind1RepliesRepository {
             val threadCache = threadReplyCache[noteId]
             val belongsToThread = noteId in threadParentIds ||
                 (threadCache != null && threadParentIds.any { it in threadCache })
-            if (!belongsToThread) return
+            if (!belongsToThread) {
+                // DEBUG: log every rejected event to diagnose empty threads
+                val allETags = event.tags.filter { it.size >= 2 && it[0] == "e" }
+                val allEIds = allETags.map { it.getOrNull(1)?.take(8) ?: "?" }
+                val markers = allETags.map { tag -> "${tag.getOrNull(1)?.take(8)}:m=${tag.getOrNull(3) ?: "none"}/${tag.getOrNull(4) ?: ""}" }
+                Log.w(TAG, "REJECTED event ${event.id.take(8)} for thread ${noteId.take(8)}: " +
+                    "threadParentIds=${threadParentIds.map { it.take(8) }}, " +
+                    "allETags=$markers, cacheSize=${threadCache?.size ?: 0}")
+                return
+            }
 
             val reply = convertEventToNote(event, relayUrl)
             // Log nested replies (replyToId != root) for threading diagnostics
@@ -495,10 +515,11 @@ class Kind1RepliesRepository {
         val existingIds = currentReplies.map { it.id }.toSet() + rootNoteId
         val missingParentIds = currentReplies.mapNotNull { it.replyToId }.filter { it !in existingIds }.toSet()
         val pending = pendingParentFetches.getOrPut(rootNoteId) { mutableSetOf() }
+        val exhausted = exhaustedParentIds.getOrPut(rootNoteId) { mutableSetOf() }
         val batch = pendingParentBatch.getOrPut(rootNoteId) { java.util.Collections.synchronizedSet(mutableSetOf()) }
         var added = false
         missingParentIds.forEach { parentId ->
-            if (parentId in pending) return@forEach
+            if (parentId in pending || parentId in exhausted) return@forEach
             pending.add(parentId)
             batch.add(parentId)
             added = true
@@ -566,10 +587,18 @@ class Kind1RepliesRepository {
         val stillPending = parentIds.filter { pendingParentFetches[rootNoteId]?.contains(it) == true }
         if (stillPending.isNotEmpty()) {
             Log.d(TAG, "Timeout: ${stillPending.size}/${parentIds.size} parents not found for thread ${rootNoteId.take(8)}")
-            stillPending.forEach { pendingParentFetches[rootNoteId]?.remove(it) }
+            // Mark timed-out parents as exhausted so they're never re-queued
+            val exhausted = exhaustedParentIds.getOrPut(rootNoteId) { mutableSetOf() }
+            stillPending.forEach {
+                pendingParentFetches[rootNoteId]?.remove(it)
+                exhausted.add(it)
+            }
         }
-        // Recursively resolve any newly-discovered missing parents
-        scheduleFetchMissingParents(rootNoteId)
+        // Resolve any newly-discovered missing parents (from parents we DID find)
+        // Only if we actually found at least one parent (otherwise there's nothing new to discover)
+        if (stillPending.size < parentIds.size) {
+            scheduleFetchMissingParents(rootNoteId)
+        }
     }
 
     /**

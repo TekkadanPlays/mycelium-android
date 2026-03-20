@@ -188,6 +188,21 @@ class FeedStateViewModel : ViewModel() {
         _homeFeedState.update { it.copy(engagementFilter = filter) }
     }
 
+    /**
+     * Activate a NIP-51 people list as the home feed filter.
+     * When active, only notes from pubkeys in the list are shown.
+     */
+    fun setHomeActiveList(dTag: String, title: String) {
+        _homeFeedState.update { it.copy(activeListDTag = dTag, activeListTitle = title, isFollowing = true) }
+    }
+
+    /**
+     * Clear the active people list and revert to normal Following filter.
+     */
+    fun clearHomeActiveList() {
+        _homeFeedState.update { it.copy(activeListDTag = null, activeListTitle = null) }
+    }
+
     fun getHomeDisplayName(): String {
         val state = _homeFeedState.value
         return when {
@@ -259,7 +274,11 @@ data class FeedState(
 
     // Topics: selected hashtag and whether viewing that hashtag's feed (persists across tab switch)
     val selectedHashtag: String? = null,
-    val isViewingHashtagFeed: Boolean = false
+    val isViewingHashtagFeed: Boolean = false,
+
+    // Active NIP-51 people list d-tag for feed filtering (null = use normal Following/Global)
+    val activeListDTag: String? = null,
+    val activeListTitle: String? = null
 )
 
 /**

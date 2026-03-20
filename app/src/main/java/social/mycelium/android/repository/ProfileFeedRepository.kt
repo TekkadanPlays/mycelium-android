@@ -62,6 +62,10 @@ class ProfileFeedRepository(
         /** Maximum consecutive pages that produced zero items for a tab before declaring exhaustion. */
         private const val TAB_EMPTY_PAGE_LIMIT = 3
 
+        // All event kinds a profile feed subscribes to
+        val PROFILE_KINDS = listOf(1, 6, 11, 1111, 1068, 6969)
+        val PROFILE_KINDS_SET = PROFILE_KINDS.toSet()
+
         // Tab indices — shared with ProfileScreen
         const val TAB_NOTES = 0
         const val TAB_REPLIES = 1
@@ -147,7 +151,7 @@ class ProfileFeedRepository(
         tabEmptyPageCount.fill(0)
 
         val filter = Filter(
-            kinds = listOf(1, 6),
+            kinds = PROFILE_KINDS,
             authors = listOf(authorPubkey),
             limit = INITIAL_LOAD_SIZE
         )
@@ -159,7 +163,7 @@ class ProfileFeedRepository(
             filter = filter,
             priority = SubscriptionPriority.HIGH,
         ) { event, sourceRelayUrl ->
-            if ((event.kind == 1 || event.kind == 6) && event.pubKey == authorPubkey) {
+            if (event.kind in PROFILE_KINDS_SET && event.pubKey == authorPubkey) {
                 lastEventAt.set(System.currentTimeMillis())
                 pendingEvents.add(event to sourceRelayUrl)
                 scheduleFlush()
@@ -255,7 +259,7 @@ class ProfileFeedRepository(
         val untilSeconds = cursorMs / 1000
 
         val filter = Filter(
-            kinds = listOf(1, 6),
+            kinds = PROFILE_KINDS,
             authors = listOf(authorPubkey),
             limit = PAGE_SIZE,
             until = untilSeconds
@@ -271,7 +275,7 @@ class ProfileFeedRepository(
             filter = filter,
             priority = SubscriptionPriority.HIGH,
         ) { event, sourceRelayUrl ->
-            if ((event.kind == 1 || event.kind == 6) && event.pubKey == authorPubkey) {
+            if (event.kind in PROFILE_KINDS_SET && event.pubKey == authorPubkey) {
                 lastEventAt.set(System.currentTimeMillis())
                 rawEventCount.incrementAndGet()
                 val eventMs = event.createdAt * 1000L
@@ -607,6 +611,19 @@ class ProfileFeedRepository(
         val tags = event.tags.map { it.toList() }
         val storedRelayUrl = sourceRelayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
 
+        // NIP-88 poll data (kind 1068)
+        val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
+        // Zap poll data (kind 6969)
+        val zapPollData = if (event.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(tags) else null
+        // Topic title: kind-11 uses "subject" tag, also support NIP-23 "title" tag
+        val topicTitle = event.tags.firstOrNull { it.size >= 2 && (it[0] == "subject" || it[0] == "title") }?.getOrNull(1)
+        // Mentioned pubkeys (for profile resolution)
+        val mentionedPubkeys = event.tags
+            .filter { tag -> tag.size >= 2 && tag[0] == "p" }
+            .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
+            .distinct()
+        mentionedPubkeys.forEach { queueProfileIfMissing(it) }
+
         return Note(
             id = event.id,
             author = author,
@@ -627,6 +644,10 @@ class ProfileFeedRepository(
             replyToId = replyToId,
             kind = event.kind,
             tags = tags,
+            topicTitle = topicTitle,
+            pollData = pollData,
+            zapPollData = zapPollData,
+            mentionedPubkeys = mentionedPubkeys,
         )
     }
 

@@ -6,14 +6,16 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [CachedProfileEntity::class, CachedNip65Entity::class, CachedFollowListEntity::class],
-    version = 2,
+    entities = [CachedProfileEntity::class, CachedNip65Entity::class, CachedFollowListEntity::class, CachedEventEntity::class, CachedNip11Entity::class],
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun profileDao(): ProfileDao
     abstract fun nip65Dao(): Nip65Dao
     abstract fun followListDao(): FollowListDao
+    abstract fun eventDao(): EventDao
+    abstract fun nip11Dao(): Nip11Dao
 
     companion object {
         @Volatile

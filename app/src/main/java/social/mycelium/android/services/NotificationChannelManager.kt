@@ -223,6 +223,9 @@ object NotificationChannelManager {
     const val EXTRA_NOTE_ID = "mycelium_note_id"
     const val EXTRA_ROOT_NOTE_ID = "mycelium_root_note_id"
     const val EXTRA_NOTIF_TYPE = "mycelium_notif_type"
+    /** Hex pubkey of the account that received this notification.
+     *  Used to switch accounts when the user taps a notification from a background account. */
+    const val EXTRA_ACCOUNT_PUBKEY = "mycelium_account_pubkey"
 
     /**
      * Post a social notification (reply, mention, zap, etc.).
@@ -241,6 +244,7 @@ object NotificationChannelManager {
         noteId: String? = null,
         rootNoteId: String? = null,
         notifType: String? = null,
+        accountPubkey: String? = null,
         autoCancel: Boolean = true
     ) {
         // Build a deep-link PendingIntent so tapping opens the specific thread/note
@@ -249,6 +253,7 @@ object NotificationChannelManager {
             if (noteId != null) putExtra(EXTRA_NOTE_ID, noteId)
             if (rootNoteId != null) putExtra(EXTRA_ROOT_NOTE_ID, rootNoteId)
             if (notifType != null) putExtra(EXTRA_NOTIF_TYPE, notifType)
+            if (accountPubkey != null) putExtra(EXTRA_ACCOUNT_PUBKEY, accountPubkey)
         }
         val pendingIntent = if (tapIntent != null) {
             PendingIntent.getActivity(

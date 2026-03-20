@@ -142,6 +142,8 @@ data class Note(
     val dTag: String? = null,
     /** NIP-88 poll data; non-null when kind == 1068. */
     val pollData: PollData? = null,
+    /** Zap poll data (kind 6969); non-null when kind == 6969. */
+    val zapPollData: ZapPollData? = null,
     /** Publish progress for locally-published notes; null for notes from subscriptions. Not serialized. */
     @Transient val publishState: PublishState? = null
 ) {
@@ -190,6 +192,57 @@ data class PollData(
             }
             if (options.isEmpty()) return null
             return PollData(options, pollType, endsAt, relays)
+        }
+    }
+}
+
+/** Zap poll option (["poll_option", "index", "description"]). */
+@Immutable
+@Serializable
+data class ZapPollOption(
+    val index: Int,
+    val description: String
+)
+
+/** Zap poll metadata parsed from kind-6969 event tags (Amethyst-style). */
+@Immutable
+@Serializable
+data class ZapPollData(
+    val options: List<ZapPollOption>,
+    /** Minimum sats per zap vote; null = no minimum. */
+    val valueMinimum: Long? = null,
+    /** Maximum sats per zap vote; null = no maximum. */
+    val valueMaximum: Long? = null,
+    /** Unix epoch seconds when poll closes; null = open-ended. */
+    val closedAt: Long? = null,
+    /** Percentage threshold for consensus (0–100); null = no threshold. */
+    val consensusThreshold: Int? = null
+) {
+    val hasEnded: Boolean get() = closedAt != null && closedAt < System.currentTimeMillis() / 1000
+
+    companion object {
+        /** Parse zap poll tags from raw event tags. Returns null if not a zap poll. */
+        fun parseFromTags(tags: List<List<String>>): ZapPollData? {
+            val options = mutableListOf<ZapPollOption>()
+            var valueMinimum: Long? = null
+            var valueMaximum: Long? = null
+            var closedAt: Long? = null
+            var consensusThreshold: Int? = null
+            for (tag in tags) {
+                if (tag.size < 2) continue
+                when (tag[0]) {
+                    "poll_option" -> if (tag.size >= 3) {
+                        val idx = tag[1].toIntOrNull()
+                        if (idx != null) options.add(ZapPollOption(idx, tag[2]))
+                    }
+                    "value_minimum" -> valueMinimum = tag[1].toLongOrNull()
+                    "value_maximum" -> valueMaximum = tag[1].toLongOrNull()
+                    "closed_at" -> closedAt = tag[1].toLongOrNull()
+                    "consensus_threshold" -> consensusThreshold = tag[1].toIntOrNull()
+                }
+            }
+            if (options.isEmpty()) return null
+            return ZapPollData(options.sortedBy { it.index }, valueMinimum, valueMaximum, closedAt, consensusThreshold)
         }
     }
 }

@@ -56,7 +56,10 @@ data class NotificationData(
     /** NIP-88: All options on the poll, for context display. */
     val pollAllOptions: List<String> = emptyList(),
     /** NIP-88: Whether the poll is multiple choice. */
-    val pollIsMultipleChoice: Boolean = false
+    val pollIsMultipleChoice: Boolean = false,
+    /** Raw event content before nostr:npub→@name resolution. Used by flushTargetFetchBatch
+     *  to detect mentions via isUserCitedInContent (which needs the original nostr: URIs). */
+    val rawContent: String? = null
 )
 
 enum class NotificationType {

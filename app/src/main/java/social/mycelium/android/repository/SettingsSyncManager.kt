@@ -116,6 +116,20 @@ object SettingsSyncManager {
     }
 
     /**
+     * Apply already-decrypted remote settings to local preferences.
+     * Called by [StartupOrchestrator] which handles the fetch + decrypt itself.
+     */
+    fun applyRemoteSettings(remoteSettings: SyncedSettings) {
+        isApplyingRemote = true
+        try {
+            SyncedSettings.applyToLocalPreferences(remoteSettings)
+            Log.d(TAG, "Remote settings applied via orchestrator")
+        } finally {
+            isApplyingRemote = false
+        }
+    }
+
+    /**
      * Fetch the latest kind 30078 settings event for this user from relays.
      * Decrypts with NIP-44 and merges into local preferences.
      *
@@ -143,18 +157,15 @@ object SettingsSyncManager {
 
                 var latestEvent: Event? = null
                 val stateMachine = RelayConnectionStateMachine.getInstance()
-                val handle = stateMachine.requestTemporarySubscriptionWithRelay(
-                    relayUrls, filter, priority = SubscriptionPriority.NORMAL
-                ) { event, _ ->
+                stateMachine.awaitOneShotSubscription(
+                    relayUrls, filter, priority = SubscriptionPriority.NORMAL,
+                    settleMs = 500L, maxWaitMs = 5_000L
+                ) { event ->
                     // Keep the newest event (highest created_at)
                     if (latestEvent == null || event.createdAt > (latestEvent?.createdAt ?: 0)) {
                         latestEvent = event
                     }
                 }
-
-                // Wait for responses to settle
-                delay(5000)
-                handle.cancel()
                 Log.d(TAG, "fetchAndApplySettings: subscription done, latestEvent=${latestEvent?.id?.take(8)}")
 
                 val event = latestEvent

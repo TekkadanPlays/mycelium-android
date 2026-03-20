@@ -14,6 +14,7 @@ data class RelayInformation(
     val description: String? = null,
     val pubkey: String? = null,
     val contact: String? = null,
+    @Serializable(with = FlexibleIntListSerializer::class)
     val supported_nips: List<Int>? = null,
     val software: String? = null,
     val version: String? = null,

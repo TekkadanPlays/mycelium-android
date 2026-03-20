@@ -227,4 +227,47 @@ object NotificationPreferences {
         prefs.edit().putBoolean(acctKey(KEY_MUTE_STRANGERS), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
+
+    // ── Per-account preference lookup (for background accounts) ─────────────
+    // These read directly from SharedPreferences for a specific pubkey without
+    // switching the active account. Used by background account notification gating.
+
+    /** Read a per-account boolean preference for a specific pubkey. */
+    private fun getAccountBoolForPubkey(pubkey: String, base: String, default: Boolean): Boolean {
+        if (!::prefs.isInitialized) return default
+        val key = "${pubkey.lowercase()}:${base}"
+        return if (prefs.contains(key)) prefs.getBoolean(key, default)
+        else prefs.getBoolean(base, default) // legacy global fallback
+    }
+
+    /**
+     * Check whether a notification type is allowed for a specific account.
+     * Reads directly from SharedPreferences — safe to call for any account
+     * without affecting the active account's in-memory state flows.
+     */
+    fun isNotificationAllowedForAccount(pubkey: String, type: social.mycelium.android.data.NotificationType): Boolean {
+        if (!pushEnabled.value) return false
+        return when (type) {
+            social.mycelium.android.data.NotificationType.REPLY,
+            social.mycelium.android.data.NotificationType.COMMENT ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_REPLIES, true)
+            social.mycelium.android.data.NotificationType.LIKE,
+            social.mycelium.android.data.NotificationType.BADGE_AWARD ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_REACTIONS, true)
+            social.mycelium.android.data.NotificationType.ZAP ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_ZAPS, true)
+            social.mycelium.android.data.NotificationType.REPOST ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_REPOSTS, true)
+            social.mycelium.android.data.NotificationType.MENTION,
+            social.mycelium.android.data.NotificationType.HIGHLIGHT,
+            social.mycelium.android.data.NotificationType.REPORT ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_MENTIONS, true)
+            social.mycelium.android.data.NotificationType.QUOTE ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_QUOTES, true)
+            social.mycelium.android.data.NotificationType.DM ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_DMS, true)
+            social.mycelium.android.data.NotificationType.POLL_VOTE ->
+                getAccountBoolForPubkey(pubkey, KEY_NOTIFY_POLLS, true)
+        }
+    }
 }

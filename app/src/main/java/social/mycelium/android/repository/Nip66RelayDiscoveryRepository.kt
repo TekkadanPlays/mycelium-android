@@ -21,7 +21,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -32,13 +31,6 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
-import io.ktor.client.request.post
-import io.ktor.client.request.setBody
-import io.ktor.client.statement.bodyAsText
-import io.ktor.http.ContentType
-import io.ktor.http.content.TextContent
-import io.ktor.http.isSuccess
-import social.mycelium.android.network.MyceliumHttpClient
 import social.mycelium.android.relay.RelayHealthTracker
 
 /**
@@ -64,11 +56,6 @@ object Nip66RelayDiscoveryRepository {
     private const val CACHE_KEY_MONITORS = "known_monitors"
     private const val CACHE_KEY_TIMESTAMP = "last_fetch"
     private const val CACHE_EXPIRY_MS = 6 * 60 * 60 * 1000L // 6 hours
-
-    /** rstate REST API base URL (proxied via Hono on mycelium.social). */
-    private const val RSTATE_BASE_URL = "https://mycelium.social/relays"
-
-    private val httpClient = MyceliumHttpClient.instance
 
     /** Well-known relays where NIP-66 monitors publish kind 30166 events. */
     val MONITOR_RELAYS = listOf(
@@ -253,213 +240,14 @@ object Nip66RelayDiscoveryRepository {
         else -> null
     }
 
-    // ── REST API (primary path) ──
+    // ── Discovery (WebSocket NIP-66) ──
 
     /**
-     * Fetch relay data from the rstate REST API at mycelium.social.
-     * This is the primary discovery path — a single HTTPS POST replaces
-     * the 12-second WebSocket bootstrap to multiple monitor relays.
+     * Fetch relay discovery data via WebSocket NIP-66 (kind 30166) from
+     * well-known monitor relays.
      *
-     * @param nipFilter Optional NIP numbers to filter by (e.g. [50] for search relays).
-     *                  Pass null/empty for all relays.
-     * @param limit     Max results per page (API max 500).
-     * @return true if the REST call succeeded and populated data, false otherwise.
-     */
-    private suspend fun fetchFromRestApi(
-        nipFilter: List<Int>? = null,
-        limit: Int = 500
-    ): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val bodyMap = mutableMapOf<String, Any>()
-            bodyMap["limit"] = limit
-            bodyMap["format"] = "detailed"
-            if (!nipFilter.isNullOrEmpty()) {
-                bodyMap["filter"] = mapOf("nips" to nipFilter)
-            }
-
-            val bodyJson = buildRestRequestBody(bodyMap)
-            Log.d(TAG, "REST API request: POST $RSTATE_BASE_URL/search body=$bodyJson")
-
-            val response = httpClient.post("$RSTATE_BASE_URL/search") {
-                setBody(TextContent(bodyJson, ContentType.Application.Json))
-            }
-            if (!response.status.isSuccess()) {
-                Log.w(TAG, "REST API returned ${response.status}")
-                return@withContext false
-            }
-
-            val responseBody = response.bodyAsText()
-            if (responseBody.isBlank()) {
-                Log.w(TAG, "REST API returned empty body")
-                return@withContext false
-            }
-
-            val parsed = JSON.parseToJsonElement(responseBody).jsonObject
-            val relaysArray = parsed["relays"]?.jsonArray ?: run {
-                Log.w(TAG, "REST API response missing 'relays' array")
-                return@withContext false
-            }
-            val total = parsed["total"]?.jsonPrimitive?.int ?: 0
-            Log.d(TAG, "REST API returned ${relaysArray.size} relays (total=$total)")
-
-            val relays = mutableMapOf<String, DiscoveredRelay>()
-            for (element in relaysArray) {
-                val relay = parseRestRelayState(element.jsonObject) ?: continue
-                relays[normalizeUrl(relay.url)] = relay
-            }
-
-            if (relays.isNotEmpty()) {
-                // Merge with existing data (REST results take precedence)
-                val merged = _discoveredRelays.value.toMutableMap()
-                merged.putAll(relays)
-                _discoveredRelays.value = merged
-                saveToDisk(merged)
-                val searchCount = merged.values.count { RelayType.SEARCH in it.types }
-                val searchRelays = merged.values.filter { RelayType.SEARCH in it.types }
-                val withRtt = searchRelays.count { it.bestRtt != null }
-                Log.d(TAG, "REST API: merged ${relays.size} relays (total now ${merged.size}, SEARCH: $searchCount, withRTT: $withRtt/${searchRelays.size})")
-                if (searchRelays.isNotEmpty()) {
-                    searchRelays.sortedBy { it.bestRtt ?: Int.MAX_VALUE }.take(5).forEach { r ->
-                        Log.d(TAG, "  SEARCH relay: ${r.url} bestRtt=${r.bestRtt} (read=${r.avgRttRead} open=${r.avgRttOpen})")
-                    }
-                }
-            }
-
-            _hasFetched.value = true
-            return@withContext true
-        } catch (e: Exception) {
-            Log.e(TAG, "REST API fetch failed: ${e.message}", e)
-            return@withContext false
-        }
-    }
-
-    /**
-     * Build a JSON request body string from a map.
-     * Handles nested maps and lists for the rstate search endpoint.
-     */
-    private fun buildRestRequestBody(map: Map<String, Any>): String {
-        val entries = map.entries.joinToString(",") { (key, value) ->
-            "\"$key\":${valueToJson(value)}"
-        }
-        return "{$entries}"
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun valueToJson(value: Any): String = when (value) {
-        is String -> "\"$value\""
-        is Number -> value.toString()
-        is Boolean -> value.toString()
-        is List<*> -> "[${value.joinToString(",") { valueToJson(it!!) }}]"
-        is Map<*, *> -> buildRestRequestBody(value as Map<String, Any>)
-        else -> "\"$value\""
-    }
-
-    /**
-     * Parse a single relay object from the rstate REST API "detailed" format
-     * (CompactRelayState) into a DiscoveredRelay.
-     */
-    private fun parseRestRelayState(obj: JsonObject): DiscoveredRelay? {
-        val relayUrl = obj["relayUrl"]?.jsonPrimitive?.content ?: return null
-
-        // Network
-        val network = obj["network"]?.jsonObject?.get("value")?.jsonPrimitive?.content
-
-        // Software
-        val softwareObj = obj["software"]?.jsonObject
-        val software = softwareObj?.get("family")?.jsonObject?.get("value")?.jsonPrimitive?.content
-        val version = softwareObj?.get("version")?.jsonObject?.get("value")?.jsonPrimitive?.content
-
-        // RTT — rstate API nests as rtt.open.value, rtt.read.value, rtt.write.value
-        // but some responses use flat integers: rtt.open = 123 (not rtt.open.value = 123)
-        val rttObj = obj["rtt"]?.jsonObject
-        val rttOpen = rttObj?.get("open")?.let { el ->
-            (el as? JsonObject)?.get("value")?.jsonPrimitive?.int
-                ?: (el as? JsonPrimitive)?.content?.toIntOrNull()
-        }
-        val rttRead = rttObj?.get("read")?.let { el ->
-            (el as? JsonObject)?.get("value")?.jsonPrimitive?.int
-                ?: (el as? JsonPrimitive)?.content?.toIntOrNull()
-        }
-        val rttWrite = rttObj?.get("write")?.let { el ->
-            (el as? JsonObject)?.get("value")?.jsonPrimitive?.int
-                ?: (el as? JsonPrimitive)?.content?.toIntOrNull()
-        }
-        if (rttObj != null && rttRead == null) {
-            Log.w(TAG, "RTT parse miss for $relayUrl: rtt=$rttObj")
-        }
-
-        // NIPs
-        val nipsObj = obj["nips"]?.jsonObject
-        val nipsList = nipsObj?.get("list")?.jsonArray?.mapNotNull {
-            it.jsonPrimitive.int
-        }?.toSet() ?: emptySet()
-
-        // Requirements
-        val reqsObj = obj["requirements"]?.jsonObject
-        val paymentRequired = reqsObj?.get("payment")?.jsonObject?.get("value")?.jsonPrimitive?.boolean ?: false
-        val authRequired = reqsObj?.get("auth")?.jsonObject?.get("value")?.jsonPrimitive?.boolean ?: false
-
-        // Labels
-        val labelsObj = obj["labels"]?.jsonObject
-        val countryCode = labelsObj?.get("countryCode")?.jsonArray
-            ?.firstOrNull { el -> el.jsonPrimitive.content.length == 2 && el.jsonPrimitive.content.all { it.isLetter() } }
-            ?.jsonPrimitive?.content?.uppercase()
-        val isp = labelsObj?.get("host.isp")?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
-        val nip11Version = labelsObj?.get("nip11.version")?.jsonArray?.firstOrNull()?.jsonPrimitive?.content
-
-        // Meta
-        val observationCount = obj["observationCount"]?.jsonPrimitive?.int ?: 0
-        val lastSeenAt = obj["lastSeenAt"]?.jsonPrimitive?.long ?: 0L
-        val updatedAt = obj["updated_at"]?.jsonPrimitive?.long ?: 0L
-
-        // Geo
-        val geoObj = obj["geo"]?.jsonObject
-
-        // Infer relay types from NIPs (rstate doesn't return T tags directly)
-        val types = mutableSetOf<RelayType>()
-        if (50 in nipsList) {
-            types.add(RelayType.SEARCH)
-            Log.d(TAG, "Found SEARCH relay: $relayUrl (NIPs: ${nipsList.joinToString()})")
-        }
-        if (nipsList.isNotEmpty()) {
-            if (65 in nipsList && (1 in nipsList || 2 in nipsList)) types.add(RelayType.PUBLIC_OUTBOX)
-            if (4 in nipsList || 44 in nipsList) types.add(RelayType.PUBLIC_INBOX)
-            if (96 in nipsList) types.add(RelayType.BLOB)
-            if (types.isEmpty() && (1 in nipsList || 2 in nipsList)) types.add(RelayType.PUBLIC_OUTBOX)
-        }
-
-        // Determine hasNip11 from presence of software or nip11.version label
-        val hasNip11 = software != null || nip11Version != null
-
-        return DiscoveredRelay(
-            url = relayUrl,
-            types = types,
-            supportedNips = nipsList,
-            network = network,
-            avgRttOpen = rttOpen,
-            avgRttRead = rttRead,
-            avgRttWrite = rttWrite,
-            monitorCount = observationCount,
-            lastSeen = lastSeenAt.takeIf { it > 0 } ?: (updatedAt / 1000),
-            software = software,
-            version = nip11Version ?: version,
-            hasNip11 = hasNip11,
-            paymentRequired = paymentRequired,
-            authRequired = authRequired,
-            countryCode = countryCode,
-            isp = isp
-        )
-    }
-
-    // ── Discovery (HTTPS primary, WebSocket fallback) ──
-
-    /**
-     * Fetch relay discovery data. Tries the rstate REST API first (fast, single
-     * HTTPS call). Falls back to WebSocket NIP-66 bootstrap if the REST API is
-     * unreachable.
-     *
-     * @param discoveryRelays Relays to query for kind 30166 events (fallback only)
-     * @param monitorPubkeys Optional: specific monitor pubkeys to trust (fallback only)
+     * @param discoveryRelays Additional relays to query for kind 30166 events.
+     * @param monitorPubkeys Optional: specific monitor pubkeys to trust.
      */
     fun fetchRelayDiscovery(
         discoveryRelays: List<String> = emptyList(),
@@ -476,29 +264,19 @@ object Nip66RelayDiscoveryRepository {
         _isLoading.value = true
 
         scope.launch {
-            // ── Primary: rstate REST API ──
-            val restSuccess = try {
-                fetchFromRestApi()
-            } catch (e: Exception) {
-                Log.w(TAG, "REST API primary fetch threw: ${e.message}")
-                false
+            // On cold start the relay pool hasn't connected yet — wait for it.
+            // The mux needs time to flush subscriptions and open WebSockets.
+            if (_discoveredRelays.value.isEmpty() && !_hasFetched.value) {
+                Log.d(TAG, "Cold start — waiting for relay pool before NIP-66 fetch")
+                delay(4_000L)
             }
-
-            if (restSuccess) {
-                Log.d(TAG, "REST API succeeded, skipping WebSocket fallback")
-                _isLoading.value = false
-                return@launch
-            }
-
-            // ── Fallback: WebSocket NIP-66 bootstrap ──
-            Log.d(TAG, "REST API unavailable, falling back to WebSocket NIP-66")
             fetchRelayDiscoveryViaWebSocket(discoveryRelays, monitorPubkeys)
         }
     }
 
     /**
-     * Original WebSocket-based NIP-66 discovery. Now used only as a fallback
-     * when the rstate REST API is unreachable.
+     * WebSocket-based NIP-66 discovery. Subscribes to kind 30166 events
+     * from monitor relays and aggregates the results.
      */
     private suspend fun fetchRelayDiscoveryViaWebSocket(
         discoveryRelays: List<String>,
@@ -515,6 +293,7 @@ object Nip66RelayDiscoveryRepository {
             Log.d(TAG, "Fetching kind $KIND_RELAY_DISCOVERY from ${allRelays.size} relays")
 
             val rawEvents = mutableListOf<Event>()
+            val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
 
             val filter = if (monitorPubkeys.isNotEmpty()) {
                 Filter(
@@ -533,11 +312,25 @@ object Nip66RelayDiscoveryRepository {
                 .requestTemporarySubscription(allRelays, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
                     if (event.kind == KIND_RELAY_DISCOVERY) {
                         synchronized(rawEvents) { rawEvents.add(event) }
+                        lastEventAt.set(System.currentTimeMillis())
                     }
                 }
             fetchHandle = handle
 
-            delay(FETCH_TIMEOUT_MS)
+            // Settle-based wait: the 2s quiet window only starts counting after
+            // the first event arrives, so relay connection time doesn't eat into it.
+            // FETCH_TIMEOUT_MS is the hard deadline for connection + data combined.
+            val deadline = System.currentTimeMillis() + FETCH_TIMEOUT_MS
+            while (System.currentTimeMillis() < deadline) {
+                delay(300)
+                val lastAt = lastEventAt.get()
+                if (lastAt > 0) {
+                    // First event received — now apply settle logic
+                    val quietMs = System.currentTimeMillis() - lastAt
+                    if (quietMs >= 2_000L) break
+                }
+                // No events yet → keep waiting for relays to connect
+            }
             handle.cancel()
             fetchHandle = null
 
@@ -549,15 +342,16 @@ object Nip66RelayDiscoveryRepository {
                 val aggregated = aggregateDiscoveryEvents(parsed)
                 _discoveredRelays.value = aggregated
                 saveToDisk(aggregated)
+                _hasFetched.value = true
                 Log.d(TAG, "Discovered ${aggregated.size} relays from ${parsed.size} monitor events")
+            } else {
+                Log.w(TAG, "No events received — relays may not be connected yet")
             }
 
-            _hasFetched.value = true
             _isLoading.value = false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to fetch relay discovery: ${e.message}", e)
             _isLoading.value = false
-            _hasFetched.value = true
         }
     }
 

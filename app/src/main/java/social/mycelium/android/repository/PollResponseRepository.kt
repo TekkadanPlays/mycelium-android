@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.TemporarySubscriptionHandle
+import social.mycelium.android.relay.NoOpTemporaryHandle
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -164,6 +166,68 @@ object PollResponseRepository {
             totalVoters = current.totalVoters + 1
         )
         _tallies.value = _tallies.value + (pollId to updated)
+    }
+
+    /** Track active live subscriptions so we don't duplicate them. */
+    private val liveSubscriptions = ConcurrentHashMap<String, TemporarySubscriptionHandle>()
+
+    /**
+     * Open a persistent subscription for new poll responses (kind-1018) arriving after now.
+     * Call from a composable's DisposableEffect; cancel the returned handle on dispose.
+     * The initial historical fetch is still done by [fetchTally]; this only catches new votes.
+     */
+    fun subscribeLive(pollId: String, relayUrls: List<String>, myPubkey: String?): TemporarySubscriptionHandle {
+        if (relayUrls.isEmpty()) return NoOpTemporaryHandle
+        // Don't duplicate if already subscribed
+        liveSubscriptions[pollId]?.let { return it }
+
+        val nowSec = System.currentTimeMillis() / 1000
+        val filter = Filter(
+            kinds = listOf(RESPONSE_KIND),
+            tags = mapOf("e" to listOf(pollId)),
+            since = nowSec
+        )
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        val handle = stateMachine.requestTemporarySubscription(
+            relayUrls, filter, priority = SubscriptionPriority.LOW
+        ) { event ->
+            if (event.kind != RESPONSE_KIND) return@requestTemporarySubscription
+            val voterPubkey = event.pubKey
+            val responses = event.tags
+                .filter { it.size >= 2 && it[0] == "response" }
+                .map { it[1] }
+            if (responses.isEmpty()) return@requestTemporarySubscription
+
+            // Incrementally update the tally
+            val current = _tallies.value[pollId] ?: PollTally(pollId)
+            // Check if voter already counted
+            val existingVoters = current.votesByOption.values.flatten().toSet()
+            if (voterPubkey in existingVoters) return@requestTemporarySubscription
+
+            val updatedVotes = current.votesByOption.toMutableMap()
+            val updatedMyVotes = current.myVotedOptions.toMutableSet()
+            for (optionCode in responses) {
+                updatedVotes[optionCode] = (updatedVotes[optionCode] ?: emptySet()) + voterPubkey
+                if (myPubkey != null && voterPubkey == myPubkey) {
+                    updatedMyVotes.add(optionCode)
+                }
+            }
+            val updated = current.copy(
+                votesByOption = updatedVotes,
+                myVotedOptions = updatedMyVotes,
+                totalVoters = current.totalVoters + 1
+            )
+            _tallies.value = _tallies.value + (pollId to updated)
+            Log.d(TAG, "Live vote on poll ${pollId.take(8)}: +1 voter (${voterPubkey.take(8)})")
+        }
+        liveSubscriptions[pollId] = handle
+        Log.d(TAG, "Live subscription opened for poll ${pollId.take(8)}")
+        return handle
+    }
+
+    /** Cancel a live subscription (call on composable dispose). */
+    fun cancelLive(pollId: String) {
+        liveSubscriptions.remove(pollId)?.cancel()
     }
 
     /** Set option labels on an existing tally (called from PollBlock which has PollData). */

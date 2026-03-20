@@ -90,13 +90,17 @@ fun ComposeNoteScreen(
     var showZapRaiser by remember { mutableStateOf(false) }
     var markdownEnabled by remember { mutableStateOf(false) }
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
-    val markdownTransformation = remember { MarkdownVisualTransformation() }
+    val mdLinkColor = MaterialTheme.colorScheme.primary
+    val markdownTransformation = remember(mdLinkColor) { MarkdownVisualTransformation(linkColor = mdLinkColor) }
     var isUploading by remember { mutableStateOf(false) }
 
-    // ── NIP-88 Poll mode ──────────────────────────────────────────────
+    // ── Poll mode ──────────────────────────────────────────────────
     var isPollMode by remember { mutableStateOf(false) }
     var pollOptions by remember { mutableStateOf(listOf("", "")) }
     var isMultipleChoice by remember { mutableStateOf(false) }
+    var isZapPoll by remember { mutableStateOf(false) }
+    var zapPollMinSats by remember { mutableStateOf("") }
+    var zapPollMaxSats by remember { mutableStateOf("") }
 
     // Image picker → EXIF strip → Blossom upload → insert URL
     val mediaPicker = rememberLauncherForActivityResult(
@@ -148,14 +152,27 @@ fun ComposeNoteScreen(
                 showRelayPicker = false
                 val err = if (isPollMode) {
                     val validOptions = pollOptions.filter { it.isNotBlank() }
-                    val optionPairs = validOptions.mapIndexed { i, label -> i.toString() to label }
-                    accountStateViewModel.publishPoll(
-                        question = content,
-                        options = optionPairs,
-                        isMultipleChoice = isMultipleChoice,
-                        endsAtEpochSeconds = null,
-                        relayUrls = selectedUrls
-                    )
+                    if (isZapPoll) {
+                        val optionPairs = validOptions.mapIndexed { i, label -> i to label }
+                        accountStateViewModel.publishZapPoll(
+                            question = content,
+                            options = optionPairs,
+                            valueMinimum = zapPollMinSats.toLongOrNull(),
+                            valueMaximum = zapPollMaxSats.toLongOrNull(),
+                            closedAtEpochSeconds = null,
+                            consensusThreshold = null,
+                            relayUrls = selectedUrls
+                        )
+                    } else {
+                        val optionPairs = validOptions.mapIndexed { i, label -> i.toString() to label }
+                        accountStateViewModel.publishPoll(
+                            question = content,
+                            options = optionPairs,
+                            isMultipleChoice = isMultipleChoice,
+                            endsAtEpochSeconds = null,
+                            relayUrls = selectedUrls
+                        )
+                    }
                 } else {
                     accountStateViewModel.publishKind1(content, selectedUrls, zapRaiserAmount = zapRaiserAmount)
                 }
@@ -197,11 +214,12 @@ fun ComposeNoteScreen(
                 .padding(horizontal = 16.dp)
         ) {
             // ── Scrollable content area ──
+            val scrollState = rememberScrollState()
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .verticalScroll(rememberScrollState())
+                    .then(if (isPollMode) Modifier.verticalScroll(scrollState) else Modifier)
             ) {
                 // Text input — always at the top (question for poll mode, content for note mode)
                 social.mycelium.android.ui.components.ModernTextField(
@@ -214,7 +232,10 @@ fun ComposeNoteScreen(
                     placeholder = if (isPollMode) "Ask a question…" else "What's on your mind?",
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(if (isPollMode) Modifier.heightIn(min = 56.dp, max = 120.dp) else Modifier.heightIn(min = 200.dp))
+                        .then(
+                            if (isPollMode) Modifier.heightIn(min = 56.dp, max = 120.dp)
+                            else Modifier.weight(1f)
+                        )
                         .padding(vertical = 12.dp),
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.Sentences,
@@ -269,19 +290,69 @@ fun ComposeNoteScreen(
                                 Text("Add option")
                             }
                         }
-                        // Multiple choice toggle
+                        // Poll type toggle: NIP-88 vs Zap Poll
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(top = 4.dp)
+                            modifier = Modifier.padding(top = 8.dp)
                         ) {
-                            Checkbox(
-                                checked = isMultipleChoice,
-                                onCheckedChange = { isMultipleChoice = it }
-                            )
                             Text(
-                                text = "Allow multiple selections",
-                                style = MaterialTheme.typography.bodyMedium
+                                text = "Poll type:",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(end = 8.dp)
                             )
+                            FilterChip(
+                                selected = !isZapPoll,
+                                onClick = { isZapPoll = false },
+                                label = { Text("Standard") }
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            FilterChip(
+                                selected = isZapPoll,
+                                onClick = { isZapPoll = true },
+                                label = { Text("⚡ Zap Poll") }
+                            )
+                        }
+
+                        // Multiple choice toggle (NIP-88 only)
+                        if (!isZapPoll) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                Checkbox(
+                                    checked = isMultipleChoice,
+                                    onCheckedChange = { isMultipleChoice = it }
+                                )
+                                Text(
+                                    text = "Allow multiple selections",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                        }
+
+                        // Zap poll sats range (zap poll only)
+                        if (isZapPoll) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = zapPollMinSats,
+                                    onValueChange = { zapPollMinSats = it.filter { c -> c.isDigit() } },
+                                    placeholder = { Text("Min sats") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                                )
+                                OutlinedTextField(
+                                    value = zapPollMaxSats,
+                                    onValueChange = { zapPollMaxSats = it.filter { c -> c.isDigit() } },
+                                    placeholder = { Text("Max sats") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number)
+                                )
+                            }
                         }
                     }
                 }

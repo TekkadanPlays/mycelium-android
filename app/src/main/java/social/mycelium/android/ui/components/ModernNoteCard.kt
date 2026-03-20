@@ -48,6 +48,7 @@ import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import social.mycelium.android.repository.QuotedNoteCache
 import social.mycelium.android.ui.icons.Nip05Verified
@@ -334,9 +335,37 @@ private fun NoteCardContent(
             if (mentionedPubkeys.isNotEmpty()) {
                 LaunchedEffect(mentionedPubkeys) {
                     val pubkeySet = mentionedPubkeys.toSet()
+                    val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
+                    if (uncached.isNotEmpty()) {
+                        profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+                    }
+                    // Catch-up: profiles may have loaded before collector registered
+                    val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
+                    val initiallyResolved = pubkeySet.size - uncached.size
+                    if (nowResolved > initiallyResolved) {
+                        mentionProfileVersion++
+                    }
                     profileCache.profileUpdated
                         .filter { it in pubkeySet }
+                        .debounce(150)
                         .collect { mentionProfileVersion++ }
+                }
+                LaunchedEffect(mentionedPubkeys, mentionProfileVersion) {
+                    val pubkeySet = mentionedPubkeys.toSet()
+                    val hasPlaceholders = pubkeySet.any { pk ->
+                        val author = profileCache.getAuthor(pk)
+                        author == null || author.displayName == pk.take(8) + "..."
+                    }
+                    if (hasPlaceholders) {
+                        delay(2000)
+                        val stillPlaceholder = pubkeySet.any { pk ->
+                            val author = profileCache.getAuthor(pk)
+                            author == null || author.displayName == pk.take(8) + "..."
+                        }
+                        if (!stillPlaceholder) {
+                            mentionProfileVersion++
+                        }
+                    }
                 }
             }
             val contentBlocks = remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion, diskCacheReady) {

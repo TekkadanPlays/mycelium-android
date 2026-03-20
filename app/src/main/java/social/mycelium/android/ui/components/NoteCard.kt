@@ -2706,10 +2706,39 @@ fun NoteCard(
                     if (uncached.isNotEmpty()) {
                         profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
                     }
+                    // Catch-up check: profiles may have loaded between initial composition
+                    // and this LaunchedEffect starting (SharedFlow replay=0 means we'd miss them).
+                    // If any mentioned profile is now resolved that wasn't in the initial render, bump.
+                    val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
+                    val initiallyResolved = pubkeySet.size - uncached.size
+                    if (nowResolved > initiallyResolved) {
+                        mentionProfileVersion++
+                    }
+                    // Collect profile updates; use short debounce so mentions refresh quickly
                     profileCache.profileUpdated
                         .filter { it in pubkeySet }
-                        .debounce(300)
+                        .debounce(150)
                         .collect { mentionProfileVersion++ }
+                }
+                // Safety net: if any mentions are still placeholders after profiles should have loaded,
+                // do a periodic re-check to catch any missed SharedFlow emissions.
+                LaunchedEffect(mentionedPubkeys, mentionProfileVersion) {
+                    val pubkeySet = mentionedPubkeys.toSet()
+                    val hasPlaceholders = pubkeySet.any { pk ->
+                        val author = profileCache.getAuthor(pk)
+                        author == null || author.displayName == pk.take(8) + "..."
+                    }
+                    if (hasPlaceholders) {
+                        delay(2000)
+                        // Re-check: if any placeholder resolved since last version, bump
+                        val stillPlaceholder = pubkeySet.any { pk ->
+                            val author = profileCache.getAuthor(pk)
+                            author == null || author.displayName == pk.take(8) + "..."
+                        }
+                        if (!stillPlaceholder) {
+                            mentionProfileVersion++
+                        }
+                    }
                 }
             }
             // Quoted note fetch state (hoisted so inline QuotedNote blocks can access it)

@@ -1452,11 +1452,13 @@ fun DashboardScreen(
 
     val uriHandler = LocalUriHandler.current
 
-    // Relay health: trouble count for sidebar badge
+    // Relay health: trouble count for sidebar badge — only flag user-specified relays
+    // (outbox/inbox/custom categories), not indexer or system relays.
     val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
     val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
-    val troubleRelayCount = remember(flaggedRelays, blockedRelays) {
-        (flaggedRelays - blockedRelays).size
+    val troubleRelayCount = remember(flaggedRelays, blockedRelays, userRelayUrls) {
+        val trouble = (flaggedRelays + blockedRelays)
+        trouble.count { it in userRelayUrls || social.mycelium.android.repository.RelayStorageManager.normalizeRelayUrl(it) in userRelayUrls }
     }
 
     GlobalSidebar(

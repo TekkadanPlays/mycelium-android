@@ -109,17 +109,16 @@ class RelayForegroundService : Service() {
             Log.d(TAG, "Push notifications enabled from foreground service (${scopes.size} accounts)")
         }
 
-        // Observe new note counts and update the service notification
+        // Observe new note counts and update the service notification.
+        // When count drops to 0 (feed refreshed), reset notification to default text.
         serviceScope.launch {
             NotesRepository.getInstance().newNotesCounts.collectLatest { counts ->
                 val followingCount = counts.following
-                if (followingCount > 0) {
-                    val notification = NotificationChannelManager.buildRelayServiceNotification(
-                        this@RelayForegroundService, followingCount
-                    )
-                    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    manager.notify(NotificationChannelManager.NOTIFICATION_ID_RELAY_SERVICE, notification)
-                }
+                val notification = NotificationChannelManager.buildRelayServiceNotification(
+                    this@RelayForegroundService, followingCount
+                )
+                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.notify(NotificationChannelManager.NOTIFICATION_ID_RELAY_SERVICE, notification)
             }
         }
 

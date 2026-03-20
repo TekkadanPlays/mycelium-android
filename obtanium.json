@@ -19,6 +19,31 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.01",
+      "versionCode": 39,
+      "releaseDate": "2026-03-20",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.01-beta/Mycelium-v0.5.01-beta.apk",
+      "changelog": "Notification enrichment, relay resilience, NIP-19 mention rendering, feed deduplication fixes, battery optimization info panel.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Notifications defer until profile + target note data is fully enriched (up to 3s wait, no more placeholder names)",
+        "Fix: relay blocking no longer triggers on transient DNS/HTTP 502/503 errors",
+        "Fix: relay health icon scoped to user-configured relays only",
+        "Fix: unblocking a relay immediately triggers reconnect and resubscribe",
+        "Fix: NIP-19 @mention rendering race condition resolved with catch-up check and faster debounce",
+        "Fix: foreground service notification clears new-notes count on feed refresh",
+        "Fix: duplicate articles eliminated via NIP-33 author:dTag deduplication for kind-30023",
+        "Fix: duplicate boosts eliminated — display-layer filter hides original when repost version exists",
+        "Battery optimization info panel added to Notification Settings with direct link to device battery settings"
+      ]
+    },
+    {
       "version": "0.5.00",
       "versionCode": 38,
       "releaseDate": "2026-03-20",

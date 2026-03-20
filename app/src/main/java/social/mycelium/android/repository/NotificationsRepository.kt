@@ -75,6 +75,11 @@ class NotificationsRepository(
         private const val TARGET_FETCH_TIMEOUT_MS = 4000L
         private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 6000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
+        /** Maximum time to wait for profile/enrichment data before firing the notification anyway. */
+        private const val ENRICHMENT_WAIT_MS = 3000L
+        private const val ENRICHMENT_POLL_MS = 200L
+        /** Matches placeholder author names from resolveAuthor (e.g. "a1b2c3d4..."). */
+        private val HEX_PLACEHOLDER_REGEX = Regex("^[0-9a-f]{8}\\.\\.\\.$")
 
         // ── Backward-compatible static shim ──────────────────────────────────
         // Delegates to the active account's instance via AccountScopedRegistry.
@@ -272,27 +277,60 @@ class NotificationsRepository(
             Log.d(TAG, "fireNotif SUPPRESSED (channel disabled for ${ownerPubkeyHex.take(8)}): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
-        val channelId = when (type) {
-            NotificationType.REPLY -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPLIES
-            NotificationType.COMMENT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_COMMENTS
-            NotificationType.LIKE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
-            NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS
-            NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS
-            NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
-            NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
-            NotificationType.HIGHLIGHT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
-            NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS
-            NotificationType.POLL_VOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_POLLS
-            NotificationType.REPORT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
-            NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
+
+        // Defer posting only when the author name is a hex placeholder (profile not yet cached).
+        // Wait up to ENRICHMENT_WAIT_MS for the profile to resolve so the notification
+        // shows a real display name instead of "a1b2c3d4...". If already resolved, fire immediately.
+        scope.launch {
+            val data = notificationsById[notifIdSuffix]
+            val authorName = data?.author?.displayName ?: title
+            val isPlaceholder = HEX_PLACEHOLDER_REGEX.matches(authorName)
+
+            if (isPlaceholder) {
+                val startMs = System.currentTimeMillis()
+                while (System.currentTimeMillis() - startMs < ENRICHMENT_WAIT_MS) {
+                    delay(ENRICHMENT_POLL_MS)
+                    val current = notificationsById[notifIdSuffix] ?: break
+                    val authorResolved = current.author?.displayName?.let {
+                        !HEX_PLACEHOLDER_REGEX.matches(it)
+                    } ?: false
+                    if (authorResolved) break
+                }
+                // Notification may have been removed during enrichment
+                if (notificationsById[notifIdSuffix] == null) {
+                    Log.d(TAG, "fireNotif CANCELLED (removed during enrichment): type=$type suffix=${notifIdSuffix.take(8)}")
+                    return@launch
+                }
+            }
+
+            // Re-read the enriched notification data for final title/body
+            val enriched = notificationsById[notifIdSuffix]
+            val finalTitle = enriched?.author?.displayName ?: title
+            val finalBody = enriched?.text ?: body
+            val finalType = enriched?.type ?: type
+
+            val channelId = when (finalType) {
+                NotificationType.REPLY -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPLIES
+                NotificationType.COMMENT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_COMMENTS
+                NotificationType.LIKE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
+                NotificationType.ZAP -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_ZAPS
+                NotificationType.REPOST -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REPOSTS
+                NotificationType.MENTION -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+                NotificationType.QUOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+                NotificationType.HIGHLIGHT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+                NotificationType.DM -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS
+                NotificationType.POLL_VOTE -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_POLLS
+                NotificationType.REPORT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
+                NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
+            }
+            val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+            Log.d(TAG, "fireNotif POSTING: type=$finalType channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${ownerPubkeyHex.take(8)} title=$finalTitle")
+            social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
+                ctx, channelId, notifId, finalTitle, finalBody,
+                noteId = noteId, rootNoteId = rootNoteId, notifType = finalType.name,
+                accountPubkey = ownerPubkeyHex
+            )
         }
-        val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
-        Log.d(TAG, "fireNotif POSTING: type=$type channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${ownerPubkeyHex.take(8)} title=$title")
-        social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
-            ctx, channelId, notifId, title, body,
-            noteId = noteId, rootNoteId = rootNoteId, notifType = type.name,
-            accountPubkey = ownerPubkeyHex
-        )
     }
 
     // Seen IDs are in-memory only — no persistence needed.
@@ -689,7 +727,10 @@ class NotificationsRepository(
                 if (resolved != null) {
                     notificationsById[event.id]?.let { existing ->
                         if (existing.author?.displayName != resolved.displayName) {
-                            notificationsById[event.id] = existing.copy(author = resolved)
+                            val oldName = existing.author?.displayName ?: "Someone"
+                            val newName = resolved.displayName ?: "Someone"
+                            val newText = existing.text.replaceFirst(oldName, newName)
+                            notificationsById[event.id] = existing.copy(author = resolved, text = newText)
                             emitSorted()
                         }
                     }

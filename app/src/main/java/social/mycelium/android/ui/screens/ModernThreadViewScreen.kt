@@ -1876,13 +1876,39 @@ private fun ReplyContentBody(
         social.mycelium.android.utils.extractPubkeysFromContent(reply.content)
     }
     var replyMentionVersion by remember(reply.id) { androidx.compose.runtime.mutableIntStateOf(0) }
-    if (replyMentionedPubkeys.isNotEmpty() && replyMentionVersion == 0) {
+    if (replyMentionedPubkeys.isNotEmpty()) {
         LaunchedEffect(replyMentionedPubkeys) {
             val pubkeySet = replyMentionedPubkeys.toSet()
+            val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
+            if (uncached.isNotEmpty()) {
+                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+            }
+            val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
+            val initiallyResolved = pubkeySet.size - uncached.size
+            if (nowResolved > initiallyResolved) {
+                replyMentionVersion++
+            }
             profileCache.profileUpdated
                 .filter { it in pubkeySet }
-                .debounce(1500)
-                .collect { replyMentionVersion = 1 }
+                .debounce(150)
+                .collect { replyMentionVersion++ }
+        }
+        LaunchedEffect(replyMentionedPubkeys, replyMentionVersion) {
+            val pubkeySet = replyMentionedPubkeys.toSet()
+            val hasPlaceholders = pubkeySet.any { pk ->
+                val author = profileCache.getAuthor(pk)
+                author == null || author.displayName == pk.take(8) + "..."
+            }
+            if (hasPlaceholders) {
+                kotlinx.coroutines.delay(2000)
+                val stillPlaceholder = pubkeySet.any { pk ->
+                    val author = profileCache.getAuthor(pk)
+                    author == null || author.displayName == pk.take(8) + "..."
+                }
+                if (!stillPlaceholder) {
+                    replyMentionVersion++
+                }
+            }
         }
     }
     val replyCacheKey = remember(reply.content, replyMediaUrls, replyMentionVersion) {

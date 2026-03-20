@@ -438,7 +438,8 @@ object RelayHealthTracker {
         Log.i(TAG, "Relay BLOCKED (manual): $url")
     }
 
-    /** Unblock a relay. Persisted immediately. */
+    /** Unblock a relay. Persisted immediately. Triggers reconnect + resubscribe
+     *  so the relay immediately rejoins the feed. */
     fun unblockRelay(relayUrl: String) {
         val url = normalize(relayUrl)
         synchronized(lock) {
@@ -452,7 +453,16 @@ object RelayHealthTracker {
         persistBlockedRelays()
         persistAutoBlockExpiry()
         emitState()
-        Log.i(TAG, "Relay UNBLOCKED: $url")
+        Log.i(TAG, "Relay UNBLOCKED: $url — triggering reconnect")
+        // Clear pool-level blacklist + reconnect state for this relay, then
+        // re-apply subscriptions so the relay immediately rejoins the feed.
+        try {
+            val rcsm = RelayConnectionStateMachine.getInstance()
+            rcsm.relayPool.forceReconnect(url)
+            rcsm.requestReconnectOnResume()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to trigger reconnect after unblock: ${e.message}")
+        }
     }
 
     /**

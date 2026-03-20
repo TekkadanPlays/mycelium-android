@@ -203,6 +203,16 @@ class NotesRepository private constructor() {
                 currentNotes.forEach { it.originalNoteId?.let(::add) }
                 synchronized(pendingNotesLock) { _pendingNewNotes.forEach { it.originalNoteId?.let(::add) } }
             }
+            // Kind 30023 (NIP-23 articles) are parameterized replaceable: same author + d-tag = same article.
+            // Track existing articles by author:dTag so updated versions replace older ones.
+            val existingArticleKeys = buildMap<String, Long> {
+                currentNotes.forEach { note ->
+                    if (note.kind == 30023 && note.dTag != null) {
+                        val key = "${note.author.id.lowercase()}:${note.dTag}"
+                        put(key, note.timestamp)
+                    }
+                }
+            }.toMutableMap()
 
             // Age gate: events from the main subscription older than the feed floor are
             // silently dropped. Only loadOlderNotes (isPagination=true) may introduce older
@@ -373,7 +383,38 @@ class NotesRepository private constructor() {
                     continue
                 }
 
+                // Kind 30023 article dedup: same author + d-tag = same article (NIP-33).
+                // Keep only the newest version; drop stale copies from different relays.
+                if (event.kind == 30023 && note.dTag != null) {
+                    val articleKey = "${note.author.id.lowercase()}:${note.dTag}"
+                    val existingTs = existingArticleKeys[articleKey]
+                    if (existingTs != null && existingTs >= note.timestamp) {
+                        // A newer or equal version already exists — skip this older copy
+                        continue
+                    }
+                    // This is the newest version — remove any stale version from the batch
+                    if (existingTs != null) {
+                        newNotes.removeAll { it.kind == 30023 && it.dTag == note.dTag && it.author.id.lowercase() == note.author.id.lowercase() }
+                    }
+                    existingArticleKeys[articleKey] = note.timestamp
+                }
+
                 newNotes.add(note)
+            }
+
+            // Remove stale article versions from existing feed (newer version arrived in this batch)
+            val articleReplacements = newNotes.filter { it.kind == 30023 && it.dTag != null }
+            if (articleReplacements.isNotEmpty()) {
+                val staleIds = mutableSetOf<String>()
+                for (replacement in articleReplacements) {
+                    val key = "${replacement.author.id.lowercase()}:${replacement.dTag}"
+                    currentNotes.filter { it.kind == 30023 && it.dTag != null && "${it.author.id.lowercase()}:${it.dTag}" == key && it.id != replacement.id }
+                        .forEach { staleIds.add(it.id) }
+                }
+                if (staleIds.isNotEmpty()) {
+                    _notes.value = _notes.value.filter { it.id !in staleIds }
+                    Log.d(TAG, "Removed ${staleIds.size} stale article versions replaced by newer events")
+                }
             }
 
             // Apply relay URL merges to existing notes
@@ -1071,6 +1112,12 @@ class NotesRepository private constructor() {
             val followEnabled = followFilterEnabled
             val ownPk = currentUserPubkey
 
+            // Boost dedup: if both original note X and repost:X exist, hide the original.
+            // The repost version carries the boost badge, boosters list, and repost timestamp.
+            val repostedOriginals = buildSet {
+                allNotes.forEach { note -> note.originalNoteId?.let(::add) }
+            }
+
             // Early exit: follow mode with empty follow list
             if (followEnabled) {
                 if (currentFollowFilter == null || currentFollowFilter.isEmpty()) {
@@ -1113,6 +1160,8 @@ class NotesRepository private constructor() {
                 afterFollow++
                 // 3. Reply filter
                 if (note.isReply) continue
+                // 4. Boost dedup: skip original if a repost version exists
+                if (note.originalNoteId == null && note.id in repostedOriginals) continue
                 filtered.add(note)
             }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {

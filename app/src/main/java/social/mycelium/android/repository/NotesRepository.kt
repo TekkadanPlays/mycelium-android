@@ -15,6 +15,8 @@ import social.mycelium.android.utils.normalizeAuthorIdForCache
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.BuildConfig
+import social.mycelium.android.db.AppDatabase
+import social.mycelium.android.db.CachedEventEntity
 import com.example.cybin.core.Event
 import com.example.cybin.relay.RelayUrlNormalizer
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -94,6 +96,10 @@ class NotesRepository private constructor() {
     private var kind1FlushJob: Job? = null
     /** Separate job for continuation flushes (not cancelled by new incoming events). */
     private var continuationFlushJob: Job? = null
+    /** Pending relay URLs seen in feed notes that need NIP-11 preload. Debounced to avoid per-event overhead. */
+    private val pendingNip11Urls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private var nip11PreloadJob: Job? = null
+    private val NIP11_PRELOAD_DEBOUNCE_MS = 2000L
     /** Debounce window for batching incoming kind-1 events before flushing to the notes list. */
     private val KIND1_BATCH_DEBOUNCE_MS = 120L
     /** Max events to process per flush cycle. Remaining events trigger an immediate follow-up flush
@@ -174,6 +180,15 @@ class NotesRepository private constructor() {
         }
         if (batch.isEmpty()) return
 
+        // Queue raw events for Room persistence (before filtering — we want ALL events stored).
+        // Event objects are queued as-is; toJson() runs on background IO thread during flush.
+        if (eventDao != null && !isGlobalMode) {
+            for ((event, relayUrl, _) in batch) {
+                pendingEventObjects.add(Triple(event, relayUrl, Unit))
+            }
+            scheduleEventStoreFlush()
+        }
+
         android.os.Trace.beginSection("NotesRepo.flushKind1Events(${batch.size})")
         try {
             // Convert all events to Notes (no lock needed — convertEventToNote is stateless except profile cache)
@@ -197,7 +212,7 @@ class NotesRepository private constructor() {
             var ageGateDropped = 0
 
             for ((event, relayUrl, isPagination) in batch) {
-                if (event.kind != 1 && event.kind != 30023) continue
+                if (event.kind != 1 && event.kind != 30023 && event.kind != 1068 && event.kind != 6969) continue
 
                 // Age gate: drop ancient events from the live subscription
                 if (!isPagination && ageFloorMs > 0L) {
@@ -447,6 +462,19 @@ class NotesRepository private constructor() {
                 scheduleBatchProfileRequest(profileRelayUrls)
             }
 
+            // Collect unique relay URLs from this batch for debounced NIP-11 preload.
+            // This ensures relay orb icons resolve for outbox relays not covered by
+            // the initial preload (Fix 1) or user subscription relays.
+            val nip11Cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+            if (nip11Cache != null) {
+                val allRelayUrls = (feedNotes + pendingNew).flatMap { it.relayUrls }.distinct()
+                val uncached = allRelayUrls.filter { !nip11Cache.hasCachedRelayInfo(it) }
+                if (uncached.isNotEmpty()) {
+                    pendingNip11Urls.addAll(uncached)
+                    scheduleNip11Preload()
+                }
+            }
+
             if (BuildConfig.DEBUG && batch.size > 5) {
                 Log.d(TAG, "Flushed ${batch.size} events: ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges${if (ageGateDropped > 0) ", $ageGateDropped age-gated" else ""}")
             }
@@ -470,6 +498,22 @@ class NotesRepository private constructor() {
         }
     }
 
+    /** Schedule a debounced NIP-11 preload for relay URLs seen in feed notes.
+     *  Multiple flush cycles accumulate URLs; preload fires once after the debounce window. */
+    private fun scheduleNip11Preload() {
+        nip11PreloadJob?.cancel()
+        nip11PreloadJob = scope.launch {
+            delay(NIP11_PRELOAD_DEBOUNCE_MS)
+            val urls = pendingNip11Urls.toList()
+            pendingNip11Urls.clear()
+            if (urls.isNotEmpty()) {
+                Log.d(TAG, "NIP-11 preload: ${urls.size} new relay URLs from feed notes")
+                social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+                    ?.preloadRelayInfo(urls, scope)
+            }
+        }
+    }
+
     /** Coalesce profileUpdated emissions and apply author updates in batches to avoid O(notes) work per profile. */
     private fun startProfileUpdateCoalescer() {
         scope.launch {
@@ -489,7 +533,49 @@ class NotesRepository private constructor() {
         }
     }
 
+    // ── Event store write path (deferred toJson on IO thread) ────────────────
+    private fun scheduleEventStoreFlush() {
+        eventStoreFlushJob?.cancel()
+        eventStoreFlushJob = scope.launch {
+            delay(EVENT_STORE_FLUSH_DEBOUNCE_MS)
+            flushEventStore()
+        }
+    }
 
+    private suspend fun flushEventStore() {
+        val dao = eventDao ?: return
+        withContext(Dispatchers.IO) {
+            val entities = mutableListOf<CachedEventEntity>()
+            while (true) {
+                val triple = pendingEventObjects.poll() ?: break
+                val (event, relayUrl, _) = triple
+                entities.add(CachedEventEntity(
+                    eventId = event.id,
+                    kind = event.kind,
+                    pubkey = event.pubKey.lowercase(),
+                    createdAt = event.createdAt,
+                    eventJson = event.toJson(), // O(1) for relay events via rawJson
+                    relayUrl = relayUrl.ifBlank { null }
+                ))
+            }
+            if (entities.isEmpty()) return@withContext
+            try {
+                dao.insertAll(entities)
+                if (entities.size > 20) {
+                    Log.d(TAG, "Event store: persisted ${entities.size} events (total=${dao.count()})")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Event store flush failed: ${e.message}", e)
+            }
+        }
+    }
+
+    /** Persist a kind-6 repost event to the store. Called from handleKind6Repost. */
+    private fun persistRepostEvent(event: Event, relayUrl: String) {
+        if (eventDao == null || isGlobalMode) return
+        pendingEventObjects.add(Triple(event, relayUrl, Unit))
+        scheduleEventStoreFlush()
+    }
 
     /**
      * Set the current user's public key. Used to identify own events for immediate display.
@@ -546,6 +632,11 @@ class NotesRepository private constructor() {
     private var followFilter: Set<String>? = null
     @Volatile
     private var followFilterEnabled: Boolean = true
+    /** True when a NIP-51 custom people list is actively selected as feed filter.
+     *  When true, an empty followFilter means "show nothing" (intentional) rather than
+     *  "still loading" (transient). Controls display behavior in updateDisplayedNotes. */
+    @Volatile
+    private var customListActive: Boolean = false
 
     /** True when user is viewing All/Global feed. Global notes are ephemeral: never cached, destroyed on exit. */
     @Volatile
@@ -630,8 +721,12 @@ class NotesRepository private constructor() {
 
     /** Optional context for feed cache persistence so notes survive process death. Set from MainActivity. */
     @Volatile private var appContext: Context? = null
-    private var feedCacheSaveJob: Job? = null
-    private val feedCacheJson = Json { ignoreUnknownKeys = true }
+
+    // ── Event store (Room DB) — persists events for cold-start feed restoration ──
+    @Volatile private var eventDao: social.mycelium.android.db.EventDao? = null
+    private val pendingEventObjects = java.util.concurrent.ConcurrentLinkedQueue<Triple<Event, String, Unit>>()
+    private var eventStoreFlushJob: Job? = null
+    private val EVENT_STORE_FLUSH_DEBOUNCE_MS = 2_000L
 
     /** Event IDs that the user has deleted — persisted so they stay hidden after restart. */
     private val deletedEventIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -646,13 +741,9 @@ class NotesRepository private constructor() {
         private const val FEED_SINCE_DAYS = 7
         /** Debounce display updates so hundreds of events/sec don't thrash the UI. */
         private const val DISPLAY_UPDATE_DEBOUNCE_MS = 150L
-        private const val FEED_CACHE_PREFS = "notes_feed_cache"
         private const val DELETED_IDS_PREFS = "notes_deleted_ids"
         private const val DELETED_IDS_KEY = "deleted_event_ids"
         private const val DELETED_IDS_MAX = 500
-        private const val FEED_CACHE_KEY = "feed_notes"
-        private const val FEED_CACHE_FOLLOWING_KEY = "feed_notes_following"
-        private const val FEED_LAST_MODE_KEY = "feed_last_mode"
         private const val FEED_CACHE_MAX = 200
         /** Max time to wait for older notes before declaring done. */
         private const val OLDER_NOTES_TIMEOUT_MS = 12_000L
@@ -680,77 +771,62 @@ class NotesRepository private constructor() {
     fun prepareFeedCache(context: Context) {
         if (appContext != null) return
         appContext = context.applicationContext
+        eventDao = AppDatabase.getInstance(context.applicationContext).eventDao()
         loadDeletedIdsFromDisk(context.applicationContext)
-        scope.launch { loadFeedCacheFromDisk() }
-        feedCacheSaveJob = scope.launch {
-            _notes.collect { list ->
-                delay(2000)
-                if (list.isEmpty()) return@collect
-                // Never persist global/All notes — they are ephemeral
-                if (isGlobalMode) return@collect
-                val isFollowing = followFilterEnabled && !followFilter.isNullOrEmpty()
-                saveFeedCacheToDisk(list.take(FEED_CACHE_MAX), isFollowing)
-            }
+        scope.launch { loadFeedCacheFromRoom() }
+        // Migration: clear legacy SharedPreferences feed cache (one-time)
+        scope.launch(Dispatchers.IO) {
+            try {
+                val prefs = context.applicationContext.getSharedPreferences("notes_feed_cache", Context.MODE_PRIVATE)
+                if (prefs.contains("feed_notes") || prefs.contains("feed_notes_following")) {
+                    prefs.edit().clear().apply()
+                    Log.d(TAG, "Cleared legacy SharedPreferences feed cache")
+                }
+            } catch (_: Exception) {}
         }
     }
 
-    private suspend fun loadFeedCacheFromDisk() {
-        val ctx = appContext ?: run { _feedCacheChecked.value = true; return }
+    /**
+     * Load feed from Room event store on cold start. Replays raw events through
+     * convertEventToNote() so the feed is populated identically to live events.
+     * Replaces the old SharedPreferences JSON blob — no more 500KB-2MB I/O stalls.
+     */
+    private suspend fun loadFeedCacheFromRoom() {
+        val dao = eventDao ?: run { _feedCacheChecked.value = true; return }
         withContext(Dispatchers.IO) {
             try {
-                val prefs = ctx.getSharedPreferences(FEED_CACHE_PREFS, Context.MODE_PRIVATE)
-                val lastMode = prefs.getString(FEED_LAST_MODE_KEY, "all")
-                val primaryKey = if (lastMode == "following") FEED_CACHE_FOLLOWING_KEY else FEED_CACHE_KEY
-                var json = prefs.getString(primaryKey, null)
-                if (json == null) {
-                    val fallbackKey = if (primaryKey == FEED_CACHE_KEY) FEED_CACHE_FOLLOWING_KEY else FEED_CACHE_KEY
-                    json = prefs.getString(fallbackKey, null)
-                }
-                val list = json?.let { feedCacheJson.decodeFromString<List<Note>>(it) } ?: run {
+                val entities = dao.getFeedEvents(FEED_CACHE_MAX)
+                if (entities.isEmpty()) {
                     _feedCacheChecked.value = true
                     return@withContext
                 }
-                val filtered = if (deletedEventIds.isEmpty()) list else list.filter { note ->
-                    note.id !in deletedEventIds &&
-                        note.originalNoteId?.let { it !in deletedEventIds } != false
+                val notes = mutableListOf<Note>()
+                for (entity in entities) {
+                    if (entity.eventId in deletedEventIds) continue
+                    try {
+                        val event = Event.fromJson(entity.eventJson)
+                        val note = convertEventToNote(event, entity.relayUrl ?: "")
+                        if (!note.isReply) notes.add(note)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Feed cache: skip bad event ${entity.eventId.take(8)}: ${e.message}")
+                    }
                 }
-                if (filtered.isNotEmpty() && _notes.value.isEmpty()) {
-                    _notes.value = filtered
-                    _displayedNotes.value = filtered
+                if (notes.isNotEmpty() && _notes.value.isEmpty()) {
+                    _notes.value = notes
+                    _displayedNotes.value = notes
                     initialLoadComplete = true
-                    // Mark grace period as consumed so new subscription events go to pending
                     val now = System.currentTimeMillis()
                     firstNoteDisplayedAtMs = now - INITIAL_FEED_GRACE_MS - 1
                     feedCutoffTimestampMs = now
-                    latestNoteTimestampAtOpen = list.maxOfOrNull { it.timestamp } ?: now
+                    latestNoteTimestampAtOpen = notes.maxOfOrNull { it.timestamp } ?: now
                     _feedSessionState.value = FeedSessionState.Live
-                    Log.d(TAG, "Restored ${filtered.size} notes from feed cache (grace period consumed, ${list.size - filtered.size} deleted filtered)")
-                    // Re-resolve authors from the (now-loaded) profile cache so restored
-                    // notes render with display names and avatars immediately.
+                    Log.d(TAG, "Restored ${notes.size} notes from Room event store")
                     refreshAuthorsFromCache()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Load feed cache failed: ${e.message}", e)
+                Log.e(TAG, "Load feed cache from Room failed: ${e.message}", e)
             } finally {
                 _feedCacheChecked.value = true
-            }
-        }
-    }
-
-    private suspend fun saveFeedCacheToDisk(notes: List<Note>, isFollowingMode: Boolean) {
-        val ctx = appContext ?: return
-        withContext(Dispatchers.IO) {
-            try {
-                val json = feedCacheJson.encodeToString(notes)
-                val key = if (isFollowingMode) FEED_CACHE_FOLLOWING_KEY else FEED_CACHE_KEY
-                val mode = if (isFollowingMode) "following" else "all"
-                ctx.getSharedPreferences(FEED_CACHE_PREFS, Context.MODE_PRIVATE)
-                    .edit()
-                    .putString(key, json)
-                    .putString(FEED_LAST_MODE_KEY, mode)
-                    .apply()
-            } catch (e: Exception) {
-                Log.e(TAG, "Save feed cache failed: ${e.message}", e)
             }
         }
     }
@@ -762,7 +838,7 @@ class NotesRepository private constructor() {
         if (authors.isEmpty()) return null
         val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400L * FEED_SINCE_DAYS
         return Filter(
-            kinds = listOf(1),
+            kinds = listOf(1, 6969),
             authors = authors.toList(),
             limit = FOLLOWING_FEED_LIMIT,
             since = sevenDaysAgo
@@ -828,6 +904,10 @@ class NotesRepository private constructor() {
         lastEnsuredRelaySet = allUserRelayUrls.toSet()
         profileCache.setFallbackRelayUrls(allUserRelayUrls)
         relayStateMachine.resumeSubscriptionProvider = { getSubscriptionForResume() }
+        // Preload NIP-11 info for all subscription relays so relay orb icons are
+        // available as soon as feed notes start arriving (avoids per-orb fetch lag).
+        social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+            ?.preloadRelayInfo(allUserRelayUrls, scope)
         // Only reset to Idle when no notes exist (first load). When notes are already
         // present (e.g. user added a relay), keep the current session state so the
         // loading overlay doesn't flash over the existing feed.
@@ -864,7 +944,28 @@ class NotesRepository private constructor() {
      *
      * getSubscriptionForResume uses lastAppliedKind1Filter when follow list is temporarily empty on resume.
      */
+    /**
+     * Apply a custom pubkey set as the feed filter (e.g. from a NIP-51 people list).
+     * Unlike [setFollowFilter], this bypasses the safety guard that prevents blanking
+     * the feed when the follow list is transiently empty. An empty set here is intentional
+     * (the user selected a list with no members) and should blank the feed.
+     */
+    fun setCustomListFilter(pubkeys: Set<String>) {
+        val normalized = pubkeys.map { it.lowercase() }.toSet()
+        followFilter = normalized.takeIf { it.isNotEmpty() }
+        followFilterEnabled = true
+        customListActive = true
+        isGlobalMode = false
+        profileCache.setPinnedPubkeys(normalized.takeIf { it.isNotEmpty() })
+        updateDisplayedNotes()
+        if (subscriptionRelays.isNotEmpty()) {
+            applySubscriptionToStateMachine(subscriptionRelays)
+            Log.d(TAG, "Custom list filter applied: ${normalized.size} authors")
+        }
+    }
+
     fun setFollowFilter(followList: Set<String>?, enabled: Boolean) {
+        customListActive = false
         val wasGlobal = isGlobalMode
         // Normalize to lowercase; treat empty set as null (still loading).
         // When effective is null and enabled=true, ingestion filter drops ALL notes (no global bleed).
@@ -938,8 +1039,8 @@ class NotesRepository private constructor() {
                 paginationExtraCap = 0
                 _paginationExhausted.value = false
                 feedCutoffTimestampMs = System.currentTimeMillis()
-                scope.launch { loadFeedCacheFromDisk() }
-                Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from disk cache")
+                scope.launch { loadFeedCacheFromRoom() }
+                Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from Room")
             }
         } else {
             // Not entering or leaving global — just updating follow list within same mode.
@@ -958,45 +1059,62 @@ class NotesRepository private constructor() {
         android.os.Trace.beginSection("NotesRepo.updateDisplayedNotes")
         try {
             // Pre-build a combined set of raw + normalized URLs for O(1) lookup (avoids per-note normalization)
-            val connectedSet = buildSet {
+            val hasRelayFilter = connectedRelays.isNotEmpty()
+            val connectedSet = if (hasRelayFilter) buildSet {
                 connectedRelays.forEach { url ->
                     add(url)
                     RelayUrlNormalizer.normalizeOrNull(url)?.url?.let { add(it) }
                 }
-            }
-            val relayMatch: (Note) -> Boolean = { note ->
-                // Locally-published notes always pass — their outbox URLs may not overlap with inbox relays
-                if (locallyPublishedIds.contains(note.id) || (note.originalNoteId != null && locallyPublishedIds.contains(note.originalNoteId))) true
-                else {
-                    val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                    urls.isEmpty() || urls.any { it in connectedSet }
-                }
-            }
+            } else emptySet()
             val allNotes = _notes.value
-            var filtered = if (connectedRelays.isEmpty()) allNotes else allNotes.filter(relayMatch)
-            val afterRelay = filtered.size
             val currentFollowFilter = followFilter
             val followEnabled = followFilterEnabled
+            val ownPk = currentUserPubkey
+
+            // Early exit: follow mode with empty follow list
             if (followEnabled) {
-                if (currentFollowFilter != null && currentFollowFilter.isNotEmpty()) {
-                    val ownPk = currentUserPubkey
-                    filtered = filtered.filter { note ->
-                        val authorKey = normalizeAuthorIdForCache(note.author.id)
-                        authorKey == ownPk || authorKey in currentFollowFilter
+                if (currentFollowFilter == null || currentFollowFilter.isEmpty()) {
+                    if (customListActive) {
+                        // Intentional: user selected a people list with 0 members → blank feed
+                        _displayedNotes.value = emptyList()
+                        return
                     }
-                } else if (_displayedNotes.value.isNotEmpty()) {
-                    // Follow filter temporarily null but feed was populated — keep previous notes
-                    // (ingestion filter already prevents non-followed notes in Following mode)
-                    Log.w(TAG, "Follow filter temporarily empty, keeping ${_displayedNotes.value.size} displayed notes")
-                    _displayedNotes.value = _displayedNotes.value // no-op assignment to avoid blanking
-                    return
-                } else {
-                    // First load, no follow filter yet — blank to prevent global bleed
-                    filtered = emptyList()
+                    if (_displayedNotes.value.isNotEmpty()) {
+                        Log.w(TAG, "Follow filter temporarily empty, keeping ${_displayedNotes.value.size} displayed notes")
+                        return
+                    } else {
+                        _displayedNotes.value = emptyList()
+                        return
+                    }
                 }
             }
-            val afterFollow = filtered.size
-            filtered = filtered.filter { note -> !note.isReply }
+
+            // Single-pass filter: relay match + follow filter + reply filter combined.
+            // Replaces 3 sequential .filter() calls (3× O(N)) with one pass (1× O(N)).
+            var afterRelay = 0
+            var afterFollow = 0
+            val filtered = ArrayList<Note>(minOf(allNotes.size, 500))
+            for (note in allNotes) {
+                // 1. Relay match
+                if (hasRelayFilter) {
+                    val isLocal = locallyPublishedIds.contains(note.id) ||
+                        (note.originalNoteId != null && locallyPublishedIds.contains(note.originalNoteId))
+                    if (!isLocal) {
+                        val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                        if (urls.isNotEmpty() && urls.none { it in connectedSet }) continue
+                    }
+                }
+                afterRelay++
+                // 2. Follow filter
+                if (followEnabled && currentFollowFilter != null) {
+                    val authorKey = normalizeAuthorIdForCache(note.author.id)
+                    if (authorKey != ownPk && authorKey !in currentFollowFilter) continue
+                }
+                afterFollow++
+                // 3. Reply filter
+                if (note.isReply) continue
+                filtered.add(note)
+            }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
                 Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")
             }
@@ -1291,6 +1409,61 @@ class NotesRepository private constructor() {
         val relays = subscriptionRelays.ifEmpty { return }
 
         _isLoadingOlder.value = true
+
+        // ── Room-first path: serve deep-fetched history instantly ──────────
+        // If the DeepHistoryFetcher has persisted events to Room, load them
+        // before hitting relays. This makes scrolling back through history
+        // instantaneous — no relay round-trip needed for cached windows.
+        val dao = eventDao
+        if (dao != null) {
+            scope.launch {
+                try {
+                    val roomEvents = if (authors != null) {
+                        dao.getOlderFeedEvents(authors, untilSec, PAGINATION_PAGE_SIZE)
+                    } else {
+                        dao.getOlderFeedEventsAll(untilSec, PAGINATION_PAGE_SIZE)
+                    }
+                    if (roomEvents.isNotEmpty()) {
+                        Log.d(TAG, "loadOlderNotes: Room-first hit — ${roomEvents.size} cached events")
+                        paginationExtraCap += roomEvents.size
+                        for (entity in roomEvents) {
+                            try {
+                                val event = Event.fromJson(entity.eventJson)
+                                pendingKind1Events.add(Triple(event, entity.relayUrl ?: "", true))
+                            } catch (e: Exception) {
+                                // Skip malformed cached events
+                            }
+                        }
+                        // Lower age floor so these events pass the age gate
+                        val oldestCachedMs = roomEvents.minOf { it.createdAt } * 1000L
+                        if (oldestCachedMs < feedAgeFloorMs) feedAgeFloorMs = oldestCachedMs
+                        flushKind1Events()
+                        val newSize = _notes.value.size
+                        // Update cursor from oldest cached event
+                        val oldestSec = roomEvents.minOf { it.createdAt }
+                        if (paginationCursorMs == 0L || oldestSec * 1000L < paginationCursorMs) {
+                            paginationCursorMs = oldestSec * 1000L
+                        }
+                        Log.d(TAG, "loadOlderNotes: Room served ${roomEvents.size} events, feed=$newSize, cursor=${fmtMs(paginationCursorMs)}")
+                        _isLoadingOlder.value = false
+                        return@launch
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Room-first pagination failed: ${e.message}")
+                }
+                // Room empty for this window — fall back to relay fetch
+                loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
+            }
+            return
+        }
+
+        // No Room available — relay fetch directly
+        loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
+    }
+
+    /** Relay-based pagination (original loadOlderNotes logic). */
+    private fun loadOlderNotesFromRelay(cursorMs: Long, untilSec: Long, authors: List<String>?, relays: List<String>) {
+        val currentNotes = _notes.value
         olderNotesHandle?.cancel()
         paginationExtraCap += PAGINATION_PAGE_SIZE
         val beforeCount = currentNotes.size
@@ -1522,6 +1695,8 @@ class NotesRepository private constructor() {
      */
     private suspend fun handleKind6Repost(event: Event, relayUrl: String) {
         try {
+            persistRepostEvent(event, relayUrl)
+
             // Track own boosts so the repost icon turns green (even for relay echoes)
             val reposterPubkey = event.pubKey
             if (reposterPubkey.lowercase() == currentUserPubkey) {
@@ -2055,8 +2230,9 @@ class NotesRepository private constructor() {
         Log.d(TAG, "Flushing repost batch: ${allNoteIds.size} notes across ${allRelayUrls.size} relays (was ${allNoteIds.size} individual subs)")
 
         val filter = Filter(ids = allNoteIds, kinds = listOf(1), limit = allNoteIds.size)
-        val handle = relayStateMachine.requestTemporarySubscription(allRelayUrls, filter, priority = SubscriptionPriority.LOW) { originalEvent ->
-            val pending = batch[originalEvent.id] ?: return@requestTemporarySubscription
+        relayStateMachine.requestOneShotSubscription(allRelayUrls, filter, priority = SubscriptionPriority.LOW,
+            settleMs = 500L, maxWaitMs = 8_000L) { originalEvent ->
+            val pending = batch[originalEvent.id] ?: return@requestOneShotSubscription
             scope.launch {
                 try {
                     processEventMutex.withLock {
@@ -2113,11 +2289,9 @@ class NotesRepository private constructor() {
             }
         }
 
-        // Auto-cancel after timeout to avoid leaking subscriptions
+        // Clean up any pending that didn't get fetched after EOSE auto-close + buffer
         scope.launch {
-            delay(8_000L)
-            handle.cancel()
-            // Clean up any pending that didn't get fetched
+            delay(9_000L)
             batch.values.forEach { pendingRepostFetches.remove(it.compositeId) }
         }
     }
@@ -2170,7 +2344,8 @@ class NotesRepository private constructor() {
 
     private fun convertEventToNote(event: Event, relayUrl: String): Note {
         android.os.Trace.beginSection("NotesRepo.convertEventToNote")
-        // Cache raw signed event JSON for NIP-18 reposts (kind-6 content field)
+        // Cache raw signed event JSON for NIP-18 reposts (kind-6 content field).
+        // event.toJson() returns rawJson (zero-copy from relay wire) when available.
         social.mycelium.android.utils.RawEventCache.put(event.id, event.toJson())
         val storedRelayUrl = relayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
         val pubkeyHex = event.pubKey
@@ -2203,15 +2378,33 @@ class NotesRepository private constructor() {
         quotedRefs.forEach { ref ->
             if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
         }
+        // Extract relay hints from e-tags and p-tags (position 2 = relay URL hint).
+        // Feed into NIP-65 cache as supplementary data for authors without kind-10002.
+        // This enriches relay orbs for users whose outbox relays weren't discovered yet.
+        if (storedRelayUrl != null && Nip65RelayListRepository.getCachedOutboxRelays(event.pubKey) == null) {
+            Nip65RelayListRepository.addRelayHintsForAuthor(event.pubKey, listOf(storedRelayUrl))
+        }
+        for (tag in event.tags) {
+            if (tag.size >= 3 && tag[2].isNotBlank()) {
+                val tagType = tag[0]
+                val relayHint = tag[2].trim()
+                if ((tagType == "e" || tagType == "p") && (relayHint.startsWith("wss://") || relayHint.startsWith("ws://"))) {
+                    // For p-tags, the hint tells us where the mentioned author reads (inbox)
+                    if (tagType == "p" && tag[1].length == 64) {
+                        Nip65RelayListRepository.addRelayHintsForAuthor(tag[1], listOf(relayHint))
+                    }
+                }
+            }
+        }
         val isReply = Nip10ReplyDetector.isReply(event)
         val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(event) else null
         val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(event) else null
-        // Relay orbs only show confirmed locations: the relay we actually received
-        // this event from. Additional relays are added as the same event arrives from
-        // other relays (flushKind1Events merge) or when we publish and a relay OK's
-        // (mergePublishRelayUrl). NIP-65 outbox relays are NOT included — they are
-        // the author's *claimed* publish destinations, not confirmed storage locations.
-        val relayUrls: List<String> = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList()
+        // Relay orbs: only show relays that actually delivered/confirmed this event.
+        // Additional relays are merged naturally when the same event arrives from
+        // other relays (flushKind1Events dedup) or via publish OK (mergePublishRelayUrl).
+        // NIP-65 outbox relays are NOT added here — they are speculative and would show
+        // relays where the note may not actually exist.
+        val relayUrls = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList()
         
         // Convert event tags to List<List<String>> for NIP-22 I tags and better e tag tracking
         val tags = event.tags.map { it.toList() }
@@ -2225,6 +2418,9 @@ class NotesRepository private constructor() {
 
         // NIP-88 poll data (kind 1068)
         val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
+
+        // Zap poll data (kind 6969)
+        val zapPollData = if (event.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(tags) else null
 
         val note = Note(
             id = event.id,
@@ -2254,7 +2450,8 @@ class NotesRepository private constructor() {
             summary = articleSummary,
             imageUrl = articleImage,
             dTag = dTag,
-            pollData = pollData
+            pollData = pollData,
+            zapPollData = zapPollData
         )
         android.os.Trace.endSection()
         return note
@@ -2277,10 +2474,11 @@ class NotesRepository private constructor() {
         _feedSessionState.value = FeedSessionState.Idle
         // Reset subscription guard so ensureSubscriptionToNotes re-applies after account switch
         lastEnsuredRelaySet = emptySet()
-        // Also clear on-disk feed cache so old account's notes don't leak on next cold start
-        appContext?.let { ctx ->
-            ctx.getSharedPreferences(FEED_CACHE_PREFS, Context.MODE_PRIVATE)
-                .edit().clear().apply()
+        // Clear Room event store so old account's notes don't leak on next cold start
+        scope.launch {
+            try { eventDao?.deleteAll() } catch (e: Exception) {
+                Log.e(TAG, "Event store clear failed: ${e.message}", e)
+            }
         }
     }
 

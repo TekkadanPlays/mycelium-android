@@ -106,6 +106,7 @@ external/
 # Debug/dev artifacts
 *.txt
 BATTLE_PLAN.md
+MYCELIUM FULL ARCHITECTURE AUDIT.ini
 *.gif
 
 # Old release APKs

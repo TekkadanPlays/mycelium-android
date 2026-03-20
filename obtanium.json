@@ -19,6 +19,56 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.00",
+      "versionCode": 38,
+      "releaseDate": "2026-03-20",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.00/mycelium-0.5.00-release.apk",
+      "changelog": "NIP-11 relay icon fix (Damus and all relays), NIP-51 people list feed filtering, feed architecture overhaul with one-shot slot freeing and priority-aware scheduling, kind-30011 NIP document.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Fix: NIP-11 relay icons now load correctly (dedicated HTTP client bypasses ContentNegotiation header override)",
+        "Fix: NIP-11 URL trailing slash ensures Cloudflare-protected relays serve JSON instead of HTML",
+        "NIP-51 people list feed filtering — select a kind-30000 list from the feed dropdown to filter by its members",
+        "Empty people lists correctly blank the feed (custom list filter bypasses transient-empty safety guard)",
+        "Feed architecture: one-shot subscriptions (follow list, mute list, NIP-65, people lists) auto-free relay slots on EOSE",
+        "Feed architecture: priority-aware stale thresholds (HIGH 30s, NORMAL 10s, LOW 3s) for faster slot turnover",
+        "Feed architecture: 2 reserved HIGH-priority slots per relay ensure feed subscription is never starved",
+        "Kind-30011 replaceable votes NIP document added to repository"
+      ]
+    },
+    {
+      "version": "0.4.99",
+      "versionCode": 37,
+      "releaseDate": "2026-03-19",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.4.99/mycelium-0.4.99-release.apk",
+      "changelog": "Critical thread reply fix, multiplexer dedup fix, relay connection persistence, notification badge stabilization, relay orb enrichment, poll vote timing fix, kind-1111 notification fix.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Fix: thread replies loading empty due to global event dedup in SubscriptionMultiplexer (per-sub dedup now)",
+        "Fix: infinite parent fetch loop in Kind1RepliesRepository exhausting relay slots",
+        "Fix: relay connect/disconnect churn — inbox/outbox/category relays stay connected persistently",
+        "Fix: notification badge flickering on app init (suppressed during replay, unmasked after EOSE)",
+        "Fix: poll vote UI updating before Amber signing completes",
+        "Fix: kind-1111 comment replies missing from notifications (Phase 3 E-tag subscription)",
+        "Fix: Announcements nav button highlighted when in relay manager",
+        "Relay orbs enriched with NIP-65 outbox relay URLs in feed (no thread open required)",
+        "NIP-11 preload for subscription relays on startup",
+        "RelayOrbIcon retries NIP-11 fetch when cache updates"
+      ]
+    },
+    {
       "version": "0.4.97",
       "versionCode": 34,
       "releaseDate": "2026-03-18",

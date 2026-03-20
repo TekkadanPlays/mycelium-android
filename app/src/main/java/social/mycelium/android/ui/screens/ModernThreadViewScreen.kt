@@ -257,6 +257,10 @@ fun ModernThreadViewScreen(
     onDeleteDraft: (String) -> Unit = {},
     /** Delete this note (hybrid NIP-86 + NIP-09). Only pass for the current user's own notes. */
     onDeleteNote: ((Note) -> Unit)? = null,
+    /** NIP-88 poll vote callback: (noteId, authorPubkey, selectedOptions, relayHint). */
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
+    /** Current user hex pubkey for detecting own poll votes. */
+    myPubkeyHex: String? = null,
     modifier: Modifier = Modifier
 ) {
     val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
@@ -663,6 +667,8 @@ fun ModernThreadViewScreen(
                             else social.mycelium.android.ui.components.ActionRowSchema.KIND11_FEED,
                         onSeeAllReactions = { onSeeAllReactions(note.id) },
                         compactMedia = compactMedia,
+                        onPollVote = onPollVote,
+                        myPubkeyHex = myPubkeyHex,
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -1950,8 +1956,8 @@ private fun ReplyContentBody(
                         mediaMeta = reply.mediaMeta,
                         compactMedia = compactMedia,
                         onMediaPageChanged = { },
-                        onImageTap = { _, _ -> onToggleControls() },
-                        onOpenImageViewer = { _, _ -> onToggleControls() },
+                        onImageTap = onImageTap,
+                        onOpenImageViewer = onImageTap,
                         onVideoClick = onVideoClick,
                     )
                 }

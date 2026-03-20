@@ -139,38 +139,59 @@ class RelayConnectionStateMachine {
      *  Eagerly initialized so the onAuth listener is registered BEFORE any relay connections. */
     val nip42AuthHandler: Nip42AuthHandler = Nip42AuthHandler(this)
 
+    /** Pending relay state changes accumulated between flush cycles. */
+    private val pendingRelayStateChanges = java.util.concurrent.ConcurrentHashMap<String, RelayEndpointStatus>()
+    private var relayStateFlushJob: kotlinx.coroutines.Job? = null
+    private val RELAY_STATE_FLUSH_MS = 100L
+
+    /** Batch relay state updates: accumulate changes and flush to StateFlow on a debounce. */
+    private fun scheduleRelayStateFlush() {
+        relayStateFlushJob?.cancel()
+        relayStateFlushJob = scope.launch {
+            kotlinx.coroutines.delay(RELAY_STATE_FLUSH_MS)
+            if (pendingRelayStateChanges.isNotEmpty()) {
+                val current = _perRelayState.value
+                val updates = HashMap(pendingRelayStateChanges)
+                pendingRelayStateChanges.clear()
+                // Only apply changes for URLs in the current map
+                val merged = current.toMutableMap()
+                for ((url, status) in updates) {
+                    if (url in merged) merged[url] = status
+                }
+                _perRelayState.value = merged
+            }
+        }
+    }
+
+    private fun updateRelayStatus(url: String, status: RelayEndpointStatus) {
+        pendingRelayStateChanges[url] = status
+        scheduleRelayStateFlush()
+    }
+
     init {
+        // Wire app-layer blocking into the pool so its internal reconnect loop
+        // stops hammering relays that RelayHealthTracker has auto-blocked.
+        relayPool.connectionFilter = { url -> !RelayHealthTracker.isBlocked(url) }
+
         // Register connection listener to track per-relay status from actual WebSocket events
         relayPool.addListener(object : RelayConnectionListener {
             override fun onConnecting(url: String) {
-                val current = _perRelayState.value
-                if (url in current) {
-                    _perRelayState.value = current + (url to RelayEndpointStatus.Connecting)
-                }
+                updateRelayStatus(url, RelayEndpointStatus.Connecting)
                 RelayHealthTracker.recordConnectionAttempt(url)
             }
 
             override fun onConnected(url: String) {
-                val current = _perRelayState.value
-                if (url in current) {
-                    _perRelayState.value = current + (url to RelayEndpointStatus.Connected)
-                }
+                updateRelayStatus(url, RelayEndpointStatus.Connected)
                 RelayHealthTracker.recordConnectionSuccess(url)
             }
 
             override fun onDisconnected(url: String) {
                 Log.d(TAG, "[$url] Disconnected — pool will auto-reconnect if subs active")
-                val current = _perRelayState.value
-                if (url in current) {
-                    _perRelayState.value = current + (url to RelayEndpointStatus.Connecting)
-                }
+                updateRelayStatus(url, RelayEndpointStatus.Connecting)
             }
 
             override fun onError(url: String, message: String) {
-                val current = _perRelayState.value
-                if (url in current) {
-                    _perRelayState.value = current + (url to RelayEndpointStatus.Failed)
-                }
+                updateRelayStatus(url, RelayEndpointStatus.Failed)
                 RelayHealthTracker.recordConnectionFailure(url, message)
             }
 
@@ -503,9 +524,13 @@ class RelayConnectionStateMachine {
                 _connectionError.value = null
                 retryAttempt = 0
                 relayPool.connect(priorityRelayUrls)
-                // Disconnect relays that were in the previous set but not in the new one.
-                // After closeSubscription above, they have no active subs and can be cleaned up.
-                val staleRelays = previousRelayUrls.toSet() - effectiveRelayUrls.toSet()
+                // Disconnect relays that were in the previous set but not in the new one,
+                // UNLESS they are in the persistent set (inbox/outbox/notification relays that
+                // should stay connected to avoid connect/disconnect churn).
+                val persistent = persistentRelayUrls
+                val staleRelays = (previousRelayUrls.toSet() - effectiveRelayUrls.toSet())
+                    .filter { it !in persistent }
+                    .toSet()
                 if (staleRelays.isNotEmpty()) {
                     Log.d(TAG, "Disconnecting ${staleRelays.size} stale relay(s): ${staleRelays.joinToString()}")
                     relayPool.disconnectIdleRelays(staleRelays)
@@ -537,6 +562,18 @@ class RelayConnectionStateMachine {
 
     /** Relay URLs that should be connected first (no jitter/cooldown). Typically outbox relays. */
     @Volatile private var priorityRelayUrls: Set<String> = emptySet()
+
+    /** Relay URLs that should stay connected persistently (inbox, outbox, notification relays).
+     *  These are NOT disconnected when they become idle (no active subs) because the app will
+     *  reuse them shortly for notifications, NIP-65, profile fetches, etc. Avoids churn. */
+    @Volatile private var persistentRelayUrls: Set<String> = emptySet()
+
+    /** Set which relay URLs should stay connected persistently (not disconnected when idle).
+     *  Call this with the user's inbox + outbox + category relay URLs. */
+    fun setPersistentRelayUrls(urls: Set<String>) {
+        persistentRelayUrls = urls
+        Log.d(TAG, "Persistent relay URLs set: ${urls.size} relays")
+    }
 
     /** Set which relay URLs should be prioritized for connection (connect first, clear cooldown).
      *  Call this with the user's outbox relay URLs so they connect before category relays. */
@@ -857,16 +894,18 @@ class RelayConnectionStateMachine {
 
     /**
      * One-off subscription with multiple filters (e.g. kind-7 + kind-9735 for counts).
+     * Optional [onEose] fires once when all relays have sent EOSE for this subscription.
      */
     fun requestTemporarySubscription(
         relayUrls: List<String>,
         filters: List<Filter>,
         priority: SubscriptionPriority = SubscriptionPriority.NORMAL,
+        onEose: (() -> Unit)? = null,
         onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
-        return mux.subscribeCallback(usable, filters, priority, onEvent)
+        return mux.subscribeCallback(usable, filters, priority, onEvent, onEose)
     }
 
     /**
@@ -954,6 +993,24 @@ class RelayConnectionStateMachine {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
         return mux.subscribeOneShotCallback(usable, filters, priority, settleMs, maxWaitMs, onEvent)
+    }
+
+    /**
+     * Suspending one-shot: opens REQ, collects events via [onEvent], suspends until
+     * all relays EOSE (+ settle) or hard timeout, then auto-CLOSEs and returns.
+     * Unlike requestOneShotSubscription, the caller awaits completion — no delay needed.
+     */
+    suspend fun awaitOneShotSubscription(
+        relayUrls: List<String>,
+        filter: Filter,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event) -> Unit,
+    ) {
+        val usable = filterUsableRelays(relayUrls)
+        if (usable.isEmpty()) return
+        mux.awaitOneShotSubscription(usable, listOf(filter), priority, settleMs, maxWaitMs, onEvent)
     }
 
     companion object {

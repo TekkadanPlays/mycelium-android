@@ -89,7 +89,8 @@ fun ComposeArticleScreen(
 
     var showRelayPicker by remember { mutableStateOf(false) }
     var isUploading by remember { mutableStateOf(false) }
-    val markdownTransformation = remember { MarkdownVisualTransformation() }
+    val mdLinkColor = MaterialTheme.colorScheme.primary
+    val markdownTransformation = remember(mdLinkColor) { MarkdownVisualTransformation(linkColor = mdLinkColor) }
     val context = LocalContext.current
 
     // Media server state

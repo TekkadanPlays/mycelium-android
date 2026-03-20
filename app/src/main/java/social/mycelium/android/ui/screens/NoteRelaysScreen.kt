@@ -190,12 +190,21 @@ private fun NoteRelayRow(
     }
 }
 
+/** Resolve best icon URL: NIP-11 icon → NIP-11 image → favicon.ico */
+private fun resolveNoteRelayIconUrl(info: social.mycelium.android.data.RelayInformation?, relayUrl: String): String? {
+    info?.icon?.takeIf { it.isNotBlank() }?.let { return it }
+    info?.image?.takeIf { it.isNotBlank() }?.let { return it }
+    val httpBase = relayUrl.replace("wss://", "https://").replace("ws://", "http://").trimEnd('/')
+    return "$httpBase/favicon.ico"
+}
+
 @Composable
 private fun NoteRelayIcon(relayUrl: String, nip11: Nip11CacheManager, context: android.content.Context) {
-    var iconUrl by remember(relayUrl) { mutableStateOf(nip11.getCachedRelayInfo(relayUrl)?.icon) }
+    var iconUrl by remember(relayUrl) { mutableStateOf(resolveNoteRelayIconUrl(nip11.getCachedRelayInfo(relayUrl), relayUrl)) }
     LaunchedEffect(relayUrl) {
-        if (iconUrl.isNullOrBlank()) {
-            withContext(Dispatchers.IO) { nip11.getRelayInfo(relayUrl)?.icon }?.let { iconUrl = it }
+        if (nip11.getCachedRelayInfo(relayUrl) == null) {
+            withContext(Dispatchers.IO) { nip11.getRelayInfo(relayUrl) }
+            iconUrl = resolveNoteRelayIconUrl(nip11.getCachedRelayInfo(relayUrl), relayUrl)
         }
     }
     if (!iconUrl.isNullOrBlank()) {

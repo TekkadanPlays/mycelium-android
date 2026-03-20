@@ -980,6 +980,21 @@ object Nip65RelayListRepository {
     }
 
     /**
+     * Supplement the author outbox cache with relay hints extracted from event e-tags.
+     * Only adds data for authors that don't already have NIP-65 outbox relays —
+     * hints are weaker than kind-10002 data and should not overwrite it.
+     * Called from convertEventToNote for p-tags that include relay hints.
+     * O(1) per call, no network requests.
+     */
+    fun addRelayHintsForAuthor(pubkeyHex: String, relayUrls: List<String>) {
+        if (pubkeyHex.isBlank() || relayUrls.isEmpty()) return
+        // Don't overwrite authoritative NIP-65 data with weaker hints
+        val existing = authorOutboxCache[pubkeyHex]
+        if (existing != null && existing.isNotEmpty()) return
+        authorOutboxCache[pubkeyHex] = relayUrls.distinct()
+    }
+
+    /**
      * Clear state (e.g. on logout or account switch).
      */
     fun clear() {

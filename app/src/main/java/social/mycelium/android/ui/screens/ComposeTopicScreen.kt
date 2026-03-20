@@ -90,7 +90,8 @@ fun ComposeTopicScreen(
     var markdownEnabled by remember { mutableStateOf(false) }
     var showZapRaiser by remember { mutableStateOf(false) }
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
-    val markdownTransformation = remember { MarkdownVisualTransformation() }
+    val mdLinkColor = MaterialTheme.colorScheme.primary
+    val markdownTransformation = remember(mdLinkColor) { MarkdownVisualTransformation(linkColor = mdLinkColor) }
     var isUploading by remember { mutableStateOf(false) }
     val context = LocalContext.current
 

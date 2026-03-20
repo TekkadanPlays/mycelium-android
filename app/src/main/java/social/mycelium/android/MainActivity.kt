@@ -372,11 +372,15 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         val notifType = intent.getStringExtra(
             social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTIF_TYPE
         )
-        pendingNotificationNav = PendingNotificationNav(noteId, rootNoteId, notifType)
+        val accountPubkey = intent.getStringExtra(
+            social.mycelium.android.services.NotificationChannelManager.EXTRA_ACCOUNT_PUBKEY
+        )
+        pendingNotificationNav = PendingNotificationNav(noteId, rootNoteId, notifType, accountPubkey)
         // Clear the extras so re-launch from recents doesn't re-navigate
         intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTE_ID)
         intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_ROOT_NOTE_ID)
         intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_NOTIF_TYPE)
+        intent.removeExtra(social.mycelium.android.services.NotificationChannelManager.EXTRA_ACCOUNT_PUBKEY)
     }
 
     private fun startRelayForegroundService() {

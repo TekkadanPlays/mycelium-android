@@ -37,44 +37,46 @@ class HtmlParser {
     }
     
     private fun extractTitle(doc: Document): String {
-        // Try OpenGraph title first
-        doc.select("meta[property=og:title]").first()?.attr("content")?.let { return it }
+        // Try OpenGraph title first (both property= and name= variants exist in the wild)
+        doc.select("meta[property=og:title]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
+        doc.select("meta[name=og:title]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         // Try Twitter title
-        doc.select("meta[name=twitter:title]").first()?.attr("content")?.let { return it }
+        doc.select("meta[name=twitter:title]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         // Fall back to HTML title
-        doc.select("title").first()?.text()?.let { return it }
+        doc.select("title").first()?.text()?.takeIf { it.isNotBlank() }?.let { return it }
         
         return ""
     }
     
     private fun extractDescription(doc: Document): String {
-        // Try OpenGraph description first
-        doc.select("meta[property=og:description]").first()?.attr("content")?.let { return it }
+        // Try OpenGraph description first (both property= and name= variants)
+        doc.select("meta[property=og:description]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
+        doc.select("meta[name=og:description]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         // Try Twitter description
-        doc.select("meta[name=twitter:description]").first()?.attr("content")?.let { return it }
+        doc.select("meta[name=twitter:description]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         // Try meta description
-        doc.select("meta[name=description]").first()?.attr("content")?.let { return it }
+        doc.select("meta[name=description]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         return ""
     }
     
     private fun extractImageUrl(doc: Document): String {
-        // Try OpenGraph image first
-        doc.select("meta[property=og:image]").first()?.attr("content")?.let { return it }
+        // Try OpenGraph image first (both property= and name= variants)
+        doc.select("meta[property=og:image]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return resolveUrl(it, doc.baseUri()) }
+        doc.select("meta[name=og:image]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return resolveUrl(it, doc.baseUri()) }
+        doc.select("meta[property=og:image:url]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return resolveUrl(it, doc.baseUri()) }
         
         // Try Twitter image
-        doc.select("meta[name=twitter:image]").first()?.attr("content")?.let { return it }
-        
-        // Try Twitter image:src
-        doc.select("meta[name=twitter:image:src]").first()?.attr("content")?.let { return it }
+        doc.select("meta[name=twitter:image]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return resolveUrl(it, doc.baseUri()) }
+        doc.select("meta[name=twitter:image:src]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return resolveUrl(it, doc.baseUri()) }
         
         // Try to find the first large image in the page
         doc.select("img").forEach { img ->
-            val src = img.attr("src")
+            val src = img.attr("abs:src") // abs: resolves relative URLs
             val width = img.attr("width").toIntOrNull() ?: 0
             val height = img.attr("height").toIntOrNull() ?: 0
             
@@ -86,13 +88,28 @@ class HtmlParser {
         
         return ""
     }
+
+    /** Resolve potentially relative image URLs against the page base URL. */
+    private fun resolveUrl(imageUrl: String, baseUrl: String): String {
+        if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://") || imageUrl.startsWith("//")) {
+            return if (imageUrl.startsWith("//")) "https:$imageUrl" else imageUrl
+        }
+        return try {
+            URL(URL(baseUrl), imageUrl).toString()
+        } catch (_: Exception) {
+            imageUrl
+        }
+    }
     
     private fun extractSiteName(doc: Document): String {
         // Try OpenGraph site name first
-        doc.select("meta[property=og:site_name]").first()?.attr("content")?.let { return it }
+        doc.select("meta[property=og:site_name]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         // Try Twitter site
-        doc.select("meta[name=twitter:site]").first()?.attr("content")?.let { return it }
+        doc.select("meta[name=twitter:site]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
+        
+        // Try application-name
+        doc.select("meta[name=application-name]").first()?.attr("content")?.takeIf { it.isNotBlank() }?.let { return it }
         
         // Try to extract from URL
         try {

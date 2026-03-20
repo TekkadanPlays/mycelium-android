@@ -98,8 +98,15 @@ class RelayForegroundService : Service() {
         // the app is backgrounded actually fire Android notifications.
         serviceScope.launch {
             kotlinx.coroutines.delay(12_000L)
-            social.mycelium.android.repository.NotificationsRepository.enableAndroidNotifications()
-            Log.d(TAG, "Push notifications enabled from foreground service")
+            // Enable push for ALL loaded accounts (active + background)
+            val scopes = social.mycelium.android.repository.AccountScopedRegistry.allScopes.value
+            for ((pubkey, scope) in scopes) {
+                if (scope.initialized) {
+                    scope.notificationsRepository.enableAndroidNotifications()
+                    Log.d(TAG, "Push notifications enabled for account ${pubkey.take(8)}")
+                }
+            }
+            Log.d(TAG, "Push notifications enabled from foreground service (${scopes.size} accounts)")
         }
 
         // Observe new note counts and update the service notification

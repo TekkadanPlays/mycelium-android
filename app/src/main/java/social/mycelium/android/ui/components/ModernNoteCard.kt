@@ -46,6 +46,7 @@ import social.mycelium.android.data.SampleData
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.normalizeAuthorIdForCache
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filter
 import social.mycelium.android.repository.QuotedNoteCache
@@ -458,8 +459,13 @@ private fun NoteCardContent(
                             if (uncachedIds.isNotEmpty()) {
                                 // Debounce: wait 250ms so rapidly scrolled-past cards don't waste slots
                                 delay(250)
-                                uncachedIds.forEach { id ->
-                                    val meta = QuotedNoteCache.get(id)
+                                // Launch all fetches concurrently so they land in the same batch
+                                val results = kotlinx.coroutines.coroutineScope<List<Pair<String, QuotedNoteMeta?>>> {
+                                    uncachedIds.map { id ->
+                                        async { id to QuotedNoteCache.get(id) }
+                                    }.map { it.await() }
+                                }
+                                results.forEach { (id, meta) ->
                                     if (meta != null) quotedMetas = quotedMetas + (id to meta)
                                 }
                             }
@@ -621,7 +627,7 @@ private fun NoteCardContent(
                                                                     Box(
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
-                                                                            .aspectRatio(qVideoRatio.coerceIn(0.5f, 2.5f))
+                                                                            .aspectRatio(qVideoRatio.coerceIn(0.4f, 2.5f))
                                                                             .clip(RoundedCornerShape(6.dp))
                                                                             .background(Color.Black)
                                                                     ) {
@@ -635,11 +641,11 @@ private fun NoteCardContent(
                                                                     }
                                                                 } else {
                                                                     // Images: stable ratio from cache
-                                                                    val qImgRatio = (qKnownRatio ?: (16f / 9f)).coerceIn(0.5f, 2.5f)
+                                                                    val qImgRatio = (qKnownRatio ?: (16f / 9f)).coerceIn(0.4f, 2.5f)
                                                                     coil.compose.AsyncImage(
                                                                         model = url,
                                                                         contentDescription = null,
-                                                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                                                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
                                                                         modifier = Modifier
                                                                             .fillMaxWidth()
                                                                             .aspectRatio(qImgRatio)

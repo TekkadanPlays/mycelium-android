@@ -155,6 +155,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         private const val PREF_CURRENT_ACCOUNT = "current_account_npub"
         private const val PREF_ALL_ACCOUNTS = "all_accounts_json"
         private const val PREF_ONBOARDING_COMPLETE_PREFIX = "onboarding_complete_"
+        private const val PREF_SETTINGS_APPLIED_PREFIX = "settings_applied_"
     }
 
     init {
@@ -332,6 +333,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         Log.d("AccountStateViewModel", "\uD83D\uDD1D Setting guest mode")
         _currentAccount.value = null
         NoteCountsRepository.currentUserPubkey = null
+        social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(null)
         social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(null)
         _zappedNoteIds.value = emptySet()
         _zappedAmountByNoteId.value = emptyMap()
@@ -441,6 +443,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         restoreZapState(accountInfo.npub)
         ReactionsRepository.loadForAccount(getApplication(), accountInfo.npub)
         NoteCountsRepository.currentUserPubkey = hexPubkey
+        // Create per-account scope (NotificationsRepository instance) and set as active
+        social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
+        social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(hexPubkey)
         social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
         // Restore persisted kind-3 before any relay fetch can overwrite with stale data
         ContactListRepository.restorePersistedKind3(hexPubkey)
@@ -502,6 +507,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val isSameAccount = incomingHex != null && incomingHex == currentActivePubkey
         if (isSameAccount) {
             Log.d("AccountStateViewModel", "\uD83D\uDD04 Same account already active — skipping teardown")
+            // Ensure registry knows this is the active account (ViewModel may have been re-created)
+            social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(incomingHex, getApplication())
+            social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(incomingHex)
             // Populate this instance's state so the UI works, but skip destructive operations
             val updatedAccount = accountInfo.copy(lastUsed = System.currentTimeMillis())
             val updatedAccounts = _savedAccounts.value
@@ -617,6 +625,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             restoreZapState(updatedAccount.npub)
             ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
             NoteCountsRepository.currentUserPubkey = hexPubkey
+            // Create per-account scope (NotificationsRepository instance) and set as active
+            social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
+            social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(hexPubkey)
             social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
             // Restore persisted kind-3 before any relay fetch can overwrite with stale data
             ContactListRepository.restorePersistedKind3(hexPubkey)
@@ -676,25 +687,34 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     /**
-     * Register the settings sync publish callback and fetch remote settings from relays.
-     * Called after account activation (Amber login or session restore).
+     * Register the settings sync publish callback so local setting changes are synced to relays.
+     * The initial fetch is handled by [StartupOrchestrator.runPhase0Settings] with CRITICAL
+     * priority to guarantee it completes before any other relay subscriptions.
      */
     private fun initSettingsSync(hexPubkey: String) {
         val signer = getCurrentSigner() ?: return
         val context = getApplication<android.app.Application>()
-        val relayUrls = getPublishRelayUrlSet()
 
-        // Register callback so preference setters trigger debounced publish
+        // Register callback — evaluate relay URLs lazily so we always publish
+        // to the current set, not a stale snapshot captured at login time.
         social.mycelium.android.repository.SettingsSyncManager.registerPublishCallback {
-            social.mycelium.android.repository.SettingsSyncManager.publishSettings(
-                context, signer, hexPubkey, relayUrls
-            )
+            val freshRelays = getPublishRelayUrlSet()
+            if (freshRelays.isNotEmpty()) {
+                social.mycelium.android.repository.SettingsSyncManager.publishSettings(
+                    context, signer, hexPubkey, freshRelays
+                )
+            }
         }
+        Log.d("AccountStateViewModel", "Settings sync: publish callback registered (fetch handled by StartupOrchestrator)")
+    }
 
-        // Fetch and apply remote settings (one-shot on login)
-        social.mycelium.android.repository.SettingsSyncManager.fetchAndApplySettings(
-            signer, hexPubkey, relayUrls.toList()
-        )
+    /** Check if settings have already been applied for this account (first-login flag). */
+    fun isSettingsAlreadyApplied(hexPubkey: String): Boolean =
+        prefs.getBoolean(PREF_SETTINGS_APPLIED_PREFIX + hexPubkey, false)
+
+    /** Mark settings as applied so the orchestrator doesn't re-fetch on subsequent launches. */
+    fun markSettingsApplied(hexPubkey: String) {
+        prefs.edit().putBoolean(PREF_SETTINGS_APPLIED_PREFIX + hexPubkey, true).apply()
     }
 
     private fun restoreZapState(accountNpub: String) {
@@ -1098,9 +1118,6 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val relaySet = getPublishRelayUrlSet()
         if (relaySet.isEmpty()) return "No outbox relays configured"
 
-        // Optimistically record local vote
-        PollResponseRepository.recordLocalVote(pollNoteId, accountHex, selectedOptions)
-
         viewModelScope.launch {
             val result = EventPublisher.publish(
                 context = getApplication(),
@@ -1126,6 +1143,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
             when (result) {
                 is PublishResult.Success -> {
+                    // Record vote only after successful signing + publish so the UI
+                    // doesn't show a phantom vote if Amber rejects the signing request.
+                    PollResponseRepository.recordLocalVote(pollNoteId, accountHex, selectedOptions)
                     Log.d("AccountStateViewModel", "Poll vote published: ${result.eventId.take(8)} for poll ${pollNoteId.take(8)}")
                 }
                 is PublishResult.Error -> {
@@ -1199,6 +1219,73 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 }
                 is PublishResult.Error -> {
                     _toastMessage.value = "Poll publish failed: ${result.message}"
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Publish a kind-6969 zap poll event.
+     * @param question Poll question text (event content).
+     * @param options List of (index, description) pairs for poll options.
+     * @param valueMinimum Minimum sats per zap vote (null = no minimum).
+     * @param valueMaximum Maximum sats per zap vote (null = no maximum).
+     * @param closedAtEpochSeconds Optional deadline (Unix seconds). Null = open-ended.
+     * @param consensusThreshold Percentage threshold (0–100) for consensus. Null = none.
+     * @param relayUrls Relay URLs to publish to.
+     */
+    fun publishZapPoll(
+        question: String,
+        options: List<Pair<Int, String>>,
+        valueMinimum: Long?,
+        valueMaximum: Long?,
+        closedAtEpochSeconds: Long?,
+        consensusThreshold: Int?,
+        relayUrls: Set<String>
+    ): String? {
+        if (question.isBlank()) return "Poll question is empty"
+        if (options.size < 2) return "Add at least 2 options"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+        val pubkey = currentAccount.value?.toHexKey()
+
+        viewModelScope.launch {
+            when (val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 6969, content = question) {
+                for ((index, description) in options) {
+                    add(arrayOf("poll_option", index.toString(), description))
+                }
+                if (valueMinimum != null) add(arrayOf("value_minimum", valueMinimum.toString()))
+                if (valueMaximum != null) add(arrayOf("value_maximum", valueMaximum.toString()))
+                if (closedAtEpochSeconds != null) add(arrayOf("closed_at", closedAtEpochSeconds.toString()))
+                if (consensusThreshold != null) add(arrayOf("consensus_threshold", consensusThreshold.toString()))
+                add(arrayOf("alt", "Zap Poll"))
+            }) {
+                is PublishResult.Success -> {
+                    val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
+                        ?: social.mycelium.android.data.Author(id = result.event.pubKey, username = "", displayName = "You")
+                    val zapPollData = social.mycelium.android.data.ZapPollData(
+                        options = options.map { social.mycelium.android.data.ZapPollOption(it.first, it.second) },
+                        valueMinimum = valueMinimum,
+                        valueMaximum = valueMaximum,
+                        closedAt = closedAtEpochSeconds,
+                        consensusThreshold = consensusThreshold
+                    )
+                    val note = social.mycelium.android.data.Note(
+                        id = result.event.id,
+                        author = author,
+                        content = question,
+                        timestamp = result.event.createdAt * 1000L,
+                        kind = 6969,
+                        relayUrls = relayUrls.toList(),
+                        tags = result.event.tags.map { it.toList() },
+                        zapPollData = zapPollData
+                    )
+                    NotesRepository.getInstance().injectOwnNote(note)
+                    NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
+                    Log.d("AccountStateViewModel", "Zap poll published: ${result.eventId.take(8)} with ${options.size} options")
+                }
+                is PublishResult.Error -> {
+                    _toastMessage.value = "Zap poll publish failed: ${result.message}"
                 }
             }
         }
@@ -1965,10 +2052,17 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             // Onboarding flag must be cleared so re-login triggers the setup flow.
             val pubkey = accountInfo.toHexKey()
             if (pubkey != null) {
+                // Destroy per-account scope (stops notification subscription, cancels coroutines)
+                social.mycelium.android.repository.AccountScopedRegistry.removeScope(pubkey)
                 relayStorageManager.clearUserData(pubkey)
                 Log.d("AccountStateViewModel", "🗑️ Cleared relay data for account: ${accountInfo.toShortNpub()}")
             }
             prefs.edit().remove(PREF_ONBOARDING_COMPLETE_PREFIX + accountInfo.npub).apply()
+            // Clear settings-applied flag so re-login fetches fresh settings
+            val hex = accountInfo.toHexKey()
+            if (hex != null) {
+                prefs.edit().remove(PREF_SETTINGS_APPLIED_PREFIX + hex).apply()
+            }
 
             // Remove from saved accounts
             val updatedAccounts = _savedAccounts.value.filter { it.npub != accountInfo.npub }

@@ -55,6 +55,7 @@ fun AdaptiveHeader(
     onLoginClick: (() -> Unit)? = null,
     onProfileClick: () -> Unit = {},
     onAccountsClick: () -> Unit = {},
+    onListsClick: () -> Unit = {},
     onQrCodeClick: () -> Unit = {},
     onSettingsClick: () -> Unit = {},
     onRelaysClick: () -> Unit = {},
@@ -86,6 +87,12 @@ fun AdaptiveHeader(
     onTopicsFavoritesFilterChange: ((Boolean) -> Unit)? = null,
     activeEngagementFilter: String? = null,
     onEngagementFilterChange: (String?) -> Unit = {},
+    /** NIP-51 people lists available as feed filters. */
+    peopleLists: List<Pair<String, String>> = emptyList(),
+    /** Currently active people list d-tag (null = none). */
+    activeListDTag: String? = null,
+    /** Callback when a people list is selected as feed filter (dTag, title). Null clears. */
+    onPeopleListSelected: ((String?, String?) -> Unit)? = null,
     /** Navigate to Topics screen from the Mycelium logo menu. */
     onNavigateToTopics: (() -> Unit)? = null,
     /** Navigate to Home feed from the Topics logo menu. */
@@ -344,26 +351,53 @@ fun AdaptiveHeader(
                                         HorizontalDivider()
                                     }
                                     if (onFollowingFilterChange != null) {
+                                        val isGlobalActive = !isFollowingFilter && activeListDTag == null
+                                        val isFollowingActive = isFollowingFilter && activeListDTag == null
                                         DropdownMenuItem(
                                             text = {
-                                                Text("Global", color = if (!isFollowingFilter) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                                Text("Global", color = if (isGlobalActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                             },
                                             onClick = {
                                                 logoMenuExpanded = false
+                                                onPeopleListSelected?.invoke(null, null)
                                                 onFollowingFilterChange(false)
                                             },
-                                            leadingIcon = { Icon(Icons.Outlined.Public, contentDescription = null, tint = if (!isFollowingFilter) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                                            leadingIcon = { Icon(Icons.Outlined.Public, contentDescription = null, tint = if (isGlobalActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                                         )
                                         DropdownMenuItem(
                                             text = {
-                                                Text("Following", color = if (isFollowingFilter) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                                Text("Following", color = if (isFollowingActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                             },
                                             onClick = {
                                                 logoMenuExpanded = false
+                                                onPeopleListSelected?.invoke(null, null)
                                                 onFollowingFilterChange(true)
                                             },
-                                            leadingIcon = { Icon(Icons.Outlined.People, contentDescription = null, tint = if (isFollowingFilter) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
+                                            leadingIcon = { Icon(Icons.Outlined.People, contentDescription = null, tint = if (isFollowingActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                                         )
+                                        // NIP-51 people lists as feed filters
+                                        if (peopleLists.isNotEmpty() && onPeopleListSelected != null) {
+                                            HorizontalDivider()
+                                            peopleLists.forEach { (dTag, title) ->
+                                                val isActive = activeListDTag == dTag
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(title, color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                                    },
+                                                    onClick = {
+                                                        logoMenuExpanded = false
+                                                        onPeopleListSelected(dTag, title)
+                                                    },
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            Icons.AutoMirrored.Outlined.List,
+                                                            contentDescription = null,
+                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -692,6 +726,19 @@ fun AdaptiveHeader(
                                     leadingIcon = {
                                         Icon(
                                             Icons.Outlined.AccountCircle,
+                                            contentDescription = null
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Lists") },
+                                    onClick = {
+                                        showMenu = false
+                                        onListsClick()
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.AutoMirrored.Outlined.List,
                                             contentDescription = null
                                         )
                                     }

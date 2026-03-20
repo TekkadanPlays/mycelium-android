@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -121,13 +122,40 @@ fun RelayOrbs(
 
 }
 
-/** Single relay orb icon — shows NIP-11 icon if cached, else Router fallback. */
+/** Resolve the best icon URL for a relay: NIP-11 icon → NIP-11 image → favicon.ico */
+private fun resolveRelayIconUrl(info: RelayInformation?, relayUrl: String): String? {
+    info?.icon?.takeIf { it.isNotBlank() }?.let { return it }
+    info?.image?.takeIf { it.isNotBlank() }?.let { return it }
+    // Favicon fallback — construct from relay URL
+    val httpBase = relayUrl
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trimEnd('/')
+    return "$httpBase/favicon.ico"
+}
+
+/** Single relay orb icon — shows NIP-11 icon if cached, else favicon, else Router fallback.
+ *  Uses per-relay [Nip11CacheManager.relayUpdated] flow so each orb only recomposes
+ *  when ITS relay's NIP-11 data arrives (no global recomposition storm).
+ *  Falls back to a lazy fetch if the relay isn't cached yet. */
 @Composable
 private fun RelayOrbIcon(relayUrl: String, nip11: Nip11CacheManager, context: android.content.Context) {
-    var iconUrl by remember(relayUrl) { mutableStateOf(nip11.getCachedRelayInfo(relayUrl)?.icon) }
+    // Per-orb reactive state: starts with whatever is cached, updates when this relay's data arrives
+    val iconUrl by produceState<String?>(
+        initialValue = resolveRelayIconUrl(nip11.getCachedRelayInfo(relayUrl), relayUrl),
+        key1 = relayUrl
+    ) {
+        // If already cached, value is set. Listen for updates targeted at this relay.
+        nip11.relayUpdated.collect { updatedUrl ->
+            if (updatedUrl == relayUrl) {
+                value = resolveRelayIconUrl(nip11.getCachedRelayInfo(relayUrl), relayUrl)
+            }
+        }
+    }
+    // Trigger a fetch if not cached yet (runs once per uncached relay)
     LaunchedEffect(relayUrl) {
-        if (iconUrl.isNullOrBlank()) {
-            withContext(Dispatchers.IO) { nip11.getRelayInfo(relayUrl)?.icon }?.let { iconUrl = it }
+        if (nip11.getCachedRelayInfo(relayUrl) == null) {
+            withContext(Dispatchers.IO) { nip11.getRelayInfo(relayUrl) }
         }
     }
     if (!iconUrl.isNullOrBlank()) {

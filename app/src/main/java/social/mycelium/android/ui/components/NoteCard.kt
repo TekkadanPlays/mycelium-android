@@ -67,6 +67,7 @@ import com.example.cybin.nip19.encodeNevent
 import social.mycelium.android.utils.NoteContentBlock
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
@@ -80,6 +81,8 @@ import coil.compose.SubcomposeAsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
+import social.mycelium.android.data.UrlPreviewInfo
+import social.mycelium.android.services.UrlPreviewCache
 import social.mycelium.android.data.IMetaData
 import social.mycelium.android.utils.MediaAspectRatioCache
 import social.mycelium.android.utils.QuotedNoteHeightCache
@@ -248,10 +251,10 @@ internal fun QuotedNoteBody(
                         val knownImgRatio = currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
                         val qImgInitiallyKnown = knownImgRatio != null
                         var qImgContainerRatio by remember(qImageUrls) {
-                            mutableFloatStateOf((knownImgRatio ?: (16f / 9f)).coerceIn(0.5f, 2.0f))
+                            mutableFloatStateOf((knownImgRatio ?: (16f / 9f)).coerceIn(0.4f, 2.5f))
                         }
                         if (qImgInitiallyKnown && knownImgRatio != null) {
-                            val clamped = knownImgRatio.coerceIn(0.5f, 2.0f)
+                            val clamped = knownImgRatio.coerceIn(0.4f, 2.5f)
                             if (clamped != qImgContainerRatio) qImgContainerRatio = clamped
                         }
                         val imgRatio = qImgContainerRatio
@@ -305,7 +308,7 @@ internal fun QuotedNoteBody(
                                             androidx.compose.foundation.Image(
                                                 painter = painter,
                                                 contentDescription = null,
-                                                contentScale = ContentScale.Crop,
+                                                contentScale = ContentScale.Fit,
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             SideEffect {
@@ -388,7 +391,7 @@ internal fun QuotedNoteBody(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .aspectRatio(videoRatio.coerceIn(0.5f, 2.5f))
+                                .aspectRatio(videoRatio.coerceIn(0.4f, 2.5f))
                                 .clip(RoundedCornerShape(6.dp))
                                 .background(Color.Black)
                         ) {
@@ -639,18 +642,18 @@ internal fun QuotedNoteContent(
                 bottom = if (depth == 0) 4.dp else 2.dp
             )
             .clickable(onClick = navigateToQuotedNote)
-            .drawBehind {
-                drawRoundRect(
-                    color = accentColor,
-                    topLeft = Offset.Zero,
-                    size = androidx.compose.ui.geometry.Size(accentWidthPx, size.height),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(accentCornerPx, accentCornerPx)
-                )
-            }
     ) {
         Column(modifier = Modifier
             .padding(start = 10.dp, top = 2.dp, bottom = 2.dp)
             .fillMaxWidth()
+            .drawBehind {
+                drawRoundRect(
+                    color = accentColor,
+                    topLeft = Offset(-10.dp.toPx(), -2.dp.toPx()),
+                    size = androidx.compose.ui.geometry.Size(accentWidthPx, size.height + 4.dp.toPx()),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(accentCornerPx, accentCornerPx)
+                )
+            }
             .animateContentSize(animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = FastOutSlowInEasing))
         ) {
             // ── Header row: author (left) + counters & emojis (right) ──
@@ -2522,7 +2525,21 @@ fun NoteCard(
                 Spacer(modifier = Modifier.height(4.dp))
             }
 
-            val firstPreview = note.urlPreviews.firstOrNull()
+            // Resolve URL previews: prefer note's own previews, but fall back to global cache
+            // so previews fetched by any screen (dashboard, profile, thread) propagate everywhere.
+            val cacheRevision by UrlPreviewCache.revision.collectAsState()
+            val resolvedPreviews = remember(note.urlPreviews, note.content, cacheRevision) {
+                if (note.urlPreviews.isNotEmpty()) {
+                    note.urlPreviews
+                } else {
+                    val urls = UrlDetector.findUrls(note.content)
+                    val embedded = note.mediaUrls.toSet()
+                    urls.filter { it !in embedded && !UrlDetector.isImageUrl(it) && !UrlDetector.isVideoUrl(it) }
+                        .take(2)
+                        .mapNotNull { UrlPreviewCache.get(it) }
+                }
+            }
+            val firstPreview = resolvedPreviews.firstOrNull()
 
             // Counts row: above embed and body (when action row is shown)
             if (showActionRow) {
@@ -2668,20 +2685,6 @@ fun NoteCard(
                 Spacer(modifier = Modifier.height(2.dp))
             }
 
-            // NIP-88 Poll block (kind-1068)
-            if (note.pollData != null) {
-                PollBlock(
-                    pollData = note.pollData,
-                    noteId = note.id,
-                    noteAuthorPubkey = note.author.id,
-                    relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
-                    myPubkey = myPubkeyHex,
-                    onVote = { nId, authorPk, selections, relayHint ->
-                        onPollVote?.invoke(nId, authorPk, selections, relayHint)
-                    }
-                )
-            }
-
             // Body zone: only when there is text or quoted notes; otherwise embed/media only
             val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
             // When firstPreview is shown as the top-level embed, pass its URL as "consumed"
@@ -2728,9 +2731,14 @@ fun NoteCard(
                         // Debounce: wait 250ms before network fetch so rapidly scrolled-past
                         // cards don't waste subscription slots
                         delay(250)
+                        // Launch all fetches concurrently so they land in the same batch
+                        val results = kotlinx.coroutines.coroutineScope {
+                            uncachedIds.map { id ->
+                                async { id to QuotedNoteCache.get(id) }
+                            }.map { it.await() }
+                        }
                         val newFailed = mutableSetOf<String>()
-                        val fetched = uncachedIds.mapNotNull { id ->
-                            val meta = QuotedNoteCache.get(id)
+                        val fetched = results.mapNotNull { (id, meta) ->
                             if (meta != null) id to meta
                             else { newFailed.add(id); null }
                         }
@@ -2763,7 +2771,7 @@ fun NoteCard(
             }
             val contentBlocks by produceState(
                 initialValue = social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey) ?: emptyList(),
-                contentCacheKey, note.urlPreviews, diskCacheReady
+                contentCacheKey, resolvedPreviews, diskCacheReady
             ) {
                 // Check cache first (may already be populated from a previous composition)
                 social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey)?.let { cached ->
@@ -2774,7 +2782,7 @@ fun NoteCard(
                     buildNoteContentWithInlinePreviews(
                         displayContent,
                         note.mediaUrls.toSet(),
-                        note.urlPreviews,
+                        resolvedPreviews,
                         linkStyle,
                         profileCache,
                         consumedUrls,
@@ -3082,6 +3090,32 @@ fun NoteCard(
                         } // end height-stable Box
                     }
                 }
+            }
+
+            // NIP-88 Poll block (kind-1068) — rendered after body text so question appears above options
+            if (note.pollData != null) {
+                PollBlock(
+                    pollData = note.pollData,
+                    noteId = note.id,
+                    noteAuthorPubkey = note.author.id,
+                    relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
+                    myPubkey = myPubkeyHex,
+                    onVote = { nId, authorPk, selections, relayHint ->
+                        onPollVote?.invoke(nId, authorPk, selections, relayHint)
+                    }
+                )
+            }
+
+            // Kind-6969 Zap Poll block — rendered after body text so question appears above options
+            if (note.zapPollData != null) {
+                ZapPollBlock(
+                    zapPollData = note.zapPollData,
+                    noteId = note.id,
+                    noteAuthorPubkey = note.author.id,
+                    relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
+                    myPubkey = myPubkeyHex,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
 
             // Translation label (subtle, below content)

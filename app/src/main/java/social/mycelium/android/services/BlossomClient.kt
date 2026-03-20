@@ -7,8 +7,7 @@ import android.util.Log
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.timeout
 import io.ktor.client.request.delete
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -39,16 +38,7 @@ import java.security.MessageDigest
  * @see <a href="https://github.com/vitorpamplona/amethyst">Amethyst</a>
  */
 class BlossomClient(
-    private val client: HttpClient = HttpClient(CIO) {
-        engine {
-            requestTimeout = 120_000
-        }
-        install(HttpTimeout) {
-            requestTimeoutMillis = 120_000
-            connectTimeoutMillis = 30_000
-            socketTimeoutMillis = 120_000
-        }
-    }
+    private val client: HttpClient = social.mycelium.android.network.MyceliumHttpClient.instance
 ) {
 
     companion object {
@@ -168,6 +158,7 @@ class BlossomClient(
         // Strategy 1: PUT /upload (Amethyst alignment)
         try {
             val response = client.put("$cleanServer/upload") {
+                timeout { requestTimeoutMillis = 120_000; socketTimeoutMillis = 120_000 }
                 header("Authorization", authHeader)
                 header("Content-Length", size.toString())
                 contentType(contentType)
@@ -190,6 +181,7 @@ class BlossomClient(
         // Strategy 2: POST /upload (some servers prefer POST)
         try {
             val response = client.post("$cleanServer/upload") {
+                timeout { requestTimeoutMillis = 120_000; socketTimeoutMillis = 120_000 }
                 header("Authorization", authHeader)
                 contentType(contentType)
                 setBody(fileBytes)
@@ -207,6 +199,7 @@ class BlossomClient(
         // Strategy 3: PUT /media (BUD spec alternative)
         try {
             val response = client.put("$cleanServer/media") {
+                timeout { requestTimeoutMillis = 120_000; socketTimeoutMillis = 120_000 }
                 header("Authorization", authHeader)
                 header("Content-Length", size.toString())
                 contentType(contentType)

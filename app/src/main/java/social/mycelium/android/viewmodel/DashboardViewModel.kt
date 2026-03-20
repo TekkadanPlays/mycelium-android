@@ -5,9 +5,7 @@ import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import social.mycelium.android.data.Note
-import social.mycelium.android.data.NoteUpdate
 import social.mycelium.android.data.UrlPreviewInfo
-import social.mycelium.android.network.WebSocketClient
 import social.mycelium.android.repository.ContactListRepository
 import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.repository.LiveActivityRepository
@@ -55,7 +53,6 @@ data class DashboardUiState(
 )
 
 class DashboardViewModel : ViewModel() {
-    private val webSocketClient = WebSocketClient()
     private val notesRepository = NotesRepository.getInstance()
     private val liveActivityRepository = LiveActivityRepository.getInstance()
     private val urlPreviewManager = UrlPreviewManager(UrlPreviewService(), UrlPreviewCache)
@@ -204,6 +201,16 @@ class DashboardViewModel : ViewModel() {
         lastFollowFilterList = list
         val toPass = if (enabled) list else null
         notesRepository.setFollowFilter(toPass, enabled)
+    }
+
+    /**
+     * Apply a custom pubkey set as the follow filter (e.g. from a NIP-51 people list).
+     * Bypasses the ViewModel's follow list and passes the custom set directly.
+     */
+    fun setFollowFilterWithCustomList(pubkeys: Set<String>) {
+        lastFollowFilterEnabled = true
+        lastFollowFilterList = pubkeys
+        notesRepository.setCustomListFilter(pubkeys)
     }
 
     private fun loadInitialData() {
@@ -357,39 +364,6 @@ class DashboardViewModel : ViewModel() {
         notesRepository.applyPendingNotes()
     }
 
-    private fun connectWebSocket() {
-        viewModelScope.launch {
-            try {
-                webSocketClient.connect()
-                // No fake notes: feed is driven by NotesRepository (relay). WebSocket is for real-time like/share updates only.
-
-                // Listen for real-time updates
-                webSocketClient.realTimeUpdates.collect { update ->
-                    handleRealTimeUpdate(update)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "WebSocket connection error: ${e.message}", e)
-                _uiState.update { it.copy(error = "Connection error: ${e.message}") }
-            }
-        }
-    }
-
-    private fun handleRealTimeUpdate(update: NoteUpdate) {
-        _uiState.update { state -> state.copy(
-            notes = state.notes.map { note ->
-                if (note.id == update.noteId) {
-                    when (update.action) {
-                        "like" -> note.copy(likes = note.likes + 1, isLiked = true)
-                        "unlike" -> note.copy(likes = note.likes - 1, isLiked = false)
-                        "share" -> note.copy(shares = note.shares + 1, isShared = true)
-                        else -> note
-                    }
-                } else {
-                    note
-                }
-            }
-        ) }
-    }
 
     fun toggleLike(noteId: String) {
         viewModelScope.launch {
@@ -411,14 +385,6 @@ class DashboardViewModel : ViewModel() {
                 }
             ) }
 
-            // Send update via WebSocket
-            val update = NoteUpdate(
-                noteId = noteId,
-                action = if (isLikedAction) "like" else "unlike",
-                userId = "current_user",
-                timestamp = System.currentTimeMillis()
-            )
-            webSocketClient.sendNoteUpdate(update)
         }
     }
 
@@ -434,13 +400,6 @@ class DashboardViewModel : ViewModel() {
                 }
             ) }
 
-            val update = NoteUpdate(
-                noteId = noteId,
-                action = "share",
-                userId = "current_user",
-                timestamp = System.currentTimeMillis()
-            )
-            webSocketClient.sendNoteUpdate(update)
         }
     }
 
@@ -591,7 +550,6 @@ class DashboardViewModel : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
-        webSocketClient.cleanup()
         // Do not call notesRepository.disconnectAll() - shared connection and notes outlive this screen
     }
 }

@@ -454,7 +454,12 @@ private fun OverlayThreadPanel(
                 }
             },
             onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) },
-            onDeleteNote = { n -> accountStateViewModel.deleteNote(n) }
+            onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
+            onPollVote = { noteId, authorPk, selections, relayHint ->
+                val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+                if (err != null) showSnackbar(err)
+            },
+            myPubkeyHex = accountHexKey
         )
     }
 }
@@ -560,8 +565,24 @@ private fun OverlayProfilePanel(
         onDispose { profileFeedRepo.pause() }
     }
     val authorNotesRaw = remember(profileFeedNotes, dashboardAuthorNotes) {
-        (dashboardAuthorNotes + profileFeedNotes)
-            .distinctBy { it.id }
+        // Merge dashboard + profile notes, collapsing repost:XXX entries with their originals
+        val combined = (dashboardAuthorNotes + profileFeedNotes).distinctBy { it.id }
+        val byId = combined.associateBy { it.id }.toMutableMap()
+        val toRemove = mutableSetOf<String>()
+        for (note in combined) {
+            val origId = note.originalNoteId ?: continue
+            val orig = byId[origId]
+            if (orig != null) {
+                // Merge boost authors from repost entry onto the original
+                val mergedAuthors = (orig.repostedByAuthors + note.repostedByAuthors).distinctBy { it.id }
+                byId[origId] = orig.copy(
+                    repostedByAuthors = mergedAuthors,
+                    repostTimestamp = maxOf(note.repostTimestamp ?: 0L, orig.repostTimestamp ?: 0L)
+                )
+                toRemove.add(note.id) // remove the repost:XXX duplicate
+            }
+        }
+        byId.values.filter { it.id !in toRemove }
             .sortedByDescending { it.repostTimestamp ?: it.timestamp }
     }
     // URL preview enrichment for profile notes (mirrors DashboardViewModel enrichment pipeline)
@@ -836,7 +857,12 @@ private fun OverlayProfilePanel(
                         navController.navigate("reactions/$noteId") { launchSingleTop = true }
                     },
                     onNavigateToZapSettings = { navController.navigate("zap_settings") { launchSingleTop = true } },
-                    onDeleteNote = { n -> accountStateViewModel.deleteNote(n) }
+                    onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
+                    onPollVote = { noteId, authorPk, selections, relayHint ->
+                        val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+                        if (err != null) showSnackbar(err)
+                    },
+                    myPubkeyHex = currentAccount?.toHexKey()
                 )
             }
         }
@@ -893,15 +919,39 @@ fun MyceliumNavigation(
     val pendingNav by appViewModel.pendingNotificationNav.collectAsState()
     LaunchedEffect(pendingNav) {
         val nav = appViewModel.consumePendingNotificationNav() ?: return@LaunchedEffect
+
+        // ── Account switch: if notification is from a different account, switch first ──
+        val navAccountPubkey = nav.accountPubkey
+        val currentPubkey = currentAccount?.toHexKey()
+        if (navAccountPubkey != null && currentPubkey != null && navAccountPubkey != currentPubkey) {
+            val targetAccount = accountStateViewModel.savedAccounts.value
+                .firstOrNull { it.toHexKey() == navAccountPubkey }
+            if (targetAccount != null) {
+                Log.d("MyceliumNav", "Notification tap: switching from ${currentPubkey.take(8)} to ${navAccountPubkey.take(8)}")
+                accountStateViewModel.switchToAccount(targetAccount)
+                // Brief delay for account switch to propagate (registry + state flows)
+                kotlinx.coroutines.delay(500L)
+            } else {
+                Log.w("MyceliumNav", "Notification tap: account ${navAccountPubkey.take(8)} not in saved accounts, skipping switch")
+            }
+        }
+
         val targetNoteId = nav.rootNoteId ?: nav.noteId
         val highlightReplyId = if (nav.rootNoteId != null) nav.noteId else null
 
-        // Look up real data from NotificationsRepository (already ingested the event)
-        val notifData = NotificationsRepository.findNotificationByNoteId(nav.noteId)
+        // Look up real data from the correct account's NotificationsRepository.
+        // If we just switched accounts, the companion shim now points to the new active account.
+        // Also try the specific account's repo directly for robustness.
+        val specificRepo = if (navAccountPubkey != null) {
+            social.mycelium.android.repository.AccountScopedRegistry.getScope(navAccountPubkey)?.notificationsRepository
+        } else null
+        val notifData = specificRepo?.findNotificationByNoteId(nav.noteId)
+            ?: NotificationsRepository.findNotificationByNoteId(nav.noteId)
 
         // Mark the notification as read so it doesn't show as unread in the notifications view
         if (notifData != null) {
-            NotificationsRepository.markAsSeen(notifData.id)
+            specificRepo?.markAsSeen(notifData.id)
+                ?: NotificationsRepository.markAsSeen(notifData.id)
         }
 
         // Try to get a real Note with author metadata + relay URLs:
@@ -1155,7 +1205,7 @@ fun MyceliumNavigation(
         route == "messages" -> 1
         route == "wallet" -> 2
         route?.startsWith("announcements") == true -> 3
-        route?.startsWith("relays") == true -> 3 // Relay Manager also maps to same tab index
+        route?.startsWith("relays") == true -> -1 // Relay Manager is not a bottom nav destination
         route == "notifications" -> 4
         route == "topics" -> 5
         route?.startsWith("profile") == true || route == "user_profile" -> 6
@@ -1208,7 +1258,7 @@ fun MyceliumNavigation(
                 currentRoute == "topics" -> "topics"
                 currentRoute == "notifications" -> "notifications"
                 currentRoute?.startsWith("announcements") == true -> "announcements"
-                currentRoute?.startsWith("relays") == true -> "announcements"
+                currentRoute?.startsWith("relays") == true -> "" // Relay Manager — no bottom nav item highlighted
                 currentRoute?.startsWith("profile") == true -> "profile"
                 isMainScreen(currentRoute) -> currentRoute ?: "home"
                 else -> "home"
@@ -1242,69 +1292,150 @@ fun MyceliumNavigation(
         // Set current user pubkey so own events are displayed immediately in the feed
         NotesRepository.getInstance().setCurrentUserPubkey(pubkey)
     }
+    // ── Phased startup via StartupOrchestrator ────────────────────────────
+    // Phase 0: Settings (CRITICAL) → Phase 1: Follow + Mute list →
+    // Phase 2: Feed (driven by DashboardScreen) → Phase 3: Enrichment →
+    // Phase 4: DMs + background
     LaunchedEffect(currentAccount, onboardingComplete) {
         val pubkey = currentAccount?.toHexKey() ?: return@LaunchedEffect
         if (!onboardingComplete) return@LaunchedEffect
-        // Relay data is persisted during onboarding — load it directly.
-        // Notifications need to query ALL user relays for p-tagged events — outbox relays
-        // are where our notes live, so others' reactions/replies land there too.
-        // NOTE: indexer relays are intentionally excluded from feed/notification
-        // connections — they are only for NIP-65 lookups during onboarding.
+
+        // Load relay URL sets from persisted storage
         val categories = storageManager.loadCategories(pubkey)
         val outboxRelays = storageManager.loadOutboxRelays(pubkey)
         val inboxRelays = storageManager.loadInboxRelays(pubkey)
-
         val categoryUrls = categories.flatMap { it.relays }.map { it.url }
         val outboxUrls = outboxRelays.map { it.url }
         val inboxUrls = inboxRelays.map { it.url }
-
+        val indexerUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
         val allUserRelayUrls = (categoryUrls + outboxUrls + inboxUrls)
             .map { it.trim().removeSuffix("/") }
             .distinct()
 
-        Log.d(
-            "MyceliumNav",
-            "Notif sub: categories=${categoryUrls.size}, outbox=${outboxUrls.size}, " +
-                "inbox=${inboxUrls.size}, total=${allUserRelayUrls.size}"
-        )
+        Log.d("MyceliumNav", "Startup: categories=${categoryUrls.size}, outbox=${outboxUrls.size}, inbox=${inboxUrls.size}, total=${allUserRelayUrls.size}")
 
-        if (allUserRelayUrls.isNotEmpty()) {
-            val indexerUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
-            NotificationsRepository.setCacheRelayUrls(indexerUrls)
-            NotificationsRepository.startSubscription(pubkey, inboxUrls, outboxUrls, categoryUrls)
-            Log.d("MyceliumNav", "Notif subscription started: inbox=${inboxUrls.size}, outbox=${outboxUrls.size}, categories=${categoryUrls.size}")
-            // Enable Android push notifications after a brief delay for subscription setup.
-            // seenEventIds dedup in handleEvent prevents replayed events from re-firing.
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
-                kotlinx.coroutines.delay(2_000L)
-                NotificationsRepository.enableAndroidNotifications()
-                Log.d("MyceliumNav", "Android push notifications enabled (initial replay settled)")
+        if (allUserRelayUrls.isEmpty()) {
+            Log.w("MyceliumNav", "Startup aborted: no relay URLs for ${pubkey.take(8)}")
+            return@LaunchedEffect
+        }
+
+        // Wire emoji pack callbacks (no relay subscription — just callback registration)
+        social.mycelium.android.repository.EmojiPackSelectionRepository.onAddPackAction = { author, dTag, relayHint ->
+            accountStateViewModel.addEmojiPack(author, dTag, relayHint)
+        }
+        social.mycelium.android.repository.EmojiPackSelectionRepository.onRemovePackAction = { author, dTag ->
+            accountStateViewModel.removeEmojiPack(author, dTag)
+        }
+
+        // Reset orchestrator for this account session
+        social.mycelium.android.repository.StartupOrchestrator.reset()
+
+        // ── Phase 0: Settings (CRITICAL priority, non-blocking) ──────────
+        // Fires concurrently with Phase 1. Settings are cosmetic and apply
+        // retroactively via SharedPreferences → Compose recomposition.
+        val signer = accountStateViewModel.getCurrentSigner()
+        if (signer != null && !accountStateViewModel.isSettingsAlreadyApplied(pubkey)) {
+            social.mycelium.android.repository.StartupOrchestrator.runPhase0Settings(
+                signer, pubkey, allUserRelayUrls
+            )
+            // Mark applied after launching — the orchestrator will apply settings
+            // when they arrive. On next launch, skipPhase0() fires instantly.
+            accountStateViewModel.markSettingsApplied(pubkey)
+        } else {
+            social.mycelium.android.repository.StartupOrchestrator.skipPhase0()
+            Log.d("MyceliumNav", "Phase 0: settings already applied or no signer — skipping")
+        }
+
+        // ── Phase 1: Follow list + Mute list (HIGH priority) ────────────
+        // Runs on orchestrator's own scope (survives recomposition).
+        // Await completion so follow list is ready before Phase 3 reads it.
+        val followRelayUrls = (indexerUrls + outboxUrls).distinct()
+        val phase1Deferred = social.mycelium.android.repository.StartupOrchestrator.runPhase1UserState(
+            pubkey, followRelayUrls, allUserRelayUrls
+        )
+        phase1Deferred.await()
+        val cachedFollowList = social.mycelium.android.repository.ContactListRepository.getCachedFollowList(pubkey)
+        Log.d("MyceliumNav", "Phase 1: follow list ready (${cachedFollowList?.size ?: 0} follows)")
+
+        // Phase 2 (feed) is driven by DashboardScreen via markFeedStarted().
+        // Phase 3+4 run on a detached scope so they survive LaunchedEffect cancellation.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            // Wait for feed to start, or timeout after 8s
+            val feedDeadline = System.currentTimeMillis() + 8_000L
+            while (!social.mycelium.android.repository.StartupOrchestrator.feedStarted.value
+                && System.currentTimeMillis() < feedDeadline) {
+                kotlinx.coroutines.delay(200)
             }
-            // Fetch mute list (NIP-51 kind 10000) and bookmarks (kind 10003)
-            social.mycelium.android.repository.MuteListRepository.fetchMuteList(pubkey, allUserRelayUrls)
-            social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(pubkey, allUserRelayUrls)
-            // Fetch saved emoji packs (NIP-30 kind 10030)
-            social.mycelium.android.repository.EmojiPackSelectionRepository.start(pubkey, allUserRelayUrls)
-            social.mycelium.android.repository.EmojiPackSelectionRepository.onAddPackAction = { author, dTag, relayHint ->
-                accountStateViewModel.addEmojiPack(author, dTag, relayHint)
-            }
-            social.mycelium.android.repository.EmojiPackSelectionRepository.onRemovePackAction = { author, dTag ->
-                accountStateViewModel.removeEmojiPack(author, dTag)
-            }
-            // Load kind:30073 anchor subscriptions (favorites) for this user
+            // Small grace period for feed EOSE before flooding with enrichment
+            kotlinx.coroutines.delay(2_000L)
+
+            // ── Phase 3: Enrichment ─────────────────────────────────────
+            social.mycelium.android.repository.StartupOrchestrator.runPhase3Enrichment(
+                context = context,
+                userPubkey = pubkey,
+                inboxUrls = inboxUrls,
+                outboxUrls = outboxUrls,
+                categoryUrls = categoryUrls,
+                indexerUrls = indexerUrls,
+                allUserRelayUrls = allUserRelayUrls,
+                followedPubkeys = cachedFollowList ?: emptySet(),
+                feedRelayUrls = allUserRelayUrls,
+            )
+            // Load kind:30073 anchor subscriptions
             accountStateViewModel.requestMySubscriptions()
-            // Start DM subscription (fetch-only) — raw kind-1059 gift wraps are buffered
-            // without any Amber interaction. Decryption is triggered by the user visiting
-            // the DM page (ConversationsScreen).
+
+            // ── Phase 4: Background (DMs, etc.) — 10s after enrichment ──
+            kotlinx.coroutines.delay(10_000L)
             val dmSigner = accountStateViewModel.getCurrentSigner()
             if (dmSigner != null) {
-                social.mycelium.android.repository.DirectMessageRepository.startSubscription(
+                social.mycelium.android.repository.StartupOrchestrator.runPhase4Background(
                     pubkey, dmSigner, inboxUrls, outboxUrls
                 )
-                Log.d("MyceliumNav", "DM subscription started (fetch-only): inbox=${inboxUrls.size}, outbox=${outboxUrls.size} relays")
             }
-        } else {
-            Log.w("MyceliumNav", "Notif subscription skipped: no relay URLs found for ${pubkey.take(8)}")
+
+            // ── Phase 5: Deep History — 5s after Phase 4 ──────────────
+            kotlinx.coroutines.delay(5_000L)
+            social.mycelium.android.repository.StartupOrchestrator.runPhase5DeepHistory(
+                context, pubkey, cachedFollowList ?: emptySet(), allUserRelayUrls
+            )
+        }
+    }
+
+    // ── Background account notification subscriptions ────────────────────────
+    // Start notification subscriptions for saved accounts that are NOT the active account.
+    // Each gets its own NotificationsRepository instance via AccountScopedRegistry,
+    // with strict owner-pubkey gating to prevent cross-account notification leakage.
+    val savedAccounts by accountStateViewModel.savedAccounts.collectAsState()
+    LaunchedEffect(currentAccount, savedAccounts, onboardingComplete) {
+        if (!onboardingComplete) return@LaunchedEffect
+        val activePubkey = currentAccount?.toHexKey() ?: return@LaunchedEffect
+        val backgroundAccounts = savedAccounts.filter { it.toHexKey() != null && it.toHexKey() != activePubkey }
+        for (bgAccount in backgroundAccounts) {
+            val bgPubkey = bgAccount.toHexKey() ?: continue
+            // Only start if the account has relay data (i.e. completed onboarding)
+            val bgCategories = storageManager.loadCategories(bgPubkey)
+            val bgOutbox = storageManager.loadOutboxRelays(bgPubkey)
+            val bgInbox = storageManager.loadInboxRelays(bgPubkey)
+            val bgCategoryUrls = bgCategories.flatMap { it.relays }.map { it.url }
+            val bgOutboxUrls = bgOutbox.map { it.url }
+            val bgInboxUrls = bgInbox.map { it.url }
+            val bgAllUrls = (bgCategoryUrls + bgOutboxUrls + bgInboxUrls)
+                .map { it.trim().removeSuffix("/") }.distinct()
+            if (bgAllUrls.isEmpty()) {
+                Log.d("MyceliumNav", "Background notif sub skipped for ${bgPubkey.take(8)}: no relays")
+                continue
+            }
+            // Ensure the background account has a scope in the registry
+            val bgScope = social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(bgPubkey, context)
+            val bgIndexerUrls = storageManager.loadIndexerRelays(bgPubkey).map { it.url }
+            bgScope.notificationsRepository.setCacheRelayUrls(bgIndexerUrls)
+            bgScope.notificationsRepository.startSubscription(bgPubkey, bgInboxUrls, bgOutboxUrls, bgCategoryUrls)
+            Log.d("MyceliumNav", "Background notif sub started for ${bgPubkey.take(8)}: inbox=${bgInboxUrls.size}, outbox=${bgOutboxUrls.size}")
+            // Enable push notifications for background account after replay settles
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                kotlinx.coroutines.delay(4_000L)
+                bgScope.notificationsRepository.enableAndroidNotifications()
+            }
         }
     }
 
@@ -1498,6 +1629,7 @@ fun MyceliumNavigation(
                                     screen == "onboarding" -> navController.navigate("onboarding") { launchSingleTop = true }
                                     screen.startsWith("settings/") -> navController.navigate(screen) { launchSingleTop = true }
                                     screen.startsWith("boost_relay_selection/") -> navController.navigate(screen) { launchSingleTop = true }
+                                    screen == "lists" -> navController.navigate("lists") { launchSingleTop = true }
                                 }
                             } },
                             onThreadClick = { note, _ ->
@@ -2318,7 +2450,12 @@ fun MyceliumNavigation(
                                 }
                             },
                             onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) },
-                            onDeleteNote = { n -> accountStateViewModel.deleteNote(n) }
+                            onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
+                            onPollVote = { noteId, authorPk, selections, relayHint ->
+                                val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+                                if (err != null) showSnackbar(err)
+                            },
+                            myPubkeyHex = currentAccount?.toHexKey()
                     )
                     }
                 }
@@ -2905,7 +3042,12 @@ fun MyceliumNavigation(
                                         }
                                     },
                                     onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) },
-                                    onDeleteNote = { n -> accountStateViewModel.deleteNote(n) }
+                                    onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
+                                    onPollVote = { noteId, authorPk, selections, relayHint ->
+                                        val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+                                        if (err != null) showSnackbar(err)
+                                    },
+                                    myPubkeyHex = currentAccount?.toHexKey()
                                 )
                             }
                         }
@@ -2998,9 +3140,23 @@ fun MyceliumNavigation(
                         else emptyList()
                     }
                     val userNotes = remember(userProfileFeedNotes, dashboardUserNotes) {
-                        (userProfileFeedNotes + dashboardUserNotes)
-                            .distinctBy { it.id }
-                            .sortedByDescending { it.timestamp }
+                        val combined = (userProfileFeedNotes + dashboardUserNotes).distinctBy { it.id }
+                        val byId = combined.associateBy { it.id }.toMutableMap()
+                        val toRemove = mutableSetOf<String>()
+                        for (note in combined) {
+                            val origId = note.originalNoteId ?: continue
+                            val orig = byId[origId]
+                            if (orig != null) {
+                                val mergedAuthors = (orig.repostedByAuthors + note.repostedByAuthors).distinctBy { it.id }
+                                byId[origId] = orig.copy(
+                                    repostedByAuthors = mergedAuthors,
+                                    repostTimestamp = maxOf(note.repostTimestamp ?: 0L, orig.repostTimestamp ?: 0L)
+                                )
+                                toRemove.add(note.id)
+                            }
+                        }
+                        byId.values.filter { it.id !in toRemove }
+                            .sortedByDescending { it.repostTimestamp ?: it.timestamp }
                     }
 
                     // ── Own-profile badge fetching (NIP-58) ──
@@ -3082,6 +3238,26 @@ fun MyceliumNavigation(
                             },
                             onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
                             badges = ownProfileBadges
+                    )
+                }
+
+                // Lists — people lists (kind 30000) + hashtag subscriptions (kind 10015)
+                composable("lists") {
+                    val listsContext = androidx.compose.ui.platform.LocalContext.current
+                    social.mycelium.android.ui.screens.ListsScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) },
+                        onNavigateToListDetail = { dTag ->
+                            navController.navigate("lists/$dTag") { launchSingleTop = true }
+                        },
+                        getSigner = { accountStateViewModel.getCurrentSigner() },
+                        getOutboxRelays = {
+                            val pk = accountStateViewModel.currentAccount.value?.toHexKey()
+                            if (pk != null) {
+                                val sm = social.mycelium.android.repository.RelayStorageManager(listsContext)
+                                sm.loadOutboxRelays(pk).map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+                            } else emptySet()
+                        },
                     )
                 }
 
@@ -3897,7 +4073,7 @@ fun MyceliumNavigation(
                                         overlayNotifReplyKinds.removeLastOrNull()
                                         overlayNotifThreadHighlightIds.removeLastOrNull()
                                     },
-                                    onProfileClick = { overlayProfilePubkeyStack.add(normalizeAuthorIdForCache(it)) },
+                                    onProfileClick = { navController.navigateToProfile(normalizeAuthorIdForCache(it)) },
                                     onNoteClick = { clickedNote ->
                                         val threadNote = if (clickedNote.originalNoteId != null) clickedNote.copy(id = clickedNote.originalNoteId) else clickedNote
                                         if (threadNote.isReply && threadNote.rootNoteId != null) {
@@ -4032,7 +4208,12 @@ fun MyceliumNavigation(
                                         }
                                     },
                                     onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) },
-                                    onDeleteNote = { n -> accountStateViewModel.deleteNote(n) }
+                                    onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
+                                    onPollVote = { noteId, authorPk, selections, relayHint ->
+                                        val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+                                        if (err != null) showSnackbar(err)
+                                    },
+                                    myPubkeyHex = currentAccount?.toHexKey()
                                 )
                             }
                         }
@@ -4344,7 +4525,12 @@ fun MyceliumNavigation(
                                             }
                                         },
                                         onDeleteDraft = { draftId -> social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId) },
-                                        onDeleteNote = { n -> accountStateViewModel.deleteNote(n) }
+                                        onDeleteNote = { n -> accountStateViewModel.deleteNote(n) },
+                                        onPollVote = { noteId, authorPk, selections, relayHint ->
+                                            val err = accountStateViewModel.sendPollVote(noteId, authorPk, selections, relayHint)
+                                            if (err != null) showSnackbar(err)
+                                        },
+                                        myPubkeyHex = currentAccount?.toHexKey()
                                     )
                                 }
                             }

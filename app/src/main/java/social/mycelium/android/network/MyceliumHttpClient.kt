@@ -3,11 +3,17 @@ package social.mycelium.android.network
 import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
+import io.ktor.client.plugins.HttpRedirect
+import io.ktor.client.plugins.HttpRequestRetry
 import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.cache.HttpCache
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.logging.LogLevel
 import io.ktor.client.plugins.logging.Logger
 import io.ktor.client.plugins.logging.Logging
 import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.websocket.WebSocketDeflateExtension
 import kotlinx.serialization.json.Json
 
 /**
@@ -56,6 +62,30 @@ object MyceliumHttpClient {
 
             install(WebSockets) {
                 pingIntervalMillis = 30_000
+                extensions {
+                    install(WebSocketDeflateExtension) {
+                        // Only compress frames above 128 bytes (small REQ/CLOSE messages
+                        // don't benefit from compression overhead).
+                        compressIfBiggerThan(128)
+                    }
+                }
+            }
+
+            install(ContentNegotiation) {
+                json(jsonConfig)
+            }
+
+            install(HttpRedirect) {
+                checkHttpMethod = false
+            }
+
+            install(HttpCache)
+
+            install(HttpRequestRetry) {
+                maxRetries = 3
+                retryIf { _, response -> response.status.value in listOf(408, 429, 500, 502, 503, 504) }
+                retryOnExceptionIf { _, cause -> cause is java.io.IOException }
+                delayMillis { retry -> retry * 1500L } // 1.5s, 3s, 4.5s
             }
 
             install(Logging) {

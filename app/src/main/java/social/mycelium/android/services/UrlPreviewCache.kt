@@ -9,6 +9,9 @@ import social.mycelium.android.data.UrlPreviewState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -31,6 +34,11 @@ object UrlPreviewCache {
     private val cache = LruCache<String, UrlPreviewInfo>(100)
     private val loadingStates = ConcurrentHashMap<String, UrlPreviewState>()
     private val mutex = Mutex()
+
+    /** Increments on every put(). Composables can observe this to reactively pick up
+     *  previews fetched by any screen without per-screen enrichment plumbing. */
+    private val _revision = MutableStateFlow(0)
+    val revision: StateFlow<Int> = _revision.asStateFlow()
     private val diskScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val diskJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     @Volatile private var prefs: SharedPreferences? = null
@@ -53,6 +61,7 @@ object UrlPreviewCache {
      */
     fun put(url: String, previewInfo: UrlPreviewInfo) {
         cache.put(url, previewInfo)
+        _revision.value++
         scheduleDiskSave()
     }
     

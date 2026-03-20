@@ -70,6 +70,7 @@ import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.relay.RelayHealthInfo
 import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.relay.RelayHealthTracker
+import social.mycelium.android.db.AppDatabase
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayType
 import social.mycelium.android.repository.ContactListRepository
@@ -269,9 +270,31 @@ fun RelayHealthScreen(
     }
     val slotsByUrl = remember(slotSnapshots) { slotSnapshots.associateBy { it.url.trimEnd('/') } }
 
+    // ── Event store stats (refreshed every 5s) ──
+    var eventStoreCount by remember { mutableIntStateOf(0) }
+    var eventStoreBytes by remember { mutableStateOf(0L) }
+    var profileCacheCount by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        val db = AppDatabase.getInstance(context)
+        while (true) {
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                try {
+                    eventStoreCount = db.eventDao().count()
+                    eventStoreBytes = db.eventDao().totalJsonBytes()
+                    profileCacheCount = db.profileDao().count()
+                } catch (_: Exception) {}
+            }
+            delay(5_000)
+        }
+    }
+
     val autoBlockExpiryMap by RelayHealthTracker.autoBlockExpiryMap.collectAsState()
     val troubleRelays = remember(flaggedRelays, blockedRelays) {
         (flaggedRelays + blockedRelays).distinct().sorted()
+    }
+    // Only flagged (failing) relays that are NOT blocked count as "needing attention"
+    val actionableTroubleCount = remember(flaggedRelays, blockedRelays) {
+        (flaggedRelays - blockedRelays).size
     }
     val connectedCount = perRelayState.count { it.value == RelayEndpointStatus.Connected || it.value == RelayEndpointStatus.Connecting }
     val totalTracked = healthMap.size
@@ -357,7 +380,7 @@ fun RelayHealthScreen(
             ) {
                 tabTitles.forEachIndexed { index, title ->
                     val selected = pagerState.currentPage == index
-                    val showBadge = index == 3 && troubleRelays.isNotEmpty()
+                    val showBadge = index == 3 && actionableTroubleCount > 0
                     Tab(
                         selected = selected,
                         onClick = { scope.launch { pagerState.animateScrollToPage(index) } },
@@ -403,11 +426,14 @@ fun RelayHealthScreen(
                         totalActiveSubs = totalActiveSubs,
                         totalQueuedSubs = totalQueuedSubs,
                         avgConnectTime = avgConnectTime,
-                        troubleCount = troubleRelays.size,
+                        troubleCount = actionableTroubleCount,
                         followingRelayCount = followingRelayCount,
                         slotSnapshots = slotSnapshots,
                         healthMap = healthMap,
-                        perRelayState = perRelayState
+                        perRelayState = perRelayState,
+                        eventStoreCount = eventStoreCount,
+                        eventStoreBytes = eventStoreBytes,
+                        profileCacheCount = profileCacheCount
                     )
                     1 -> RelaysTab(
                         categoryRelayMap = categoryRelayMap,
@@ -462,7 +488,10 @@ private fun OverviewTab(
     followingRelayCount: Int,
     slotSnapshots: List<RelaySlotSnapshot>,
     healthMap: Map<String, RelayHealthInfo>,
-    perRelayState: Map<String, RelayEndpointStatus>
+    perRelayState: Map<String, RelayEndpointStatus>,
+    eventStoreCount: Int = 0,
+    eventStoreBytes: Long = 0L,
+    profileCacheCount: Int = 0
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -480,7 +509,8 @@ private fun OverviewTab(
                 totalQueuedSubs = totalQueuedSubs,
                 avgConnectTime = avgConnectTime,
                 troubleCount = troubleCount,
-                followingRelayCount = followingRelayCount
+                followingRelayCount = followingRelayCount,
+                totalFailures = healthMap.values.sumOf { it.connectionFailures.toLong() }
             )
         }
 
@@ -675,6 +705,15 @@ private fun OverviewTab(
                     }
                 }
             }
+        }
+
+        // Event store + local cache stats
+        item(key = "event_store") {
+            EventStoreCard(
+                eventStoreCount = eventStoreCount,
+                eventStoreBytes = eventStoreBytes,
+                profileCacheCount = profileCacheCount
+            )
         }
     }
 }
@@ -1401,6 +1440,123 @@ private fun OutboxDeliveryCard(
     }
 }
 
+// ── Event Store Card ──
+
+@Composable
+private fun EventStoreCard(
+    eventStoreCount: Int,
+    eventStoreBytes: Long,
+    profileCacheCount: Int
+) {
+    // Estimated total DB overhead: JSON + indexes + row overhead (~1.5x JSON size)
+    val estimatedDbBytes = (eventStoreBytes * 1.5).toLong()
+    val sizeLabel = formatBytes(estimatedDbBytes)
+    val jsonSizeLabel = formatBytes(eventStoreBytes)
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RectangleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Storage, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Local Cache", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                OverviewStat(
+                    label = "Events",
+                    value = formatCount(eventStoreCount.toLong()),
+                    icon = Icons.Outlined.Description,
+                    accent = if (eventStoreCount > 0) Color(0xFF4CAF50) else null
+                )
+                OverviewStat(
+                    label = "JSON",
+                    value = jsonSizeLabel,
+                    icon = Icons.Outlined.DataObject
+                )
+                OverviewStat(
+                    label = "Profiles",
+                    value = formatCount(profileCacheCount.toLong()),
+                    icon = Icons.Outlined.People,
+                    accent = if (profileCacheCount > 0) Color(0xFF4CAF50) else null
+                )
+                OverviewStat(
+                    label = "DB Size",
+                    value = sizeLabel,
+                    icon = Icons.Outlined.SdStorage
+                )
+            }
+            if (eventStoreCount > 0) {
+                Spacer(Modifier.height(8.dp))
+                // Storage bar — show cache usage vs actual available device storage
+                val dataDir = android.os.Environment.getDataDirectory()
+                val stat = android.os.StatFs(dataDir.path)
+                val availableBytes = stat.availableBytes
+                val totalUsedByApp = estimatedDbBytes
+                val totalBudget = availableBytes + totalUsedByApp // total = free + what we're using
+                val usageFraction = if (totalBudget > 0) (totalUsedByApp.toFloat() / totalBudget).coerceIn(0f, 1f) else 0f
+                val barColor = when {
+                    availableBytes < 500_000_000L -> MaterialTheme.colorScheme.error // <500MB free
+                    availableBytes < 2_000_000_000L -> Color(0xFFFFA726) // <2GB free
+                    else -> Color(0xFF4CAF50)
+                }
+                val animatedUsage by animateFloatAsState(
+                    targetValue = usageFraction,
+                    animationSpec = tween(400),
+                    label = "storageUsage"
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Storage", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(60.dp))
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(6.dp)
+                            .clip(RectangleShape)
+                            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .fillMaxWidth(animatedUsage.coerceAtLeast(0.01f))
+                                .clip(RectangleShape)
+                                .background(barColor)
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text("$sizeLabel / ${formatBytes(totalBudget)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp)
+                }
+                Spacer(Modifier.height(4.dp))
+                // Average event size + free space info
+                val avgEventBytes = if (eventStoreCount > 0) eventStoreBytes / eventStoreCount else 0L
+                val estimatedCapacity = if (avgEventBytes > 0) availableBytes / (avgEventBytes * 1.5).toLong() else 0L
+                Text(
+                    buildString {
+                        if (avgEventBytes > 0) append("~${avgEventBytes} bytes/event")
+                        if (estimatedCapacity > 0) append(" · ${formatBytes(availableBytes)} free (~${formatCount(estimatedCapacity)} more events)")
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    fontSize = 10.sp
+                )
+            }
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_073_741_824 -> "%.1f GB".format(bytes / 1_073_741_824.0)
+    bytes >= 1_048_576 -> "%.1f MB".format(bytes / 1_048_576.0)
+    bytes >= 1_024 -> "%.0f KB".format(bytes / 1_024.0)
+    else -> "$bytes B"
+}
+
 // ── Collapsible section header ──
 
 @Composable
@@ -1508,6 +1664,14 @@ private fun PulsingDot(
 
 // ── NIP-11 relay icon with color-coded border ──
 
+/** Resolve best icon URL: NIP-11 icon → NIP-11 image → favicon.ico */
+private fun resolveHealthRelayIconUrl(info: social.mycelium.android.data.RelayInformation?, relayUrl: String): String? {
+    info?.icon?.takeIf { it.isNotBlank() }?.let { return it }
+    info?.image?.takeIf { it.isNotBlank() }?.let { return it }
+    val httpBase = relayUrl.replace("wss://", "https://").replace("ws://", "http://").trimEnd('/')
+    return "$httpBase/favicon.ico"
+}
+
 @Composable
 private fun RelayIcon(
     relayUrl: String,
@@ -1518,10 +1682,11 @@ private fun RelayIcon(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var iconUrl by remember(relayUrl) { mutableStateOf(nip11.getCachedRelayInfo(relayUrl)?.icon) }
+    var iconUrl by remember(relayUrl) { mutableStateOf(resolveHealthRelayIconUrl(nip11.getCachedRelayInfo(relayUrl), relayUrl)) }
     LaunchedEffect(relayUrl) {
-        if (iconUrl.isNullOrBlank()) {
-            nip11.getRelayInfo(relayUrl)?.icon?.let { iconUrl = it }
+        if (nip11.getCachedRelayInfo(relayUrl) == null) {
+            nip11.getRelayInfo(relayUrl)
+            iconUrl = resolveHealthRelayIconUrl(nip11.getCachedRelayInfo(relayUrl), relayUrl)
         }
     }
 
@@ -1603,7 +1768,8 @@ private fun NetworkOverviewCard(
     totalQueuedSubs: Int,
     avgConnectTime: Long,
     troubleCount: Int,
-    followingRelayCount: Int
+    followingRelayCount: Int,
+    totalFailures: Long = 0L
 ) {
     val scoreColor = when {
         healthScore >= 80f -> Color(0xFF4CAF50)
@@ -1738,20 +1904,21 @@ private fun NetworkOverviewCard(
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 OverviewStat(
-                    label = "Following",
+                    label = "Outbox",
                     value = "$followingRelayCount",
-                    icon = Icons.Outlined.People
+                    icon = Icons.Outlined.Upload
                 )
                 OverviewStat(
-                    label = "Flagged",
-                    value = "$troubleCount",
-                    icon = Icons.Outlined.Warning,
-                    accent = if (troubleCount > 0) MaterialTheme.colorScheme.error else null
+                    label = "Failures",
+                    value = formatCount(totalFailures),
+                    icon = Icons.Outlined.ErrorOutline,
+                    accent = if (totalFailures > 0L) MaterialTheme.colorScheme.error else null
                 )
                 OverviewStat(
-                    label = "Slots",
-                    value = "$totalActiveSubs / ${totalActiveSubs + totalQueuedSubs}",
-                    icon = Icons.Outlined.ViewWeek
+                    label = "Queued",
+                    value = "$totalQueuedSubs",
+                    icon = Icons.Outlined.HourglassTop,
+                    accent = if (totalQueuedSubs > 0) Color(0xFFFFA726) else null
                 )
             }
         }

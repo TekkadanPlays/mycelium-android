@@ -515,7 +515,49 @@ private fun NoteCardContent(
                                             .toSet()
                                     }
                                     val quotedIsMarkdown = remember(quotedDisplayContent) { isMarkdown(quotedDisplayContent) }
-                                    val quotedContentBlocks = remember(quotedDisplayContent, quotedMediaUrls) {
+
+                                    // Mention profile resolution for quoted note content
+                                    val quotedMentionedPubkeys = remember(meta.fullContent) {
+                                        social.mycelium.android.utils.extractPubkeysFromContent(meta.fullContent)
+                                    }
+                                    var quotedMentionVersion by remember { mutableIntStateOf(0) }
+                                    if (quotedMentionedPubkeys.isNotEmpty()) {
+                                        LaunchedEffect(quotedMentionedPubkeys) {
+                                            val pubkeySet = quotedMentionedPubkeys.toSet()
+                                            val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
+                                            if (uncached.isNotEmpty()) {
+                                                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+                                            }
+                                            val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
+                                            val initiallyResolved = pubkeySet.size - uncached.size
+                                            if (nowResolved > initiallyResolved) {
+                                                quotedMentionVersion++
+                                            }
+                                            profileCache.profileUpdated
+                                                .filter { it in pubkeySet }
+                                                .debounce(150)
+                                                .collect { quotedMentionVersion++ }
+                                        }
+                                        LaunchedEffect(quotedMentionedPubkeys, quotedMentionVersion) {
+                                            val pubkeySet = quotedMentionedPubkeys.toSet()
+                                            val hasPlaceholders = pubkeySet.any { pk ->
+                                                val author = profileCache.getAuthor(pk)
+                                                author == null || author.displayName == pk.take(8) + "..."
+                                            }
+                                            if (hasPlaceholders) {
+                                                delay(2000)
+                                                val stillPlaceholder = pubkeySet.any { pk ->
+                                                    val author = profileCache.getAuthor(pk)
+                                                    author == null || author.displayName == pk.take(8) + "..."
+                                                }
+                                                if (!stillPlaceholder) {
+                                                    quotedMentionVersion++
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    val quotedContentBlocks = remember(quotedDisplayContent, quotedMediaUrls, quotedMentionVersion) {
                                         buildNoteContentWithInlinePreviews(
                                             quotedDisplayContent,
                                             quotedMediaUrls,
@@ -761,21 +803,15 @@ private fun NoteCardContent(
                     pageCount = { mediaList.size },
                     initialPage = 0
                 )
-                // Container ratio: prefers imeta/cache for stability. For videos with
-                // unknown dimensions, allows ONE reactive update when the player reports.
+                // Container ratio: locked at first composition from imeta/cache, or defaults to 16:9.
+                // NEVER resizes mid-view — scroll-back resets remember keys → picks up cache.
                 val currentMediaUrl = mediaList.getOrNull(pagerState.currentPage)
-                val knownMediaRatio = if (currentMediaUrl != null) {
-                    note.mediaMeta[currentMediaUrl]?.aspectRatio()
-                        ?: social.mycelium.android.utils.MediaAspectRatioCache.get(currentMediaUrl)
-                } else null
-                val mediaInitiallyKnown = knownMediaRatio != null
-                var mediaContainerRatio by remember(mediaList, note.mediaMeta) {
-                    mutableFloatStateOf(knownMediaRatio ?: (16f / 9f))
-                }
-                // Only sync from cache when ratio was known at first composition
-                // (page swipes, scroll-back) — never for items that defaulted to 16/9
-                if (mediaInitiallyKnown && knownMediaRatio != null && knownMediaRatio != mediaContainerRatio) {
-                    mediaContainerRatio = knownMediaRatio
+                var mediaContainerRatio by remember(mediaList) {
+                    val initial = if (currentMediaUrl != null) {
+                        note.mediaMeta[currentMediaUrl]?.aspectRatio()
+                            ?: social.mycelium.android.utils.MediaAspectRatioCache.get(currentMediaUrl)
+                    } else null
+                    mutableFloatStateOf(initial ?: (16f / 9f))
                 }
                 val modernCompactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
                 val mediaContainerModifier = Modifier.fillMaxWidth()

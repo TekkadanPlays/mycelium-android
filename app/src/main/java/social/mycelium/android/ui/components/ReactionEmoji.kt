@@ -57,7 +57,7 @@ fun ReactionEmoji(
 }
 
 /** Check if a string looks like an image URL (http(s) ending with common image extensions). */
-private fun isImageUrl(s: String): Boolean {
+internal fun isImageUrl(s: String): Boolean {
     if (!s.startsWith("http://") && !s.startsWith("https://")) return false
     val lower = s.lowercase().split("?").first()
     return lower.endsWith(".gif") || lower.endsWith(".webp") || lower.endsWith(".png") ||

@@ -181,11 +181,19 @@ fun RelayManagementScreen(
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
         .perRelayState.collectAsState()
 
-    // Trouble relay count for health icon badge
+    // Trouble relay count for health icon badge — scoped to user-configured relays only
+    // (matches sidebar logic: excludes blocked relays and non-user relays like indexer temps)
     val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
     val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
-    val troubleCount = remember(flaggedRelays, blockedRelays) {
-        (flaggedRelays - blockedRelays).size
+    val userRelayUrlSet = remember(relayCategories, outboxRelays, inboxRelays) {
+        val categoryUrls = relayCategories.flatMap { it.relays }.map { it.url.trim().removeSuffix("/").lowercase() }
+        val outbox = outboxRelays.map { it.url.trim().removeSuffix("/").lowercase() }
+        val inbox = inboxRelays.map { it.url.trim().removeSuffix("/").lowercase() }
+        (categoryUrls + outbox + inbox).toSet()
+    }
+    val troubleCount = remember(flaggedRelays, blockedRelays, userRelayUrlSet) {
+        val actionable = flaggedRelays - blockedRelays
+        actionable.count { it in userRelayUrlSet || normalizeRelayUrl(it).removeSuffix("/").lowercase() in userRelayUrlSet }
     }
 
     var fabExpanded by remember { mutableStateOf(false) }
@@ -301,7 +309,7 @@ fun RelayManagementScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.padding(bottom = 80.dp)
                 ) {
-                    // Secondary: Update Indexers (Outbox/Inbox tabs only)
+                    // Secondary: Publish Relay List (Outbox tab)
                     AnimatedVisibility(
                         visible = fabExpanded && currentFixedTab == RelayTab.OUTBOX,
                         enter = fadeIn() + slideInVertically { it / 2 },
@@ -309,6 +317,18 @@ fun RelayManagementScreen(
                     ) {
                         FabMenuItem(label = "Publish Relay List", icon = Icons.Outlined.Publish) {
                             fabExpanded = false; showPublishConfirmation = true
+                        }
+                    }
+
+                    // Secondary: Publish Indexer List (Indexer tab)
+                    AnimatedVisibility(
+                        visible = fabExpanded && currentFixedTab == RelayTab.INDEXER,
+                        enter = fadeIn() + slideInVertically { it / 2 },
+                        exit = fadeOut() + slideOutVertically { it / 2 }
+                    ) {
+                        FabMenuItem(label = "Publish Indexer List", icon = Icons.Outlined.Publish) {
+                            fabExpanded = false
+                            accountStateViewModel.publishIndexerRelayList()
                         }
                     }
 
@@ -529,9 +549,6 @@ fun RelayManagementScreen(
                             },
                             onOpenRelayLog = onOpenRelayLog, nip65Source = null, nip65CreatedAt = null,
                             emptyMessage = "Indexer relays for profile lookups and search.\nThese are discovered via NIP-66 during sign-in.",
-                            onPublishList = { accountStateViewModel.publishIndexerRelayList() },
-                            publishLabel = "Publish Indexer List (kind 10086)",
-                            publishDescription = "Share your preferred indexer relays with other clients",
                             modifier = Modifier.fillMaxSize())
                         RelayTab.OUTBOX -> {
                             // Compute Both / Outbox-only / Inbox-only groups
@@ -584,7 +601,6 @@ fun RelayManagementScreen(
                                 onOpenRelayLog = onOpenRelayLog,
                                 nip65Source = nip65Source, nip65CreatedAt = nip65CreatedAt,
                                 emptyMessage = "Outbox & inbox relays.\nThese should be found via indexer relays — but you can add some now if you'd like.",
-                                onPublishNip65 = { accountStateViewModel.publishNip65RelayList() },
                                 modifier = Modifier.fillMaxSize())
                         }
                     }

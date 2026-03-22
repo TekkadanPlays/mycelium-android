@@ -201,6 +201,7 @@ object StartupOrchestrator {
         userPubkey: String,
         followRelayUrls: List<String>,
         allUserRelayUrls: List<String>,
+        signer: com.example.cybin.signer.NostrSigner? = null,
     ): CompletableDeferred<Unit> {
         // Guard against double-execution when LaunchedEffect re-fires
         phase1Deferred?.let { return it }
@@ -244,7 +245,7 @@ object StartupOrchestrator {
                 if (!muteJob.isCompleted) Log.w(TAG, "Phase 1: mute list timed out")
 
                 // Fire-and-forget: people lists + hashtag interests (LOW priority, don't block feed)
-                PeopleListRepository.fetchPeopleLists(userPubkey, allUserRelayUrls)
+                PeopleListRepository.fetchPeopleLists(userPubkey, allUserRelayUrls, signer)
                 PeopleListRepository.fetchHashtagList(userPubkey, allUserRelayUrls)
                 Log.d(TAG, "Phase 1: people lists + hashtag interests fetch launched (non-blocking)")
             } catch (e: Exception) {
@@ -315,6 +316,7 @@ object StartupOrchestrator {
 
         // Bookmarks, emoji packs, anchor subs
         BookmarkRepository.fetchBookmarks(userPubkey, allUserRelayUrls)
+        EmojiPackRepository.setUserRelays(allUserRelayUrls)
         EmojiPackSelectionRepository.start(userPubkey, allUserRelayUrls)
         Log.d(TAG, "Phase 3: bookmarks + emoji packs started")
 

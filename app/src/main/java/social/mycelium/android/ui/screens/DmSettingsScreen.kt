@@ -62,22 +62,6 @@ fun DmSettingsScreen(
                 onCheckedChange = { acceptDmsFromAnyone = it }
             )
 
-            HorizontalDivider(
-                thickness = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
-            )
-
-            // ── Notifications ──
-            DmSettingsSectionHeader("Notifications")
-
-            var dmNotifications by remember { mutableStateOf(true) }
-            DmSettingsToggleRow(
-                title = "Push notifications",
-                description = "Get notified when you receive a new direct message",
-                checked = dmNotifications,
-                onCheckedChange = { dmNotifications = it }
-            )
-
             Spacer(Modifier.height(16.dp))
         }
     }

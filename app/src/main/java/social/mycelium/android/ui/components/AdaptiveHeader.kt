@@ -93,6 +93,12 @@ fun AdaptiveHeader(
     activeListDTag: String? = null,
     /** Callback when a people list is selected as feed filter (dTag, title). Null clears. */
     onPeopleListSelected: ((String?, String?) -> Unit)? = null,
+    /** Subscribed hashtags (kind-10015) available as feed content filters. */
+    subscribedHashtags: Set<String> = emptySet(),
+    /** Currently active hashtag content filter (null = none). */
+    activeHashtagFilter: String? = null,
+    /** Callback when a hashtag filter is selected. Null clears. */
+    onHashtagFilterSelected: ((String?) -> Unit)? = null,
     /** Navigate to Topics screen from the Mycelium logo menu. */
     onNavigateToTopics: (() -> Unit)? = null,
     /** Navigate to Home feed from the Topics logo menu. */
@@ -379,18 +385,47 @@ fun AdaptiveHeader(
                                         if (peopleLists.isNotEmpty() && onPeopleListSelected != null) {
                                             HorizontalDivider()
                                             peopleLists.forEach { (dTag, title) ->
-                                                val isActive = activeListDTag == dTag
+                                                val isActive = activeListDTag == dTag && activeHashtagFilter == null
                                                 DropdownMenuItem(
                                                     text = {
                                                         Text(title, color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                                                     },
                                                     onClick = {
                                                         logoMenuExpanded = false
+                                                        onHashtagFilterSelected?.invoke(null)
                                                         onPeopleListSelected(dTag, title)
                                                     },
                                                     leadingIcon = {
                                                         Icon(
                                                             Icons.AutoMirrored.Outlined.List,
+                                                            contentDescription = null,
+                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        }
+                                        // Subscribed hashtags as feed content filters
+                                        if (subscribedHashtags.isNotEmpty() && onHashtagFilterSelected != null) {
+                                            HorizontalDivider()
+                                            subscribedHashtags.sorted().forEach { hashtag ->
+                                                val isActive = activeHashtagFilter == hashtag
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text("#$hashtag", color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                                                    },
+                                                    onClick = {
+                                                        logoMenuExpanded = false
+                                                        if (isActive) {
+                                                            onHashtagFilterSelected(null)
+                                                        } else {
+                                                            onPeopleListSelected?.invoke(null, null)
+                                                            onHashtagFilterSelected(hashtag)
+                                                        }
+                                                    },
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            Icons.Outlined.Tag,
                                                             contentDescription = null,
                                                             tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                                                         )

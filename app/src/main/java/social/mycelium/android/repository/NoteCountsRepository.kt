@@ -597,7 +597,7 @@ object NoteCountsRepository {
      * Optimistically inject our own reaction into the counts so the UI updates
      * immediately after publishing, without waiting for relay echo of kind-7.
      */
-    fun injectOwnReaction(noteId: String, emoji: String, authorPubkey: String) {
+    fun injectOwnReaction(noteId: String, emoji: String, authorPubkey: String, customEmojiUrl: String? = null) {
         if (noteId.isBlank() || emoji.isBlank()) return
         val snapshot = _countsByNoteId.value.toMutableMap()
         val counts = snapshot[noteId] ?: NoteCounts()
@@ -607,7 +607,10 @@ object NoteCountsRepository {
         val emojiAuthors = (authors[emoji] ?: emptyList()).toMutableList()
         if (authorPubkey !in emojiAuthors) emojiAuthors.add(authorPubkey)
         authors[emoji] = emojiAuthors
-        snapshot[noteId] = counts.copy(reactions = existing.toList(), reactionAuthors = authors)
+        val emojiUrls = if (customEmojiUrl != null) {
+            counts.customEmojiUrls.toMutableMap().also { it[emoji] = customEmojiUrl }
+        } else counts.customEmojiUrls
+        snapshot[noteId] = counts.copy(reactions = existing.toList(), reactionAuthors = authors, customEmojiUrls = emojiUrls)
         _countsByNoteId.value = snapshot
         Log.d(TAG, "Optimistic reaction injected: $emoji on ${noteId.take(8)} by ${authorPubkey.take(8)}")
     }

@@ -20,8 +20,10 @@ object ReactionsRepository {
     private const val TAG = "ReactionsRepo"
     private const val PREFS_PREFIX = "Mycelium_reactions_"
     private const val KEY_RECENT = "recent_emojis"
+    private const val KEY_FAVORITES = "favorite_emojis"
     private const val KEY_LAST_BY_NOTE = "last_by_note"
-    private const val MAX_RECENT = 12
+    private const val MAX_RECENT = 32
+    private const val MAX_FAVORITES = 32
 
     /** Types of animations that NoteCard can flash at the top of a card. */
     enum class AnimationType { REACTION, BOOST, ZAP }
@@ -94,6 +96,35 @@ object ReactionsRepository {
         current.add(0, emoji)
         val trimmed = current.take(MAX_RECENT)
         prefs.edit().putString(KEY_RECENT, json.encodeToString(trimmed)).apply()
+    }
+
+    fun getFavoriteEmojis(context: Context, accountNpub: String?): List<String> {
+        val prefs = prefs(context, accountNpub)
+        val stored = prefs.getString(KEY_FAVORITES, null) ?: return emptyList()
+        return try {
+            json.decodeFromString<List<String>>(stored)
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun addFavoriteEmoji(context: Context, accountNpub: String?, emoji: String) {
+        if (emoji.isBlank()) return
+        val prefs = prefs(context, accountNpub)
+        val current = getFavoriteEmojis(context, accountNpub).toMutableList()
+        if (emoji !in current) {
+            current.add(emoji)
+            if (current.size > MAX_FAVORITES) current.removeFirst()
+            prefs.edit().putString(KEY_FAVORITES, json.encodeToString(current.toList())).apply()
+        }
+    }
+
+    fun removeFavoriteEmoji(context: Context, accountNpub: String?, emoji: String) {
+        if (emoji.isBlank()) return
+        val prefs = prefs(context, accountNpub)
+        val current = getFavoriteEmojis(context, accountNpub).toMutableList()
+        current.remove(emoji)
+        prefs.edit().putString(KEY_FAVORITES, json.encodeToString(current.toList())).apply()
     }
 
     fun setLastReaction(noteId: String, emoji: String) {

@@ -71,9 +71,9 @@ class NotificationsRepository(
         private const val PREFS_KEY_PUBKEY = "my_pubkey_hex"
         private const val PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS = "mark_all_seen_epoch_ms"
         private const val SWEEP_FALLBACK_DELAY_MS = 15_000L
-        private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
-        private const val TARGET_FETCH_TIMEOUT_MS = 4000L
-        private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 6000L
+        private const val TARGET_FETCH_BATCH_DELAY_MS = 200L
+        private const val TARGET_FETCH_TIMEOUT_MS = 2500L
+        private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 4000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
         /** Maximum time to wait for profile/enrichment data before firing the notification anyway. */
         private const val ENRICHMENT_WAIT_MS = 3000L
@@ -190,6 +190,10 @@ class NotificationsRepository(
     private val myTopicIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     /** Our kind-1 note IDs — used to detect quotes (q-tag references to our notes). */
     private val myNoteIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    /** Cached event tags for kind-1 notifications, keyed by event ID.
+     *  Used by Phase 3 reclassification sweep to detect q-tags retroactively
+     *  (since myNoteIds isn't populated until after Phase 1 EOSE). */
+    private val kind1EventTags = ConcurrentHashMap<String, List<List<String>>>()
 
     private var prefs: SharedPreferences? = null
     @Volatile private var appContext: Context? = null
@@ -470,6 +474,7 @@ class NotificationsRepository(
             seenEventIds.clear()
             myTopicIds.clear()
             myNoteIds.clear()
+            kind1EventTags.clear()
             targetFetchExhaustedIds.clear()
             _notifications.value = emptyList()
         }
@@ -561,6 +566,9 @@ class NotificationsRepository(
             myTopicIds.addAll(topicIds)
             val noteIds = fetchUserNoteIds(pubkey, allRelays, null)
             myNoteIds.addAll(noteIds)
+            // Reclassify Phase 1 replies that are actually quotes (q-tag couldn't be
+            // checked during Phase 1 because myNoteIds was empty at that point)
+            reclassifyQuotes()
             val extraFilters = mutableListOf<Filter>()
             if (topicIds.isNotEmpty()) {
                 Log.d(TAG, "Phase 3: Found ${topicIds.size} topics, adding thread replies filter")
@@ -694,8 +702,7 @@ class NotificationsRepository(
         // the event actually references us before creating a notification.
         val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
         val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
-                (event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) } ||
-                 (myTopicIds.isEmpty() && myNoteIds.isEmpty())) // Accept kind-1111 before Phase 3 populates IDs
+                event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
         // For kind-1 replies: also accept if user is directly cited in content (mention)
@@ -786,7 +793,7 @@ class NotificationsRepository(
             mapOf(emoji to customEmojiUrl) else emptyMap()
         val action = when {
             emoji == "❤️" -> "liked your post"
-            else -> "reacted $emoji to your post"
+            else -> "reacted to your post"
         }
         val text = "${author.displayName ?: "Someone"} $action"
         val data = NotificationData(
@@ -810,6 +817,8 @@ class NotificationsRepository(
     }
 
     private fun handleReply(event: Event, author: Author, ts: Long) {
+        // Cache event tags so Phase 3 reclassification can retroactively detect q-tags
+        kind1EventTags[event.id] = event.tags.map { it.toList() }
         val rootId = getReplyRootNoteId(event)
         val replyToId = getReplyToNoteId(event)
         // Check if user is directly cited in content (nostr:npub1... / nostr:nprofile1...)
@@ -818,11 +827,15 @@ class NotificationsRepository(
         if (rootId == null && !isDirectlyCitedInContent) return
         val note = eventToNote(event)
         val replyId = event.id
-        // Classify: if no root → pure mention. If root exists but user is cited → mention-in-reply.
-        // If root exists and user is NOT cited → reply (will be verified via target fetch).
-        val isMention = rootId == null || isDirectlyCitedInContent
-        val text = if (isMention) "${author.displayName} mentioned you" else "${author.displayName} replied to your post"
-        val notifType = if (isMention) NotificationType.MENTION else NotificationType.REPLY
+        // Classify: if no root → pure mention (no reply threading context).
+        // If root exists → always start as REPLY. The fetchAndSetTargetNote verification
+        // will reclassify to MENTION if the parent note turns out not to be ours.
+        // This avoids the previous bug where cited-in-content replies were immediately
+        // classified as MENTION and skipped parent verification entirely.
+        val isPureMention = rootId == null
+        val text = if (isPureMention) "${author.displayName} mentioned you" else "${author.displayName} replied to your post"
+        val notifType = if (isPureMention) NotificationType.MENTION else NotificationType.REPLY
+        val parentId = if (rootId != null) (replyToId ?: rootId) else null
         val data = NotificationData(
             id = event.id,
             type = notifType,
@@ -831,6 +844,7 @@ class NotificationsRepository(
             author = author,
             rootNoteId = rootId,
             replyNoteId = replyId,
+            targetNoteId = parentId,
             replyKind = NOTIFICATION_KIND_TEXT,
             sortTimestamp = ts,
             rawContent = event.content
@@ -838,14 +852,14 @@ class NotificationsRepository(
         notificationsById[event.id] = data
         emitSorted()
         fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = rootId)
-        if (rootId != null && !isMention) {
-            // Only fetch parent for verification if this is a REPLY (not already classified as MENTION).
-            // Mentions-in-replies are already correctly classified and don't need parent verification.
-            val parentId = replyToId ?: rootId
+        if (parentId != null) {
+            // Always fetch parent for verification — even if user is cited in content.
+            // fetchAndSetTargetNote will reclassify REPLY→MENTION if parent isn't ours,
+            // or remove the notification if parent isn't ours AND user isn't cited.
             scope.launch { fetchAndSetTargetNote(parentId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         }
         // Update today's summary
-        updateTodaySummary(if (isMention) NotificationType.MENTION else NotificationType.REPLY, ts, 0L)
+        updateTodaySummary(notifType, ts, 0L)
     }
 
     /** Handle a kind-1 event that quotes one of our notes (q-tag). */
@@ -866,6 +880,43 @@ class NotificationsRepository(
         fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = quotedNoteId)
         // Fetch the quoted note for display
         scope.launch { fetchAndSetTargetNote(quotedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
+    }
+
+    /**
+     * Reclassify Phase 1 REPLY/MENTION notifications that are actually quotes.
+     * During Phase 1, myNoteIds is empty so q-tag detection fails. After Phase 3
+     * populates myNoteIds, this sweep checks cached kind-1 event tags and content
+     * for quote references, converting matching notifications to QUOTE type.
+     */
+    private fun reclassifyQuotes() {
+        if (myNoteIds.isEmpty()) return
+        var reclassified = 0
+        for ((eventId, tags) in kind1EventTags) {
+            val existing = notificationsById[eventId] ?: continue
+            // Only reclassify REPLY or MENTION type notifications
+            if (existing.type != NotificationType.REPLY && existing.type != NotificationType.MENTION) continue
+            // Check q-tag first
+            val quotedId = tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
+                // Also check content for nostr:nevent/note references
+                ?: existing.rawContent?.let { findQuotedNoteIdInContent(it) }
+            if (quotedId != null) {
+                val authorName = existing.author?.displayName ?: "Someone"
+                notificationsById[eventId] = existing.copy(
+                    type = NotificationType.QUOTE,
+                    text = "$authorName quoted your note",
+                    targetNoteId = quotedId
+                )
+                // Fetch the quoted note for display if not already fetched
+                if (existing.targetNote == null) {
+                    scope.launch { fetchAndSetTargetNote(quotedId, eventId) { d -> { n -> d.copy(targetNote = n) } } }
+                }
+                reclassified++
+            }
+        }
+        if (reclassified > 0) {
+            Log.d(TAG, "reclassifyQuotes: reclassified $reclassified replies → quotes")
+            emitSorted()
+        }
     }
 
     /** Check if the user's pubkey is directly cited in content via nostr:npub1 or nostr:nprofile1 references. */
@@ -1457,8 +1508,101 @@ class NotificationsRepository(
     }
 
     private fun fetchAndSetTargetNote(noteId: String, notificationId: String, update: (NotificationData) -> (Note?) -> NotificationData) {
+        // Fast path: check feed cache immediately — avoids the debounce delay entirely
+        // for target notes that are already in the local feed (common for replies/likes to your recent posts).
+        val cached = NotesRepository.getInstance().getNoteFromCache(noteId)
+        if (cached != null) {
+            val current = notificationsById[notificationId]
+            if (current != null) {
+                val targetAuthorHex = normalizeAuthorIdForCache(cached.author.id)
+                val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
+                // Verify relevance (same logic as flushTargetFetchBatch Step 3)
+                if (current.type == NotificationType.LIKE && !isOurNote) {
+                    notificationsById.remove(notificationId)
+                    emitSorted()
+                    return
+                }
+                if (current.type == NotificationType.REPOST && !isOurNote) {
+                    notificationsById.remove(notificationId)
+                    emitSorted()
+                    return
+                }
+                if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
+                    val contentToCheck = current.rawContent ?: current.note?.content ?: ""
+                    val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
+                        isUserCitedInContent(contentToCheck, myPubkeyHex!!)
+                    if (!isCited) {
+                        notificationsById.remove(notificationId)
+                        emitSorted()
+                        return
+                    }
+                    notificationsById[notificationId] = current.copy(
+                        type = NotificationType.MENTION,
+                        text = "${current.author?.displayName ?: "Someone"} mentioned you"
+                    )
+                    emitSorted()
+                    return
+                }
+                var updated = update(current)(cached)
+                if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && cached.kind == 11 && myPubkeyHex != null) {
+                    val rootAuthorHex = normalizeAuthorIdForCache(cached.author.id)
+                    if (rootAuthorHex == myPubkeyHex) {
+                        updated = updated.copy(replyKind = 11, text = "${current.author?.displayName ?: "Someone"} replied to your thread")
+                    }
+                }
+                notificationsById[notificationId] = updated
+                emitSorted()
+                return
+            }
+        }
+        // Mid path: try Room DB before falling through to batched relay fetch
+        val roomContext = appContext
+        if (roomContext != null) {
+            scope.launch {
+                try {
+                    val dao = social.mycelium.android.db.AppDatabase.getInstance(roomContext).eventDao()
+                    val entities = dao.getByIds(listOf(noteId))
+                    if (entities.isNotEmpty()) {
+                        val event = Event.fromJson(entities.first().eventJson)
+                        val note = eventToNote(event)
+                        val current = notificationsById[notificationId]
+                        if (current != null) {
+                            val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
+                            val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
+                            if (current.type == NotificationType.LIKE && !isOurNote) {
+                                notificationsById.remove(notificationId); emitSorted(); return@launch
+                            }
+                            if (current.type == NotificationType.REPOST && !isOurNote) {
+                                notificationsById.remove(notificationId); emitSorted(); return@launch
+                            }
+                            if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
+                                val contentToCheck = current.rawContent ?: current.note?.content ?: ""
+                                val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
+                                    isUserCitedInContent(contentToCheck, myPubkeyHex!!)
+                                if (!isCited) {
+                                    notificationsById.remove(notificationId); emitSorted(); return@launch
+                                }
+                                notificationsById[notificationId] = current.copy(
+                                    type = NotificationType.MENTION,
+                                    text = "${current.author?.displayName ?: "Someone"} mentioned you"
+                                )
+                                emitSorted(); return@launch
+                            }
+                            notificationsById[notificationId] = update(current)(note)
+                            emitSorted()
+                        }
+                        return@launch
+                    }
+                } catch (_: Exception) { }
+                // Room miss — fall through to batched relay fetch
+                if (subscriptionRelayUrls.isEmpty()) return@launch
+                pendingTargetFetches.getOrPut(noteId) { mutableListOf() }.add(PendingTargetFetch(noteId, notificationId, update))
+                scheduleTargetFetchFlush()
+            }
+            return
+        }
         if (subscriptionRelayUrls.isEmpty()) return
-        // Buffer for batched fetch — multiple notifications may share the same parent noteId
+        // Slow path: buffer for batched relay fetch
         pendingTargetFetches.getOrPut(noteId) { mutableListOf() }.add(PendingTargetFetch(noteId, notificationId, update))
         scheduleTargetFetchFlush()
     }
@@ -1499,7 +1643,33 @@ class NotificationsRepository(
                 remainingIds.add(noteId)
             }
         }
-        if (remainingIds.isNotEmpty()) Log.d(TAG, "Cache hit ${fetched.size}/${allNoteIds.size}, fetching ${remainingIds.size} from relays")
+        if (remainingIds.isNotEmpty()) Log.d(TAG, "In-memory cache hit ${fetched.size}/${allNoteIds.size}, checking Room for ${remainingIds.size}")
+
+        // ── Step 1b: Check Room DB before hitting relays ────────────────
+        // DeepHistoryFetcher and NotesRepository persist events to Room —
+        // many target notes are already stored locally from previous sessions.
+        if (remainingIds.isNotEmpty()) {
+            try {
+                val roomContext = appContext
+                if (roomContext != null) {
+                    val dao = social.mycelium.android.db.AppDatabase.getInstance(roomContext).eventDao()
+                    val roomEntities = dao.getByIds(remainingIds)
+                    for (entity in roomEntities) {
+                        try {
+                            val event = Event.fromJson(entity.eventJson)
+                            fetched[event.id] = eventToNote(event)
+                        } catch (_: Exception) { }
+                    }
+                    val roomHits = remainingIds.count { fetched.containsKey(it) }
+                    if (roomHits > 0) {
+                        remainingIds.removeAll(fetched.keys)
+                        Log.d(TAG, "Room cache hit $roomHits more, ${remainingIds.size} still need relay fetch")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Room lookup failed: ${e.message}")
+            }
+        }
 
         // ── Step 2: Fetch remaining from relays (EOSE-driven, no blind delay) ──
         if (remainingIds.isNotEmpty()) {

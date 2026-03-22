@@ -64,7 +64,7 @@ object NotificationPreferences {
 
     private lateinit var prefs: SharedPreferences
 
-    private val _pushEnabled = MutableStateFlow(true)
+    private val _pushEnabled = MutableStateFlow(false)
     val pushEnabled: StateFlow<Boolean> = _pushEnabled.asStateFlow()
 
     private val _connectionMode = MutableStateFlow(ConnectionMode.ADAPTIVE)
@@ -107,7 +107,7 @@ object NotificationPreferences {
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         // ── Global (device-level) settings ──
-        _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, true)
+        _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, false)
 
         // Migration: old boolean toggle → new ConnectionMode enum
         if (prefs.contains(KEY_CONNECTION_MODE)) {

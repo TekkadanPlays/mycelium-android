@@ -1418,7 +1418,7 @@ fun DashboardScreen(
     }
     // Stage 2: engagement sort — only recomputes when filter type or counts change.
     // For the default chronological feed (engagementFilter == null/empty), this is a no-op pass-through.
-    val engagementFilteredNotes by remember(baseFilteredNotes, engagementFilter) {
+    val afterEngagementSort by remember(baseFilteredNotes, engagementFilter) {
         derivedStateOf {
             when (engagementFilter) {
                 "replies" -> baseFilteredNotes.sortedByDescending { replyCountByNoteId[it.id] ?: 0 }
@@ -1427,6 +1427,20 @@ fun DashboardScreen(
                 }
                 "zaps" -> baseFilteredNotes.sortedByDescending { countsByNoteId[it.id]?.zapTotalSats ?: 0L }
                 else -> baseFilteredNotes
+            }
+        }
+    }
+    // Stage 3: hashtag content filter — only notes containing the active hashtag are shown.
+    val activeHashtagFilter = homeFeedState.activeHashtagFilter
+    val engagementFilteredNotes by remember(afterEngagementSort, activeHashtagFilter) {
+        derivedStateOf {
+            if (activeHashtagFilter == null) afterEngagementSort
+            else {
+                val tag = activeHashtagFilter.lowercase()
+                afterEngagementSort.filter { note ->
+                    note.content.contains("#$tag", ignoreCase = true) ||
+                    note.hashtags.any { it.equals(tag, ignoreCase = true) }
+                }
             }
         }
     }
@@ -1793,6 +1807,16 @@ fun DashboardScreen(
                                 feedStateViewModel.setHomeActiveList(dTag, title)
                             } else {
                                 feedStateViewModel.clearHomeActiveList()
+                            }
+                            scrollToTopTrigger++
+                        },
+                        subscribedHashtags = social.mycelium.android.repository.PeopleListRepository.subscribedHashtags.collectAsState().value,
+                        activeHashtagFilter = homeFeedState.activeHashtagFilter,
+                        onHashtagFilterSelected = { hashtag ->
+                            if (hashtag != null) {
+                                feedStateViewModel.setHomeHashtagFilter(hashtag)
+                            } else {
+                                feedStateViewModel.clearHomeHashtagFilter()
                             }
                             scrollToTopTrigger++
                         },

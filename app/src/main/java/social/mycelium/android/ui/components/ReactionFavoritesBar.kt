@@ -12,25 +12,22 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import social.mycelium.android.repository.EmojiPackSelectionRepository
+import java.text.BreakIterator
 
 /**
- * Compact horizontal bar showing the user's favorite/recent emojis and custom emoji pack
- * thumbnails. Tapping an emoji fires [onEmojiSelected]; tapping "…" opens the full picker.
+ * Compact horizontal bar showing the user's recent single-character emojis.
+ * Tapping an emoji fires [onEmojiSelected]; tapping "…" opens the full picker.
  *
- * Layout: [recent emojis (unicode or custom images)] [pack samples] [⋯]
+ * Only single-grapheme unicode emojis are shown (no emoji strings, no custom pack emojis)
+ * to prevent overflow that makes the 3-dots button impossible to press.
  *
- * Used as the quick-react row in both NoteCard reactions and thread reply reactions,
- * replacing the old hardcoded 10-emoji dropdown.
+ * Layout: [recent emojis (max 6)] [⋯]
  */
 @Composable
 fun ReactionFavoritesBar(
@@ -40,75 +37,33 @@ fun ReactionFavoritesBar(
     onOpenFullPicker: () -> Unit,
     modifier: Modifier = Modifier,
     maxRecentEmojis: Int = 6,
-    maxCustomEmojis: Int = 4,
 ) {
-    // Resolve custom emoji URLs for :shortcode: entries in the recent list
-    val savedEmojis by EmojiPackSelectionRepository.allSavedEmojis.collectAsState()
-    val customSample = remember(savedEmojis) {
-        savedEmojis.entries.take(maxCustomEmojis).map { it.key to it.value }
-    }
-    val recentItems = remember(recentEmojis, savedEmojis) {
-        recentEmojis.take(maxRecentEmojis)
+    // Only show single-grapheme unicode emojis (no :shortcode: custom, no multi-emoji strings)
+    val recentItems = remember(recentEmojis) {
+        recentEmojis.filter { emoji ->
+            !emoji.startsWith(":") && countGraphemeClusters(emoji) == 1
+        }.take(maxRecentEmojis)
     }
 
     Row(
-        modifier = modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(0.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Recent emojis — render :shortcode: as images, unicode as text
+        // Recent single-grapheme unicode emojis only
         recentItems.forEach { emoji ->
-            val isCustom = emoji.startsWith(":") && emoji.endsWith(":") && emoji.length > 2
-            val customUrl = if (isCustom) savedEmojis[emoji] else null
-
-            if (customUrl != null) {
-                // Custom emoji from saved packs — render as image
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clickable { onCustomEmojiSelected(emoji.removeSurrounding(":"), customUrl) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    AsyncImage(
-                        model = customUrl,
-                        contentDescription = emoji.removeSurrounding(":"),
-                        modifier = Modifier.size(26.dp),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-            } else {
-                // Unicode emoji or unresolved shortcode — render as text
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clickable { onEmojiSelected(emoji) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = emoji,
-                        fontSize = 22.sp
-                    )
-                }
-            }
-        }
-
-        // Additional custom emojis from saved packs (not already shown in recents)
-        val recentSet = recentItems.toSet()
-        customSample.forEach { (shortcode, url) ->
-            if (shortcode !in recentSet) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clickable { onCustomEmojiSelected(shortcode.removeSurrounding(":"), url) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    AsyncImage(
-                        model = url,
-                        contentDescription = shortcode.removeSurrounding(":"),
-                        modifier = Modifier.size(26.dp),
-                        contentScale = ContentScale.Fit
-                    )
-                }
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clickable { onEmojiSelected(emoji) },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = emoji,
+                    fontSize = 22.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Visible
+                )
             }
         }
 
@@ -127,4 +82,13 @@ fun ReactionFavoritesBar(
             )
         }
     }
+}
+
+/** Count grapheme clusters in a string (handles multi-codepoint emojis like 👨‍👩‍👧‍👦 as 1 cluster). */
+internal fun countGraphemeClusters(text: String): Int {
+    val it = BreakIterator.getCharacterInstance()
+    it.setText(text)
+    var count = 0
+    while (it.next() != BreakIterator.DONE) count++
+    return count
 }

@@ -18,11 +18,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
-import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.pager.HorizontalPager
@@ -32,11 +29,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Hd
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,7 +54,7 @@ import kotlinx.coroutines.withContext
 import java.net.URL
 import java.util.UUID
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ImageContentViewerScreen(
     urls: List<String>,
@@ -201,57 +195,87 @@ fun ImageContentViewerScreen(
             }
         }
 
-        // Toolbar — auto-hides on single tap
+        // Floating controls — minimal icons that don't cover the image
         AnimatedVisibility(
             visible = showControls,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
-            Column(Modifier.statusBarsPadding()) {
-                TopAppBar(
-                    title = { },
-                    navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
-                        }
-                    },
-                    windowInsets = WindowInsets(0),
-                    actions = {
-                        IconButton(
-                            onClick = {
-                                scope.launch {
-                                    saveImageToGallery(context, urls[pagerState.currentPage])
-                                }
-                            }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Download,
-                                contentDescription = "Save image",
-                                tint = Color.White
-                            )
-                        }
-                        IconButton(
-                            onClick = { useHd = !useHd }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Hd,
-                                contentDescription = "Load HD",
-                                tint = if (useHd) MaterialTheme.colorScheme.primary else Color.White
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Black.copy(alpha = 0.6f),
-                        navigationIconContentColor = Color.White,
-                        actionIconContentColor = Color.White
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .padding(horizontal = 8.dp, vertical = 8.dp)
+            ) {
+                // Back button — top left
+                IconButton(
+                    onClick = onBackClick,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .size(40.dp)
+                        .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp)
                     )
-                )
+                }
+
+                // Download + HD — top right
+                Row(
+                    modifier = Modifier.align(Alignment.TopEnd),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    IconButton(
+                        onClick = {
+                            scope.launch {
+                                saveImageToGallery(context, urls[pagerState.currentPage])
+                            }
+                        },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Download,
+                            contentDescription = "Save image",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = { useHd = !useHd },
+                        modifier = Modifier
+                            .size(40.dp)
+                            .background(
+                                if (useHd) MaterialTheme.colorScheme.primary.copy(alpha = 0.8f)
+                                else Color.Black.copy(alpha = 0.5f),
+                                CircleShape
+                            )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Hd,
+                            contentDescription = "Load HD",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
             }
         }
+    }
+}
+
+private fun mimeTypeFromUrl(urlString: String): Pair<String, String> {
+    val lower = urlString.lowercase().split("?").first()
+    return when {
+        lower.endsWith(".png") -> "image/png" to ".png"
+        lower.endsWith(".gif") -> "image/gif" to ".gif"
+        lower.endsWith(".webp") -> "image/webp" to ".webp"
+        lower.endsWith(".svg") -> "image/svg+xml" to ".svg"
+        else -> "image/jpeg" to ".jpg"
     }
 }
 
@@ -265,10 +289,11 @@ private suspend fun saveImageToGallery(context: android.content.Context, urlStri
             val bytes = inputStream.readBytes()
             inputStream.close()
             if (bytes.isEmpty()) return@withContext
-            val filename = "Mycelium_${UUID.randomUUID()}.jpg"
+            val (mimeType, ext) = mimeTypeFromUrl(urlString)
+            val filename = "Mycelium_${UUID.randomUUID()}$ext"
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
             }
             val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 context.contentResolver.insert(
@@ -280,6 +305,14 @@ private suspend fun saveImageToGallery(context: android.content.Context, urlStri
                 context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
             }
             uri?.let { context.contentResolver.openOutputStream(it)?.use { out -> out.write(bytes) } }
-        } catch (_: Exception) { }
+            // Show toast on main thread
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Image saved", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        } catch (_: Exception) {
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(context, "Failed to save image", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 }

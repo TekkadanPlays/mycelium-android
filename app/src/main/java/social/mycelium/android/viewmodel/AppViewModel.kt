@@ -28,6 +28,7 @@ data class PendingNotifThread(
     val note: Note,
     val replyKind: Int = 1,
     val highlightReplyId: String? = null,
+    val needsAsyncFetch: Boolean = false,
 )
 
 /** Holds reaction/zap/boost data for the dedicated ReactionsScreen. */

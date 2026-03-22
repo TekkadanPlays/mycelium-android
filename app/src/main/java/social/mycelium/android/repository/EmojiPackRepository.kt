@@ -1,5 +1,6 @@
 package social.mycelium.android.repository
 
+import android.content.Context
 import android.util.Log
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -11,6 +12,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import social.mycelium.android.db.AppDatabase
+import social.mycelium.android.db.CachedEmojiPackEntity
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import java.util.concurrent.ConcurrentHashMap
 
@@ -48,7 +53,90 @@ object EmojiPackRepository {
     /** Addresses currently being fetched (dedup). */
     private val pendingFetches = ConcurrentHashMap.newKeySet<String>()
 
+    /** User's relay URLs for broadened pack fetching. Set via [setUserRelays]. */
+    @Volatile
+    private var userRelayUrls: List<String> = emptyList()
+
+    fun setUserRelays(relays: List<String>) { userRelayUrls = relays }
+
+    /** App context for Room DB access. Set via [init]. */
+    @Volatile
+    private var appContext: Context? = null
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Initialize Room persistence. Call once from startup.
+     * Loads any previously-cached packs from Room for instant availability.
+     */
+    fun init(context: Context) {
+        if (appContext != null) return
+        appContext = context.applicationContext
+        scope.launch { loadFromRoom() }
+    }
+
+    private suspend fun loadFromRoom() {
+        val ctx = appContext ?: return
+        withContext(Dispatchers.IO) {
+            try {
+                val dao = AppDatabase.getInstance(ctx).emojiPackDao()
+                val entities = dao.getAll()
+                if (entities.isEmpty()) return@withContext
+                var loaded = 0
+                for (entity in entities) {
+                    val emojis = deserializeEmojis(entity.emojisJson)
+                    val pack = EmojiPack(
+                        name = entity.name,
+                        author = entity.author,
+                        dTag = entity.dTag,
+                        emojis = emojis,
+                        createdAt = entity.createdAt
+                    )
+                    cache[entity.address] = pack
+                    loaded++
+                }
+                _packs.value = cache.toMap()
+                Log.d(TAG, "Loaded $loaded emoji packs from Room cache")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load emoji packs from Room: ${e.message}")
+            }
+        }
+    }
+
+    private fun persistToRoom(address: String, pack: EmojiPack) {
+        val ctx = appContext ?: return
+        scope.launch {
+            try {
+                val dao = AppDatabase.getInstance(ctx).emojiPackDao()
+                val entity = CachedEmojiPackEntity(
+                    address = address,
+                    name = pack.name,
+                    author = pack.author,
+                    dTag = pack.dTag,
+                    emojisJson = serializeEmojis(pack.emojis),
+                    createdAt = pack.createdAt
+                )
+                dao.insert(entity)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to persist emoji pack to Room: ${e.message}")
+            }
+        }
+    }
+
+    private fun serializeEmojis(emojis: Map<String, String>): String {
+        val json = JSONObject()
+        for ((k, v) in emojis) json.put(k, v)
+        return json.toString()
+    }
+
+    private fun deserializeEmojis(json: String): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        try {
+            val obj = JSONObject(json)
+            for (key in obj.keys()) result[key] = obj.getString(key)
+        } catch (_: Exception) { }
+        return result
+    }
 
     /**
      * Get a cached emoji pack by its address coordinate ("30030:pubkey:dtag").
@@ -78,15 +166,21 @@ object EmojiPackRepository {
         }
     }
 
+    private val FALLBACK_RELAYS = listOf(
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://relay.nostr.band",
+        "wss://purplepag.es",
+    )
+
     private fun fetchEmojiPack(author: String, dTag: String, relayHints: List<String>, address: String) {
-        val relays = relayHints.ifEmpty {
-            listOf(
-                "wss://relay.damus.io",
-                "wss://nos.lol",
-                "wss://relay.nostr.band",
-                "wss://purplepag.es",
-            )
-        }
+        // Always combine: relay hints + author outbox relays + user relays + fallbacks.
+        // Previously only hints OR fallbacks were used, causing packs to silently fail
+        // when the hint relay was offline.
+        val authorOutbox = Nip65RelayListRepository.getCachedOutboxRelays(author).orEmpty()
+        val relays = social.mycelium.android.relay.RelayHealthTracker.filterBlocked(
+            (relayHints + authorOutbox + userRelayUrls + FALLBACK_RELAYS).distinct()
+        ).orEmpty()
 
         val filter = Filter(
             kinds = listOf(KIND_EMOJI_PACK),
@@ -95,7 +189,7 @@ object EmojiPackRepository {
             limit = 1
         )
 
-        Log.d(TAG, "Fetching emoji pack: author=${author.take(8)}, dTag=$dTag on ${relays.size} relays")
+        Log.d(TAG, "Fetching emoji pack: author=${author.take(8)}, dTag=$dTag on ${relays.size} relays (hints=${relayHints.size}, outbox=${authorOutbox.size})")
 
         val stateMachine = RelayConnectionStateMachine.getInstance()
         stateMachine.requestOneShotSubscription(
@@ -144,6 +238,7 @@ object EmojiPackRepository {
 
         cache[address] = pack
         _packs.value = cache.toMap()
+        persistToRoom(address, pack)
         Log.d(TAG, "Cached emoji pack '$name' ($address) with ${emojis.size} emojis")
     }
 

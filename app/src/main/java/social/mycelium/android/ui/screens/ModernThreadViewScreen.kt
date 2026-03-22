@@ -397,9 +397,24 @@ fun ModernThreadViewScreen(
     // Key on totalReplyCount (not list ref) to avoid recomputing when the same replies re-emit
     val threadNoteRelays = remember(repliesState.totalReplyCount, note.id) {
         val map = mutableMapOf<String, List<String>>()
-        map[note.id] = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+        val rootRelays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+        map[note.id] = rootRelays
+        // Include quoted event IDs from the root note so their counts render
+        note.quotedEventIds.forEach { qid ->
+            if (qid !in map) {
+                val cached = social.mycelium.android.repository.QuotedNoteCache.getCached(qid)
+                map[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { rootRelays }
+            }
+        }
         repliesState.replies.forEach { reply ->
             map[reply.id] = reply.relayUrls
+            // Extract quoted event IDs from reply content
+            social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(reply.content).forEach { qid ->
+                if (qid !in map) {
+                    val cached = social.mycelium.android.repository.QuotedNoteCache.getCached(qid)
+                    map[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { reply.relayUrls }
+                }
+            }
         }
         map.toMap()
     }
@@ -2193,17 +2208,54 @@ private fun ReplyControlsPanel(
                             if (isScrolling && showReactionMenu) showReactionMenu = false
                         }
                         if (selectedEmoji != null) {
-                            // Show the actual emoji the user reacted with
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clickable { showReactionMenu = true },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = selectedEmoji!!,
-                                    fontSize = 16.sp
-                                )
+                            val isCustomEmoji = selectedEmoji!!.startsWith(":") && selectedEmoji!!.endsWith(":") && selectedEmoji!!.length > 2
+                            if (isCustomEmoji) {
+                                // NIP-30 custom emoji — resolve URL from counts or saved packs
+                                val allSaved by social.mycelium.android.repository.EmojiPackSelectionRepository.allSavedEmojis.collectAsState()
+                                val countsUrl = replyCounts?.customEmojiUrls?.get(selectedEmoji!!)
+                                val savedUrl = allSaved[selectedEmoji!!]
+                                val emojiUrl = countsUrl ?: savedUrl
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clickable { showReactionMenu = true },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (emojiUrl != null) {
+                                        coil.compose.AsyncImage(
+                                            model = emojiUrl,
+                                            contentDescription = selectedEmoji!!.removeSurrounding(":"),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Filled.Favorite,
+                                            contentDescription = "Reacted",
+                                            tint = Color(0xFFE91E63),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            } else {
+                                // Regular emoji — show first grapheme
+                                val displayEmoji = remember(selectedEmoji) {
+                                    val breaker = java.text.BreakIterator.getCharacterInstance()
+                                    breaker.setText(selectedEmoji!!)
+                                    val start = breaker.first()
+                                    val end = breaker.next()
+                                    if (end != java.text.BreakIterator.DONE) selectedEmoji!!.substring(start, end) else selectedEmoji!!
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .clickable { showReactionMenu = true },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = displayEmoji,
+                                        fontSize = 16.sp
+                                    )
+                                }
                             }
                         } else {
                             CompactModernButton(
@@ -2239,9 +2291,8 @@ private fun ReplyControlsPanel(
                             )
                         }
                         if (showFullPicker) {
-                            val recentEmojis = remember { social.mycelium.android.repository.ReactionsRepository.getRecentEmojis(context, accountNpub) }
-                            social.mycelium.android.ui.components.EmojiPickerDialog(
-                                recentEmojis = recentEmojis,
+                            social.mycelium.android.ui.components.EmojiDrawer(
+                                accountNpub = accountNpub,
                                 onDismiss = { showFullPicker = false },
                                 onEmojiSelected = { emoji ->
                                     showFullPicker = false
@@ -2253,11 +2304,6 @@ private fun ReplyControlsPanel(
                                     val emojiKey = ":$shortcode:"
                                     selectedEmoji = emojiKey
                                     onReact(reply.toNote(), emojiKey)
-                                },
-                                onGifSelected = { gifUrl ->
-                                    showFullPicker = false
-                                    selectedEmoji = "GIF"
-                                    onReact(reply.toNote(), gifUrl)
                                 }
                             )
                         }

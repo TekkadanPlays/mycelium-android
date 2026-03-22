@@ -170,10 +170,15 @@ class Kind1RepliesViewModel : ViewModel() {
      */
     private fun updateRepliesState(replies: List<Note>, forceResort: Boolean = false) {
         val current = _uiState.value
-        // Fast-path: skip if reply set is unchanged (unless sort order changed)
+        // Fast-path: skip if reply set is unchanged (unless sort order changed or relay URLs changed)
         if (!forceResort && replies.size == current.totalReplyCount && replies.size > 0) {
             val currentIds = current.replies.mapTo(HashSet(current.replies.size)) { it.id }
-            if (replies.all { it.id in currentIds }) return
+            if (replies.all { it.id in currentIds }) {
+                // Also check if any relay URLs changed (mergePublishRelayUrl updates)
+                val currentRelayCount = current.replies.sumOf { it.relayUrls.size }
+                val newRelayCount = replies.sumOf { it.relayUrls.size }
+                if (currentRelayCount == newRelayCount) return
+            }
         }
 
         val sortedReplies = when (current.sortOrder) {

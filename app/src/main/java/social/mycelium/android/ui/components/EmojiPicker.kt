@@ -1,6 +1,5 @@
 package social.mycelium.android.ui.components
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -8,6 +7,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -25,23 +26,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import java.text.BreakIterator
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import social.mycelium.android.repository.EmojiPackRepository
 import social.mycelium.android.repository.EmojiPackSelectionRepository
-import social.mycelium.android.repository.GifSearchRepository
 
 private val SageGreen = Color(0xFF8FBC8F)
 
 /**
  * Full-featured emoji picker dialog with category tabs, search, recent emojis,
- * and custom emoji input. Themed with Mycelium's sage green palette.
+ * custom emoji packs (NIP-30), and custom emoji string input.
+ * Themed with Mycelium's sage green palette.
  */
 @Composable
 fun EmojiPickerDialog(
@@ -49,14 +49,11 @@ fun EmojiPickerDialog(
     onDismiss: () -> Unit,
     onEmojiSelected: (String) -> Unit,
     onCustomEmojiSelected: ((shortcode: String, url: String) -> Unit)? = null,
-    /** Called when user selects a GIF; fullUrl is the image URL to use as reaction content. */
-    onGifSelected: ((fullUrl: String) -> Unit)? = null,
     onSaveDefaultEmoji: ((String) -> Unit)? = null
 ) {
     var searchQuery by remember { mutableStateOf("") }
-    // -1 = Recent/Quick, -2 = Saved Packs, -3 = GIF search, 0+ = unicode categories
-    var selectedCategoryIndex by remember { mutableIntStateOf(-1) }
     var customEmoji by remember { mutableStateOf("") }
+    val pagerScope = rememberCoroutineScope()
 
     val categories = EmojiData.categories
     val isSearching = searchQuery.isNotEmpty()
@@ -69,45 +66,46 @@ fun EmojiPickerDialog(
     }
     val hasSavedPacks = savedPacksWithContent.any { it.second != null && it.second!!.emojis.isNotEmpty() }
 
-    // GIF search state
-    var gifResults by remember { mutableStateOf<List<GifSearchRepository.GifResult>>(emptyList()) }
-    var gifSearchQuery by remember { mutableStateOf("") }
-    var isGifLoading by remember { mutableStateOf(false) }
-    val gifScope = rememberCoroutineScope()
-    var gifSearchJob by remember { mutableStateOf<Job?>(null) }
-    val showGifGrid = selectedCategoryIndex == -3
-
-    // Load trending GIFs when GIF tab is first selected
-    LaunchedEffect(showGifGrid) {
-        if (showGifGrid && gifResults.isEmpty() && gifSearchQuery.isBlank()) {
-            isGifLoading = true
-            gifResults = GifSearchRepository.trending()
-            isGifLoading = false
+    // Build page index list: -1=Recent, -2=Packs (if any), 0..N=unicode categories
+    val pageIndices = remember(hasSavedPacks, categories) {
+        buildList {
+            add(-1) // Recent
+            if (hasSavedPacks) add(-2) // Packs
+            categories.indices.forEach { add(it) }
         }
     }
+    val pagerState = rememberPagerState(initialPage = 0) { pageIndices.size }
+    val currentCategoryIndex = pageIndices.getOrElse(pagerState.currentPage) { -1 }
 
-    // Filter emojis by search query
-    val searchResults = remember(searchQuery) {
+    // Filter emojis by search query (unicode + custom pack emojis)
+    val searchResults = remember(searchQuery, allPacksMap) {
         if (searchQuery.isEmpty()) emptyList()
-        else categories.flatMap { it.emojis }.filter { emoji ->
-            emoji.contains(searchQuery, ignoreCase = true)
-        }.distinct()
+        else {
+            val unicodeMatches = categories.flatMap { it.emojis }.filter { emoji ->
+                emoji.contains(searchQuery, ignoreCase = true)
+            }.distinct()
+            unicodeMatches
+        }
+    }
+    // Custom emoji search results (from packs)
+    val customSearchResults = remember(searchQuery, allPacksMap) {
+        if (searchQuery.isEmpty()) emptyList()
+        else {
+            val normalizedQuery = searchQuery.lowercase()
+            allPacksMap.values.flatMap { pack ->
+                pack.emojis.entries.filter { (shortcode, _) ->
+                    shortcode.removeSurrounding(":").lowercase().contains(normalizedQuery)
+                }.map { (shortcode, url) -> shortcode to url }
+            }.distinctBy { it.second }
+        }
     }
 
-    // Current emoji list to display (unicode only; packs handled separately)
-    val displayEmojis = when {
-        isSearching && !showGifGrid -> searchResults
-        selectedCategoryIndex == -1 -> {
-            // Recent + Quick access defaults (deduped)
-            val recent = recentEmojis.take(16)
-            val defaults = EmojiData.quickAccessDefaults.filter { it !in recent }
-            recent + defaults
-        }
-        selectedCategoryIndex == -2 -> emptyList() // Packs tab renders its own grid
-        selectedCategoryIndex == -3 -> emptyList() // GIF tab renders its own grid
-        else -> categories.getOrNull(selectedCategoryIndex)?.emojis ?: emptyList()
+    // Recent + Quick access emojis for page -1
+    val recentPageEmojis = remember(recentEmojis) {
+        val recent = recentEmojis.take(16)
+        val defaults = EmojiData.quickAccessDefaults.filter { it !in recent }
+        recent + defaults
     }
-    val showPacksGrid = selectedCategoryIndex == -2 && !isSearching
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -169,52 +167,30 @@ fun EmojiPickerDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Category tabs - scrollable row
+                // Category tabs - scrollable row (synced with pager)
                 if (!isSearching) {
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(horizontal = 12.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        // Recent tab
-                        item {
-                            CategoryTab(
-                                icon = "🕐",
-                                label = "Recent",
-                                isSelected = selectedCategoryIndex == -1,
-                                onClick = { selectedCategoryIndex = -1 }
-                            )
-                        }
-                        // Saved Packs tab (only if user has saved packs)
-                        if (hasSavedPacks) {
-                            item {
-                                CategoryTab(
-                                    icon = "⭐",
-                                    label = "Packs",
-                                    isSelected = selectedCategoryIndex == -2,
-                                    onClick = { selectedCategoryIndex = -2 }
-                                )
+                        items(pageIndices.size) { pageIdx ->
+                            val catIndex = pageIndices[pageIdx]
+                            val icon = when (catIndex) {
+                                -1 -> "🕐"
+                                -2 -> "⭐"
+                                else -> categories.getOrNull(catIndex)?.icon ?: ""
                             }
-                        }
-                        // GIF search tab
-                        if (onGifSelected != null) {
-                            item {
-                                CategoryTab(
-                                    icon = "🎬",
-                                    label = "GIF",
-                                    isSelected = selectedCategoryIndex == -3,
-                                    onClick = { selectedCategoryIndex = -3 }
-                                )
+                            val label = when (catIndex) {
+                                -1 -> "Recent"
+                                -2 -> "Packs"
+                                else -> categories.getOrNull(catIndex)?.name ?: ""
                             }
-                        }
-                        // Category tabs
-                        items(categories) { category ->
-                            val index = categories.indexOf(category)
                             CategoryTab(
-                                icon = category.icon,
-                                label = category.name,
-                                isSelected = selectedCategoryIndex == index,
-                                onClick = { selectedCategoryIndex = index }
+                                icon = icon,
+                                label = label,
+                                isSelected = pagerState.currentPage == pageIdx,
+                                onClick = { pagerScope.launch { pagerState.animateScrollToPage(pageIdx) } }
                             )
                         }
                     }
@@ -225,150 +201,9 @@ fun EmojiPickerDialog(
                     )
                 }
 
-                // Emoji grid / Packs grid / GIF grid
-                if (showGifGrid) {
-                    // GIF search bar + results grid
-                    Column(modifier = Modifier.weight(1f)) {
-                        // GIF search input
-                        OutlinedTextField(
-                            value = gifSearchQuery,
-                            onValueChange = { query ->
-                                gifSearchQuery = query
-                                gifSearchJob?.cancel()
-                                gifSearchJob = gifScope.launch {
-                                    delay(400) // debounce
-                                    isGifLoading = true
-                                    gifResults = if (query.isBlank()) {
-                                        GifSearchRepository.trending()
-                                    } else {
-                                        GifSearchRepository.search(query)
-                                    }
-                                    isGifLoading = false
-                                }
-                            },
-                            placeholder = { Text("Search GIFs", style = MaterialTheme.typography.bodyMedium) },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.Search,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            },
-                            singleLine = true,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 4.dp)
-                                .height(44.dp),
-                            shape = RoundedCornerShape(12.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = SageGreen,
-                                cursorColor = SageGreen
-                            ),
-                            textStyle = MaterialTheme.typography.bodyMedium
-                        )
-
-                        if (isGifLoading) {
-                            Box(
-                                modifier = Modifier.fillMaxWidth().weight(1f),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(28.dp),
-                                    strokeWidth = 2.dp,
-                                    color = SageGreen
-                                )
-                            }
-                        } else {
-                            LazyVerticalGrid(
-                                columns = GridCells.Fixed(3),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f)
-                                    .padding(horizontal = 4.dp),
-                                contentPadding = PaddingValues(vertical = 4.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                items(gifResults) { gif ->
-                                    Box(
-                                        modifier = Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(8.dp))
-                                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-                                            .clickable { onGifSelected?.invoke(gif.fullUrl) },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        AsyncImage(
-                                            model = gif.previewUrl,
-                                            contentDescription = "GIF",
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Tenor attribution
-                        Text(
-                            text = "Powered by Tenor",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)
-                        )
-                    }
-                } else if (showPacksGrid) {
-                    // Saved emoji packs — each pack as a labeled section
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(7),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .padding(horizontal = 8.dp),
-                        contentPadding = PaddingValues(vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp)
-                    ) {
-                        savedPacksWithContent.forEach { (addr, pack) ->
-                            if (pack != null && pack.emojis.isNotEmpty()) {
-                                // Pack header spanning full width
-                                item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
-                                    Text(
-                                        text = pack.name,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        fontWeight = FontWeight.Medium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp, start = 4.dp)
-                                    )
-                                }
-                                // Emoji images
-                                items(pack.emojis.entries.toList()) { (shortcode, url) ->
-                                    Box(
-                                        modifier = Modifier
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(6.dp))
-                                            .clickable {
-                                                if (onCustomEmojiSelected != null) {
-                                                    onCustomEmojiSelected(shortcode, url)
-                                                } else {
-                                                    onEmojiSelected(shortcode)
-                                                }
-                                            },
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        AsyncImage(
-                                            model = url,
-                                            contentDescription = shortcode.removeSurrounding(":"),
-                                            modifier = Modifier.size(32.dp),
-                                            contentScale = ContentScale.Fit
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
+                // Swipeable emoji pages / search results
+                if (isSearching) {
+                    // Flat search grid (no pager)
                     LazyVerticalGrid(
                         columns = GridCells.Fixed(8),
                         modifier = Modifier
@@ -379,49 +214,116 @@ fun EmojiPickerDialog(
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        items(displayEmojis) { emoji ->
-                            val isCustom = emoji.startsWith(":") && emoji.endsWith(":") && emoji.length > 2
-                            val customUrl = if (isCustom) allPacksMap.values
-                                .flatMap { it.emojis.entries }
-                                .firstOrNull { ":${it.key}:" == emoji || it.key == emoji }
-                                ?.value
-                                ?: EmojiPackSelectionRepository.allSavedEmojis.value[emoji]
-                            else null
-
-                            Box(
-                                modifier = Modifier
-                                    .aspectRatio(1f)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .clickable {
-                                        if (isCustom && customUrl != null && onCustomEmojiSelected != null) {
-                                            onCustomEmojiSelected(emoji.removeSurrounding(":"), customUrl)
-                                        } else {
-                                            onEmojiSelected(emoji)
-                                        }
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (customUrl != null) {
+                        if (customSearchResults.isNotEmpty()) {
+                            items(customSearchResults) { (shortcode, url) ->
+                                Box(
+                                    modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable {
+                                            if (onCustomEmojiSelected != null) {
+                                                onCustomEmojiSelected(shortcode, url)
+                                            } else {
+                                                onEmojiSelected(shortcode)
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
                                     AsyncImage(
-                                        model = customUrl,
-                                        contentDescription = emoji.removeSurrounding(":"),
+                                        model = url,
+                                        contentDescription = shortcode.removeSurrounding(":"),
                                         modifier = Modifier.size(32.dp),
                                         contentScale = ContentScale.Fit
                                     )
-                                } else {
-                                    Text(
-                                        text = emoji,
-                                        fontSize = 24.sp,
-                                        textAlign = TextAlign.Center
-                                    )
+                                }
+                            }
+                        }
+                        items(searchResults) { emoji ->
+                            EmojiGridCell(emoji, allPacksMap, onEmojiSelected, onCustomEmojiSelected)
+                        }
+                    }
+                } else {
+                    // Swipeable pager — one page per category
+                    HorizontalPager(
+                        state = pagerState,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        key = { pageIndices.getOrElse(it) { -1 } }
+                    ) { pageIdx ->
+                        val catIndex = pageIndices.getOrElse(pageIdx) { -1 }
+                        when (catIndex) {
+                            -2 -> {
+                                // Saved emoji packs grid
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(7),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 8.dp),
+                                    contentPadding = PaddingValues(vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    savedPacksWithContent.forEach { (_, pack) ->
+                                        if (pack != null && pack.emojis.isNotEmpty()) {
+                                            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
+                                                Text(
+                                                    text = pack.name,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.padding(top = 8.dp, bottom = 4.dp, start = 4.dp)
+                                                )
+                                            }
+                                            items(pack.emojis.entries.toList()) { (shortcode, url) ->
+                                                Box(
+                                                    modifier = Modifier
+                                                        .aspectRatio(1f)
+                                                        .clip(RoundedCornerShape(6.dp))
+                                                        .clickable {
+                                                            if (onCustomEmojiSelected != null) {
+                                                                onCustomEmojiSelected(shortcode, url)
+                                                            } else {
+                                                                onEmojiSelected(shortcode)
+                                                            }
+                                                        },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    AsyncImage(
+                                                        model = url,
+                                                        contentDescription = shortcode.removeSurrounding(":"),
+                                                        modifier = Modifier.size(32.dp),
+                                                        contentScale = ContentScale.Fit
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            else -> {
+                                // Unicode emoji grid (Recent or specific category)
+                                val emojis = if (catIndex == -1) recentPageEmojis
+                                    else categories.getOrNull(catIndex)?.emojis ?: emptyList()
+                                LazyVerticalGrid(
+                                    columns = GridCells.Fixed(8),
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(horizontal = 8.dp),
+                                    contentPadding = PaddingValues(vertical = 8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    items(emojis) { emoji ->
+                                        EmojiGridCell(emoji, allPacksMap, onEmojiSelected, onCustomEmojiSelected)
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                // Custom emoji input row at bottom (hidden in GIF mode)
-                if (!showGifGrid) {
+                // Custom emoji input row at bottom
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
                 Row(
@@ -434,7 +336,7 @@ fun EmojiPickerDialog(
                     OutlinedTextField(
                         value = customEmoji,
                         onValueChange = { customEmoji = it },
-                        placeholder = { Text("Custom emoji", style = MaterialTheme.typography.bodySmall) },
+                        placeholder = { Text("Type emoji or combo…", style = MaterialTheme.typography.bodySmall) },
                         singleLine = true,
                         modifier = Modifier
                             .weight(1f)
@@ -448,15 +350,19 @@ fun EmojiPickerDialog(
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(
                             onSend = {
-                                firstGrapheme(customEmoji)?.let { onEmojiSelected(it) }
+                                val text = customEmoji.trim()
+                                if (text.isNotEmpty()) onEmojiSelected(text)
                             }
                         )
                     )
 
                     // Save to recents button
-                    if (firstGrapheme(customEmoji) != null && onSaveDefaultEmoji != null) {
+                    if (customEmoji.trim().isNotEmpty() && onSaveDefaultEmoji != null) {
                         FilledIconButton(
-                            onClick = { firstGrapheme(customEmoji)?.let { onSaveDefaultEmoji(it) } },
+                            onClick = {
+                                val text = customEmoji.trim()
+                                if (text.isNotEmpty()) onSaveDefaultEmoji(text)
+                            },
                             modifier = Modifier.size(36.dp),
                             colors = IconButtonDefaults.filledIconButtonColors(
                                 containerColor = SageGreen.copy(alpha = 0.15f),
@@ -469,8 +375,11 @@ fun EmojiPickerDialog(
 
                     // Send button
                     Button(
-                        onClick = { firstGrapheme(customEmoji)?.let { onEmojiSelected(it) } },
-                        enabled = firstGrapheme(customEmoji) != null,
+                        onClick = {
+                            val text = customEmoji.trim()
+                            if (text.isNotEmpty()) onEmojiSelected(text)
+                        },
+                        enabled = customEmoji.trim().isNotEmpty(),
                         modifier = Modifier.height(36.dp),
                         shape = RoundedCornerShape(10.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = SageGreen),
@@ -479,7 +388,6 @@ fun EmojiPickerDialog(
                         Text("Send", fontSize = 13.sp)
                     }
                 }
-                } // end if (!showGifGrid)
             }
         }
     }

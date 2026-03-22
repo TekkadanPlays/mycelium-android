@@ -985,13 +985,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     ReactionsRepository.persist(getApplication(), account.npub)
                     ReactionsRepository.recordEmoji(getApplication(), account.npub, emoji)
                     // Optimistically inject reaction into counts so thread/feed UI updates immediately
-                    NoteCountsRepository.injectOwnReaction(note.id, emoji, accountHex)
+                    NoteCountsRepository.injectOwnReaction(note.id, emoji, accountHex, customEmojiUrl)
                     // Also store under originalNoteId so feed reposts and thread views
                     // both find the reaction (repost note.id = "repost:xyz", thread = "xyz")
                     val origId = note.originalNoteId
                     if (origId != null && origId != note.id) {
                         ReactionsRepository.setLastReaction(origId, emoji)
-                        NoteCountsRepository.injectOwnReaction(origId, emoji, accountHex)
+                        NoteCountsRepository.injectOwnReaction(origId, emoji, accountHex, customEmojiUrl)
                     }
                     // Emit success animation — NoteCard will flash the like glow
                     ReactionsRepository.emitAnimation(note.id, emoji, success = true)
@@ -1724,7 +1724,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         replyToId = parentId ?: rootId,
                         mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(content).filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }.distinct(),
                         hashtags = result.event.tags.filter { it.size >= 2 && it[0] == "t" }.map { it[1] },
-                        relayUrls = relaySet.map { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                        relayUrls = emptyList() // Start empty; mergePublishRelayUrl populates as relays confirm OK
                     )
                     social.mycelium.android.cache.ThreadReplyCache.addLocalReply(rootId, replyNote)
                 }

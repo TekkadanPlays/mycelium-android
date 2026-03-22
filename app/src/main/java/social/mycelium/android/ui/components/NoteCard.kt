@@ -89,6 +89,7 @@ import social.mycelium.android.utils.QuotedNoteHeightCache
 import androidx.compose.foundation.layout.defaultMinSize
 import social.mycelium.android.ui.components.InlineVideoPlayer
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.Note
@@ -248,16 +249,11 @@ internal fun QuotedNoteBody(
                     if (qImageUrls.isNotEmpty()) {
                         val qPagerState = rememberPagerState(pageCount = { qImageUrls.size })
                         val currentImgUrl = qImageUrls.getOrNull(qPagerState.currentPage)
-                        val knownImgRatio = currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
-                        val qImgInitiallyKnown = knownImgRatio != null
-                        var qImgContainerRatio by remember(qImageUrls) {
-                            mutableFloatStateOf((knownImgRatio ?: (16f / 9f)).coerceIn(0.4f, 2.5f))
+                        // Lock ratio at first composition — never resize mid-view
+                        val imgRatio by remember(qImageUrls) {
+                            val initial = currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
+                            mutableFloatStateOf((initial ?: (16f / 9f)).coerceIn(0.4f, 2.5f))
                         }
-                        if (qImgInitiallyKnown && knownImgRatio != null) {
-                            val clamped = knownImgRatio.coerceIn(0.4f, 2.5f)
-                            if (clamped != qImgContainerRatio) qImgContainerRatio = clamped
-                        }
-                        val imgRatio = qImgContainerRatio
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -583,8 +579,50 @@ internal fun QuotedNoteContent(
             .toSet()
     }
     val quotedIsMarkdown = remember(quotedDisplayContent) { isMarkdown(quotedDisplayContent) }
-    val quotedCacheKey = remember(quotedDisplayContent, quotedMediaUrls) {
-        social.mycelium.android.utils.ContentBlockCache.key(quotedDisplayContent, quotedMediaUrls)
+
+    // Mention profile resolution for quoted note content (same pattern as parent NoteCard)
+    val quotedMentionedPubkeys = remember(meta.fullContent) {
+        social.mycelium.android.utils.extractPubkeysFromContent(meta.fullContent)
+    }
+    var quotedMentionVersion by remember { mutableIntStateOf(0) }
+    if (quotedMentionedPubkeys.isNotEmpty()) {
+        LaunchedEffect(quotedMentionedPubkeys) {
+            val pubkeySet = quotedMentionedPubkeys.toSet()
+            val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
+            if (uncached.isNotEmpty()) {
+                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+            }
+            val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
+            val initiallyResolved = pubkeySet.size - uncached.size
+            if (nowResolved > initiallyResolved) {
+                quotedMentionVersion++
+            }
+            profileCache.profileUpdated
+                .filter { it in pubkeySet }
+                .debounce(150)
+                .collect { quotedMentionVersion++ }
+        }
+        LaunchedEffect(quotedMentionedPubkeys, quotedMentionVersion) {
+            val pubkeySet = quotedMentionedPubkeys.toSet()
+            val hasPlaceholders = pubkeySet.any { pk ->
+                val author = profileCache.getAuthor(pk)
+                author == null || author.displayName == pk.take(8) + "..."
+            }
+            if (hasPlaceholders) {
+                delay(2000)
+                val stillPlaceholder = pubkeySet.any { pk ->
+                    val author = profileCache.getAuthor(pk)
+                    author == null || author.displayName == pk.take(8) + "..."
+                }
+                if (!stillPlaceholder) {
+                    quotedMentionVersion++
+                }
+            }
+        }
+    }
+
+    val quotedCacheKey = remember(quotedDisplayContent, quotedMediaUrls, quotedMentionVersion) {
+        social.mycelium.android.utils.ContentBlockCache.key(quotedDisplayContent, quotedMediaUrls, mentionVersion = quotedMentionVersion)
     }
     val quotedContentBlocks by produceState(
         initialValue = social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey) ?: emptyList(),
@@ -771,26 +809,20 @@ internal fun NoteMediaCarousel(
     LaunchedEffect(pagerState.currentPage) {
         onMediaPageChanged(pagerState.currentPage)
     }
-    // Container ratio: prefers imeta/cache for stability. For videos with unknown
-    // dimensions, allows ONE reactive update when the player reports real dimensions.
-    // Once the cache has a ratio, subsequent renders use it directly (locked).
+    // Container ratio: prefer imeta/cache for instant correct sizing.
+    // When no ratio is known, default to 16:9 placeholder. Once the image loads and
+    // reports its intrinsic dimensions, update to the real ratio (one-time resize).
+    // On subsequent visits the cache provides the real ratio instantly (no shift).
     val currentUrl = mediaList.getOrNull(pagerState.currentPage)
-    val knownContainerRatio = if (currentUrl != null) {
-        mediaMeta[currentUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(currentUrl)
-    } else null
-    // ratioLocked: true when the initial ratio came from imeta/cache (known at first composition).
-    // When locked, we allow cache syncs (e.g. page swipes). When unlocked (defaulted to 16/9),
-    // we do NOT sync from cache mid-lifecycle — this prevents the container from resizing
-    // while the user is looking at it. Scroll-back resets remember → picks up cache on re-enter.
-    val initiallyKnown = knownContainerRatio != null
-    var containerRatio by remember(mediaList, mediaMeta) {
-        mutableFloatStateOf(knownContainerRatio ?: (16f / 9f))
+    val knownRatio = remember(mediaList) {
+        if (currentUrl != null) {
+            mediaMeta[currentUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(currentUrl)
+        } else null
     }
-    // Only sync from cache for items that had a known ratio at first composition
-    // (e.g. page swipe changes currentUrl) — never for items that defaulted to 16/9
-    if (initiallyKnown && knownContainerRatio != null && knownContainerRatio != containerRatio) {
-        containerRatio = knownContainerRatio
+    var containerRatio by remember(mediaList) {
+        mutableFloatStateOf(knownRatio ?: (16f / 9f))
     }
+    val ratioWasKnown = knownRatio != null
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
     // doesn't steal vertical gestures. Only single-image carousels disable paging entirely.
     val verticalPassthrough = remember {
@@ -865,14 +897,19 @@ internal fun NoteMediaCarousel(
                             .build()
                     )
                     val painterState = imagePainter.state
-                    // Cache aspect ratio on success
+                    // Cache aspect ratio on success + update container if ratio was unknown
                     if (painterState is AsyncImagePainter.State.Success) {
                         SideEffect {
                             val drawable = painterState.result.drawable
                             val w = drawable.intrinsicWidth
                             val h = drawable.intrinsicHeight
                             if (w > 0 && h > 0) {
+                                val realRatio = w.toFloat() / h.toFloat()
                                 MediaAspectRatioCache.add(url, w, h)
+                                // Update container to real ratio if we were using a default
+                                if (!ratioWasKnown) {
+                                    containerRatio = realRatio
+                                }
                             }
                         }
                     }
@@ -1709,6 +1746,7 @@ internal fun NoteActionRow(
     ownVoteValue: Int,
     voteScore: Int,
     reactionEmoji: String?,
+    customEmojiUrls: Map<String, String> = emptyMap(),
     isDetailsExpanded: Boolean,
     onDetailsToggle: () -> Unit,
     isZapMenuExpanded: Boolean,
@@ -1716,8 +1754,8 @@ internal fun NoteActionRow(
     onShowCustomZapDialog: () -> Unit,
     recentEmojis: List<String>,
     onReactWithEmoji: (String) -> Unit,
+    accountNpub: String? = null,
     onReactWithCustomEmoji: (shortcode: String, url: String) -> Unit,
-    onReactWithGif: (String) -> Unit,
     onSaveDefaultEmoji: (String) -> Unit,
     onComment: (String) -> Unit,
     onBoost: ((Note) -> Unit)?,
@@ -1837,6 +1875,7 @@ internal fun NoteActionRow(
 
             ReactionButton(
                 emoji = reactionEmoji,
+                customEmojiUrls = customEmojiUrls,
                 onClick = { showReactionPicker = true }
             )
 
@@ -1844,7 +1883,9 @@ internal fun NoteActionRow(
             if (showReactionPicker && !showFullPicker) {
                 androidx.compose.material3.DropdownMenu(
                     expanded = true,
-                    onDismissRequest = { showReactionPicker = false }
+                    onDismissRequest = { showReactionPicker = false },
+                    offset = DpOffset(0.dp, (-48).dp),
+                    shape = RoundedCornerShape(24.dp)
                 ) {
                     ReactionFavoritesBar(
                         recentEmojis = recentEmojis,
@@ -1864,10 +1905,10 @@ internal fun NoteActionRow(
                 }
             }
 
-            // Full emoji picker dialog (opened via "..." in the favorites bar)
+            // Full emoji drawer (opened via "..." in the favorites bar)
             if (showFullPicker) {
-                EmojiPickerDialog(
-                    recentEmojis = recentEmojis,
+                EmojiDrawer(
+                    accountNpub = accountNpub,
                     onDismiss = { showFullPicker = false },
                     onEmojiSelected = { emoji ->
                         showFullPicker = false
@@ -1876,10 +1917,6 @@ internal fun NoteActionRow(
                     onCustomEmojiSelected = { shortcode, url ->
                         showFullPicker = false
                         onReactWithCustomEmoji(shortcode, url)
-                    },
-                    onGifSelected = { gifUrl ->
-                        showFullPicker = false
-                        onReactWithGif(gifUrl)
                     },
                     onSaveDefaultEmoji = { emoji ->
                         onSaveDefaultEmoji(emoji)
@@ -3191,12 +3228,14 @@ fun NoteCard(
                 ownVoteValue = ownVoteValue,
                 voteScore = voteScore,
                 reactionEmoji = reactionEmoji,
+                customEmojiUrls = overrideCustomEmojiUrls ?: emptyMap(),
                 isDetailsExpanded = isDetailsExpanded,
                 onDetailsToggle = { isDetailsExpanded = !isDetailsExpanded },
                 isZapMenuExpanded = isZapMenuExpanded,
                 onZapMenuToggle = { isZapMenuExpanded = !isZapMenuExpanded },
                 onShowCustomZapDialog = { showCustomZapDialog = true },
                 recentEmojis = recentEmojis,
+                accountNpub = accountNpub,
                 onReactWithEmoji = { emoji ->
                     ReactionsRepository.recordEmoji(context, accountNpub, emoji)
                     recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
@@ -3209,10 +3248,6 @@ fun NoteCard(
                     recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
                     reactionEmoji = emojiKey
                     onReact(note, emojiKey)
-                },
-                onReactWithGif = { gifUrl ->
-                    reactionEmoji = "GIF"
-                    onReact(note, gifUrl)
                 },
                 onSaveDefaultEmoji = { emoji ->
                     ReactionsRepository.recordEmoji(context, accountNpub, emoji)
@@ -3311,6 +3346,7 @@ private fun ActionButton(
 @Composable
 private fun ReactionButton(
     emoji: String?,
+    customEmojiUrls: Map<String, String> = emptyMap(),
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -3327,9 +3363,42 @@ private fun ReactionButton(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.size(20.dp)
             )
+        } else if (emoji.startsWith(":") && emoji.endsWith(":") && emoji.length > 2) {
+            // NIP-30 custom emoji shortcode — resolve URL from event tags first, then saved packs
+            val allSaved by social.mycelium.android.repository.EmojiPackSelectionRepository.allSavedEmojis.collectAsState()
+            val url = customEmojiUrls[emoji] ?: allSaved[emoji]
+            if (url != null) {
+                coil.compose.AsyncImage(
+                    model = url,
+                    contentDescription = emoji.removeSurrounding(":"),
+                    modifier = Modifier.size(22.dp)
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Favorite,
+                    contentDescription = "Reacted",
+                    tint = Color(0xFFE91E63),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        } else if (isImageUrl(emoji)) {
+            // Direct image/GIF URL reaction
+            coil.compose.AsyncImage(
+                model = emoji,
+                contentDescription = "Image reaction",
+                modifier = Modifier.size(22.dp)
+            )
         } else {
+            // For multi-grapheme combos (e.g. "🤙🔥"), show only the first grapheme
+            val display = remember(emoji) {
+                val breaker = java.text.BreakIterator.getCharacterInstance()
+                breaker.setText(emoji)
+                val start = breaker.first()
+                val end = breaker.next()
+                if (end != java.text.BreakIterator.DONE) emoji.substring(start, end) else emoji
+            }
             Text(
-                text = emoji,
+                text = display,
                 fontSize = 18.sp
             )
         }

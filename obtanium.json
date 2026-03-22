@@ -19,6 +19,26 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.02",
+      "versionCode": 40,
+      "releaseDate": "2026-03-22",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.02-beta/Mycelium-v0.5.02-beta.apk",
+      "changelog": "Outbox relay feed freshness, quoted event counts in thread view, media layout shift elimination, NIP-30 custom emoji reaction rendering fix.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Fix: outbox relay posts no longer go stale — outbox events bypass feed cutoff gate",
+        "Fix: quoted event reaction/zap/reply counts now render in thread view (subscriptions extended to quoted event IDs)",
+        "Fix: media no longer renders small before expanding — container ratio updates once on image load when initially unknown",
+        "Fix: NIP-30 custom emoji reactions render as images instead of raw :shortcode: text (ReactionButton, thread replies, optimistic injection all resolve emoji URLs from event tags)"
+      ]
+    },
+    {
       "version": "0.5.01",
       "versionCode": 39,
       "releaseDate": "2026-03-20",

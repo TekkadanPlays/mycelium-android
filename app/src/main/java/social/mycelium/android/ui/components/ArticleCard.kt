@@ -223,7 +223,6 @@ fun ArticleCard(
             recentEmojis = emptyList(),
             onReactWithEmoji = {},
             onReactWithCustomEmoji = { _, _ -> },
-            onReactWithGif = {},
             onSaveDefaultEmoji = {},
             onComment = {},
             onBoost = onBoost,

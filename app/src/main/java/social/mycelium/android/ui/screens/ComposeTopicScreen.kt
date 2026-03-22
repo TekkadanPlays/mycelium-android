@@ -33,6 +33,7 @@ import social.mycelium.android.data.UserRelay
 import social.mycelium.android.ui.components.ComposeToolbar
 import social.mycelium.android.ui.components.MentionSuggestionList
 import social.mycelium.android.ui.components.MentionSuggestionState
+import social.mycelium.android.utils.ComposeVisualTransformation
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.utils.UnicodeStylizer
 import social.mycelium.android.viewmodel.AccountStateViewModel
@@ -92,6 +93,7 @@ fun ComposeTopicScreen(
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
     val mdLinkColor = MaterialTheme.colorScheme.primary
     val markdownTransformation = remember(mdLinkColor) { MarkdownVisualTransformation(linkColor = mdLinkColor) }
+    val composeTransformation = remember { ComposeVisualTransformation() }
     var isUploading by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
@@ -209,7 +211,7 @@ fun ComposeTopicScreen(
                     keyboardType = KeyboardType.Text
                 ),
                 visualTransformation = if (markdownEnabled) markdownTransformation
-                    else androidx.compose.ui.text.input.VisualTransformation.None,
+                    else composeTransformation,
             )
             MentionSuggestionList(
                 mentionState = mentionState,
@@ -256,7 +258,9 @@ fun ComposeTopicScreen(
                 showZapRaiser = showZapRaiser,
                 onToggleZapRaiser = { showZapRaiser = it },
                 onApplyUnicodeStyle = { style ->
-                    textFieldValue = TextFieldValue(UnicodeStylizer.stylize(content, style))
+                    val normalized = UnicodeStylizer.normalize(content)
+                    val styled = UnicodeStylizer.stylize(normalized, style)
+                    textFieldValue = TextFieldValue(styled, TextRange(styled.length))
                 },
                 onScheduleClick = {
                     Toast.makeText(context, "Topic scheduling coming soon", Toast.LENGTH_SHORT).show()

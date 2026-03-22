@@ -203,6 +203,21 @@ class FeedStateViewModel : ViewModel() {
         _homeFeedState.update { it.copy(activeListDTag = null, activeListTitle = null) }
     }
 
+    /**
+     * Activate a hashtag as the home feed content filter.
+     * When active, only notes containing the hashtag are displayed.
+     */
+    fun setHomeHashtagFilter(hashtag: String) {
+        _homeFeedState.update { it.copy(activeHashtagFilter = hashtag.lowercase().removePrefix("#"), activeListDTag = null, activeListTitle = null) }
+    }
+
+    /**
+     * Clear the active hashtag filter.
+     */
+    fun clearHomeHashtagFilter() {
+        _homeFeedState.update { it.copy(activeHashtagFilter = null) }
+    }
+
     fun getHomeDisplayName(): String {
         val state = _homeFeedState.value
         return when {
@@ -278,7 +293,10 @@ data class FeedState(
 
     // Active NIP-51 people list d-tag for feed filtering (null = use normal Following/Global)
     val activeListDTag: String? = null,
-    val activeListTitle: String? = null
+    val activeListTitle: String? = null,
+
+    // Active hashtag content filter (null = none). When set, only notes containing #hashtag are shown.
+    val activeHashtagFilter: String? = null
 )
 
 /**

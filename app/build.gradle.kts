@@ -24,12 +24,11 @@ android {
         applicationId = "social.mycelium.android"
         minSdk = 35
         targetSdk = 36
-        versionCode = 39
-        versionName = "0.5.01"
+        versionCode = 40
+        versionName = "0.5.02"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField("String", "TENOR_API_KEY", "\"${localProperties.getProperty("tenor.api.key", "")}\"")
     }
 
     // Load keystore properties

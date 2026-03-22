@@ -90,8 +90,9 @@ class NotesRepository private constructor() {
     private var currentUserPubkey: String? = null
 
     /** Pending kind-1 events waiting to be flushed into the notes list in a single batch.
-     *  Triple: (event, relayUrl, isPagination) — isPagination=true bypasses the age gate. */
-    private val pendingKind1Events = ConcurrentLinkedQueue<Triple<Event, String, Boolean>>()
+     *  PendingKind1Event: event, relayUrl, isPagination (bypasses age gate), isOutbox (bypasses cutoff gate). */
+    data class PendingKind1Event(val event: Event, val relayUrl: String, val isPagination: Boolean, val isOutbox: Boolean = false)
+    private val pendingKind1Events = ConcurrentLinkedQueue<PendingKind1Event>()
     /** Job that schedules the next batch flush (debounce timer). */
     private var kind1FlushJob: Job? = null
     /** Separate job for continuation flushes (not cancelled by new incoming events). */
@@ -117,7 +118,7 @@ class NotesRepository private constructor() {
         }
         relayStateMachine.registerKind1Handler { event, relayUrl ->
             // Lock-free: just enqueue and schedule a batched flush
-            pendingKind1Events.add(Triple(event, relayUrl, false))
+            pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false))
             scheduleKind1Flush()
         }
         relayStateMachine.registerKind6Handler { event, relayUrl ->
@@ -126,9 +127,12 @@ class NotesRepository private constructor() {
             }
         }
         // Wire outbox feed events into the same ingestion pipeline
+        // Mark as isOutbox=true so they bypass the cutoff gate and go directly to feed.
+        // Outbox events represent the user's followed feed discovered late (NIP-65 takes 15+ sec),
+        // so they should never be sent to the pending buffer.
         outboxFeedManager.onNoteReceived = { event, relayUrl ->
             Log.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
-            pendingKind1Events.add(Triple(event, relayUrl, false))
+            pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             scheduleKind1Flush()
         }
         startProfileUpdateCoalescer()
@@ -171,7 +175,7 @@ class NotesRepository private constructor() {
      * notes list with a single sort + emit. This replaces the old per-event mutex+sort pattern.
      */
     private suspend fun flushKind1Events() {
-        val batch = mutableListOf<Triple<Event, String, Boolean>>()
+        val batch = mutableListOf<PendingKind1Event>()
         var drained = 0
         while (drained < MAX_FLUSH_CHUNK_SIZE) {
             val item = pendingKind1Events.poll() ?: break
@@ -183,8 +187,8 @@ class NotesRepository private constructor() {
         // Queue raw events for Room persistence (before filtering — we want ALL events stored).
         // Event objects are queued as-is; toJson() runs on background IO thread during flush.
         if (eventDao != null && !isGlobalMode) {
-            for ((event, relayUrl, _) in batch) {
-                pendingEventObjects.add(Triple(event, relayUrl, Unit))
+            for (item in batch) {
+                pendingEventObjects.add(Triple(item.event, item.relayUrl, Unit))
             }
             scheduleEventStoreFlush()
         }
@@ -220,8 +224,14 @@ class NotesRepository private constructor() {
             // with ancient notes that corrupt the pagination cursor.
             val ageFloorMs = feedAgeFloorMs
             var ageGateDropped = 0
+            // Track which note IDs came from outbox events so they bypass the cutoff gate
+            val outboxNoteIds = HashSet<String>()
 
-            for ((event, relayUrl, isPagination) in batch) {
+            for (pending in batch) {
+                val event = pending.event
+                val relayUrl = pending.relayUrl
+                val isPagination = pending.isPagination
+                val isOutbox = pending.isOutbox
                 if (event.kind != 1 && event.kind != 30023 && event.kind != 1068 && event.kind != 6969) continue
 
                 // Age gate: drop ancient events from the live subscription
@@ -233,6 +243,7 @@ class NotesRepository private constructor() {
                     }
                 }
 
+                if (isOutbox) outboxNoteIds.add(event.id)
                 if (BuildConfig.DEBUG) logIncomingEventSummary(event, relayUrl)
                 val note = convertEventToNote(event, relayUrl)
 
@@ -443,7 +454,7 @@ class NotesRepository private constructor() {
                 val isOlderThanCutoff = cutoff <= 0L || note.timestamp <= cutoff
                 val isOwnEvent = note.author.id.lowercase() == currentUserPubkey
 
-                if (!initialLoadComplete || isOlderThanCutoff || isOwnEvent || withinGracePeriod) {
+                if (!initialLoadComplete || isOlderThanCutoff || isOwnEvent || withinGracePeriod || note.id in outboxNoteIds) {
                     feedNotes.add(note)
                 } else {
                     pendingNew.add(note)
@@ -1478,7 +1489,7 @@ class NotesRepository private constructor() {
                         for (entity in roomEvents) {
                             try {
                                 val event = Event.fromJson(entity.eventJson)
-                                pendingKind1Events.add(Triple(event, entity.relayUrl ?: "", true))
+                                pendingKind1Events.add(PendingKind1Event(event, entity.relayUrl ?: "", isPagination = true))
                             } catch (e: Exception) {
                                 // Skip malformed cached events
                             }
@@ -1548,7 +1559,7 @@ class NotesRepository private constructor() {
                 eventCount.incrementAndGet()
                 val eventMs = event.createdAt * 1000L
                 oldestReceivedMs.updateAndGet { prev -> minOf(prev, eventMs) }
-                pendingKind1Events.add(Triple(event, relayUrl, true))
+                pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = true))
                 scheduleKind1Flush()
             }
         }
@@ -1652,7 +1663,7 @@ class NotesRepository private constructor() {
                 limit = limit
             )
             relayStateMachine.requestFeedChange(relayUrls, filter) { event ->
-                pendingKind1Events.add(Triple(event, "", false))
+                pendingKind1Events.add(PendingKind1Event(event, "", isPagination = false))
                 scheduleKind1Flush()
             }
             connectedRelays = relayUrls

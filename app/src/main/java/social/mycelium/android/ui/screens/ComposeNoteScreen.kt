@@ -4,24 +4,35 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.HowToVote
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.widget.Toast
+import coil.compose.AsyncImage
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -36,6 +47,7 @@ import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.ui.components.ComposeToolbar
 import social.mycelium.android.ui.components.MentionSuggestionList
 import social.mycelium.android.ui.components.MentionSuggestionState
+import social.mycelium.android.utils.ComposeVisualTransformation
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.utils.UnicodeStylizer
 import social.mycelium.android.viewmodel.AccountStateViewModel
@@ -92,7 +104,10 @@ fun ComposeNoteScreen(
     var selectedMediaServer by remember { mutableStateOf(blossomServers.firstOrNull() ?: nip96Servers.firstOrNull()) }
     val mdLinkColor = MaterialTheme.colorScheme.primary
     val markdownTransformation = remember(mdLinkColor) { MarkdownVisualTransformation(linkColor = mdLinkColor) }
+    val composeTransformation = remember { ComposeVisualTransformation() }
     var isUploading by remember { mutableStateOf(false) }
+    // Track uploaded media URLs for inline previews
+    val uploadedMediaUrls = remember { mutableStateListOf<String>() }
 
     // ── Poll mode ──────────────────────────────────────────────────
     var isPollMode by remember { mutableStateOf(false) }
@@ -117,6 +132,7 @@ fun ComposeNoteScreen(
         accountStateViewModel.uploadMedia(uri, server.baseUrl, mimeType) { url, error ->
             isUploading = false
             if (url != null) {
+                uploadedMediaUrls.add(url)
                 val newText = if (content.isBlank()) url else "$content\n$url"
                 textFieldValue = TextFieldValue(newText, TextRange(newText.length))
             } else {
@@ -242,7 +258,7 @@ fun ComposeNoteScreen(
                         keyboardType = KeyboardType.Text
                     ),
                     visualTransformation = if (markdownEnabled) markdownTransformation
-                        else androidx.compose.ui.text.input.VisualTransformation.None,
+                        else composeTransformation,
                 )
 
                 // ── Poll options editor (below the question) ──
@@ -369,6 +385,67 @@ fun ComposeNoteScreen(
                     }
                 }
 
+                // ── Inline media previews ──
+                if (uploadedMediaUrls.isNotEmpty()) {
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(uploadedMediaUrls.size) { index ->
+                            val url = uploadedMediaUrls[index]
+                            val isVideo = url.let { u -> u.endsWith(".mp4", true) || u.endsWith(".mov", true) || u.endsWith(".webm", true) || u.endsWith(".avi", true) }
+                            Box(
+                                modifier = Modifier
+                                    .size(80.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                            ) {
+                                if (isVideo) {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Filled.PlayArrow,
+                                            contentDescription = "Video",
+                                            modifier = Modifier.size(32.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                } else {
+                                    AsyncImage(
+                                        model = url,
+                                        contentDescription = "Uploaded media",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                                // Remove button
+                                IconButton(
+                                    onClick = {
+                                        uploadedMediaUrls.removeAt(index)
+                                        // Also remove URL from text content
+                                        val currentText = textFieldValue.text
+                                        val cleaned = currentText.replace(url, "").replace(Regex("\n{2,}"), "\n").trim()
+                                        textFieldValue = TextFieldValue(cleaned, TextRange(cleaned.length))
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .size(24.dp)
+                                        .padding(2.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Filled.Close,
+                                        contentDescription = "Remove",
+                                        modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Inline quoted note previews ──
+                ComposeQuotedNotePreviews(content = content)
+
                 // Zapraiser input (shown when toggled from toolbar)
                 AnimatedVisibility(visible = showZapRaiser) {
                     OutlinedTextField(
@@ -416,7 +493,9 @@ fun ComposeNoteScreen(
                     if (!enabled) zapRaiserAmount = null
                 },
                 onApplyUnicodeStyle = { style ->
-                    textFieldValue = TextFieldValue(UnicodeStylizer.stylize(content, style))
+                    val normalized = UnicodeStylizer.normalize(content)
+                    val styled = UnicodeStylizer.stylize(normalized, style)
+                    textFieldValue = TextFieldValue(styled, TextRange(styled.length))
                 },
                 onScheduleClick = {
                     Toast.makeText(context, "Note scheduling coming soon", Toast.LENGTH_SHORT).show()
@@ -427,6 +506,125 @@ fun ComposeNoteScreen(
                 publishLabel = if (isPollMode) "Publish poll" else "Publish",
                 onPublish = { showRelayPicker = true }
             )
+        }
+    }
+}
+
+/**
+ * Extracts nostr:nevent1.../nostr:note1... references from content and displays
+ * compact inline preview cards for each. Fetches metadata on the fly via QuotedNoteCache.
+ */
+@Composable
+private fun ComposeQuotedNotePreviews(content: String) {
+    val quoteRegex = remember { Regex("""nostr:(nevent1[a-z0-9]{58,}|note1[a-z0-9]{58,})""") }
+    val quotedIds = remember(content) {
+        quoteRegex.findAll(content).mapNotNull { match ->
+            try {
+                val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute(match.value)
+                when (val entity = parsed?.entity) {
+                    is com.example.cybin.nip19.NEvent -> entity.hex
+                    is com.example.cybin.nip19.NNote -> entity.hex
+                    else -> null
+                }
+            } catch (_: Exception) { null }
+        }.distinct().toList()
+    }
+
+    if (quotedIds.isEmpty()) return
+
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        quotedIds.forEach { eventId ->
+            var meta by remember(eventId) {
+                mutableStateOf(social.mycelium.android.repository.QuotedNoteCache.getCached(eventId))
+            }
+            LaunchedEffect(eventId) {
+                if (meta == null) {
+                    meta = social.mycelium.android.repository.QuotedNoteCache.get(eventId)
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                border = BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                ),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (meta != null) {
+                    val m = meta!!
+                    val author = remember(m.authorId) { profileCache.resolveAuthor(m.authorId) }
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        // Author avatar
+                        if (!author.avatarUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = author.avatarUrl,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primaryContainer),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = (author.displayName.firstOrNull() ?: '?').toString(),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = author.displayName.ifBlank { author.username.ifBlank { m.authorId.take(8) + "…" } },
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = m.contentSnippet,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                } else {
+                    // Loading placeholder
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text(
+                            text = "Loading quoted note…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }

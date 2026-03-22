@@ -472,7 +472,8 @@ fun NotificationsScreen(
                                 notification.type in listOf(
                                     NotificationType.LIKE,
                                     NotificationType.REPOST,
-                                    NotificationType.ZAP
+                                    NotificationType.ZAP,
+                                    NotificationType.BADGE_AWARD
                                 ) -> {
                                     CompactNotificationRow(
                                         notification = notification,
@@ -644,7 +645,7 @@ private fun CompactNotificationRow(
         when (notification.type) {
             NotificationType.LIKE -> when {
                 emoji == "❤️" || emoji == "+" || emoji == null -> "liked your post"
-                else -> "reacted $emoji to your post"
+                else -> "reacted to your post"
             }
             NotificationType.REPOST -> "reposted your post"
             NotificationType.ZAP -> {

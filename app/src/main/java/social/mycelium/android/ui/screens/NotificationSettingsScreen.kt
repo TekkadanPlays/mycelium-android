@@ -30,6 +30,7 @@ import social.mycelium.android.ui.settings.NotificationPreferences
 @Composable
 fun NotificationSettingsScreen(
     onBackClick: () -> Unit,
+    onNavigateToPower: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -104,22 +105,11 @@ fun NotificationSettingsScreen(
                             color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f),
                             lineHeight = 18.sp
                         )
-                        // Quick-link to battery optimization settings
+                        // Quick-link to Mycelium's Power settings
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    try {
-                                        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-                                        context.startActivity(intent)
-                                    } catch (_: Exception) {
-                                        // Fallback: open general app settings
-                                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                            data = android.net.Uri.parse("package:${context.packageName}")
-                                        }
-                                        context.startActivity(intent)
-                                    }
-                                }
+                                .clickable { onNavigateToPower() }
                                 .padding(vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -131,7 +121,7 @@ fun NotificationSettingsScreen(
                                 tint = MaterialTheme.colorScheme.primary
                             )
                             Text(
-                                "Open battery settings",
+                                "Open power settings",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary,
                                 fontWeight = FontWeight.Medium

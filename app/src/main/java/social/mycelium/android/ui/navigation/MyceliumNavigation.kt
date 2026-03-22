@@ -150,23 +150,36 @@ import kotlinx.coroutines.withContext
 private fun buildRootStubNote(
     rootId: String,
     replyNote: social.mycelium.android.data.Note,
-    fallbackRelayUrls: List<String> = emptyList()
+    fallbackRelayUrls: List<String> = emptyList(),
+    skipPubkey: String? = null
 ): social.mycelium.android.data.Note {
     // First, check if the root note is already in the notes cache (feed/thread cache)
     val cachedRoot = NotesRepository.getInstance().getNoteFromCache(rootId)
     if (cachedRoot != null) return cachedRoot
 
     val profileCache = ProfileMetadataCache.getInstance()
-    // Try to find the root author pubkey from the reply's p-tags (first p-tag is typically the root author)
-    val rootAuthorPubkey = replyNote.tags
-        .firstOrNull { it.size >= 2 && it[0] == "p" }
-        ?.getOrNull(1)
+    // Find the root author pubkey from the reply's p-tags, skipping the current user's
+    // own pubkey (which is typically the FIRST p-tag in a reply-to-self notification).
+    // The root/e-tag referenced pubkey in the root marker is the best candidate.
+    val pTagPubkeys = replyNote.tags
+        .filter { it.size >= 2 && it[0] == "p" }
+        .mapNotNull { it.getOrNull(1) }
+    // Prefer a p-tag pubkey that isn't the current user
+    val rootAuthorPubkey = if (skipPubkey != null) {
+        pTagPubkeys.firstOrNull { it != skipPubkey } ?: pTagPubkeys.firstOrNull()
+    } else {
+        pTagPubkeys.firstOrNull()
+    }
     val author = if (rootAuthorPubkey != null) {
         profileCache.resolveAuthor(rootAuthorPubkey)
     } else {
         // Fallback: use the reply note's mentioned pubkeys if tags are empty
         // (happens when Note is built from QuotedNoteMeta which has no tags)
-        val mentionedPubkey = replyNote.mentionedPubkeys.firstOrNull()
+        val mentionedPubkey = if (skipPubkey != null) {
+            replyNote.mentionedPubkeys.firstOrNull { it != skipPubkey }
+        } else {
+            replyNote.mentionedPubkeys.firstOrNull()
+        }
         if (mentionedPubkey != null) {
             profileCache.resolveAuthor(mentionedPubkey)
         } else {
@@ -954,51 +967,36 @@ fun MyceliumNavigation(
                 ?: NotificationsRepository.markAsSeen(notifData.id)
         }
 
-        // Try to get a real Note with author metadata + relay URLs:
-        // 1) From the notification's embedded note
-        // 2) From the notification's targetNote (for likes/zaps/reposts)
-        // 3) From NotesRepository cache (the event was already ingested)
-        // 4) Fall back to a minimal stub (thread composable will fetch from relays)
-        val realNote = notifData?.note
-            ?: notifData?.targetNote
-            ?: NotesRepository.getInstance().getNoteFromCache(targetNoteId)
-        val noteForThread = if (realNote != null) {
-            // If we have a rootNoteId that differs from the note id, try to get the root too
-            if (targetNoteId != realNote.id) {
-                NotesRepository.getInstance().getNoteFromCache(targetNoteId) ?: run {
-                    // Prefer the targetNote's author (the actual parent/root) over the
-                    // notification's author (the replier). Fall back to resolveAuthor from
-                    // the reply's first p-tag (typically the root author).
-                    val rootAuthor = notifData?.targetNote?.author
-                        ?: realNote.tags.firstOrNull { it.size >= 2 && it[0] == "p" }
-                            ?.getOrNull(1)?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
-                        ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false)
-                    social.mycelium.android.data.Note(
-                        id = targetNoteId,
-                        author = rootAuthor,
-                        content = "",
-                        timestamp = 0L,
-                        isReply = false,
-                        relayUrls = realNote.relayUrls
-                    )
-                }
+        // Resolve the root/target note for the thread overlay.
+        // Priority: 1) NotesRepository in-memory cache, 2) notifData.targetNote (enrichment result),
+        //           3) notifData.note if it IS the target, 4) stub with async fetch.
+        // For reply notifications, notifData.note is the REPLY (not the root), so we
+        // must look up the root by targetNoteId, not use notifData.note directly.
+        val myPubkey = currentAccount?.toHexKey()
+        val cachedRoot = NotesRepository.getInstance().getNoteFromCache(targetNoteId)
+            ?: notifData?.targetNote?.takeIf { it.id == targetNoteId }
+            ?: notifData?.note?.takeIf { it.id == targetNoteId }
+        val replyNote = notifData?.note  // The reply event (for relay hints + p-tag author resolution)
+        val noteForThread = cachedRoot ?: run {
+            // Build a stub — async fetch will replace it with real data.
+            // Use replyNote's p-tags to guess root author, skipping our own pubkey.
+            if (replyNote != null) {
+                buildRootStubNote(targetNoteId, replyNote, skipPubkey = myPubkey)
             } else {
-                realNote
+                // No reply note available (e.g. like/zap with no embedded note).
+                // Try targetNote author from notification data.
+                val fallbackAuthor = notifData?.targetNote?.author
+                    ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false)
+                social.mycelium.android.data.Note(
+                    id = targetNoteId,
+                    author = fallbackAuthor,
+                    content = "",
+                    timestamp = 0L
+                )
             }
-        } else {
-            // Absolute fallback: stub note. Thread composable will fetch from relays.
-            // Try to resolve root author from notification's targetNote or p-tags
-            val fallbackAuthor = notifData?.targetNote?.author
-                ?: notifData?.note?.tags?.firstOrNull { it.size >= 2 && it[0] == "p" }
-                    ?.getOrNull(1)?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
-                ?: social.mycelium.android.data.Author(id = "", username = "", displayName = "", avatarUrl = null, isVerified = false)
-            social.mycelium.android.data.Note(
-                id = targetNoteId,
-                author = fallbackAuthor,
-                content = "",
-                timestamp = 0L
-            )
         }
+        // Whether we need to async-fetch the root note to replace the stub
+        val needsAsyncFetch = cachedRoot == null
         // Navigate to notifications screen and open the thread as an overlay stack
         // (instead of navigating to thread/ route which replaces the feed view)
         appViewModel.setPendingNotifThread(
@@ -1006,10 +1004,11 @@ fun MyceliumNavigation(
                 note = noteForThread,
                 replyKind = 1,
                 highlightReplyId = highlightReplyId,
+                needsAsyncFetch = needsAsyncFetch,
             )
         )
         navController.navigate("notifications") { launchSingleTop = true }
-        Log.d("MyceliumNav", "Deep-link from notification: navigating to notifications overlay, type=${nav.notifType} notifFound=${notifData != null} realNote=${realNote != null}")
+        Log.d("MyceliumNav", "Deep-link from notification: navigating to notifications overlay, type=${nav.notifType} notifFound=${notifData != null} cached=${cachedRoot != null} needsFetch=$needsAsyncFetch")
     }
 
     // Observe async toast messages (e.g. reaction failures, publish results)
@@ -1134,6 +1133,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
                 || route.startsWith("boost_relay_selection")
                 || route.startsWith("compose")
+                || route == "settings/publish_results"
         if (!preserveDashboardOverlay) {
             overlayThreadStack.clear()
             overlayThreadHighlightIds.clear()
@@ -1153,6 +1153,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
                 || route.startsWith("boost_relay_selection")
                 || route.startsWith("compose")
+                || route == "settings/publish_results"
         if (!preserveTopicOverlay) {
             overlayTopicThreadStack.clear()
             overlayTopicThreadHighlightIds.clear()
@@ -1167,6 +1168,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
                 || route.startsWith("boost_relay_selection")
                 || route.startsWith("compose")
+                || route == "settings/publish_results"
         if (!preserveProfileOverlay) {
             overlayProfileThreadStack.clear()
             overlayProfileThreadHighlightIds.clear()
@@ -1181,6 +1183,7 @@ fun MyceliumNavigation(
                 || route.startsWith("reply_compose")
                 || route.startsWith("boost_relay_selection")
                 || route.startsWith("compose")
+                || route == "settings/publish_results"
         if (!preserveNotifOverlay) {
             overlayNotifThreadStack.clear()
             overlayNotifThreadHighlightIds.clear()
@@ -1276,6 +1279,7 @@ fun MyceliumNavigation(
     LaunchedEffect(Unit) {
         NotificationsRepository.init(context)
         social.mycelium.android.repository.DraftsRepository.init(context)
+        social.mycelium.android.repository.EmojiPackRepository.init(context)
     }
     // Load drafts when account is available
     LaunchedEffect(currentAccount) {
@@ -1351,7 +1355,7 @@ fun MyceliumNavigation(
         // Await completion so follow list is ready before Phase 3 reads it.
         val followRelayUrls = (indexerUrls + outboxUrls).distinct()
         val phase1Deferred = social.mycelium.android.repository.StartupOrchestrator.runPhase1UserState(
-            pubkey, followRelayUrls, allUserRelayUrls
+            pubkey, followRelayUrls, allUserRelayUrls, signer
         )
         phase1Deferred.await()
         val cachedFollowList = social.mycelium.android.repository.ContactListRepository.getCachedFollowList(pubkey)
@@ -3261,6 +3265,28 @@ fun MyceliumNavigation(
                     )
                 }
 
+                // List detail — shows members of a specific people list
+                composable(
+                    "lists/{dTag}",
+                    arguments = listOf(navArgument("dTag") { type = NavType.StringType })
+                ) { backStackEntry ->
+                    val dTag = backStackEntry.arguments?.getString("dTag") ?: ""
+                    val listDetailContext = androidx.compose.ui.platform.LocalContext.current
+                    social.mycelium.android.ui.screens.ListDetailScreen(
+                        dTag = dTag,
+                        onBackClick = { navController.popBackStack() },
+                        onProfileClick = { pubkey -> navController.navigateToProfile(pubkey) },
+                        getSigner = { accountStateViewModel.getCurrentSigner() },
+                        getOutboxRelays = {
+                            val pk = accountStateViewModel.currentAccount.value?.toHexKey()
+                            if (pk != null) {
+                                val sm = social.mycelium.android.repository.RelayStorageManager(listDetailContext)
+                                sm.loadOutboxRelays(pk).map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+                            } else emptySet()
+                        },
+                    )
+                }
+
                 // Settings — feed and relay connections persist; no disconnect when visiting settings.
                 composable("settings") {
                     SettingsScreen(
@@ -3313,7 +3339,10 @@ fun MyceliumNavigation(
                 }
 
                 composable("settings/notifications") {
-                    NotificationSettingsScreen(onBackClick = { navController.popBackStack() })
+                    NotificationSettingsScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onNavigateToPower = { navController.navigate("settings/power") { launchSingleTop = true } }
+                    )
                 }
 
                 composable("settings/filters_blocks") {
@@ -4017,6 +4046,25 @@ fun MyceliumNavigation(
                         overlayNotifThreadStack.add(pending.note)
                         overlayNotifReplyKinds.add(pending.replyKind)
                         overlayNotifThreadHighlightIds.add(pending.highlightReplyId)
+
+                        // Async-fetch the real root note to replace the stub
+                        if (pending.needsAsyncFetch) {
+                            val rootId = pending.note.id
+                            val hintRelays = pending.note.relayUrls.ifEmpty { listOfNotNull(pending.note.relayUrl) } + notifFallbackRelayUrls
+                            launch(Dispatchers.IO) {
+                                val fetched = NotesRepository.getInstance().fetchNoteByIdExpanded(
+                                    noteId = rootId,
+                                    userRelayUrls = hintRelays.distinct(),
+                                    authorPubkey = pending.note.author.id.takeIf { it.isNotBlank() }
+                                )
+                                if (fetched != null) {
+                                    withContext(Dispatchers.Main.immediate) {
+                                        val idx = overlayNotifThreadStack.indexOfFirst { it.id == rootId }
+                                        if (idx >= 0) overlayNotifThreadStack[idx] = fetched
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // ── Notifications thread overlay (stack-based) ──────────────────────

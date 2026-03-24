@@ -31,6 +31,76 @@ object ZapPollResponseRepository {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // ── Room persistence ────────────────────────────────────────────────
+
+    @Volatile var eventDao: social.mycelium.android.db.EventDao? = null
+
+    /** Persist a kind-9735 event to Room. */
+    private fun persistEvent(event: Event, pollId: String) {
+        val dao = eventDao ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                dao.insert(social.mycelium.android.db.CachedEventEntity(
+                    eventId = event.id,
+                    kind = event.kind,
+                    pubkey = event.pubKey.lowercase(),
+                    createdAt = event.createdAt,
+                    eventJson = event.toJson(),
+                    referencedEventId = pollId
+                ))
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to persist zap receipt ${event.id.take(8)}: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Load cached kind-9735 events from Room for a zap poll and build an initial tally.
+     * Returns null if no cached events exist.
+     */
+    private suspend fun loadTallyFromRoom(pollId: String, myPubkey: String?): ZapPollTally? {
+        val dao = eventDao ?: return null
+        val cached = dao.getByKindAndReference(ZAP_RECEIPT_KIND, pollId)
+        if (cached.isEmpty()) return null
+
+        val votes = mutableMapOf<Int, MutableList<ZapVote>>()
+        val votersSeen = mutableSetOf<String>()
+        val myVotes = mutableSetOf<Int>()
+        var totalSats = 0L
+
+        for (entity in cached) {
+            try {
+                val event = Event.fromJson(entity.eventJson)
+                val descriptionTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }
+                val zapRequestJson = descriptionTag?.getOrNull(1) ?: continue
+                val zapRequest = Event.fromJson(zapRequestJson)
+                val voterPubkey = zapRequest.pubKey
+                if (!votersSeen.add(voterPubkey)) continue
+
+                val pollOptionTag = zapRequest.tags.firstOrNull { it.size >= 2 && it[0] == "poll_option" }
+                val optionIndex = pollOptionTag?.getOrNull(1)?.toIntOrNull() ?: continue
+                val bolt11Tag = event.tags.firstOrNull { it.size >= 2 && it[0] == "bolt11" }
+                val amountSats = bolt11Tag?.getOrNull(1)?.let { parseBolt11Amount(it) } ?: 0L
+
+                val vote = ZapVote(voterPubkey, amountSats, optionIndex)
+                votes.getOrPut(optionIndex) { mutableListOf() }.add(vote)
+                totalSats += amountSats
+                if (myPubkey != null && voterPubkey == myPubkey) myVotes.add(optionIndex)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse cached zap receipt: ${e.message}")
+            }
+        }
+
+        return ZapPollTally(
+            pollId = pollId,
+            votesByOption = votes.mapValues { it.value.toList() },
+            totalSats = totalSats,
+            totalVoters = votersSeen.size,
+            myVotedOptions = myVotes,
+            isFetching = false
+        )
+    }
+
     /**
      * Zap vote for a single option from one voter.
      */
@@ -64,23 +134,41 @@ object ZapPollResponseRepository {
     private val inFlightPolls = ConcurrentHashMap.newKeySet<String>()
     private val fetchedPolls = ConcurrentHashMap.newKeySet<String>()
 
+    /** Last successful fetch timestamp (epoch seconds) per poll, for delta refresh. */
+    private val lastFetchTimeSec = ConcurrentHashMap<String, Long>()
+
     /**
      * Fetch zap receipt tallies for a zap poll. Idempotent.
      */
     fun fetchTally(pollId: String, relayUrls: List<String>, myPubkey: String?) {
-        if (pollId in fetchedPolls || !inFlightPolls.add(pollId)) return
+        // If already fetched, do a delta refresh instead of full re-fetch
+        if (pollId in fetchedPolls) {
+            refreshTally(pollId, relayUrls, myPubkey)
+            return
+        }
+        if (!inFlightPolls.add(pollId)) return
         if (relayUrls.isEmpty()) { inFlightPolls.remove(pollId); return }
 
+        val fetchStartSec = System.currentTimeMillis() / 1000
+
+        // Mark as fetching
         _tallies.value = _tallies.value + (pollId to ZapPollTally(pollId, isFetching = true))
 
         scope.launch {
             try {
+                // ── Phase 1: Seed from Room cache (instant, before relay fetch) ──
+                val roomTally = loadTallyFromRoom(pollId, myPubkey)
+                if (roomTally != null) {
+                    _tallies.value = _tallies.value + (pollId to roomTally.copy(isFetching = true))
+                    Log.d(TAG, "ZapPoll $pollId: seeded ${roomTally.totalVoters} voters from Room cache")
+                }
+
+                // ── Phase 2: Fetch from relays and persist to Room ──
                 val votes = ConcurrentHashMap<Int, MutableList<ZapVote>>()
                 val votersSeen = ConcurrentHashMap.newKeySet<String>()
                 val myVotes = ConcurrentHashMap.newKeySet<Int>()
                 var totalSats = 0L
 
-                // Fetch kind-9735 zap receipts referencing this poll event
                 val filter = Filter(
                     kinds = listOf(ZAP_RECEIPT_KIND),
                     tags = mapOf("e" to listOf(pollId)),
@@ -93,7 +181,6 @@ object ZapPollResponseRepository {
                 ) { event ->
                     if (event.kind != ZAP_RECEIPT_KIND) return@requestOneShotSubscription
 
-                    // Parse the embedded zap request from "description" tag
                     val descriptionTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }
                     val zapRequestJson = descriptionTag?.getOrNull(1) ?: return@requestOneShotSubscription
 
@@ -101,15 +188,12 @@ object ZapPollResponseRepository {
                         val zapRequest = Event.fromJson(zapRequestJson)
                         val voterPubkey = zapRequest.pubKey
 
-                        // Find poll_option tag in zap request
                         val pollOptionTag = zapRequest.tags.firstOrNull { it.size >= 2 && it[0] == "poll_option" }
                         val optionIndex = pollOptionTag?.getOrNull(1)?.toIntOrNull() ?: return@requestOneShotSubscription
 
-                        // Parse amount from bolt11 tag
                         val bolt11Tag = event.tags.firstOrNull { it.size >= 2 && it[0] == "bolt11" }
                         val amountSats = bolt11Tag?.getOrNull(1)?.let { parseBolt11Amount(it) } ?: 0L
 
-                        // Only count one vote per voter (first seen)
                         if (!votersSeen.add(voterPubkey)) return@requestOneShotSubscription
 
                         val vote = ZapVote(voterPubkey, amountSats, optionIndex)
@@ -122,6 +206,8 @@ object ZapPollResponseRepository {
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to parse zap request for poll $pollId: ${e.message}")
                     }
+                    // Persist every relay event to Room
+                    persistEvent(event, pollId)
                 }
 
                 delay(FETCH_TIMEOUT_MS + 500L)
@@ -136,10 +222,93 @@ object ZapPollResponseRepository {
                 )
                 _tallies.value = _tallies.value + (pollId to tally)
                 fetchedPolls.add(pollId)
+                lastFetchTimeSec[pollId] = fetchStartSec
                 Log.d(TAG, "ZapPoll $pollId: ${votersSeen.size} voters, ${totalSats} sats total")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch zap poll tally for $pollId: ${e.message}")
                 _tallies.value = _tallies.value + (pollId to ZapPollTally(pollId, isFetching = false))
+            } finally {
+                inFlightPolls.remove(pollId)
+            }
+        }
+    }
+
+    /**
+     * Delta refresh: fetch only zap receipts newer than our last fetch time,
+     * then merge them into the existing tally. Called when a previously-fetched
+     * zap poll re-enters the viewport.
+     */
+    private fun refreshTally(pollId: String, relayUrls: List<String>, myPubkey: String?) {
+        if (!inFlightPolls.add(pollId)) return
+        val sinceSec = lastFetchTimeSec[pollId] ?: run {
+            inFlightPolls.remove(pollId)
+            return
+        }
+        if (relayUrls.isEmpty()) { inFlightPolls.remove(pollId); return }
+        val refreshStartSec = System.currentTimeMillis() / 1000
+
+        scope.launch {
+            try {
+                val current = _tallies.value[pollId] ?: ZapPollTally(pollId)
+                val existingVoters = current.votesByOption.values.flatten().map { it.voterPubkey }.toMutableSet()
+                val newVotes = ConcurrentHashMap<Int, MutableList<ZapVote>>()
+                val newMyVotes = ConcurrentHashMap.newKeySet<Int>()
+                var newVoterCount = 0
+                var newSats = 0L
+
+                val filter = Filter(
+                    kinds = listOf(ZAP_RECEIPT_KIND),
+                    tags = mapOf("e" to listOf(pollId)),
+                    since = sinceSec - 5,
+                    limit = 200
+                )
+                RelayConnectionStateMachine.getInstance().requestOneShotSubscription(
+                    relayUrls, filter, priority = SubscriptionPriority.LOW,
+                    settleMs = 400L, maxWaitMs = 4000L
+                ) { event ->
+                    if (event.kind != ZAP_RECEIPT_KIND) return@requestOneShotSubscription
+                    val descriptionTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }
+                    val zapRequestJson = descriptionTag?.getOrNull(1) ?: return@requestOneShotSubscription
+                    try {
+                        val zapRequest = Event.fromJson(zapRequestJson)
+                        val voterPubkey = zapRequest.pubKey
+                        if (voterPubkey in existingVoters) return@requestOneShotSubscription
+                        if (!existingVoters.add(voterPubkey)) return@requestOneShotSubscription
+
+                        val pollOptionTag = zapRequest.tags.firstOrNull { it.size >= 2 && it[0] == "poll_option" }
+                        val optionIndex = pollOptionTag?.getOrNull(1)?.toIntOrNull() ?: return@requestOneShotSubscription
+                        val bolt11Tag = event.tags.firstOrNull { it.size >= 2 && it[0] == "bolt11" }
+                        val amountSats = bolt11Tag?.getOrNull(1)?.let { parseBolt11Amount(it) } ?: 0L
+
+                        val vote = ZapVote(voterPubkey, amountSats, optionIndex)
+                        newVotes.getOrPut(optionIndex) { mutableListOf() }.add(vote)
+                        newSats += amountSats
+                        newVoterCount++
+                        if (myPubkey != null && voterPubkey == myPubkey) newMyVotes.add(optionIndex)
+                    } catch (_: Exception) {}
+                    persistEvent(event, pollId)
+                }
+                delay(4500L)
+
+                if (newVoterCount > 0) {
+                    val mergedVotes = current.votesByOption.toMutableMap()
+                    for ((option, votes) in newVotes) {
+                        mergedVotes[option] = (mergedVotes[option] ?: emptyList()) + votes
+                    }
+                    val updated = current.copy(
+                        votesByOption = mergedVotes,
+                        totalSats = current.totalSats + newSats,
+                        totalVoters = current.totalVoters + newVoterCount,
+                        myVotedOptions = current.myVotedOptions + newMyVotes
+                    )
+                    _tallies.value = _tallies.value + (pollId to updated)
+                    Log.d(TAG, "ZapPoll $pollId delta refresh: +$newVoterCount voters, +$newSats sats")
+                } else {
+                    Log.d(TAG, "ZapPoll $pollId delta refresh: no new votes since $sinceSec")
+                }
+                lastFetchTimeSec[pollId] = refreshStartSec
+            } catch (e: Exception) {
+                Log.w(TAG, "ZapPoll $pollId delta refresh failed: ${e.message}")
             } finally {
                 inFlightPolls.remove(pollId)
             }
@@ -210,6 +379,7 @@ object ZapPollResponseRepository {
                     myVotedOptions = updatedMyVotes
                 )
                 _tallies.value = _tallies.value + (pollId to updated)
+                persistEvent(event, pollId)
                 Log.d(TAG, "Live zap vote on poll ${pollId.take(8)}: +${amountSats} sats from ${voterPubkey.take(8)}")
             } catch (e: Exception) {
                 Log.w(TAG, "Live zap parse failed for poll $pollId: ${e.message}")
@@ -223,6 +393,10 @@ object ZapPollResponseRepository {
     /** Cancel a live subscription (call on composable dispose). */
     fun cancelLive(pollId: String) {
         liveSubscriptions.remove(pollId)?.cancel()
+        // Update timestamp so the next delta refresh starts from when live coverage ended
+        if (pollId in fetchedPolls) {
+            lastFetchTimeSec[pollId] = System.currentTimeMillis() / 1000
+        }
     }
 
     /** Set option labels on an existing tally. */
@@ -264,5 +438,6 @@ object ZapPollResponseRepository {
         _tallies.value = emptyMap()
         inFlightPolls.clear()
         fetchedPolls.clear()
+        lastFetchTimeSec.clear()
     }
 }

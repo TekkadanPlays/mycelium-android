@@ -25,6 +25,7 @@ import social.mycelium.android.repository.VoteRepository
 import social.mycelium.android.repository.PollResponseRepository
 import social.mycelium.android.repository.EmojiPackSelectionRepository
 import social.mycelium.android.repository.EmojiPackRepository
+import social.mycelium.android.repository.QuotedNoteCache
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.bechToBytes
 import com.example.cybin.nip19.NPub
@@ -442,6 +443,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
         restoreZapState(accountInfo.npub)
         ReactionsRepository.loadForAccount(getApplication(), accountInfo.npub)
+        VoteRepository.loadForAccount(getApplication(), accountInfo.npub)
         NoteCountsRepository.currentUserPubkey = hexPubkey
         // Create per-account scope (NotificationsRepository instance) and set as active
         social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
@@ -624,6 +626,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
             restoreZapState(updatedAccount.npub)
             ReactionsRepository.loadForAccount(getApplication(), updatedAccount.npub)
+            VoteRepository.loadForAccount(getApplication(), updatedAccount.npub)
             NoteCountsRepository.currentUserPubkey = hexPubkey
             // Create per-account scope (NotificationsRepository instance) and set as active
             social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
@@ -985,13 +988,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     ReactionsRepository.persist(getApplication(), account.npub)
                     ReactionsRepository.recordEmoji(getApplication(), account.npub, emoji)
                     // Optimistically inject reaction into counts so thread/feed UI updates immediately
-                    NoteCountsRepository.injectOwnReaction(note.id, emoji, accountHex, customEmojiUrl)
+                    NoteCountsRepository.injectOwnReaction(note.id, emoji, accountHex, customEmojiUrl, reactionEventId = result.event.id)
                     // Also store under originalNoteId so feed reposts and thread views
                     // both find the reaction (repost note.id = "repost:xyz", thread = "xyz")
                     val origId = note.originalNoteId
                     if (origId != null && origId != note.id) {
                         ReactionsRepository.setLastReaction(origId, emoji)
-                        NoteCountsRepository.injectOwnReaction(origId, emoji, accountHex, customEmojiUrl)
+                        NoteCountsRepository.injectOwnReaction(origId, emoji, accountHex, customEmojiUrl, reactionEventId = result.event.id)
                     }
                     // Emit success animation — NoteCard will flash the like glow
                     ReactionsRepository.emitAnimation(note.id, emoji, success = true)
@@ -1482,6 +1485,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         tags = result.event.tags.map { it.toList() }
                     )
                     NotesRepository.getInstance().injectOwnNote(note)
+                    // Prefetch quoted notes so they render immediately (don't rely on lazy composable fetch)
+                    if (note.quotedEventIds.isNotEmpty()) {
+                        QuotedNoteCache.prefetchForNotes(listOf(note))
+                    }
                     // Mark as confirmed — progress line turns green then fades
                     NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
                 }
@@ -2347,6 +2354,59 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         Log.e("AccountStateViewModel", "NIP-09 deletion failed: ${result.message}")
                         _toastMessage.value = "Deletion request failed: ${result.message}"
                     }
+                }
+            }
+        }
+        return null
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Reaction deletion — NIP-09 kind-5 referencing a kind-7 reaction event
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Delete a reaction the current user previously published.
+     *
+     * @param noteId    The note the reaction is attached to (for optimistic count updates).
+     * @param reactionEventId  The event ID of the kind-7 reaction to delete.
+     * @param emoji     The emoji that was reacted with (for count bookkeeping).
+     *
+     * Returns null on success, or an error message for synchronous failures.
+     */
+    fun deleteReaction(noteId: String, reactionEventId: String, emoji: String): String? {
+        val account = _currentAccount.value ?: return "Sign in to remove reaction"
+        val accountHex = account.toHexKey() ?: return "Invalid account key"
+        val signer = getSignerOrNull() ?: return signerUnavailableMessage()
+
+        val outboxRelays = relayStorageManager.loadOutboxRelays(accountHex)
+            .mapNotNull { RelayUrlNormalizer.normalizeOrNull(it.url)?.url }
+            .toSet()
+        if (outboxRelays.isEmpty()) return "No outbox relays configured"
+
+        // Optimistic removal — update counts and tracking immediately
+        NoteCountsRepository.removeOwnReaction(noteId, reactionEventId, emoji)
+
+        viewModelScope.launch {
+            val result = EventPublisher.publish(
+                context = getApplication(),
+                signer = signer,
+                relayUrls = outboxRelays,
+                kind = 5,
+                content = "Reaction deleted"
+            ) {
+                add(arrayOf("e", reactionEventId))
+                add(arrayOf("k", "7"))
+            }
+            when (result) {
+                is PublishResult.Success -> {
+                    Log.d("AccountStateViewModel", "Reaction deletion published: ${result.eventId.take(8)} for reaction ${reactionEventId.take(8)} on note ${noteId.take(8)}")
+                    _toastMessage.value = "Reaction removed"
+                }
+                is PublishResult.Error -> {
+                    Log.e("AccountStateViewModel", "Reaction deletion failed: ${result.message}")
+                    _toastMessage.value = "Failed to remove reaction: ${result.message}"
+                    // Re-inject the reaction since deletion failed
+                    NoteCountsRepository.injectOwnReaction(noteId, emoji, accountHex, null, reactionEventId)
                 }
             }
         }

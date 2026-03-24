@@ -13,6 +13,11 @@ interface EventDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insert(event: CachedEventEntity)
 
+    /** Update the stored merged relay URLs for an event. Used when relay merges happen
+     *  in-memory so cold-start restoration preserves all relay orbs. */
+    @Query("UPDATE cached_events SET relayUrls = :relayUrls WHERE eventId = :eventId")
+    suspend fun updateRelayUrls(eventId: String, relayUrls: String)
+
     /** Feed events (kind-1, kind-6, kind-30023) ordered newest-first. */
     @Query("SELECT * FROM cached_events WHERE kind IN (1, 6, 30023) ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getFeedEvents(limit: Int = 500): List<CachedEventEntity>
@@ -55,6 +60,14 @@ interface EventDao {
     /** Delete events by kind (e.g. clear only feed events). */
     @Query("DELETE FROM cached_events WHERE kind IN (:kinds)")
     suspend fun deleteByKinds(kinds: List<Int>)
+
+    /** Poll/zap-poll response events referencing a specific poll event. */
+    @Query("SELECT * FROM cached_events WHERE kind = :kind AND referencedEventId = :pollId ORDER BY createdAt ASC")
+    suspend fun getByKindAndReference(kind: Int, pollId: String): List<CachedEventEntity>
+
+    /** User's own events of a specific kind (e.g. own poll votes). */
+    @Query("SELECT * FROM cached_events WHERE kind = :kind AND pubkey = :pubkey ORDER BY createdAt DESC")
+    suspend fun getByKindAndPubkey(kind: Int, pubkey: String): List<CachedEventEntity>
 
     /**
      * Size-based pruning: delete the oldest events beyond [keepCount].

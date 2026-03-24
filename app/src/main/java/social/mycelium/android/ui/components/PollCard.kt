@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -36,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -46,11 +48,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.style.TextDecoration
 import social.mycelium.android.data.PollData
 import social.mycelium.android.data.PollOption
 import social.mycelium.android.repository.PollResponseRepository
 import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.QuotedNoteCache
 import social.mycelium.android.repository.ZapPollResponseRepository
+import social.mycelium.android.utils.NoteContentBlock
+import social.mycelium.android.utils.UrlDetector
+import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
 
 private val MyceliumGreen = Color(0xFF8FBC8F)
 
@@ -222,7 +231,9 @@ fun PollBlock(
                     } else {
                         onVote(noteId, noteAuthorPubkey, setOf(option.code), relayUrls.firstOrNull())
                     }
-                }
+                },
+                myPubkey = myPubkey,
+                onPollVote = onVote,
             )
 
             // ── Inline voter avatars ──
@@ -331,7 +342,13 @@ private fun PollOptionRow(
     voteCount: Int,
     percentage: Float,
     enabled: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onProfileClick: (String) -> Unit = {},
+    onNoteClick: (social.mycelium.android.data.Note) -> Unit = {},
+    onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
+    onOpenImageViewer: (List<String>, Int) -> Unit = { _, _ -> },
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
     val animatedProgress by animateFloatAsState(
         targetValue = if (showResults) (percentage / 100f).coerceIn(0f, 1f) else 0f,
@@ -411,22 +428,28 @@ private fun PollOptionRow(
                 Spacer(Modifier.width(8.dp))
             }
 
-            // Option label
-            Text(
+            // Option label — rich content: NIP-19 refs, media, quoted notes, URLs
+            RichPollOptionContent(
                 text = option.label,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = when {
-                    isMyVote -> FontWeight.SemiBold
-                    isLeading && showResults -> FontWeight.Medium
-                    else -> FontWeight.Normal
-                },
-                color = when {
-                    isMyVote -> MyceliumGreen
-                    else -> MaterialTheme.colorScheme.onSurface
-                },
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = when {
+                        isMyVote -> FontWeight.SemiBold
+                        isLeading && showResults -> FontWeight.Medium
+                        else -> FontWeight.Normal
+                    },
+                    color = when {
+                        isMyVote -> MyceliumGreen
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
+                ),
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                onProfileClick = onProfileClick,
+                onNoteClick = onNoteClick,
+                onVideoClick = onVideoClick,
+                onOpenImageViewer = onOpenImageViewer,
+                myPubkey = myPubkey,
+                onPollVote = onPollVote,
             )
 
             // Results
@@ -632,7 +655,8 @@ fun ZapPollBlock(
                     if (!hasVoted && !zapPollData.hasEnded) {
                         onZapVote?.invoke(noteId, noteAuthorPubkey, option.index, relayUrls.firstOrNull())
                     }
-                }
+                },
+                myPubkey = myPubkey,
             )
 
             // Inline voter avatars
@@ -690,7 +714,13 @@ private fun ZapPollOptionRow(
     voterCount: Int,
     percentage: Float,
     enabled: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onProfileClick: (String) -> Unit = {},
+    onNoteClick: (social.mycelium.android.data.Note) -> Unit = {},
+    onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
+    onOpenImageViewer: (List<String>, Int) -> Unit = { _, _ -> },
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
     val animatedProgress by animateFloatAsState(
         targetValue = if (showResults) (percentage / 100f).coerceIn(0f, 1f) else 0f,
@@ -743,21 +773,28 @@ private fun ZapPollOptionRow(
                 Spacer(Modifier.width(8.dp))
             }
 
-            Text(
+            // Option description — rich content: NIP-19 refs, media, quoted notes, URLs
+            RichPollOptionContent(
                 text = description,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = when {
-                    isMyVote -> FontWeight.SemiBold
-                    isLeading && showResults -> FontWeight.Medium
-                    else -> FontWeight.Normal
-                },
-                color = when {
-                    isMyVote -> ZapYellow
-                    else -> MaterialTheme.colorScheme.onSurface
-                },
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = when {
+                        isMyVote -> FontWeight.SemiBold
+                        isLeading && showResults -> FontWeight.Medium
+                        else -> FontWeight.Normal
+                    },
+                    color = when {
+                        isMyVote -> ZapYellow
+                        else -> MaterialTheme.colorScheme.onSurface
+                    },
+                ),
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
+                modifier = Modifier.weight(1f),
+                onProfileClick = onProfileClick,
+                onNoteClick = onNoteClick,
+                onVideoClick = onVideoClick,
+                onOpenImageViewer = onOpenImageViewer,
+                myPubkey = myPubkey,
+                onPollVote = onPollVote,
             )
 
             if (showResults) {
@@ -797,6 +834,239 @@ private fun ZapPollOptionRow(
                 Text("⚡", fontSize = 14.sp)
             }
         }
+    }
+}
+
+/**
+ * Rich content renderer for poll option labels.
+ * Runs the label through the same content pipeline as kind-1 notes:
+ * NIP-19 refs (npub → @name, nevent/note → quoted note), media, URLs, hashtags, custom emoji.
+ */
+@Composable
+private fun RichPollOptionContent(
+    text: String,
+    style: androidx.compose.ui.text.TextStyle,
+    modifier: Modifier = Modifier,
+    maxLines: Int = Int.MAX_VALUE,
+    onProfileClick: (String) -> Unit = {},
+    onNoteClick: (social.mycelium.android.data.Note) -> Unit = {},
+    onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
+    onOpenImageViewer: (List<String>, Int) -> Unit = { _, _ -> },
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
+) {
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+    val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline)
+    val uriHandler = LocalUriHandler.current
+
+    // Check if the option label is primarily a single URL (common for link polls)
+    val detectedUrls = remember(text) { UrlDetector.findUrls(text) }
+    val isSingleUrlOption = remember(text, detectedUrls) {
+        detectedUrls.size == 1 && text.trim() == detectedUrls.first()
+    }
+
+    if (isSingleUrlOption) {
+        // Render compact URL embed card instead of raw URL text
+        PollOptionUrlEmbed(
+            url = detectedUrls.first(),
+            style = style,
+            modifier = modifier,
+        )
+    } else {
+        // Detect media URLs for the block builder
+        val mediaUrls = remember(text) {
+            detectedUrls.filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.toSet()
+        }
+
+        val contentBlocks = remember(text) {
+            buildNoteContentWithInlinePreviews(
+                content = text,
+                mediaUrls = mediaUrls,
+                urlPreviews = emptyList(),
+                linkStyle = linkStyle,
+                profileCache = profileCache,
+            )
+        }
+
+        Column(modifier = modifier) {
+            contentBlocks.forEach { block ->
+                when (block) {
+                    is NoteContentBlock.Content -> {
+                        val annotated = block.annotated
+                        if (annotated.isNotEmpty()) {
+                            ClickableNoteContent(
+                                text = annotated,
+                                style = style,
+                                maxLines = maxLines,
+                                emojiUrls = block.emojiUrls,
+                                onClick = { offset ->
+                                    val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                                    val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                    when {
+                                        profile != null -> onProfileClick(profile.item)
+                                        url != null -> uriHandler.openUri(url.item)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                    is NoteContentBlock.MediaGroup -> {
+                        NoteMediaCarousel(
+                            mediaList = block.urls,
+                            allMediaUrls = block.urls,
+                            groupStartIndex = 0,
+                            initialMediaPage = 0,
+                            isVisible = true,
+                            onMediaPageChanged = {},
+                            onImageTap = onOpenImageViewer,
+                            onOpenImageViewer = onOpenImageViewer,
+                            onVideoClick = onVideoClick,
+                        )
+                    }
+                    is NoteContentBlock.QuotedNote -> {
+                        val eventId = block.eventId
+                        var meta by remember(eventId) { mutableStateOf(QuotedNoteCache.getCached(eventId)) }
+                        if (meta == null) {
+                            LaunchedEffect(eventId) {
+                                meta = QuotedNoteCache.get(eventId)
+                            }
+                        }
+                        val m = meta
+                        if (m != null) {
+                            val quotedAuthor = remember(m.authorId) { profileCache.resolveAuthor(m.authorId) }
+                            QuotedNoteContent(
+                                parentNoteId = eventId,
+                                meta = m,
+                                quotedAuthor = quotedAuthor,
+                                quotedCounts = null,
+                                linkStyle = linkStyle,
+                                profileCache = profileCache,
+                                isVisible = true,
+                                onProfileClick = onProfileClick,
+                                onNoteClick = onNoteClick,
+                                onVideoClick = onVideoClick,
+                                onOpenImageViewer = onOpenImageViewer,
+                                myPubkey = myPubkey,
+                                onPollVote = onPollVote,
+                            )
+                        } else {
+                            Text(
+                                text = "Loading quoted note…",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+                    is NoteContentBlock.Preview -> {
+                        // Compact URL embed instead of full UrlPreviewCard
+                        PollOptionUrlEmbed(
+                            url = block.previewInfo.url,
+                            style = style,
+                        )
+                    }
+                    else -> { /* LiveEventReference, EmojiPack, Article — rare in poll options */ }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Compact URL embed for poll option labels. Shows title + domain on the left,
+ * tappable thumbnail on the right. The image opens the browser; the surrounding
+ * poll option row still functions as the vote button.
+ */
+@Composable
+private fun PollOptionUrlEmbed(
+    url: String,
+    style: androidx.compose.ui.text.TextStyle,
+    modifier: Modifier = Modifier,
+) {
+    val uriHandler = LocalUriHandler.current
+    val urlPreviewService = remember { social.mycelium.android.services.UrlPreviewService() }
+    val cacheRevision by social.mycelium.android.services.UrlPreviewCache.revision.collectAsState()
+
+    var previewState by remember(url) {
+        val cached = social.mycelium.android.services.UrlPreviewCache.get(url)
+        mutableStateOf(cached)
+    }
+
+    // Re-read cache when revision changes (another component may have fetched it)
+    @Suppress("UNUSED_EXPRESSION") cacheRevision
+    LaunchedEffect(url, cacheRevision) {
+        val cached = social.mycelium.android.services.UrlPreviewCache.get(url)
+        if (cached != null) {
+            previewState = cached
+            return@LaunchedEffect
+        }
+        if (!social.mycelium.android.services.UrlPreviewCache.isLoading(url)) {
+            social.mycelium.android.services.UrlPreviewCache.setLoadingState(url, social.mycelium.android.data.UrlPreviewState.Loading)
+            val result = urlPreviewService.fetchPreview(url)
+            social.mycelium.android.services.UrlPreviewCache.setLoadingState(url, result)
+            if (result is social.mycelium.android.data.UrlPreviewState.Loaded) {
+                previewState = result.previewInfo
+            }
+        }
+    }
+
+    val preview = previewState
+    if (preview != null && preview.hasBasicInfo()) {
+        Row(
+            modifier = modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Title + domain on the left
+            Column(modifier = Modifier.weight(1f)) {
+                if (preview.title.isNotEmpty()) {
+                    Text(
+                        text = preview.title,
+                        style = style,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Text(
+                    text = preview.rootDomain,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            // Tappable thumbnail on the right
+            if (preview.imageUrl.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surfaceContainerHighest,
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(6.dp)
+                        )
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp))
+                        .clickable { uriHandler.openUri(url) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    coil.compose.AsyncImage(
+                        model = preview.imageUrlFullPath,
+                        contentDescription = preview.title.ifEmpty { "Link preview" },
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                    )
+                }
+            }
+        }
+    } else {
+        // Fallback: show URL as styled text while loading or if no preview
+        Text(
+            text = url,
+            style = style.copy(
+                color = MaterialTheme.colorScheme.primary,
+                textDecoration = TextDecoration.Underline
+            ),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

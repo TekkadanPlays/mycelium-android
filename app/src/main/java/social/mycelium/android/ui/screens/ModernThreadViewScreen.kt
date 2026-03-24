@@ -43,7 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.RepeatMode
+
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
@@ -135,6 +135,36 @@ private fun subtreeWithStructure(tree: List<ThreadedReply>, focusReplyId: String
         level = newLevel
     )
     return listOf(relevel(node, 0))
+}
+
+/**
+ * Compute the sub-thread drill-down stack needed to make a deeply nested reply
+ * visible in the display list. If the reply is at level >= MAX_THREAD_DEPTH, the
+ * user needs to be routed through one or more sub-thread pivots to reach it.
+ *
+ * Returns the list of reply IDs to push onto [rootReplyIdStack], or empty if the
+ * reply is visible without drilling down.
+ */
+private fun computeDrillDownStack(tree: List<ThreadedReply>, targetId: String): List<String> {
+    val path = findPathToReplyId(tree, targetId) ?: return emptyList()
+    // Each sub-thread pivot resets depth to 0. We need a pivot every time
+    // the depth would reach MAX_THREAD_DEPTH, keeping the target reply visible.
+    // Walk the path: nodes at path indices 0..N correspond to tree levels 0..N.
+    // When a node would be at level >= MAX_THREAD_DEPTH, we pivot on its parent.
+    if (path.size <= MAX_THREAD_DEPTH) return emptyList() // visible without drilling
+    val pivots = mutableListOf<String>()
+    var currentDepthOffset = 0
+    for (i in path.indices) {
+        val effectiveLevel = i - currentDepthOffset
+        if (effectiveLevel >= MAX_THREAD_DEPTH) {
+            // Pivot on the node just before this one — it becomes the new sub-thread root
+            val pivotId = path[i - 1]
+            pivots.add(pivotId)
+            // After pivoting, the pivot node is at level 0, so this node is at level 1
+            currentDepthOffset = i - 1
+        }
+    }
+    return pivots
 }
 
 // Data classes previously in ThreadViewScreen.kt — moved here after cleanup
@@ -261,6 +291,8 @@ fun ModernThreadViewScreen(
     onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
     /** Current user hex pubkey for detecting own poll votes. */
     myPubkeyHex: String? = null,
+    /** Delete a reaction (kind-5 deletion): (noteId, reactionEventId, emoji). */
+    onDeleteReaction: ((noteId: String, reactionEventId: String, emoji: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
@@ -312,10 +344,16 @@ fun ModernThreadViewScreen(
         }
     }
 
-    // Preload outbox relays for quoted note authors (outbox model for faster reply loading)
+    // Prefetch quoted notes for the root note + preload outbox relays for quoted note authors
     LaunchedEffect(note.id) {
+        // Ensure quoted notes are in cache (may already be from feed prefetch; if not, fetch now)
+        if (note.quotedEventIds.isNotEmpty()) {
+            val uncached = note.quotedEventIds.filter { social.mycelium.android.repository.QuotedNoteCache.getCached(it) == null }
+            if (uncached.isNotEmpty()) {
+                social.mycelium.android.repository.QuotedNoteCache.prefetchForNotes(listOf(note))
+            }
+        }
         val discoveryRelays = cacheRelayUrls
-        // Extract quoted note author pubkeys from the note's tags
         note.quotedEventIds.forEach { quotedId ->
             val quotedMeta = social.mycelium.android.repository.QuotedNoteCache.getCached(quotedId)
             if (quotedMeta != null && quotedMeta.authorId.isNotBlank()) {
@@ -501,42 +539,63 @@ fun ModernThreadViewScreen(
         onBackClick()
     }
 
-    // When opened from notification with highlightReplyId, expand path to that reply and scroll to it.
-    // Works for both kind-1 and kind-1111 threads.
-    val displayThreadedForHighlight = if (repliesState.threadedReplies.isNotEmpty()) {
-        repliesState.threadedReplies
-    } else {
-        repliesState.replies.map { ThreadedReply(reply = it, children = emptyList(), level = 0) }
-    }
-    val displayListForHighlight = when {
-        currentRootReplyId != null -> subtreeWithStructure(displayThreadedForHighlight, currentRootReplyId!!) ?: displayThreadedForHighlight
-        else -> displayThreadedForHighlight
-    }
-    // Track which reply to flicker-highlight after scrolling
-    var flickerReplyId by remember { mutableStateOf<String?>(null) }
+    // Persistent highlight: stays visible until user leaves the thread view entirely.
+    // Set once when we scroll to the target reply; never auto-cleared.
+    var highlightedReplyId by remember { mutableStateOf<String?>(null) }
     var haveScrolledToHighlight by remember(highlightReplyId) { mutableStateOf(false) }
-    LaunchedEffect(displayListForHighlight, highlightReplyId, haveScrolledToHighlight) {
-        if (highlightReplyId == null || haveScrolledToHighlight || displayListForHighlight.isEmpty()) return@LaunchedEffect
-        // For kind-1111, expand the path to the reply
-        val path = findPathToReplyId(displayThreadedForHighlight, highlightReplyId!!)
-        path?.forEach { id -> commentStates[id] = CommentState(isCollapsed = false, isExpanded = true) }
-        val listIndex = displayListForHighlight.indexOfFirst { it.reply.id == highlightReplyId }
-        if (listIndex >= 0) {
-            kotlinx.coroutines.delay(300) // brief pause while thread renders
-            // LazyColumn has item(main_note)=0, item(replies_section)=1, then itemsIndexed(displayList)
-            val scrollIndex = 2 + listIndex
-            listState.animateScrollToItem(scrollIndex)
-            // Trigger flicker highlight
-            flickerReplyId = highlightReplyId
-            haveScrolledToHighlight = true
-        }
-        // Don't set haveScrolledToHighlight if reply not found yet — retry when replies load
-    }
-    // Auto-clear flicker after animation
-    LaunchedEffect(flickerReplyId) {
-        if (flickerReplyId != null) {
-            kotlinx.coroutines.delay(2000)
-            flickerReplyId = null
+
+    // When opened from notification / reply tap with highlightReplyId, expand path to
+    // that reply, drill into sub-threads if needed, and scroll to it.
+    // Uses snapshotFlow to retry until the reply actually appears in the rendered list.
+    LaunchedEffect(highlightReplyId) {
+        if (highlightReplyId == null) return@LaunchedEffect
+        // Wait for replies to load (retry up to 10s)
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val threaded = if (repliesState.threadedReplies.isNotEmpty()) {
+                repliesState.threadedReplies
+            } else {
+                repliesState.replies.map { ThreadedReply(reply = it, children = emptyList(), level = 0) }
+            }
+            val path = findPathToReplyId(threaded, highlightReplyId!!)
+            if (path != null) {
+                // Expand all ancestors so they're not collapsed
+                path.forEach { id -> commentStates[id] = CommentState(isCollapsed = false, isExpanded = true) }
+
+                // If reply is deeply nested, drill into sub-threads to reach it
+                val drillStack = computeDrillDownStack(threaded, highlightReplyId!!)
+                if (drillStack.isNotEmpty()) {
+                    rootReplyIdStack = drillStack
+                }
+
+                // Brief pause for layout to settle after drill-down + expansion
+                kotlinx.coroutines.delay(350)
+
+                // Compute the display list after drill-down
+                val activeThreaded = if (repliesState.threadedReplies.isNotEmpty()) {
+                    repliesState.threadedReplies
+                } else {
+                    repliesState.replies.map { ThreadedReply(reply = it, children = emptyList(), level = 0) }
+                }
+                val activeRoot = rootReplyIdStack.lastOrNull()
+                val activeDisplayList = when {
+                    activeRoot != null -> subtreeWithStructure(activeThreaded, activeRoot) ?: activeThreaded
+                    else -> activeThreaded
+                }
+                val listIndex = activeDisplayList.indexOfFirst { it.reply.id == highlightReplyId }
+                if (listIndex >= 0) {
+                    // LazyColumn: item(main_note)=0, item(replies_section)=1, then itemsIndexed(displayList)
+                    // When in sub-thread mode, item(back_to_subthread)=2 shifts indices by 1
+                    val headerItems = if (activeRoot != null) 3 else 2
+                    val scrollIndex = headerItems + listIndex
+                    listState.animateScrollToItem(scrollIndex)
+                    highlightedReplyId = highlightReplyId
+                    haveScrolledToHighlight = true
+                    break
+                }
+            }
+            // Reply not in tree yet — wait for replies to load and retry
+            kotlinx.coroutines.delay(500)
         }
     }
 
@@ -684,6 +743,7 @@ fun ModernThreadViewScreen(
                         compactMedia = compactMedia,
                         onPollVote = onPollVote,
                         myPubkeyHex = myPubkeyHex,
+                        onDeleteReaction = onDeleteReaction,
                         modifier = Modifier.fillMaxWidth()
                     )
 
@@ -900,28 +960,20 @@ fun ModernThreadViewScreen(
                     items = displayList,
                     key = { _, it -> logicalReplyKey(it.reply) }
                 ) { index, threadedReply ->
-                    val isFlickering = flickerReplyId == threadedReply.reply.id
-                    val flickerAlpha by animateFloatAsState(
-                        targetValue = if (isFlickering) 0.15f else 0f,
-                        animationSpec = if (isFlickering) {
-                            androidx.compose.animation.core.repeatable(
-                                iterations = 3,
-                                animation = tween(350),
-                                repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
-                            )
-                        } else {
-                            tween(300)
-                        },
-                        label = "flickerHighlight"
+                    val isHighlighted = highlightedReplyId == threadedReply.reply.id
+                    val highlightAlpha by animateFloatAsState(
+                        targetValue = if (isHighlighted) 0.10f else 0f,
+                        animationSpec = tween(400),
+                        label = "persistentHighlight"
                     )
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .drawBehind {
-                                if (flickerAlpha > 0f) {
+                                if (highlightAlpha > 0f) {
                                     drawRect(
                                         color = androidx.compose.ui.graphics.Color(0xFF6750A4),
-                                        alpha = flickerAlpha
+                                        alpha = highlightAlpha
                                     )
                                 }
                             }
@@ -1877,6 +1929,8 @@ private fun ReplyContentBody(
     onLongPress: (() -> Unit)? = null,
     noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     compactMedia: Boolean = false,
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
@@ -2011,13 +2065,78 @@ private fun ReplyContentBody(
                 )
             }
             is social.mycelium.android.utils.NoteContentBlock.LiveEventReference -> {
-                // Live event references in thread replies - show simple label
-                Text(
-                    text = "Live event: ${block.eventId.take(8)}\u2026",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(vertical = 2.dp)
-                )
+                // NIP-53 live event embed — matches feed card style
+                val liveRepo = remember { social.mycelium.android.repository.LiveActivityRepository.getInstance() }
+                val activity = remember(block.eventId) { liveRepo.allActivities.value.firstOrNull { it.id == block.eventId } }
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .clickable {
+                            onNoteClick(Note(
+                                id = block.eventId,
+                                author = social.mycelium.android.data.Author(id = block.author ?: "", username = "", displayName = "Live Event"),
+                                content = "", timestamp = 0L,
+                                likes = 0, shares = 0, comments = 0,
+                                isLiked = false, hashtags = emptyList(),
+                                mediaUrls = emptyList(), isReply = false,
+                                relayUrl = block.relays.firstOrNull(),
+                                relayUrls = block.relays
+                            ))
+                        },
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                    shape = MaterialTheme.shapes.small
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (activity?.status == social.mycelium.android.data.LiveActivityStatus.LIVE) {
+                            Box(
+                                modifier = Modifier
+                                    .size(10.dp)
+                                    .background(androidx.compose.ui.graphics.Color(0xFFEF4444), androidx.compose.foundation.shape.CircleShape)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Outlined.PlayCircle,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = activity?.title ?: "Live Event",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            val subtitle = when (activity?.status) {
+                                social.mycelium.android.data.LiveActivityStatus.LIVE -> "LIVE" + (activity.currentParticipants?.let { " \u00B7 $it viewers" } ?: "")
+                                social.mycelium.android.data.LiveActivityStatus.PLANNED -> "Planned"
+                                social.mycelium.android.data.LiveActivityStatus.ENDED -> "Ended"
+                                null -> "Live Event"
+                            }
+                            Text(
+                                text = subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (activity?.status == social.mycelium.android.data.LiveActivityStatus.LIVE)
+                                    androidx.compose.ui.graphics.Color(0xFFEF4444)
+                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        )
+                    }
+                }
             }
             is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
                 social.mycelium.android.ui.components.EmojiPackGrid(
@@ -2059,6 +2178,8 @@ private fun ReplyContentBody(
                         onVideoClick = onVideoClick,
                         onOpenImageViewer = onImageTap,
                         depth = 1,
+                        myPubkey = myPubkey,
+                        onPollVote = onPollVote,
                     )
                 } else {
                     // Loading placeholder — matches feed style
@@ -2689,6 +2810,8 @@ private fun ThreadedReplyCard(
     isScrolling: Boolean = false,
     compactMedia: Boolean = false,
     accountNpub: String? = null,
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val reply = threadedReply.reply
@@ -2859,6 +2982,8 @@ private fun ThreadedReplyCard(
                             },
                             noteCountsByNoteId = noteCountsByNoteId,
                             compactMedia = compactMedia,
+                            myPubkey = myPubkey,
+                            onPollVote = onPollVote,
                         )
 
                         // Reactions and zaps — extracted into ReplyControlsPanel
@@ -2915,6 +3040,8 @@ private fun ThreadedReplyCard(
             isScrolling = isScrolling,
             compactMedia = compactMedia,
             accountNpub = accountNpub,
+            myPubkey = myPubkey,
+            onPollVote = onPollVote,
         )
 
         }
@@ -2969,6 +3096,8 @@ private fun ThreadedReplyChildren(
     isScrolling: Boolean,
     compactMedia: Boolean = false,
     accountNpub: String? = null,
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
     val reply = threadedReply.reply
     val level = threadedReply.level
@@ -3057,6 +3186,8 @@ private fun ThreadedReplyChildren(
                     isScrolling = isScrolling,
                     compactMedia = compactMedia,
                     accountNpub = accountNpub,
+                    myPubkey = myPubkey,
+                    onPollVote = onPollVote,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

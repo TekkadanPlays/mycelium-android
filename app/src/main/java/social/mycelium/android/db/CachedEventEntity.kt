@@ -17,6 +17,7 @@ import androidx.room.PrimaryKey
     indices = [
         Index(value = ["kind", "createdAt"]),
         Index(value = ["pubkey"]),
+        Index(value = ["referencedEventId"]),
     ]
 )
 data class CachedEventEntity(
@@ -32,6 +33,12 @@ data class CachedEventEntity(
     val eventJson: String,
     /** Relay URL this event was first received from (nullable). */
     val relayUrl: String? = null,
+    /** All relay URLs that have delivered this event, comma-separated.
+     *  Updated when relay merges happen in-memory so cold-start restoration
+     *  preserves all relay orbs. */
+    val relayUrls: String? = null,
     /** Timestamp (ms) when this row was inserted/updated. For cache pruning. */
-    val cachedAt: Long = System.currentTimeMillis()
+    val cachedAt: Long = System.currentTimeMillis(),
+    /** Primary referenced event ID (first "e" tag). Used for poll response → poll lookups. */
+    val referencedEventId: String? = null
 )

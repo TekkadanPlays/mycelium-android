@@ -7,6 +7,7 @@ import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.utils.EventRelayTracker
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.extractPubkeysFromContent
 import com.example.cybin.core.Filter
@@ -207,6 +208,19 @@ class ThreadRepliesRepository {
             replyCutoffTimestampMs = System.currentTimeMillis()
             Log.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} displayed, cutoff set)")
 
+            // Prefetch quoted notes from reply content so embedded quotes render without spinners
+            val allQuotedIds = getRepliesForNote(noteId).flatMap { reply ->
+                social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(reply.content)
+            }.distinct().filter { QuotedNoteCache.getCached(it) == null }
+            if (allQuotedIds.isNotEmpty()) {
+                // Build a stub Note with the quoted IDs so prefetchForNotes can resolve them
+                val stub = social.mycelium.android.data.Note(
+                    id = "prefetch-stub", author = social.mycelium.android.data.Author(id = "", username = "", displayName = ""),
+                    content = "", timestamp = 0L, quotedEventIds = allQuotedIds
+                )
+                QuotedNoteCache.prefetchForNotes(listOf(stub))
+            }
+
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching replies: ${e.message}", e)
             _error.value = "Failed to load replies: ${e.message}"
@@ -225,6 +239,8 @@ class ThreadRepliesRepository {
             NotificationsRepository.ingestEvent(event)
             // Accept kind-1111 always; accept kind-1 when root is a kind-11 topic or kind-1 note
             if (event.kind == 1111 || (event.kind == 1 && noteId in kind1RootIds)) {
+                // Track relay URL for orb accumulation
+                if (relayUrl.isNotBlank()) EventRelayTracker.addRelay(event.id, relayUrl)
                 val reply = convertEventToThreadReply(event, relayUrl).let { r ->
                     if (r.rootNoteId == null) r.copy(rootNoteId = noteId) else r
                 }
@@ -263,8 +279,11 @@ class ThreadRepliesRepository {
 
     /** Add a reply directly to the displayed list (during initial load). */
     private fun addToDisplayed(noteId: String, reply: ThreadReply) {
+        // Enrich relay URLs from EventRelayTracker (accumulates across duplicate deliveries)
+        val enrichedUrls = EventRelayTracker.enrichRelayUrls(reply.id, reply.relayUrls)
+        val enrichedReply = if (enrichedUrls.size > reply.relayUrls.size) reply.copy(relayUrls = enrichedUrls) else reply
         val currentReplies = (_replies.value[noteId] ?: emptyList()).toMutableList()
-        currentReplies.add(reply)
+        currentReplies.add(enrichedReply)
         _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
         _isLoading.value = false
     }

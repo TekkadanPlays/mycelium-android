@@ -25,6 +25,8 @@ import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.TopicsRepository
 import social.mycelium.android.repository.Nip65RelayListRepository
 import social.mycelium.android.repository.ScopedModerationRepository
+import social.mycelium.android.repository.PollResponseRepository
+import social.mycelium.android.repository.ZapPollResponseRepository
 import social.mycelium.android.relay.NetworkConnectivityMonitor
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.services.RelayForegroundService
@@ -165,6 +167,11 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
 
         // Persist feed so notes survive process death; restore on cold start
         NotesRepository.getInstance().prepareFeedCache(applicationContext)
+
+        // Wire Room EventDao into poll repositories for caching poll responses + zap receipts
+        val eventDao = social.mycelium.android.db.AppDatabase.getInstance(applicationContext).eventDao()
+        PollResponseRepository.eventDao = eventDao
+        ZapPollResponseRepository.eventDao = eventDao
 
         // Register kind-11 handler from app start so topics are collected before user opens Topics screen
         TopicsRepository.getInstance(applicationContext)

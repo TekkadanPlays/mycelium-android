@@ -19,6 +19,27 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.03",
+      "versionCode": 41,
+      "releaseDate": "2026-03-24",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.03-beta/Mycelium-v0.5.03-beta.apk",
+      "changelog": "Poll persistence to Room DB, thread view quoted note prefetch optimization.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Poll responses (kind-1018) and zap poll receipts (kind-9735) now persist to Room database instead of SharedPreferences",
+        "Poll vote tallies seed from Room on cold start — own votes survive app restart without relay refetch",
+        "Room migration 6→7: added referencedEventId column with index for efficient poll response lookups",
+        "Thread view quoted notes prefetch on open — embedded quotes resolve instantly from cache",
+        "Kind-1111 reply quoted notes prefetch after initial load window (parity with kind-1 replies)"
+      ]
+    },
+    {
       "version": "0.5.02",
       "versionCode": 40,
       "releaseDate": "2026-03-22",

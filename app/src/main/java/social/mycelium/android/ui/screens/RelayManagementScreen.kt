@@ -57,6 +57,7 @@ import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.repository.RelayRepository
 import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.DirectMessageRepository
 import social.mycelium.android.utils.normalizeRelayUrl
 import social.mycelium.android.viewmodel.RelayManagementViewModel
 import social.mycelium.android.viewmodel.AccountStateViewModel
@@ -176,6 +177,12 @@ fun RelayManagementScreen(
     val draftsRelays by remember { derivedStateOf { uiState.draftsRelays } }
     val blossomServers by remember { derivedStateOf { uiState.blossomServers } }
     val nip96Servers by remember { derivedStateOf { uiState.nip96Servers } }
+    
+    // DM Relays
+    val dmRelayUrls by DirectMessageRepository.dmRelayUrls.collectAsState()
+    val dmRelays = remember(dmRelayUrls) {
+        dmRelayUrls.map { createRelayWithNip11Info(it, read = true, write = true, nip11Cache = nip11Cache) }
+    }
 
     // Live connection state
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
@@ -514,6 +521,7 @@ fun RelayManagementScreen(
                     when (fixedTabs[page]) {
                         RelayTab.SYSTEM -> SystemTabContent(
                             announcementRelays = announcementRelays,
+                            dmRelays = dmRelays,
                             draftsRelays = draftsRelays,
                             blossomServers = blossomServers,
                             nip96Servers = nip96Servers,
@@ -522,6 +530,19 @@ fun RelayManagementScreen(
                                 addRelayTo(url, announcementRelays) { viewModel.addAnnouncementRelay(it) }
                             },
                             onRemoveAnnouncementRelay = { viewModel.removeAnnouncementRelay(it) },
+                            onAddDmRelay = { url -> DirectMessageRepository.addDmRelay(url) },
+                            onRemoveDmRelay = { url -> DirectMessageRepository.removeDmRelay(url) },
+                            onPublishDmRelays = {
+                                val signer = accountStateViewModel.getCurrentSigner()
+                                if (signer != null) {
+                                    scope.launch {
+                                        DirectMessageRepository.publishDmRelays(context, signer)
+                                        snackbarHostState.showSnackbar("DM Relays published")
+                                    }
+                                } else {
+                                    scope.launch { snackbarHostState.showSnackbar("No signer available") }
+                                }
+                            },
                             onAddDraftsRelay = { url ->
                                 addRelayTo(url, draftsRelays) { viewModel.addDraftsRelay(it) }
                             },
@@ -1240,12 +1261,16 @@ private fun FabMenuItem(label: String, icon: ImageVector, onClick: () -> Unit) {
 @Composable
 private fun SystemTabContent(
     announcementRelays: List<UserRelay>,
+    dmRelays: List<UserRelay>,
     draftsRelays: List<UserRelay>,
     blossomServers: List<social.mycelium.android.data.MediaServer>,
     nip96Servers: List<social.mycelium.android.data.MediaServer>,
     perRelayState: Map<String, RelayEndpointStatus>,
     onAddAnnouncementRelay: (String) -> Unit,
     onRemoveAnnouncementRelay: (String) -> Unit,
+    onAddDmRelay: (String) -> Unit,
+    onRemoveDmRelay: (String) -> Unit,
+    onPublishDmRelays: () -> Unit,
     onAddDraftsRelay: (String) -> Unit,
     onRemoveDraftsRelay: (String) -> Unit,
     onAddBlossomServer: (String, String) -> Unit,
@@ -1256,10 +1281,12 @@ private fun SystemTabContent(
     modifier: Modifier = Modifier
 ) {
     var announcementsExpanded by remember { mutableStateOf(true) }
+    var dmExpanded by remember { mutableStateOf(true) }
     var draftsExpanded by remember { mutableStateOf(true) }
     var blossomExpanded by remember { mutableStateOf(true) }
     var nip96Expanded by remember { mutableStateOf(true) }
     var announcementInput by remember { mutableStateOf("") }
+    var dmInput by remember { mutableStateOf("") }
     var draftsInput by remember { mutableStateOf("") }
     var blossomInput by remember { mutableStateOf("") }
     var nip96Input by remember { mutableStateOf("") }
@@ -1306,6 +1333,59 @@ private fun SystemTabContent(
                         announcementInput = ""
                     }
                 )
+            }
+        }
+
+        // ── DM Relays (NIP-17) ──
+        item(key = "dm_header") {
+            SystemSectionHeader(
+                title = "DM Relays (NIP-17)",
+                icon = Icons.Outlined.Lock,
+                count = dmRelays.size,
+                expanded = dmExpanded,
+                onToggle = { dmExpanded = !dmExpanded }
+            )
+        }
+        if (dmExpanded) {
+            if (dmRelays.isEmpty()) {
+                item(key = "dm_empty") {
+                    Text(
+                        "Relays dedicated for end-to-end encrypted messaging.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+                    )
+                }
+            }
+            dmRelays.forEachIndexed { idx, relay ->
+                item(key = "dm_${relay.url}") {
+                    SystemRelayItem(
+                        relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        onOpenRelayLog = onOpenRelayLog,
+                        onRemove = { onRemoveDmRelay(relay.url) },
+                        showDivider = true
+                    )
+                }
+            }
+            item(key = "dm_add") {
+                AddRelayRow(
+                    relayUrl = dmInput,
+                    onRelayUrlChange = { dmInput = it },
+                    onAdd = { url ->
+                        onAddDmRelay(url)
+                        dmInput = ""
+                    }
+                )
+            }
+            if (dmRelays.isNotEmpty()) {
+                item(key = "dm_publish") {
+                    PublishRelayListButton(
+                        label = "Publish DM Relays",
+                        description = "Publishes your kind-10050 event.",
+                        onClick = onPublishDmRelays
+                    )
+                }
             }
         }
 

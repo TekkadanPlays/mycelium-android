@@ -2,6 +2,7 @@ package social.mycelium.android.repository
 
 import android.content.Context
 import android.util.Log
+import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
 import com.example.cybin.signer.NostrSigner
@@ -80,15 +81,19 @@ object StartupOrchestrator {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /** Guard against double-execution when LaunchedEffect re-fires. */
-    @Volatile private var phase1Started = false
-    @Volatile private var phase0Started = false
+    @Volatile
+    private var phase1Started = false
+    @Volatile
+    private var phase0Started = false
 
     /** Deferred that completes when Phase 1 is done. Callers can await it. */
-    @Volatile private var phase1Deferred: CompletableDeferred<Unit>? = null
+    @Volatile
+    private var phase1Deferred: CompletableDeferred<Unit>? = null
 
     /** Tracks the currently active account pubkey. Used by Phase 5 to detect stale
      *  detached coroutines from a previous account that survived an account switch. */
-    @Volatile private var activePubkey: String? = null
+    @Volatile
+    private var activePubkey: String? = null
 
     /** Reset for account switch. */
     fun reset() {
@@ -356,6 +361,8 @@ object StartupOrchestrator {
         signer: NostrSigner,
         inboxUrls: List<String>,
         outboxUrls: List<String>,
+        followedPubkeys: Set<String>,
+        indexerUrls: List<String>,
     ) {
         _currentPhase.value = StartupPhase.BACKGROUND
         Log.d(TAG, "Phase 4: starting background subscriptions")
@@ -364,10 +371,94 @@ object StartupOrchestrator {
         DirectMessageRepository.startSubscription(userPubkey, signer, inboxUrls, outboxUrls)
         Log.d(TAG, "Phase 4: DM subscription started")
 
+        // Fetch kind-10050 DM relay lists for self + followed network.
+        // Results are stored in DirectMessageRepository for the DM system to use.
+        scope.launch {
+            fetchDmRelayLists(userPubkey, followedPubkeys, inboxUrls + outboxUrls, indexerUrls)
+        }
+
         scope.launch {
             delay(2_000L)
             _currentPhase.value = StartupPhase.COMPLETE
             Log.d(TAG, "Startup complete — all phases done")
+        }
+    }
+
+    /**
+     * Fetch the signed-in user's and their followed peers' kind-10050 DM relay lists.
+     * NIP-17 specifies kind-10050 as the relay list specifically for DMs.
+     * Results are stored in [DirectMessageRepository] for use when communicating.
+     */
+    private suspend fun fetchDmRelayLists(
+        userPubkey: String,
+        followedPubkeys: Set<String>,
+        fallbackRelays: List<String>,
+        indexerUrls: List<String>,
+    ) {
+        val availableRelays = (fallbackRelays + indexerUrls).filter { it.startsWith("ws") }.distinct().take(10)
+        if (availableRelays.isEmpty()) {
+            Log.d(TAG, "Phase 4: no relays for kind-10050 fetch, skipping")
+            return
+        }
+
+        val allPubkeys = (listOf(userPubkey) + followedPubkeys).distinct()
+        Log.d(TAG, "Phase 4: fetching kind-10050 DM relay lists for ${userPubkey.take(8)} and ${followedPubkeys.size} followed")
+
+        allPubkeys.chunked(200).forEach { chunk ->
+            val filter = Filter(
+                kinds = listOf(10050),
+                authors = chunk,
+                limit = chunk.size
+            )
+
+            val eventsByAuthor = mutableMapOf<String, Event>()
+            val settleWaitMs = 1500L
+            val lastSeen = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+
+            try {
+                val handle = RelayConnectionStateMachine.getInstance().requestTemporarySubscriptionWithRelay(
+                    availableRelays, filter,
+                    priority = SubscriptionPriority.LOW
+                ) { event, _ ->
+                    if (event.kind == 10050 && event.pubKey in chunk) {
+                        val current = eventsByAuthor[event.pubKey]
+                        if (current == null || event.createdAt > current.createdAt) {
+                            eventsByAuthor[event.pubKey] = event
+                        }
+                        lastSeen.set(System.currentTimeMillis())
+                    }
+                }
+                
+                // wait for settle
+                var passed = 0L
+                while (passed < 10000L) {
+                    kotlinx.coroutines.delay(200)
+                    passed += 200
+                    if (System.currentTimeMillis() - lastSeen.get() > settleWaitMs) {
+                        break
+                    }
+                }
+                handle.cancel()
+            } catch (e: Exception) {
+                Log.e(TAG, "Phase 4: kind-10050 batch fetch failed: ${e.message}")
+            }
+
+            eventsByAuthor.forEach { (pubkey, event) ->
+                val dmRelayUrls = event.tags
+                    .filter { it.size >= 2 && it[0] == "relay" }
+                    .map { it[1].trim().removeSuffix("/") }
+                    .filter { it.startsWith("wss://") || it.startsWith("ws://") }
+                    .distinct()
+
+                if (dmRelayUrls.isNotEmpty()) {
+                    if (pubkey == userPubkey) {
+                        DirectMessageRepository.setDmRelayUrls(dmRelayUrls)
+                        Log.d(TAG, "Phase 4: kind-10050 self found — ${dmRelayUrls.size} DM relays")
+                    } else {
+                        DirectMessageRepository.setPeerDmRelayUrls(pubkey, dmRelayUrls)
+                    }
+                }
+            }
         }
     }
 
@@ -389,7 +480,10 @@ object StartupOrchestrator {
         // (detached scope survives LaunchedEffect cancellation on account switch),
         // skip the deep fetch to avoid fetching history for the wrong account.
         if (activePubkey != userPubkey) {
-            Log.w(TAG, "Phase 5: skipping — account changed (active=${activePubkey?.take(8)}, requested=${userPubkey.take(8)})")
+            Log.w(
+                TAG,
+                "Phase 5: skipping — account changed (active=${activePubkey?.take(8)}, requested=${userPubkey.take(8)})"
+            )
             return
         }
         scope.launch {

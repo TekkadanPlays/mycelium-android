@@ -102,45 +102,127 @@ object DirectMessageRepository {
     /** Cache of fetched inbox relays per pubkey (NIP-65 kind-10002 only — kind-10050 intentionally ignored). */
     private val inboxRelayCache = ConcurrentHashMap<String, List<String>>()
 
+    // ── Kind-10050 DM relay list (fetched during Phase 4 startup) ────
+
+    /** DM-specific relay URLs from the user's kind-10050 event (NIP-17).
+     *  When non-empty, these should be preferred over inbox relays for DM
+     *  subscriptions and sending. Set by [setDmRelayUrls] during startup. */
+    private val _dmRelayUrls = MutableStateFlow<List<String>>(emptyList())
+    val dmRelayUrls: StateFlow<List<String>> = _dmRelayUrls.asStateFlow()
+
+    /** Store kind-10050 DM relay URLs fetched by StartupOrchestrator. */
+    fun setDmRelayUrls(urls: List<String>) {
+        _dmRelayUrls.value = urls.map { it.trim().removeSuffix("/") }.distinct()
+        Log.d(TAG, "DM relay list set: ${urls.size} relays")
+    }
+
+    fun addDmRelay(url: String) {
+        val current = _dmRelayUrls.value.toMutableList()
+        current.add(url.trim().removeSuffix("/"))
+        _dmRelayUrls.value = current.distinct()
+    }
+
+    fun removeDmRelay(url: String) {
+        val current = _dmRelayUrls.value.toMutableList()
+        current.remove(url.trim().removeSuffix("/"))
+        _dmRelayUrls.value = current.distinct()
+    }
+
+    suspend fun publishDmRelays(
+        context: android.content.Context,
+        signer: com.example.cybin.signer.NostrSigner
+    ) {
+        val uniqueUrls = _dmRelayUrls.value
+        
+        // Publish to user outbox/inbox, plus the DM relays themselves, plus indexers
+        val publishRelays = (uniqueUrls + Nip65RelayListRepository.getIndexerRelayUrls() + userOutboxRelays + userInboxRelays).toSet()
+
+        val result = social.mycelium.android.services.EventPublisher.publish(
+            context = context,
+            signer = signer,
+            relayUrls = publishRelays,
+            kind = 10050,
+            content = "",
+            tags = {
+                uniqueUrls.forEach { url -> add(arrayOf("relay", url)) }
+            }
+        )
+        
+        when (result) {
+            is social.mycelium.android.services.PublishResult.Success -> {
+                Log.d(TAG, "DM relays (kind-10050) published: ${result.eventId.take(8)}")
+            }
+            is social.mycelium.android.services.PublishResult.Error ->
+                Log.e(TAG, "DM relays publish failed: ${result.message}")
+        }
+    }
+
+    /** DM-specific relay URLs for OTHER users (peer pubkeys) fetched during Phase 4 startup.
+     *  Key = peer pubkey, Value = list of their kind-10050 relays.
+     *  These are used when SENDING DMs to a peer to ensure we hit their preferred NIP-17 relays. */
+    private val peerDmRelays = ConcurrentHashMap<String, List<String>>()
+
+    /** Populate the peer kind-10050 relay map. */
+    fun setPeerDmRelayUrls(pubkey: String, urls: List<String>) {
+        if (urls.isNotEmpty()) {
+            peerDmRelays[pubkey] = urls
+            Log.d(TAG, "Peer DM relay list set for ${pubkey.take(8)}: ${urls.size} relays")
+        }
+    }
+
     /** Maps gift wrap event IDs → DM message ID (seal ID) for relay orb confirmations. */
     private val giftWrapToDmId = ConcurrentHashMap<String, String>()
 
     private var confirmationObserverJob: kotlinx.coroutines.Job? = null
+    private var dmRelaysJob: kotlinx.coroutines.Job? = null
 
     /**
      * Start subscribing to gift-wrapped DMs for the given user.
      * **Fetch only** — raw kind-1059 events are buffered without any Amber interaction.
      * Call [decryptPending] when the user visits the DM page to trigger decryption.
      */
-    fun startSubscription(pubkey: String, signer: NostrSigner, inboxRelays: List<String>, outboxRelays: List<String> = emptyList()) {
+    fun startSubscription(
+        pubkey: String,
+        signer: NostrSigner,
+        inboxRelays: List<String>,
+        outboxRelays: List<String> = emptyList()
+    ) {
         userPubkey = pubkey
         userSigner = signer
         userInboxRelays = inboxRelays.map { it.trim().removeSuffix("/") }.distinct()
         userOutboxRelays = outboxRelays.map { it.trim().removeSuffix("/") }.distinct()
 
-        // Subscribe on inbox + outbox combined so self-wraps sent to outbox are also found
-        val allRelays = (userInboxRelays + userOutboxRelays).distinct()
-
-        _debugStatus.value = "Subscribing on ${allRelays.size} relays..."
-        Log.d(TAG, "startSubscription: pubkey=${pubkey.take(8)}, inbox=${userInboxRelays.size}, outbox=${userOutboxRelays.size}, total=${allRelays.size}")
-
-        // Subscribe to kind 1059 with #p = our pubkey — no time constraint, fetch everything
-        val filter = Filter(
-            kinds = listOf(KIND_GIFT_WRAP),
-            tags = mapOf("p" to listOf(pubkey)),
-            limit = 5000
-        )
-        Log.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, limit=5000 (no since)")
-
-        dmHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        dmHandle = stateMachine.requestTemporarySubscriptionWithRelay(
-            allRelays, filter, priority = SubscriptionPriority.NORMAL
-        ) { event, relayUrl ->
-            bufferGiftWrap(event, relayUrl)
+
+        dmRelaysJob?.cancel()
+        dmRelaysJob = scope.launch {
+            _dmRelayUrls.collect { dmRelays ->
+                dmHandle?.cancel()
+                if (dmRelays.isEmpty()) {
+                    Log.w(TAG, "No NIP-17 DM relays configured! Halting DM subscription.")
+                    _debugStatus.value = "Awaiting NIP-17 Relay setup"
+                    return@collect
+                }
+
+                _debugStatus.value = "Subscribing on ${dmRelays.size} relays..."
+                Log.d(TAG, "startSubscription: pubkey=${pubkey.take(8)}, dmRelays=${dmRelays.size}")
+
+                val filter = Filter(
+                    kinds = listOf(KIND_GIFT_WRAP),
+                    tags = mapOf("p" to listOf(pubkey)),
+                    limit = 5000
+                )
+                Log.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, limit=5000 (no since)")
+
+                dmHandle = stateMachine.requestTemporarySubscriptionWithRelay(
+                    dmRelays, filter, priority = SubscriptionPriority.NORMAL
+                ) { event, relayUrl ->
+                    bufferGiftWrap(event, relayUrl)
+                }
+                _debugStatus.value = "Listening on ${dmRelays.size} relays"
+                Log.d(TAG, "DM subscription started on ${dmRelays.size} relays for ${pubkey.take(8)}...")
+            }
         }
-        _debugStatus.value = "Listening on ${allRelays.size} relays"
-        Log.d(TAG, "DM subscription started on ${allRelays.size} relays for ${pubkey.take(8)}...")
 
         // Observe relay OK confirmations to update sent DM relay orbs
         confirmationObserverJob?.cancel()
@@ -249,9 +331,12 @@ object DirectMessageRepository {
                 refreshActiveMessages()
             }
             _debugStatus.value = "${pendingGiftWraps.size} encrypted, ${messagesById.size} decrypted" +
-                if (declinedByUser) " (user declined)" else ""
-            Log.d(TAG, "decryptPending: done — $decryptedCount ok, $failedCount bad-format, $errorCount errors, ${pendingGiftWraps.size} still pending" +
-                if (declinedByUser) ", stopped by user decline" else "")
+                    if (declinedByUser) " (user declined)" else ""
+            Log.d(
+                TAG,
+                "decryptPending: done — $decryptedCount ok, $failedCount bad-format, $errorCount errors, ${pendingGiftWraps.size} still pending" +
+                        if (declinedByUser) ", stopped by user decline" else ""
+            )
         }
     }
 
@@ -260,12 +345,22 @@ object DirectMessageRepository {
      * (foreground-capable) so Amber can prompt the user.
      * Returns null if the event has bad format. Throws on Amber decline.
      */
-    private suspend fun decryptGiftWrap(event: Event, signer: NostrSigner, myPubkey: String, relayUrls: List<String>): DirectMessage? {
+    private suspend fun decryptGiftWrap(
+        event: Event,
+        signer: NostrSigner,
+        myPubkey: String,
+        relayUrls: List<String>
+    ): DirectMessage? {
         // Step 1: Decrypt gift wrap → seal JSON
         val sealJson = signer.nip44Decrypt(event.content, event.pubKey)
         val seal = Event.fromJsonOrNull(sealJson)
         if (seal == null || seal.kind != KIND_SEAL) {
-            Log.w(TAG, "Invalid seal in gift wrap ${event.id.take(8)}, wrapPubkey=${event.pubKey.take(12)}, decryptedLen=${sealJson.length}, preview=${sealJson.take(120)}")
+            Log.w(
+                TAG,
+                "Invalid seal in gift wrap ${event.id.take(8)}, wrapPubkey=${event.pubKey.take(12)}, decryptedLen=${sealJson.length}, preview=${
+                    sealJson.take(120)
+                }"
+            )
             return null
         }
 
@@ -311,19 +406,30 @@ object DirectMessageRepository {
         refreshActiveMessages()
     }
 
+    /** Determine the best relays for a specific peer pubkey using kind-10050. No fallbacks allowed. */
+    private fun getPeerInboxRelays(peerPubkey: String): List<String> {
+        return peerDmRelays[peerPubkey] ?: emptyList()
+    }
+
     /**
-     * Send a NIP-17 gift-wrapped DM to the specified recipient.
+     * Send a NIP-17 DM. Wraps the message and publishes to both the sender's outbox/DM relays
+     * and the recipient's inbox/DM relays.
      */
-    fun sendMessage(
-        content: String,
-        recipientPubkey: String,
-        signer: NostrSigner,
-        relayUrls: Set<String>,
-        replyToId: String? = null
-    ) {
+    fun sendDirectMessage(recipientPubkey: String, content: String, replyToId: String? = null) {
+        val signer = userSigner ?: return
         val senderPubkey = userPubkey ?: return
+
         scope.launch {
             try {
+                // 1. Determine optimal relays strictly from 10050 limits
+                val myPreferred = _dmRelayUrls.value
+                val targetPreferred = getPeerInboxRelays(recipientPubkey)
+                if (myPreferred.isEmpty() || targetPreferred.isEmpty()) {
+                    Log.e(TAG, "Cannot send DM. Missing kind-10050 DM relays. Mine: ${myPreferred.size}, Peer: ${targetPreferred.size}")
+                    return@launch
+                }
+                val publishRelays = (myPreferred + targetPreferred).distinct().take(4)
+
                 // 1. Build kind 14 rumor (unsigned)
                 val rumorCreatedAt = com.example.cybin.core.nowUnixSeconds()
                 val rumorTags = mutableListOf<Array<String>>()
@@ -353,14 +459,14 @@ object DirectMessageRepository {
                 val signedSeal = signer.sign(sealTemplate)
 
                 // 3. Build kind 1059 gift wrap to RECIPIENT: encrypt seal with random key
-                // NIP-17: send to recipient's inbox relays
-                val recipientInbox = fetchInboxRelays(recipientPubkey, relayUrls)
+                // NIP-17: send to recipient's inbox relays (only strictly 10050)
+                val recipientInbox = targetPreferred.take(4)
                 Log.d(TAG, "Recipient ${recipientPubkey.take(8)} inbox relays: $recipientInbox")
                 val recipientWrapId = sendGiftWrap(signedSeal, recipientPubkey, recipientInbox.toSet())
                 giftWrapToDmId[recipientWrapId] = signedSeal.id
 
                 // 4. Build kind 1059 gift wrap to SELF: so we can see sent messages
-                // NIP-17: send to our own inbox relays so our subscription picks them up
+                // NIP-17: send to our own designated 10050 inbox relays so our subscription picks them up
                 val selfSealContent = signer.nip44Encrypt(rumorJson, senderPubkey)
                 val selfSealTemplate = com.example.cybin.core.EventTemplate(
                     createdAt = sealCreatedAt,
@@ -369,9 +475,9 @@ object DirectMessageRepository {
                     content = selfSealContent
                 )
                 val selfSignedSeal = signer.sign(selfSealTemplate)
-                // Self-wrap goes to inbox + outbox (outbox relays are already connected)
-                val senderRelays = (userInboxRelays + userOutboxRelays).distinct().ifEmpty { relayUrls.toList() }
-                Log.d(TAG, "Self-wrap to ${senderRelays.size} relays (inbox=${userInboxRelays.size} + outbox=${userOutboxRelays.size})")
+                // Self-wrap goes exclusively to DM configured relays
+                val senderRelays = myPreferred.take(4)
+                Log.d(TAG, "Self-wrap to ${senderRelays.size} relays")
                 val selfWrapId = sendGiftWrap(selfSignedSeal, senderPubkey, senderRelays.toSet())
                 giftWrapToDmId[selfWrapId] = signedSeal.id
 
@@ -439,8 +545,8 @@ object DirectMessageRepository {
                 .filter { it.size >= 2 && it[0] == "r" }
                 .filter { tag ->
                     tag.size == 2 ||
-                    tag.getOrNull(2)?.lowercase() == "read" ||
-                    tag.getOrNull(2).isNullOrBlank()
+                            tag.getOrNull(2)?.lowercase() == "read" ||
+                            tag.getOrNull(2).isNullOrBlank()
                 }
                 .map { it[1].trim().removeSuffix("/") }
                 .distinct()
@@ -485,7 +591,10 @@ object DirectMessageRepository {
         )
         val signedWrap = randomSigner.sign(wrapTemplate)
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        Log.d(TAG, "Sending gift wrap ${signedWrap.id.take(8)} to ${recipientPubkey.take(8)} on ${relayUrls.size} relays: $relayUrls")
+        Log.d(
+            TAG,
+            "Sending gift wrap ${signedWrap.id.take(8)} to ${recipientPubkey.take(8)} on ${relayUrls.size} relays: $relayUrls"
+        )
         stateMachine.send(signedWrap, relayUrls)
         // Track for NIP-42 auth retry (relay may require AUTH before accepting EVENT)
         stateMachine.nip42AuthHandler.trackPublishedEvent(signedWrap, relayUrls)
@@ -557,8 +666,14 @@ object DirectMessageRepository {
         val myPubkey = userPubkey ?: return
         val messages = messagesById.values
             .filter { dm ->
-                (dm.senderPubkey.equals(peer, ignoreCase = true) && dm.recipientPubkey.equals(myPubkey, ignoreCase = true)) ||
-                (dm.senderPubkey.equals(myPubkey, ignoreCase = true) && dm.recipientPubkey.equals(peer, ignoreCase = true))
+                (dm.senderPubkey.equals(peer, ignoreCase = true) && dm.recipientPubkey.equals(
+                    myPubkey,
+                    ignoreCase = true
+                )) ||
+                        (dm.senderPubkey.equals(myPubkey, ignoreCase = true) && dm.recipientPubkey.equals(
+                            peer,
+                            ignoreCase = true
+                        ))
             }
             .sortedBy { it.createdAt }
         _activeMessages.value = messages

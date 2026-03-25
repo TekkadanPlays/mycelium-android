@@ -147,6 +147,54 @@ fun FeedPreferencesScreen(
                 )
             }
 
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 8.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+
+            // ── Auto-Save Drafts ──
+            FeedSectionHeader("Drafts")
+            Text(
+                "Automatically save drafts while you compose, so you never lose your work.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+
+            val autoSaveDrafts by FeedPreferences.autoSaveDrafts.collectAsState()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { FeedPreferences.setAutoSaveDrafts(!autoSaveDrafts) }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Description,
+                    contentDescription = null,
+                    tint = if (autoSaveDrafts) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Auto-save drafts",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = if (autoSaveDrafts) FontWeight.Bold else FontWeight.Normal
+                    )
+                    Text(
+                        text = "Periodically save while typing and on back press",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = autoSaveDrafts,
+                    onCheckedChange = { FeedPreferences.setAutoSaveDrafts(it) }
+                )
+            }
+
             Spacer(modifier = Modifier.height(32.dp))
         }
     }

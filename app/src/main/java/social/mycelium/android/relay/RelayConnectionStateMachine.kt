@@ -215,6 +215,9 @@ class RelayConnectionStateMachine {
     private var mainFeedSubscription: CybinSubscription? = null
     private var currentSubId: String? = null
 
+    /** Separate subscription handle for kind-11 topics (own slot, not bundled with main feed). */
+    private var topicsSubId: String? = null
+
     private val _state = MutableStateFlow<RelayState>(RelayState.Disconnected)
     val state: StateFlow<RelayState> = _state.asStateFlow()
 
@@ -471,7 +474,6 @@ class RelayConnectionStateMachine {
                     } else {
                         Filter(kinds = listOf(6), limit = GLOBAL_FEED_LIMIT, since = sevenDaysAgo)
                     }
-                    val filterKind11 = Filter(kinds = listOf(11), limit = 500)
                     val filterKind1011 = Filter(kinds = listOf(1011), limit = 200)
                     val filterKind30311 = Filter(kinds = listOf(30311), limit = 20)
                     val filterKind30023 = if (kind1Filter != null) {
@@ -479,12 +481,15 @@ class RelayConnectionStateMachine {
                     } else {
                         Filter(kinds = listOf(30023), limit = 50, since = sevenDaysAgo)
                     }
-                    val allFilters = listOf(filterKind1, filterKind6, filterKind11, filterKind1011, filterKind30311, filterKind30023)
+                    // Topics (kind-11) has its own subscription slot — NOT bundled here.
+                    // Use startTopicsSubscription() to subscribe independently.
+                    val allFilters = listOf(filterKind1, filterKind6, filterKind1011, filterKind30311, filterKind30023)
                     currentSubId = CybinUtils.randomChars(10)
                     val subId = currentSubId!!
                     val relayFilterMap = effectiveRelayUrls.associateWith { allFilters }
                     relayPool.openSubscription(subId, relayFilterMap) { event, relayUrl ->
                         markEventReceived()
+                        RelayHealthTracker.recordEventReceived(relayUrl)
                         // Track every event+relay pair for relay orbs (like Amethyst's Note.addRelay)
                         social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
                         // Only update state when it actually changes (Connecting → Connected).
@@ -517,7 +522,7 @@ class RelayConnectionStateMachine {
                         }
                     }
                     val mode = if (kind1Filter != null) "following (authors filter)" else "global"
-                    Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-6 + kind-11 + kind-30023, $mode)")
+                    Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-6 + kind-30023, $mode)")
                 }
                 val previousRelayUrls = currentSubscriptionRelayUrls
                 currentSubscriptionRelayUrls = effectiveRelayUrls
@@ -669,6 +674,56 @@ class RelayConnectionStateMachine {
         onKind11 = handler
     }
 
+    // ── Separate topics subscription (kind-11) ───────────────────────────────
+
+    /**
+     * Start a dedicated kind-11 (topics) subscription on the current relay set.
+     * Runs independently from the main feed subscription so topics don't clog
+     * the primary kind-1 pipeline. Call during enrichment phase (Phase 3).
+     * Safe to call multiple times (idempotent).
+     */
+    fun startTopicsSubscription(
+        relayUrls: List<String> = currentSubscriptionRelayUrls
+    ) {
+        if (relayUrls.isEmpty()) {
+            Log.d(TAG, "Topics sub: no relays, skipping")
+            return
+        }
+        val effectiveUrls = RelayHealthTracker.filterBlocked(relayUrls)
+        if (effectiveUrls.isEmpty()) return
+
+        // Close previous topics subscription if any
+        topicsSubId?.let { relayPool.closeSubscription(it) }
+
+        val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
+        val topicsFilter = Filter(kinds = listOf(11), limit = 500, since = sevenDaysAgo)
+        val newSubId = "topics_" + CybinUtils.randomChars(6)
+        topicsSubId = newSubId
+
+        val relayFilterMap = effectiveUrls.associateWith { listOf(topicsFilter) }
+        relayPool.openSubscription(newSubId, relayFilterMap) { event, relayUrl ->
+            if (event.kind == 11) {
+                markEventReceived()
+                RelayHealthTracker.recordEventReceived(relayUrl)
+                social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
+                onKind11?.invoke(event, relayUrl)
+            }
+        }
+        Log.d(TAG, "Topics subscription started: ${effectiveUrls.size} relays (separate slot, subId=$newSubId)")
+    }
+
+    /**
+     * Stop the dedicated kind-11 subscription. Call when topics are no longer needed
+     * (e.g. user navigates away from Topics screen) to free relay resources.
+     */
+    fun stopTopicsSubscription() {
+        topicsSubId?.let {
+            relayPool.closeSubscription(it)
+            topicsSubId = null
+            Log.d(TAG, "Topics subscription stopped")
+        }
+    }
+
     fun registerKind1011Handler(handler: (Event) -> Unit) {
         onKind1011 = handler
     }
@@ -702,6 +757,8 @@ class RelayConnectionStateMachine {
             try {
                 currentSubId?.let { relayPool.closeSubscription(it) }
                 currentSubId = null
+                topicsSubId?.let { relayPool.closeSubscription(it) }
+                topicsSubId = null
                 mainFeedSubscription?.close()
                 mainFeedSubscription = null
                 currentSubscriptionRelayUrls = emptyList()
@@ -775,6 +832,7 @@ class RelayConnectionStateMachine {
      */
     fun disconnectAndClearForAccountSwitch() {
         Log.d(TAG, "Account switch: disconnecting all relays and clearing state")
+        stopTopicsSubscription()
         stateMachine.transition(RelayEvent.DisconnectRequested)
         // Clear resume provider so requestReconnectOnResume() won't race with stale relay state.
         // The new account's ensureSubscriptionToNotes() will re-register it.
@@ -863,6 +921,8 @@ class RelayConnectionStateMachine {
         retryAttempt = 0
         Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (${effectiveUrls.size} healthy, following=${kind1Filter != null})")
         stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter))
+        // Re-start topics subscription (own slot, may have been lost during disconnect)
+        startTopicsSubscription(relayUrls)
     }
 
     /**

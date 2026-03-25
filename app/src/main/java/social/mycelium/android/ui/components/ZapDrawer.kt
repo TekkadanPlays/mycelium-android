@@ -212,6 +212,162 @@ fun ZapDrawer(
     }
 }
 
+/**
+ * ModalBottomSheet wrapper for ZapDrawer.
+ * Provides proper animate-in/out with drag-to-dismiss, matching the EmojiDrawer UX.
+ * Use this instead of a Popup-based ZapDrawer for smooth close animations.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ZapBottomSheet(
+    onDismiss: () -> Unit,
+    onZap: (Long) -> Unit,
+    onCustomZapSend: ((Long, ZapType, String) -> Unit)? = null,
+    onSettingsClick: () -> Unit = {},
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        ZapAmountManager.initialize(context)
+    }
+    val zapAmounts by ZapAmountManager.zapAmounts.collectAsState()
+
+    var currentTab by remember { mutableStateOf(ZapDrawerTab.Zap) }
+    var customAmount by remember { mutableStateOf("") }
+    var customMessage by remember { mutableStateOf("") }
+    var selectedZapType by remember { mutableStateOf(ZapType.PUBLIC) }
+    var newAmountText by remember { mutableStateOf("") }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+        dragHandle = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    Modifier
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f))
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+        },
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(bottom = 16.dp)
+        ) {
+            // ── Header Tabs (Pills) ──
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    item {
+                        ZapTabTitle(
+                            icon = Icons.Filled.Bolt,
+                            label = "Zap",
+                            isSelected = currentTab == ZapDrawerTab.Zap,
+                            onClick = { currentTab = ZapDrawerTab.Zap }
+                        )
+                    }
+                    item {
+                        ZapTabTitle(
+                            icon = Icons.Outlined.Edit,
+                            label = "Custom",
+                            isSelected = currentTab == ZapDrawerTab.Custom,
+                            onClick = { currentTab = ZapDrawerTab.Custom }
+                        )
+                    }
+                    item {
+                        ZapTabTitle(
+                            icon = Icons.Outlined.Settings,
+                            label = "Setup",
+                            isSelected = currentTab == ZapDrawerTab.Setup,
+                            onClick = { currentTab = ZapDrawerTab.Setup }
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Filled.Close,
+                        contentDescription = "Close",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(top = 8.dp, bottom = 12.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+
+            AnimatedContent(
+                targetState = currentTab,
+                transitionSpec = { fadeIn() togetherWith fadeOut() },
+                label = "zap_tab"
+            ) { tab ->
+                when (tab) {
+                    ZapDrawerTab.Zap -> ZapTabContent(
+                        zapAmounts = zapAmounts,
+                        onZap = { amount ->
+                            onZap(amount)
+                            onDismiss()
+                        },
+                        newAmountText = newAmountText,
+                        onNewAmountTextChange = { newAmountText = it },
+                        onAddAmount = { amount ->
+                            ZapAmountManager.addAmount(amount)
+                            newAmountText = ""
+                        },
+                        onRemoveAmount = { ZapAmountManager.removeAmount(it) }
+                    )
+
+                    ZapDrawerTab.Custom -> CustomZapContent(
+                        customAmount = customAmount,
+                        onAmountChange = { customAmount = it },
+                        customMessage = customMessage,
+                        onMessageChange = { customMessage = it },
+                        selectedZapType = selectedZapType,
+                        onZapTypeChange = { selectedZapType = it },
+                        onSend = {
+                            val amount = customAmount.toLongOrNull()
+                            if (amount != null && amount > 0) {
+                                if (onCustomZapSend != null) {
+                                    onCustomZapSend(amount, selectedZapType, customMessage)
+                                } else {
+                                    onZap(amount)
+                                }
+                                onDismiss()
+                            }
+                        }
+                    )
+
+                    ZapDrawerTab.Setup -> SetupContent()
+                }
+            }
+        }
+    }
+}
 @Composable
 private fun ZapTabTitle(
     icon: ImageVector,

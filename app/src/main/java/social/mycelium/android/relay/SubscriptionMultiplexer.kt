@@ -618,6 +618,9 @@ class SubscriptionMultiplexer private constructor(
         }
         if (!isNew) return
 
+        // Track event against source relay for health stats
+        RelayHealthTracker.recordEventReceived(relayUrl)
+
         // Direct dispatch to registered callbacks (O(1) lookup by filterKey)
         eventCallbacks[filterKey]?.let { callbacks ->
             for (cb in callbacks) {

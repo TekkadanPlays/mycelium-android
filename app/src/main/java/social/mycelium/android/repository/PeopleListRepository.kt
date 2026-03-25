@@ -546,6 +546,16 @@ object PeopleListRepository {
     fun getPubkeysForList(dTag: String): Set<String> =
         getListByDTag(dTag)?.pubkeys ?: emptySet()
 
+    /** Get the union of pubkeys from multiple people lists. Used for multi-list feed filtering. */
+    fun getPubkeysForLists(dTags: Set<String>): Set<String> {
+        if (dTags.isEmpty()) return emptySet()
+        val result = mutableSetOf<String>()
+        for (dTag in dTags) {
+            getListByDTag(dTag)?.pubkeys?.let { result.addAll(it) }
+        }
+        return result
+    }
+
     fun clearAll() {
         peopleHandle?.cancel()
         hashtagHandle?.cancel()

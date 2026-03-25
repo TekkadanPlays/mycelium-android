@@ -247,10 +247,12 @@ object Nip65RelayListRepository {
             try {
                 Log.d(TAG, "Fetching kind-10002 for ${pubkeyHex.take(8)}... from ${indexerRelayUrls.size} indexer relays")
 
+                // Use limit=5 to collect multiple versions of this replaceable event.
+                // Different relays may hold different createdAt versions; we pick the newest.
                 val filter = Filter(
                     kinds = listOf(KIND_RELAY_LIST),
                     authors = listOf(pubkeyHex),
-                    limit = 1
+                    limit = 5
                 )
 
                 var bestEvent: Event? = null
@@ -264,6 +266,9 @@ object Nip65RelayListRepository {
                             lastEventAt.set(System.currentTimeMillis())
                             val current = bestEvent
                             if (current == null || event.createdAt > current.createdAt) {
+                                if (current != null) {
+                                    Log.d(TAG, "Superseding stale kind-10002: old createdAt=${current.createdAt} from $bestEventSourceRelay → new createdAt=${event.createdAt} from $relayUrl")
+                                }
                                 bestEvent = event
                                 bestEventSourceRelay = relayUrl
                                 Log.d(TAG, "Best kind-10002 from $relayUrl: createdAt=${event.createdAt}, rTags=${event.tags.count { it.size >= 2 && it[0] == "r" }}")
@@ -272,14 +277,17 @@ object Nip65RelayListRepository {
                     }
                 fetchHandle = handle
 
-                // Settle-based wait: break early when stream goes quiet (1s no new events)
+                // Settle-based wait: break early when stream goes quiet
+                // Use 2.5s settle for the user's own NIP-65 (replaceable event) to give
+                // slower relays time to deliver the latest version before we close.
+                val nip65SettleMs = 2_500L
                 val deadline = System.currentTimeMillis() + FETCH_TIMEOUT_MS
                 while (System.currentTimeMillis() < deadline) {
                     delay(200)
                     val lastAt = lastEventAt.get()
                     if (lastAt > 0) {
                         val quietMs = System.currentTimeMillis() - lastAt
-                        if (quietMs >= 1_000L) break
+                        if (quietMs >= nip65SettleMs) break
                     }
                 }
                 handle.cancel()
@@ -332,12 +340,12 @@ object Nip65RelayListRepository {
     private const val MAX_CONCURRENT = 20
 
     /** Once this many indexers return results, signal early completion. */
-    private const val MIN_RESULTS_FOR_EARLY_DONE = 3
+    private const val MIN_RESULTS_FOR_EARLY_DONE = 5
 
     fun fetchRelayListMultiSource(
         pubkeyHex: String,
         indexerUrls: List<String>,
-        timeoutMs: Long = 3_000L
+        timeoutMs: Long = 6_000L
     ) {
         if (indexerUrls.isEmpty()) {
             Log.w(TAG, "No indexers for multi-source NIP-65 search")

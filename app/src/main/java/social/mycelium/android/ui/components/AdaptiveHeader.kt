@@ -91,8 +91,12 @@ fun AdaptiveHeader(
     peopleLists: List<Pair<String, String>> = emptyList(),
     /** Currently active people list d-tag (null = none). */
     activeListDTag: String? = null,
+    /** Set of currently active people list d-tags (multi-select). */
+    activeListDTags: Set<String> = emptySet(),
     /** Callback when a people list is selected as feed filter (dTag, title). Null clears. */
     onPeopleListSelected: ((String?, String?) -> Unit)? = null,
+    /** Callback to toggle a people list in/out of the active set (multi-select). */
+    onPeopleListToggled: ((String, String) -> Unit)? = null,
     /** Subscribed hashtags (kind-10015) available as feed content filters. */
     subscribedHashtags: Set<String> = emptySet(),
     /** Currently active hashtag content filter (null = none). */
@@ -357,8 +361,8 @@ fun AdaptiveHeader(
                                         HorizontalDivider()
                                     }
                                     if (onFollowingFilterChange != null) {
-                                        val isGlobalActive = !isFollowingFilter && activeListDTag == null
-                                        val isFollowingActive = isFollowingFilter && activeListDTag == null
+                                        val isGlobalActive = !isFollowingFilter && activeListDTags.isEmpty()
+                                        val isFollowingActive = isFollowingFilter && activeListDTags.isEmpty()
                                         DropdownMenuItem(
                                             text = {
                                                 Text("Global", color = if (isGlobalActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
@@ -381,8 +385,78 @@ fun AdaptiveHeader(
                                             },
                                             leadingIcon = { Icon(Icons.Outlined.People, contentDescription = null, tint = if (isFollowingActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                                         )
-                                        // People lists and hashtags removed from logo menu —
-                                        // controlled via Lists page (profile dropdown) instead
+                                        // ── People Lists (multi-select with checkmarks) ──
+                                        if (peopleLists.isNotEmpty()) {
+                                            HorizontalDivider()
+                                            peopleLists.forEach { (dTag, title) ->
+                                                val isActive = dTag in activeListDTags
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(
+                                                            title,
+                                                            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        // Don't close menu — allow multi-select
+                                                        onPeopleListToggled?.invoke(dTag, title)
+                                                    },
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            Icons.Outlined.People,
+                                                            contentDescription = null,
+                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    },
+                                                    trailingIcon = {
+                                                        if (isActive) {
+                                                            Icon(
+                                                                Icons.Default.Check,
+                                                                contentDescription = "Active",
+                                                                tint = MaterialTheme.colorScheme.primary,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+                                        // ── Subscribed Hashtags (multi-select with checkmarks) ──
+                                        if (subscribedHashtags.isNotEmpty()) {
+                                            HorizontalDivider()
+                                            subscribedHashtags.toList().sorted().forEach { hashtag ->
+                                                val isActive = activeHashtagFilter == hashtag
+                                                DropdownMenuItem(
+                                                    text = {
+                                                        Text(
+                                                            "#$hashtag",
+                                                            color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                                        )
+                                                    },
+                                                    onClick = {
+                                                        logoMenuExpanded = false
+                                                        onHashtagFilterSelected?.invoke(if (isActive) null else hashtag)
+                                                    },
+                                                    leadingIcon = {
+                                                        Icon(
+                                                            Icons.Outlined.Tag,
+                                                            contentDescription = null,
+                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    },
+                                                    trailingIcon = {
+                                                        if (isActive) {
+                                                            Icon(
+                                                                Icons.Default.Check,
+                                                                contentDescription = "Active",
+                                                                tint = MaterialTheme.colorScheme.primary,
+                                                                modifier = Modifier.size(18.dp)
+                                                            )
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }

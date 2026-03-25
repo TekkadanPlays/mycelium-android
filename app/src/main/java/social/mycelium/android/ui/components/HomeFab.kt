@@ -84,7 +84,7 @@ fun HomeFab(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Go to top
+                // Go to top (furthest from FAB)
                 HomeFabItem(
                     label = "Top",
                     icon = Icons.Default.KeyboardArrowUp,
@@ -96,17 +96,19 @@ fun HomeFab(
                     }
                 )
 
-                // Create Post
-                HomeFabItem(
-                    label = "Post",
-                    icon = Icons.Default.Edit,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    onClick = {
-                        expanded = false
-                        onCompose()
-                    }
-                )
+                // Drafts (conditional — only shown when drafts exist)
+                if (draftCount > 0) {
+                    HomeFabItem(
+                        label = "Drafts ($draftCount)",
+                        icon = Icons.Outlined.Description,
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        onClick = {
+                            expanded = false
+                            onDrafts()
+                        }
+                    )
+                }
 
                 // Write Article (NIP-23 long-form)
                 HomeFabItem(
@@ -120,19 +122,17 @@ fun HomeFab(
                     }
                 )
 
-                // Drafts
-                if (draftCount > 0) {
-                    HomeFabItem(
-                        label = "Drafts ($draftCount)",
-                        icon = Icons.Outlined.Description,
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                        onClick = {
-                            expanded = false
-                            onDrafts()
-                        }
-                    )
-                }
+                // Create Post (closest to FAB — most common action)
+                HomeFabItem(
+                    label = "Post",
+                    icon = Icons.Default.Edit,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    onClick = {
+                        expanded = false
+                        onCompose()
+                    }
+                )
             }
         }
 

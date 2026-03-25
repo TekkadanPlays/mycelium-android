@@ -442,6 +442,8 @@ private fun OverlayThreadPanel(
                 accountStateViewModel.publishKind1Reply(rootId, rootPubkey, parentId, parentPubkey, content)
             },
             onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
+                expandedControlsReplyId = null
+                expandedControlsCommentId = null
                 appViewModel.setReplyToNote(replyToNote)
                 val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
                 navController.navigate(
@@ -2702,6 +2704,11 @@ fun MyceliumNavigation(
                                 else -> null
                             },
                             onOpenReplyCompose = { rootId, rootPubkey, parentId, parentPubkey, replyToNote ->
+                                // Clear expanded controls before navigating so the
+                                // replied-to comment's controls don't get stuck in
+                                // expanded state when returning from compose.
+                                expandedControlsReplyId = null
+                                expandedControlsCommentId = null
                                 appViewModel.setReplyToNote(replyToNote)
                                 val enc = { s: String? -> android.net.Uri.encode(s ?: "") }
                                 navController.navigate(
@@ -5672,6 +5679,13 @@ fun MyceliumNavigation(
                                             )
                                         }&draftId=${draft.id}"
                                     ) {
+                                        launchSingleTop = true
+                                    }
+                                }
+
+                                social.mycelium.android.data.DraftType.ARTICLE -> {
+                                    // Navigate to compose article with draft pre-filled
+                                    navController.navigate("compose_article?draftId=${draft.id}") {
                                         launchSingleTop = true
                                     }
                                 }

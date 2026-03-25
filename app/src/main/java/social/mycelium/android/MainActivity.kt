@@ -246,6 +246,9 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // Initialize NotificationsRepository with context for Android push notifications
         social.mycelium.android.repository.NotificationsRepository.init(applicationContext)
 
+        // Initialize DirectMessageRepository with context for DM relay persistence
+        social.mycelium.android.repository.DirectMessageRepository.init(applicationContext)
+
         // Handle deep-link from notification tap on cold start
         handleNotificationIntent(intent)
 

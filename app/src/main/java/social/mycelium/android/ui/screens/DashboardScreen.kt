@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.Public
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -960,9 +961,29 @@ private fun DashboardFeedContent(
             onNavigateTo = onNavigateTo,
         )
 
-        // ═══ BANNER: Relay failure warning ═══
+        // ═══ BANNER: Relay failure warning (debounced for cold start) ═══
+        // Don't show immediately — relays need time to reconnect on cold start.
+        var bannerGracePeriodExpired by remember { mutableStateOf(false) }
+        var bannerDismissed by remember { mutableStateOf(false) }
+        // Reset dismiss state when relay failures change (new failures re-show banner)
+        LaunchedEffect(failedUserRelayCount) {
+            if (failedUserRelayCount == 0) bannerDismissed = false
+        }
+        LaunchedEffect(Unit) {
+            kotlinx.coroutines.delay(15_000L) // 15s grace period for cold start reconnection
+            bannerGracePeriodExpired = true
+        }
+        // Auto-dismiss after 30s of continuous display
+        LaunchedEffect(failedUserRelayCount, bannerGracePeriodExpired) {
+            if (failedUserRelayCount > 0 && bannerGracePeriodExpired && !bannerDismissed) {
+                kotlinx.coroutines.delay(30_000L)
+                bannerDismissed = true
+            }
+        }
+
         AnimatedVisibility(
-            visible = failedUserRelayCount > 0 && sortedNotes.isNotEmpty(),
+            visible = failedUserRelayCount > 0 && sortedNotes.isNotEmpty()
+                    && bannerGracePeriodExpired && !bannerDismissed,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
@@ -1004,6 +1025,17 @@ private fun DashboardFeedContent(
                         color = MaterialTheme.colorScheme.onErrorContainer,
                         fontWeight = FontWeight.Bold,
                     )
+                    IconButton(
+                        onClick = { bannerDismissed = true },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            Icons.Outlined.Close,
+                            contentDescription = "Dismiss",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f)
+                        )
+                    }
                 }
             }
         }
@@ -1326,25 +1358,49 @@ fun DashboardScreen(
     // (drops all notes + uses lastAppliedKind1Filter for subscription). Skipping the call
     // when followList is empty was causing the filter to never be applied on cold start,
     // allowing global notes to bleed into the Following feed.
-    val activePeopleListPubkeys by remember(homeFeedState.activeListDTag) {
+    val activePeopleListPubkeys by remember(homeFeedState.activeListDTags) {
         derivedStateOf {
-            homeFeedState.activeListDTag?.let {
-                social.mycelium.android.repository.PeopleListRepository.getPubkeysForList(it)
-            }
+            if (homeFeedState.activeListDTags.isNotEmpty()) {
+                social.mycelium.android.repository.PeopleListRepository.getPubkeysForLists(homeFeedState.activeListDTags)
+            } else null
         }
     }
     LaunchedEffect(
         homeFeedState.isFollowing,
         uiState.followList,
-        homeFeedState.activeListDTag,
+        homeFeedState.activeListDTags,
         activePeopleListPubkeys
     ) {
-        if (homeFeedState.activeListDTag != null) {
-            // People list active: filter by its pubkeys (empty set = blank feed, intentional)
+        if (homeFeedState.activeListDTags.isNotEmpty()) {
+            // People list(s) active: filter by union of their pubkeys (empty set = blank feed, intentional)
             viewModel.setFollowFilterWithCustomList(activePeopleListPubkeys ?: emptySet())
         } else {
             // Normal Following/Global mode
             viewModel.setFollowFilter(homeFeedState.isFollowing)
+        }
+    }
+
+    // Update global enrichment (indexer subscriptions for hashtags + list members)
+    // when the user changes these filters while in Global mode. This ensures the
+    // GlobalFeedManager stays in sync with the dropdown selections.
+    val subscribedHashtags by social.mycelium.android.repository.PeopleListRepository.subscribedHashtags.collectAsState()
+    LaunchedEffect(
+        homeFeedState.isFollowing,
+        subscribedHashtags,
+        homeFeedState.activeListDTags,
+        homeFeedState.activeHashtagFilter
+    ) {
+        // Only relevant when in Global mode (isFollowing == false)
+        if (!homeFeedState.isFollowing) {
+            // Merge subscribed hashtags with the active hashtag filter (if any)
+            val hashtags = buildSet {
+                addAll(subscribedHashtags)
+                homeFeedState.activeHashtagFilter?.let { add(it) }
+            }
+            social.mycelium.android.repository.NotesRepository.getInstance().updateGlobalEnrichment(
+                hashtags = hashtags,
+                listDTags = homeFeedState.activeListDTags
+            )
         }
     }
 
@@ -1957,6 +2013,7 @@ fun DashboardScreen(
                             social.mycelium.android.repository.PeopleListRepository.peopleLists.value.map { it.dTag to it.title }
                         },
                         activeListDTag = homeFeedState.activeListDTag,
+                        activeListDTags = homeFeedState.activeListDTags,
                         onPeopleListSelected = { dTag, title ->
                             if (dTag != null && title != null) {
                                 feedStateViewModel.setHomeActiveList(dTag, title)
@@ -1965,7 +2022,11 @@ fun DashboardScreen(
                             }
                             scrollToTopTrigger++
                         },
-                        subscribedHashtags = social.mycelium.android.repository.PeopleListRepository.subscribedHashtags.collectAsState().value,
+                        onPeopleListToggled = { dTag, title ->
+                            feedStateViewModel.toggleHomeActiveList(dTag, title)
+                            scrollToTopTrigger++
+                        },
+                        subscribedHashtags = subscribedHashtags,
                         activeHashtagFilter = homeFeedState.activeHashtagFilter,
                         onHashtagFilterSelected = { hashtag ->
                             if (hashtag != null) {

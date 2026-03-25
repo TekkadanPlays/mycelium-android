@@ -102,6 +102,7 @@ private fun DraftItem(
         Icon(
             imageVector = when (draft.type) {
                 DraftType.NOTE -> Icons.Outlined.EditNote
+                DraftType.ARTICLE -> Icons.Outlined.Article
                 DraftType.TOPIC -> Icons.Outlined.Topic
                 DraftType.REPLY_KIND1, DraftType.REPLY_KIND1111 -> Icons.AutoMirrored.Outlined.Reply
                 DraftType.TOPIC_REPLY -> Icons.Outlined.Forum
@@ -159,6 +160,7 @@ private fun DraftItem(
 
 private fun draftTypeLabel(type: DraftType): String = when (type) {
     DraftType.NOTE -> "Note"
+    DraftType.ARTICLE -> "Article"
     DraftType.TOPIC -> "Topic"
     DraftType.REPLY_KIND1 -> "Reply"
     DraftType.REPLY_KIND1111 -> "Thread Reply"

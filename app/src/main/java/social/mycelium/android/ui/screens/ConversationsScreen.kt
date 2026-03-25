@@ -72,24 +72,31 @@ fun ConversationsScreen(
     val conversations by DirectMessageRepository.conversations.collectAsState()
     val pendingCount by DirectMessageRepository.pendingGiftWrapCount.collectAsState()
     val isDecrypting by DirectMessageRepository.isDecrypting.collectAsState()
+    val hasApprovedDecrypt by DirectMessageRepository.hasUserApprovedDecrypt.collectAsState()
+    val autoDecrypt by social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.collectAsState()
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
     val dmRelayUrls by DirectMessageRepository.dmRelayUrls.collectAsState()
 
-    // Trigger decryption when user visits this screen or when new gift wraps arrive.
-    // isScreenVisible changes when the user navigates to/from this tab.
-    // pendingCount changes when new encrypted events are buffered.
-    // If the user declines Amber, decryptPending() stops. Navigating away and back
-    // triggers a fresh attempt.
-    LaunchedEffect(isScreenVisible, pendingCount, dmRelayUrls) {
+    // Lazily start the DM relay subscription when the user first visits this screen.
+    // No relay connections are opened until this point (deferred in Phase 4).
+    LaunchedEffect(isScreenVisible) {
         if (isScreenVisible) {
             if (dmRelayUrls.isEmpty()) {
                 onConfigureDmRelays()
                 return@LaunchedEffect
             }
-            if (pendingCount > 0) {
-                DirectMessageRepository.decryptPending()
+            DirectMessageRepository.ensureSubscriptionStarted()
+        }
+    }
+
+    // Auto-decrypt: only if user has already approved this session OR auto-decrypt setting is on.
+    // When auto-decrypt is off, the user must tap the "Decrypt" button below.
+    LaunchedEffect(isScreenVisible, pendingCount, hasApprovedDecrypt, autoDecrypt) {
+        if (isScreenVisible && pendingCount > 0) {
+            if (autoDecrypt || hasApprovedDecrypt) {
+                DirectMessageRepository.decryptPending(userConfirmed = false)
             }
         }
     }
@@ -163,8 +170,19 @@ fun ConversationsScreen(
         },
         modifier = modifier
     ) { paddingValues ->
+        // Show "Decrypt Messages" prompt when pending wraps exist and user hasn't confirmed yet
+        val showDecryptPrompt = pendingCount > 0 && !hasApprovedDecrypt && !autoDecrypt && !isDecrypting
+
         if (sortedList.isEmpty()) {
-            EmptyMessagesState(isRequests = showRequests, pendingCount = pendingCount, isDecrypting = isDecrypting)
+            EmptyMessagesState(
+                isRequests = showRequests,
+                pendingCount = pendingCount,
+                isDecrypting = isDecrypting,
+                showDecryptButton = showDecryptPrompt,
+                onDecryptClick = {
+                    DirectMessageRepository.decryptPending(userConfirmed = true)
+                }
+            )
         } else {
             LazyColumn(
                 state = listState,
@@ -176,6 +194,48 @@ fun ConversationsScreen(
                 if (!showRequests) {
                     item(key = "nip17_banner") {
                         Nip17Banner()
+                    }
+                }
+
+                // Decrypt prompt banner in the list header
+                if (showDecryptPrompt) {
+                    item(key = "decrypt_prompt") {
+                        DecryptPromptBanner(
+                            pendingCount = pendingCount,
+                            onDecryptClick = {
+                                DirectMessageRepository.decryptPending(userConfirmed = true)
+                            }
+                        )
+                    }
+                }
+
+                // Decrypting progress banner
+                if (isDecrypting) {
+                    item(key = "decrypting_banner") {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(10.dp))
+                                Text(
+                                    "Decrypting messages…",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -358,7 +418,13 @@ private fun DmFabItem(
 }
 
 @Composable
-private fun EmptyMessagesState(isRequests: Boolean, pendingCount: Int = 0, isDecrypting: Boolean = false) {
+private fun EmptyMessagesState(
+    isRequests: Boolean,
+    pendingCount: Int = 0,
+    isDecrypting: Boolean = false,
+    showDecryptButton: Boolean = false,
+    onDecryptClick: () -> Unit = {}
+) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -383,7 +449,9 @@ private fun EmptyMessagesState(isRequests: Boolean, pendingCount: Int = 0, isDec
             }
             Spacer(Modifier.height(20.dp))
             Text(
-                if (isRequests) "No message requests" else "No conversations yet",
+                if (isRequests) "No message requests"
+                else if (showDecryptButton) "$pendingCount encrypted message${if (pendingCount != 1) "s" else ""}"
+                else "No conversations yet",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )
@@ -391,6 +459,7 @@ private fun EmptyMessagesState(isRequests: Boolean, pendingCount: Int = 0, isDec
             Text(
                 if (isRequests) "First messages from unknown senders appear here"
                 else if (isDecrypting) "Decrypting messages…"
+                else if (showDecryptButton) "Tap below to decrypt with your signer"
                 else if (pendingCount > 0) "$pendingCount encrypted message${if (pendingCount != 1) "s" else ""} waiting"
                 else "Start a conversation — messages are end-to-end encrypted with NIP-17 gift wrapping",
                 style = MaterialTheme.typography.bodySmall,
@@ -399,6 +468,24 @@ private fun EmptyMessagesState(isRequests: Boolean, pendingCount: Int = 0, isDec
                 lineHeight = 18.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
             )
+            if (showDecryptButton) {
+                Spacer(Modifier.height(20.dp))
+                Button(
+                    onClick = onDecryptClick,
+                    shape = RoundedCornerShape(24.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("Decrypt Messages")
+                }
+            }
             if (isDecrypting) {
                 Spacer(Modifier.height(12.dp))
                 androidx.compose.material3.LinearProgressIndicator(
@@ -414,6 +501,58 @@ private fun EmptyMessagesState(isRequests: Boolean, pendingCount: Int = 0, isDec
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
                     textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Banner prompting the user to decrypt messages — displayed at the top of the
+ * conversations list when there are pending gift wraps and auto-decrypt is off.
+ */
+@Composable
+private fun DecryptPromptBanner(
+    pendingCount: Int,
+    onDecryptClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
+    ) {
+        Row(
+            modifier = Modifier
+                .clickable(onClick = onDecryptClick)
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Default.Lock,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "$pendingCount new encrypted message${if (pendingCount != 1) "s" else ""}",
+                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    "Tap to decrypt with your signer",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
+            FilledTonalButton(
+                onClick = onDecryptClick,
+                shape = RoundedCornerShape(20.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                Text("Decrypt", style = MaterialTheme.typography.labelMedium)
             }
         }
     }

@@ -93,6 +93,10 @@ object DraftsRepository {
     fun kind1RootDrafts(): List<Draft> =
         _drafts.value.filter { it.type == DraftType.NOTE }
 
+    /** Kind-30023 long-form article drafts. */
+    fun articleDrafts(): List<Draft> =
+        _drafts.value.filter { it.type == DraftType.ARTICLE }
+
     /** Kind-11 topic root drafts (not replies). */
     fun topicRootDrafts(): List<Draft> =
         _drafts.value.filter { it.type == DraftType.TOPIC }

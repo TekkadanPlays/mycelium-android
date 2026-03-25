@@ -193,14 +193,40 @@ class FeedStateViewModel : ViewModel() {
      * When active, only notes from pubkeys in the list are shown.
      */
     fun setHomeActiveList(dTag: String, title: String) {
-        _homeFeedState.update { it.copy(activeListDTag = dTag, activeListTitle = title, isFollowing = true) }
+        _homeFeedState.update { it.copy(activeListDTag = dTag, activeListTitle = title, activeListDTags = setOf(dTag), isFollowing = true) }
     }
 
     /**
      * Clear the active people list and revert to normal Following filter.
      */
     fun clearHomeActiveList() {
-        _homeFeedState.update { it.copy(activeListDTag = null, activeListTitle = null) }
+        _homeFeedState.update { it.copy(activeListDTag = null, activeListTitle = null, activeListDTags = emptySet()) }
+    }
+
+    /**
+     * Toggle a people list in/out of the active set. Supports multi-list selection.
+     * When the resulting set is empty, reverts to normal Following/Global mode.
+     * When exactly one list is selected, also sets activeListDTag for backwards compat.
+     */
+    fun toggleHomeActiveList(dTag: String, title: String) {
+        _homeFeedState.update { state ->
+            val updated = if (dTag in state.activeListDTags) {
+                state.activeListDTags - dTag
+            } else {
+                state.activeListDTags + dTag
+            }
+            if (updated.isEmpty()) {
+                state.copy(activeListDTag = null, activeListTitle = null, activeListDTags = emptySet())
+            } else {
+                // For backwards compat, keep activeListDTag pointing to the most recently toggled list
+                state.copy(
+                    activeListDTag = if (updated.size == 1) updated.first() else dTag,
+                    activeListTitle = if (updated.size == 1) title else "${updated.size} lists",
+                    activeListDTags = updated,
+                    isFollowing = true
+                )
+            }
+        }
     }
 
     /**
@@ -294,6 +320,9 @@ data class FeedState(
     // Active NIP-51 people list d-tag for feed filtering (null = use normal Following/Global)
     val activeListDTag: String? = null,
     val activeListTitle: String? = null,
+
+    // Multi-list selection: set of active people list d-tags. Union of their pubkeys = feed filter.
+    val activeListDTags: Set<String> = emptySet(),
 
     // Active hashtag content filter (null = none). When set, only notes containing #hashtag are shown.
     val activeHashtagFilter: String? = null

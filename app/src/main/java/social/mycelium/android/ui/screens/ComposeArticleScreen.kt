@@ -77,7 +77,7 @@ fun ComposeArticleScreen(
             social.mycelium.android.repository.DraftsRepository.saveDraft(
                 social.mycelium.android.data.Draft(
                     id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
-                    type = social.mycelium.android.data.DraftType.TOPIC, // reuse TOPIC type for articles
+                    type = social.mycelium.android.data.DraftType.ARTICLE,
                     content = content,
                     title = title
                 )
@@ -86,6 +86,26 @@ fun ComposeArticleScreen(
         onBack()
     }
     androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
+
+    // Auto-save draft every 10 seconds while editing (if enabled in settings)
+    val autoSaveEnabled by social.mycelium.android.ui.settings.FeedPreferences.autoSaveDrafts.collectAsState()
+    val draftIdForAutoSave = remember { loadedDraft?.id ?: java.util.UUID.randomUUID().toString() }
+    LaunchedEffect(autoSaveEnabled) {
+        if (!autoSaveEnabled) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(10_000L)
+            if (title.isNotBlank() || content.isNotBlank()) {
+                social.mycelium.android.repository.DraftsRepository.saveDraft(
+                    social.mycelium.android.data.Draft(
+                        id = draftIdForAutoSave,
+                        type = social.mycelium.android.data.DraftType.ARTICLE,
+                        content = content,
+                        title = title
+                    )
+                )
+            }
+        }
+    }
 
     var showRelayPicker by remember { mutableStateOf(false) }
     var isUploading by remember { mutableStateOf(false) }

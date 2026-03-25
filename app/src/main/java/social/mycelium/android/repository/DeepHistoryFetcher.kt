@@ -68,7 +68,10 @@ object DeepHistoryFetcher {
     private const val MAX_BATCHES_PER_SESSION = 100
 
     /** Event kinds that should be replayed to NotificationsRepository after deep fetch.
-     *  Matches NotificationsRepository.ACCEPTED_KINDS. */
+     *  Only applies to events from p-tag groups (useUserAsPTag=true).
+     *  Feed content groups (which fetch kind-1/6 by followed authors) are gated
+     *  out at the group level, so kind-1/6 here only covers p-tag results
+     *  (replies TO us, reposts OF us). */
     private val NOTIFICATION_KINDS = setOf(1, 6, 7, 8, 16, 1068, 1018, 1111, 1984, 9735, 9802)
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -319,19 +322,26 @@ object DeepHistoryFetcher {
                     // Use ingestEventAsHistorical() so events are auto-marked as seen — they
                     // populate the list for browsing but do NOT increment the badge or trigger
                     // system notifications. This prevents badge flicker during deep fetch.
-                    var notifCount = 0
-                    for ((event, _) in events) {
-                        if (event.kind in NOTIFICATION_KINDS) {
-                            try {
-                                NotificationsRepository.ingestEventAsHistorical(event)
-                                notifCount++
-                            } catch (e: Exception) {
-                                // Don't let a single bad event kill the whole batch
+                    //
+                    // ONLY replay events from p-tag groups (useUserAsPTag=true).
+                    // Feed content groups fetch by followed-author — those events will never
+                    // pass the p-tag relevance check in NotificationsRepository, so replaying
+                    // them is pure CPU waste (hundreds of events checked and immediately dropped).
+                    if (group.useUserAsPTag) {
+                        var notifCount = 0
+                        for ((event, _) in events) {
+                            if (event.kind in NOTIFICATION_KINDS) {
+                                try {
+                                    NotificationsRepository.ingestEventAsHistorical(event)
+                                    notifCount++
+                                } catch (e: Exception) {
+                                    // Don't let a single bad event kill the whole batch
+                                }
                             }
                         }
-                    }
-                    if (notifCount > 0) {
-                        Log.d(TAG, "  ${group.label}: replayed $notifCount events to notifications")
+                        if (notifCount > 0) {
+                            Log.d(TAG, "  ${group.label}: replayed $notifCount events to notifications")
+                        }
                     }
 
                     windowTotalEvents += events.size

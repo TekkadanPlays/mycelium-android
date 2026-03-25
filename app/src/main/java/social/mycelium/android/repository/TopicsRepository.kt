@@ -270,23 +270,17 @@ class TopicsRepository private constructor(context: Context) {
     }
 
     /**
-     * Align with the shared subscription (all user relays). Does NOT call requestFeedChange when the
-     * state machine already has the same relay set: Home/Topics share one connection; opening Topics
-     * must not tear down and recreate the subscription. Only request a feed change when we are
-     * the first to set relays (e.g. app opened on Topics) or relay set actually changed.
+     * Align with the shared subscription (all user relays). Topics now have their own
+     * dedicated subscription slot (kind-11 only) — they no longer touch the main kind-1
+     * subscription. Starting the topics sub is safe to call multiple times (idempotent).
      */
     fun setSubscriptionRelays(allUserRelayUrls: List<String>) {
         if (allUserRelayUrls.sorted() == subscriptionRelays.sorted()) return
-        val current = relayStateMachine.currentSubscription.value
-        val sameRelays = current.relayUrls.sorted() == allUserRelayUrls.sorted()
         subscriptionRelays = allUserRelayUrls
         hasReceivedFirstEvent = false  // Reset so loading clears on first event from new relays
-        if (sameRelays) {
-            Log.d(TAG, "Topics: subscription already active for ${allUserRelayUrls.size} relays (no feed change)")
-            return
-        }
-        Log.d(TAG, "Topics subscription relays set: ${allUserRelayUrls.size} relays (requesting feed change)")
-        relayStateMachine.requestFeedChange(allUserRelayUrls, relayStateMachine.getCurrentKind1Filter())
+        // Start/restart dedicated topics subscription slot
+        relayStateMachine.startTopicsSubscription(allUserRelayUrls)
+        Log.d(TAG, "Topics subscription relays set: ${allUserRelayUrls.size} relays (dedicated slot)")
     }
 
     /**

@@ -255,6 +255,14 @@ class NotificationsRepository(
      *  (since myNoteIds isn't populated until after Phase 1 EOSE). */
     private val kind1EventTags = ConcurrentHashMap<String, List<List<String>>>()
 
+    /** Lock for serializing read-modify-write on consolidated notification IDs (like:*, repost:*, zap:*).
+     *  ConcurrentHashMap guarantees per-op thread safety, but the compound
+     *  read→compute→write in handleLike/handleRepost/handleZap is NOT atomic.
+     *  Without this, two concurrent events (e.g., two users reacting to the same note)
+     *  that arrive from different cross-pollination paths can race, causing the second
+     *  write to clobber the first and silently drop a reaction/zap/repost. */
+    private val consolidationLock = Any()
+
     private var prefs: SharedPreferences? = null
     @Volatile
     private var appContext: Context? = null
@@ -982,43 +990,45 @@ class NotificationsRepository(
         } else null
         val customUrls = if (customEmojiUrl != null && emoji.startsWith(":") && emoji.endsWith(":"))
             mapOf(emoji to customEmojiUrl) else emptyMap()
-        // ── Consolidated: one notification per liked note ──
-        val consolidatedId = "like:$eTag"
-        val existing = notificationsById[consolidatedId]
+        // ── Consolidated: one notification per (liked note × emoji) ──
+        // Each unique emoji gets its own row per target note, so ❤️ and 🔥
+        // on the same note appear as separate notification lines.
+        val consolidatedId = "like:$eTag:$emoji"
         val shouldAutoMark = (event.id in _seenIds.value) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
-        if (existing != null) {
-            val updatedActors = (existing.actorPubkeys + event.pubKey).distinct()
-            val updatedEmojis = (existing.reactionEmojis + emoji).distinct()
-            val updatedCustomUrls = existing.customEmojiUrls + customUrls
-            val updatedTs = maxOf(existing.sortTimestamp, ts)
-            val action = if (updatedEmojis.all { it == "❤️" }) "liked your post" else "reacted to your post"
-            val text = buildActorText(updatedActors, action)
-            notificationsById[consolidatedId] = existing.copy(
-                actorPubkeys = updatedActors,
-                reactionEmojis = updatedEmojis,
-                customEmojiUrls = updatedCustomUrls,
-                sortTimestamp = updatedTs,
-                text = text,
-                author = author
-            )
-        } else {
-            val action = if (emoji == "❤️") "liked your post" else "reacted to your post"
-            val text = "${author.displayName ?: "Someone"} $action"
-            notificationsById[consolidatedId] = NotificationData(
-                id = consolidatedId,
-                type = NotificationType.LIKE,
-                text = text,
-                note = null,
-                author = author,
-                targetNoteId = eTag,
-                sortTimestamp = ts,
-                reactionEmoji = emoji,
-                reactionEmojis = listOf(emoji),
-                actorPubkeys = listOf(event.pubKey),
-                customEmojiUrl = customEmojiUrl,
-                customEmojiUrls = customUrls
-            )
+        synchronized(consolidationLock) {
+            val existing = notificationsById[consolidatedId]
+            if (existing != null) {
+                val updatedActors = (existing.actorPubkeys + event.pubKey).distinct()
+                val updatedCustomUrls = existing.customEmojiUrls + customUrls
+                val updatedTs = maxOf(existing.sortTimestamp, ts)
+                val action = if (emoji == "❤️") "liked your post" else "reacted to your post"
+                val text = buildActorText(updatedActors, action)
+                notificationsById[consolidatedId] = existing.copy(
+                    actorPubkeys = updatedActors,
+                    customEmojiUrls = updatedCustomUrls,
+                    sortTimestamp = updatedTs,
+                    text = text,
+                    author = author
+                )
+            } else {
+                val action = if (emoji == "❤️") "liked your post" else "reacted to your post"
+                val text = "${author.displayName ?: "Someone"} $action"
+                notificationsById[consolidatedId] = NotificationData(
+                    id = consolidatedId,
+                    type = NotificationType.LIKE,
+                    text = text,
+                    note = null,
+                    author = author,
+                    targetNoteId = eTag,
+                    sortTimestamp = ts,
+                    reactionEmoji = emoji,
+                    reactionEmojis = listOf(emoji),
+                    actorPubkeys = listOf(event.pubKey),
+                    customEmojiUrl = customEmojiUrl,
+                    customEmojiUrls = customUrls
+                )
+            }
         }
         if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
         emitSorted()
@@ -1567,33 +1577,35 @@ class NotificationsRepository(
         val targetNote = parseRepostedNoteFromContent(event.content)
         // ── Consolidated: one notification per reposted note ──
         val consolidatedId = "repost:$repostedNoteId"
-        val existing = notificationsById[consolidatedId]
         val shouldAutoMark = (event.id in _seenIds.value) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
-        if (existing != null) {
-            val updatedActors = (existing.actorPubkeys + event.pubKey).distinct()
-            val updatedTs = maxOf(existing.sortTimestamp, ts)
-            val text = buildActorText(updatedActors, "reposted your post")
-            notificationsById[consolidatedId] = existing.copy(
-                actorPubkeys = updatedActors,
-                sortTimestamp = updatedTs,
-                text = text,
-                author = author,
-                targetNote = existing.targetNote ?: targetNote
-            )
-        } else {
-            val text = "${author.displayName ?: "Someone"} reposted your post"
-            notificationsById[consolidatedId] = NotificationData(
-                id = consolidatedId,
-                type = NotificationType.REPOST,
-                text = text,
-                note = null,
-                author = author,
-                targetNote = targetNote,
-                targetNoteId = if (targetNote == null) repostedNoteId else null,
-                actorPubkeys = listOf(event.pubKey),
-                sortTimestamp = ts
-            )
+        synchronized(consolidationLock) {
+            val existing = notificationsById[consolidatedId]
+            if (existing != null) {
+                val updatedActors = (existing.actorPubkeys + event.pubKey).distinct()
+                val updatedTs = maxOf(existing.sortTimestamp, ts)
+                val text = buildActorText(updatedActors, "reposted your post")
+                notificationsById[consolidatedId] = existing.copy(
+                    actorPubkeys = updatedActors,
+                    sortTimestamp = updatedTs,
+                    text = text,
+                    author = author,
+                    targetNote = existing.targetNote ?: targetNote
+                )
+            } else {
+                val text = "${author.displayName ?: "Someone"} reposted your post"
+                notificationsById[consolidatedId] = NotificationData(
+                    id = consolidatedId,
+                    type = NotificationType.REPOST,
+                    text = text,
+                    note = null,
+                    author = author,
+                    targetNote = targetNote,
+                    targetNoteId = if (targetNote == null) repostedNoteId else null,
+                    actorPubkeys = listOf(event.pubKey),
+                    sortTimestamp = ts
+                )
+            }
         }
         if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
         emitSorted()
@@ -1645,40 +1657,49 @@ class NotificationsRepository(
             profileCache.resolveAuthor(realZapperPubkey)
         } else author
         val zapperPk = realZapperPubkey ?: event.pubKey
+        // Detect DM zaps: the embedded zap request (kind-9734) may reference a kind-1059 gift-wrap.
+        // Also check if the e-tag corresponds to a known gift-wrap in DirectMessageRepository.
+        val isDmZap = parseZapTargetKind(event) == 1059 ||
+            DirectMessageRepository.isKnownGiftWrapId(eTag)
         // ── Consolidated: one notification per zapped note ──
         val consolidatedId = "zap:$eTag"
-        val existing = notificationsById[consolidatedId]
         val shouldAutoMark = (event.id in _seenIds.value) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
-        if (existing != null) {
-            val updatedActors = (existing.actorPubkeys + zapperPk).distinct()
-            val updatedSats = existing.zapAmountSats + amountSats
-            val updatedTs = maxOf(existing.sortTimestamp, ts)
-            val satsLabel = if (updatedSats > 0) formatSats(updatedSats) else ""
-            val action = if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"
-            val text = buildActorText(updatedActors, action)
-            notificationsById[consolidatedId] = existing.copy(
-                actorPubkeys = updatedActors,
-                zapAmountSats = updatedSats,
-                sortTimestamp = updatedTs,
-                text = text,
-                author = zapperAuthor
-            )
-        } else {
-            val satsLabel = if (amountSats > 0) formatSats(amountSats) else ""
-            val text =
-                "${zapperAuthor.displayName ?: "Someone"} ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
-            notificationsById[consolidatedId] = NotificationData(
-                id = consolidatedId,
-                type = NotificationType.ZAP,
-                text = text,
-                note = null,
-                author = zapperAuthor,
-                targetNoteId = eTag,
-                sortTimestamp = ts,
-                zapAmountSats = amountSats,
-                actorPubkeys = listOf(zapperPk)
-            )
+        synchronized(consolidationLock) {
+            val existing = notificationsById[consolidatedId]
+            if (existing != null) {
+                val updatedActors = (existing.actorPubkeys + zapperPk).distinct()
+                val updatedSats = existing.zapAmountSats + amountSats
+                val updatedTs = maxOf(existing.sortTimestamp, ts)
+                val satsLabel = if (updatedSats > 0) formatSats(updatedSats) else ""
+                val target = if (isDmZap) "your message" else "your post"
+                val action = if (satsLabel.isNotEmpty()) "zapped $satsLabel on $target" else "zapped $target"
+                val text = buildActorText(updatedActors, action)
+                notificationsById[consolidatedId] = existing.copy(
+                    actorPubkeys = updatedActors,
+                    zapAmountSats = updatedSats,
+                    sortTimestamp = updatedTs,
+                    text = text,
+                    author = zapperAuthor
+                )
+            } else {
+                val satsLabel = if (amountSats > 0) formatSats(amountSats) else ""
+                val target = if (isDmZap) "your message" else "your post"
+                val text = "${zapperAuthor.displayName ?: "Someone"} ${
+                    if (satsLabel.isNotEmpty()) "zapped $satsLabel on $target" else "zapped $target"
+                }"
+                notificationsById[consolidatedId] = NotificationData(
+                    id = consolidatedId,
+                    type = NotificationType.ZAP,
+                    text = text,
+                    note = null,
+                    author = zapperAuthor,
+                    targetNoteId = if (isDmZap) null else eTag,
+                    sortTimestamp = ts,
+                    zapAmountSats = amountSats,
+                    actorPubkeys = listOf(zapperPk)
+                )
+            }
         }
         if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
         emitSorted()
@@ -1690,7 +1711,8 @@ class NotificationsRepository(
             eventEpochSec = ts / 1000,
             noteId = eTag
         )
-        if (notificationsById[consolidatedId]?.targetNote == null) {
+        // Only fetch target note for non-DM zaps — DM gift wraps are encrypted and not in the feed
+        if (!isDmZap && notificationsById[consolidatedId]?.targetNote == null) {
             scope.launch { fetchAndSetTargetNote(eTag, consolidatedId) { d -> { note -> d.copy(targetNote = note) } } }
         }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
@@ -1709,6 +1731,19 @@ class NotificationsRepository(
         return try {
             val pubkeyMatch = Regex(""""pubkey"\s*:\s*"([a-f0-9]{64})"""").find(descTag)
             pubkeyMatch?.groupValues?.get(1)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Parse the target event kind from the embedded zap request (kind-9734) "description" tag.
+     *  Returns the kind number (e.g. 1059 for DM gift wraps), or null if not found. */
+    private fun parseZapTargetKind(event: Event): Int? {
+        val descTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }?.get(1)
+            ?: return null
+        return try {
+            val kindMatch = Regex(""""kind"\s*:\s*(\d+)""").find(descTag)
+            kindMatch?.groupValues?.get(1)?.toIntOrNull()
         } catch (_: Exception) {
             null
         }
@@ -1932,16 +1967,25 @@ class NotificationsRepository(
     // without re-fetching from relays.
 
     private var notifSaveJob: Job? = null
-    private val NOTIF_SAVE_DEBOUNCE_MS = 3000L
+    private val NOTIF_SAVE_DEBOUNCE_MS = 3_000L
+    /** Longer debounce during startup replay — hundreds of events arrive in bursts,
+     *  no point writing to Room every 3s when the next event will arrive momentarily. */
+    private val NOTIF_SAVE_REPLAY_DEBOUNCE_MS = 10_000L
     private val MAX_PERSISTED_NOTIFICATIONS = 3000
+    private val saveLock = Any()
 
-    /** Debounced save of notifications to Room. Called after any notification state change. */
+    /** Debounced save of notifications to Room. Called after any notification state change.
+     *  Thread-safe: synchronizes the cancel→launch sequence to prevent concurrent callers
+     *  from each launching their own save job. */
     private fun scheduleNotificationSave() {
         val ctx = appContext ?: return
-        notifSaveJob?.cancel()
-        notifSaveJob = scope.launch(Dispatchers.IO) {
-            delay(NOTIF_SAVE_DEBOUNCE_MS)
-            saveNotificationsToRoom(ctx)
+        val debounce = if (_replaySettled.value) NOTIF_SAVE_DEBOUNCE_MS else NOTIF_SAVE_REPLAY_DEBOUNCE_MS
+        synchronized(saveLock) {
+            notifSaveJob?.cancel()
+            notifSaveJob = scope.launch(Dispatchers.IO) {
+                delay(debounce)
+                saveNotificationsToRoom(ctx)
+            }
         }
     }
 

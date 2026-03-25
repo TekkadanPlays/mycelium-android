@@ -8,10 +8,12 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 
 /**
@@ -83,6 +85,13 @@ object RelayCategorySyncRepository {
                 }.toSet()
                 if (normalized.isEmpty()) return@launch
                 RelayConnectionStateMachine.getInstance().send(signed, normalized)
+                // Track publish results so delivery is visible in publish results screen
+                RelayHealthTracker.storePublishedEvent(signed.id, signed)
+                RelayHealthTracker.registerPendingPublish(signed.id, KIND_RELAY_SET, normalized)
+                scope.launch {
+                    delay(10_000L)
+                    RelayHealthTracker.finalizePendingPublish(signed.id)
+                }
                 Log.d(TAG, "Published category '${category.name}' (d=${category.id.take(8)}) " +
                     "with ${category.relays.size} relays → ${normalized.size} outbox relays")
             } catch (e: Exception) {
@@ -117,6 +126,8 @@ object RelayCategorySyncRepository {
                 }
                 val deleteSigned = signer.sign(deleteTemplate)
                 RelayConnectionStateMachine.getInstance().send(deleteSigned, normalized)
+                RelayHealthTracker.storePublishedEvent(deleteSigned.id, deleteSigned)
+                RelayHealthTracker.registerPendingPublish(deleteSigned.id, 5, normalized)
 
                 // Prong 2: Empty replacement (overwrites on relays that ignore kind-5)
                 val emptyTemplate = Event.build(KIND_RELAY_SET, "") {
@@ -125,6 +136,15 @@ object RelayCategorySyncRepository {
                 }
                 val emptySigned = signer.sign(emptyTemplate)
                 RelayConnectionStateMachine.getInstance().send(emptySigned, normalized)
+                RelayHealthTracker.storePublishedEvent(emptySigned.id, emptySigned)
+                RelayHealthTracker.registerPendingPublish(emptySigned.id, KIND_RELAY_SET, normalized)
+
+                // Finalize both after timeout
+                scope.launch {
+                    delay(10_000L)
+                    RelayHealthTracker.finalizePendingPublish(deleteSigned.id)
+                    RelayHealthTracker.finalizePendingPublish(emptySigned.id)
+                }
 
                 Log.d(TAG, "Deleted category $categoryId (kind-5 + empty replacement)")
             } catch (e: Exception) {
@@ -171,43 +191,45 @@ object RelayCategorySyncRepository {
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val collected = mutableMapOf<String, Event>()
 
-        fetchHandle = stateMachine.requestOneShotSubscription(
-            relayUrls, filter, priority = SubscriptionPriority.LOW,
-            settleMs = 800L, maxWaitMs = 8_000L,
-        ) { event ->
-            if (event.kind == KIND_RELAY_SET && event.pubKey.equals(userPubkey, ignoreCase = true)) {
-                val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1)
-                    ?: return@requestOneShotSubscription
-                // Skip deleted relay sets
-                val isDeleted = event.tags.any { it.size >= 2 && it[0] == "deleted" }
-                if (isDeleted) return@requestOneShotSubscription
-                val existing = collected[dTag]
-                if (existing == null || event.createdAt > existing.createdAt) {
-                    collected[dTag] = event
-                }
-            }
-        }
-
-        // Parse and merge after EOSE settles
+        // Use blocking await so we process results reliably after EOSE/timeout
         scope.launch {
-            kotlinx.coroutines.delay(9_000L)
-            if (collected.isEmpty()) {
-                Log.d(TAG, "No relay sets found for ${userPubkey.take(8)}")
-                return@launch
-            }
+            try {
+                stateMachine.awaitOneShotSubscription(
+                    relayUrls, filter, priority = SubscriptionPriority.LOW,
+                    settleMs = 800L, maxWaitMs = 8_000L,
+                ) { event ->
+                    if (event.kind == KIND_RELAY_SET && event.pubKey.equals(userPubkey, ignoreCase = true)) {
+                        val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1)
+                            ?: return@awaitOneShotSubscription
+                        val isDeleted = event.tags.any { it.size >= 2 && it[0] == "deleted" }
+                        if (isDeleted) return@awaitOneShotSubscription
+                        val existing = collected[dTag]
+                        if (existing == null || event.createdAt > existing.createdAt) {
+                            collected[dTag] = event
+                        }
+                    }
+                }
 
-            val remoteCategories = collected.values.mapNotNull { parseRelaySet(it) }
-            Log.d(TAG, "Fetched ${remoteCategories.size} relay sets for ${userPubkey.take(8)}: " +
-                remoteCategories.joinToString { "'${it.name}'(${it.relays.size})" })
+                if (collected.isEmpty()) {
+                    Log.d(TAG, "No relay sets found for ${userPubkey.take(8)}")
+                    return@launch
+                }
 
-            // Merge with local
-            val localCategories = storageManager.loadCategories(userPubkey)
-            val merged = mergeCategories(localCategories, remoteCategories)
+                val remoteCategories = collected.values.mapNotNull { parseRelaySet(it) }
+                Log.d(TAG, "Fetched ${remoteCategories.size} relay sets for ${userPubkey.take(8)}: " +
+                    remoteCategories.joinToString { "'${it.name}'(${it.relays.size})" })
 
-            if (merged != localCategories) {
-                storageManager.saveCategories(userPubkey, merged)
-                Log.d(TAG, "Merged categories: ${localCategories.size} local + " +
-                    "${remoteCategories.size} remote → ${merged.size} merged")
+                // Merge with local
+                val localCategories = storageManager.loadCategories(userPubkey)
+                val merged = mergeCategories(localCategories, remoteCategories)
+
+                if (merged != localCategories) {
+                    storageManager.saveCategories(userPubkey, merged)
+                    Log.d(TAG, "Merged categories: ${localCategories.size} local + " +
+                        "${remoteCategories.size} remote → ${merged.size} merged")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch relay sets: ${e.message}", e)
             }
         }
 
@@ -314,49 +336,46 @@ object RelayCategorySyncRepository {
 
         indexerFetchHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        var bestEvent: Event? = null
-
-        indexerFetchHandle = stateMachine.requestOneShotSubscription(
-            relayUrls, filter, priority = SubscriptionPriority.LOW,
-            settleMs = 800L, maxWaitMs = 6_000L,
-        ) { event ->
-            if (event.kind == KIND_INDEXER_LIST && event.pubKey.equals(userPubkey, ignoreCase = true)) {
-                val current = bestEvent
-                if (current == null || event.createdAt > current.createdAt) {
-                    bestEvent = event
-                }
-            }
-        }
 
         scope.launch {
-            kotlinx.coroutines.delay(7_000L)
-            val event = bestEvent
-            if (event == null) {
-                Log.d(TAG, "No indexer list (kind $KIND_INDEXER_LIST) found for ${userPubkey.take(8)}")
-                return@launch
-            }
+            try {
+                var bestEvent: Event? = null
+                stateMachine.awaitOneShotSubscription(
+                    relayUrls, filter, priority = SubscriptionPriority.LOW,
+                    settleMs = 800L, maxWaitMs = 6_000L,
+                ) { event ->
+                    if (event.kind == KIND_INDEXER_LIST && event.pubKey.equals(userPubkey, ignoreCase = true)) {
+                        val current = bestEvent
+                        if (current == null || event.createdAt > current.createdAt) {
+                            bestEvent = event
+                        }
+                    }
+                }
 
-            val remoteUrls = event.tags
-                .filter { it.size >= 2 && it[0] == "relay" }
-                .map { social.mycelium.android.utils.normalizeRelayUrl(it[1]) }
-                .distinct()
+                val event = bestEvent
+                if (event == null) {
+                    Log.d(TAG, "No indexer list (kind $KIND_INDEXER_LIST) found for ${userPubkey.take(8)}")
+                    return@launch
+                }
 
-            if (remoteUrls.isEmpty()) return@launch
+                val remoteUrls = event.tags
+                    .filter { it.size >= 2 && it[0] == "relay" }
+                    .map { social.mycelium.android.utils.normalizeRelayUrl(it[1]) }
+                    .distinct()
 
-            val localIndexers = storageManager.loadIndexerRelays(userPubkey)
-            val localUrlSet = localIndexers.map { it.url.trim().removeSuffix("/").lowercase() }.toSet()
+                if (remoteUrls.isEmpty()) return@launch
 
-            val newRelays = remoteUrls.filter {
-                it.trim().removeSuffix("/").lowercase() !in localUrlSet
-            }.map { url ->
-                UserRelay(url = url, read = true, write = true)
-            }
-
-            if (newRelays.isNotEmpty()) {
-                storageManager.saveIndexerRelays(userPubkey, localIndexers + newRelays)
-                Log.d(TAG, "Merged indexer list: ${localIndexers.size} local + ${newRelays.size} new → ${localIndexers.size + newRelays.size}")
-            } else {
-                Log.d(TAG, "Indexer list in sync (${localIndexers.size} relays)")
+                // Published kind-10086 is the user's authoritative indexer list.
+                // REPLACE local indexers entirely (discards auto-populated NIP-66 relays
+                // from onboarding if user has a published list).
+                val remoteRelays = remoteUrls.map { url ->
+                    UserRelay(url = url, read = true, write = true)
+                }
+                val localIndexers = storageManager.loadIndexerRelays(userPubkey)
+                storageManager.saveIndexerRelays(userPubkey, remoteRelays)
+                Log.d(TAG, "Replaced indexer list: ${localIndexers.size} local → ${remoteRelays.size} from published kind-$KIND_INDEXER_LIST")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch indexer list: ${e.message}", e)
             }
         }
 

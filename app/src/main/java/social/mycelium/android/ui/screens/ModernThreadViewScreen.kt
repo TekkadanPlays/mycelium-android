@@ -10,6 +10,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.foundation.BorderStroke
@@ -566,6 +568,7 @@ fun ModernThreadViewScreen(
     // Uses snapshotFlow to retry until the reply actually appears in the rendered list.
     LaunchedEffect(highlightReplyId) {
         if (highlightReplyId == null) return@LaunchedEffect
+        android.util.Log.d("ThreadHighlight", "Attempting to scroll to reply $highlightReplyId")
         // Wait for replies to load (retry up to 10s)
         val deadline = System.currentTimeMillis() + 10_000
         while (System.currentTimeMillis() < deadline) {
@@ -576,17 +579,19 @@ fun ModernThreadViewScreen(
             }
             val path = findPathToReplyId(threaded, highlightReplyId!!)
             if (path != null) {
+                android.util.Log.d("ThreadHighlight", "Found path to reply (${path.size} ancestors)")
                 // Expand all ancestors so they're not collapsed
                 path.forEach { id -> commentStates[id] = CommentState(isCollapsed = false, isExpanded = true) }
 
                 // If reply is deeply nested, drill into sub-threads to reach it
                 val drillStack = computeDrillDownStack(threaded, highlightReplyId!!)
                 if (drillStack.isNotEmpty()) {
+                    android.util.Log.d("ThreadHighlight", "Drilling into sub-thread (stack=${drillStack.size})")
                     rootReplyIdStack = drillStack
                 }
 
                 // Brief pause for layout to settle after drill-down + expansion
-                kotlinx.coroutines.delay(350)
+                kotlinx.coroutines.delay(400)
 
                 // Compute the display list after drill-down
                 val activeThreaded = if (repliesState.threadedReplies.isNotEmpty()) {
@@ -605,14 +610,33 @@ fun ModernThreadViewScreen(
                     // When in sub-thread mode, item(back_to_subthread)=2 shifts indices by 1
                     val headerItems = if (activeRoot != null) 3 else 2
                     val scrollIndex = headerItems + listIndex
+                    android.util.Log.d("ThreadHighlight", "Scrolling to index $scrollIndex (listIndex=$listIndex, headers=$headerItems)")
                     listState.animateScrollToItem(scrollIndex)
                     highlightedReplyId = highlightReplyId
                     haveScrolledToHighlight = true
+
+                    // Secondary scroll: the LazyColumn may compose new items
+                    // after the first scroll, shifting indices. Retry once
+                    // after a brief layout settle.
+                    kotlinx.coroutines.delay(300)
+                    val retryIndex = activeDisplayList.indexOfFirst { it.reply.id == highlightReplyId }
+                    if (retryIndex >= 0) {
+                        val retryScroll = headerItems + retryIndex
+                        if (retryScroll != scrollIndex || !listState.isScrollInProgress) {
+                            android.util.Log.d("ThreadHighlight", "Secondary scroll to $retryScroll")
+                            listState.animateScrollToItem(retryScroll)
+                        }
+                    }
                     break
+                } else {
+                    android.util.Log.d("ThreadHighlight", "Reply found in tree but not in display list (activeRoot=$activeRoot, displayListSize=${activeDisplayList.size})")
                 }
             }
             // Reply not in tree yet — wait for replies to load and retry
             kotlinx.coroutines.delay(500)
+        }
+        if (!haveScrolledToHighlight) {
+            android.util.Log.w("ThreadHighlight", "Failed to scroll to reply $highlightReplyId after 10s")
         }
     }
 
@@ -1609,7 +1633,7 @@ private fun ModernCommentCard(
                                 onClick = { onReply(comment.id) }
                             )
 
-                            // Zap button with menu - using shared state (like feed cards)
+                            // Zap button - opens ZapDrawer popup
                             CompactModernButton(
                                 icon = Icons.Filled.Bolt,
                                 contentDescription = "Zap",
@@ -1646,89 +1670,23 @@ private fun ModernCommentCard(
                         }
                     }
 
-                    // Zap menu - flowing layout with custom amounts, test, and edit buttons
-                    AnimatedVisibility(
-                        visible = isZapMenuExpanded,
-                        enter = expandVertically() + fadeIn(),
-                        exit = shrinkVertically() + fadeOut()
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
-                        ) {
-                            // Flowing zap amounts using FlowRow
-                            FlowRow(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                // Get custom zap amounts from ZapAmountManager
-                                val context = LocalContext.current
-                                LaunchedEffect(Unit) {
-                                    social.mycelium.android.utils.ZapAmountManager.initialize(context)
-                                }
-                                val zapAmounts by social.mycelium.android.utils.ZapAmountManager.zapAmounts.collectAsState()
-
-                                // Zap amount chips - sorted largest to smallest
-                                zapAmounts.sortedDescending().forEach { amount ->
-                                    FilterChip(
-                                        selected = amount == 1L, // Highlight 1 sat
-                                        onClick = {
-                                            onExpandZapMenu(commentId) // Close menu using shared state
-                                            onZap(comment.id, amount)
-                                        },
-                                        label = {
-                                            Text(
-                                                text = social.mycelium.android.utils.ZapUtils.formatZapAmount(amount),
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 14.sp
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                imageVector = Icons.Filled.Bolt,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                        },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = Color(0xFFFFA500),
-                                            selectedLabelColor = Color.White,
-                                            selectedLeadingIconColor = Color.White,
-                                            containerColor = Color(0xFFFFA500),
-                                            labelColor = Color.White,
-                                            iconColor = Color.White
-                                        ),
-                                        border = BorderStroke(
-                                            width = 1.dp,
-                                            color = Color(0xFFFFA500)
-                                        )
-                                    )
-                                }
-
-                                // Edit zap amounts chip
-                                FilterChip(
-                                    selected = false,
-                                    onClick = {
-                                        onExpandZapMenu(commentId) // Close menu using shared state
-                                        onZapSettings()
-                                    },
-                                    label = { Text("Edit") },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Filled.Edit,
-                                            contentDescription = "Edit Zap Amounts",
-                                            modifier = Modifier.size(18.dp)
-                                        )
-                                    },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                                        labelColor = MaterialTheme.colorScheme.onSurface
-                                    )
-                                )
+                    // Zap drawer — ModalBottomSheet for smooth animate-in/out
+                    if (isZapMenuExpanded) {
+                        social.mycelium.android.ui.components.ZapBottomSheet(
+                            onDismiss = { onExpandZapMenu(commentId) },
+                            onZap = { amount ->
+                                onExpandZapMenu(commentId)
+                                onZap(comment.id, amount)
+                            },
+                            onCustomZapSend = { amount, zapType, message ->
+                                onExpandZapMenu(commentId)
+                                onCustomZap(comment.id)
+                            },
+                            onSettingsClick = {
+                                onExpandZapMenu(commentId)
+                                onZapSettings()
                             }
-                        }
+                        )
                     }
                 }
             }
@@ -2595,83 +2553,20 @@ private fun ReplyControlsPanel(
         }
     }
 
-    // Zap amount chips
-    if (isControlsExpanded) {
-        AnimatedVisibility(
-            visible = isZapMenuExpanded,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut()
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 6.dp, horizontal = 12.dp),
-                horizontalAlignment = Alignment.End
-            ) {
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val context = LocalContext.current
-                    LaunchedEffect(Unit) {
-                        social.mycelium.android.utils.ZapAmountManager.initialize(context)
-                    }
-                    val zapAmounts by social.mycelium.android.utils.ZapAmountManager.zapAmounts.collectAsState()
-                    zapAmounts.sortedDescending().forEach { amount ->
-                        FilterChip(
-                            selected = amount == 1L,
-                            onClick = {
-                                onExpandZapMenu(reply.id)
-                                onZap(reply.id, amount)
-                            },
-                            label = {
-                                Text(
-                                    text = social.mycelium.android.utils.ZapUtils.formatZapAmount(amount),
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp
-                                )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    imageVector = Icons.Filled.Bolt,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = Color(0xFFFFA500),
-                                selectedLabelColor = Color.White,
-                                selectedLeadingIconColor = Color.White,
-                                containerColor = Color(0xFFFFA500),
-                                labelColor = Color.White,
-                                iconColor = Color.White
-                            ),
-                            border = BorderStroke(1.dp, Color(0xFFFFA500))
-                        )
-                    }
-                    FilterChip(
-                        selected = false,
-                        onClick = {
-                            onExpandZapMenu(reply.id)
-                            onZapSettings()
-                        },
-                        label = { Text("Edit") },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Filled.Edit,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                            labelColor = MaterialTheme.colorScheme.onSurface
-                        )
-                    )
-                }
+    // Zap drawer — ModalBottomSheet for smooth animate-in/out
+    if (isControlsExpanded && isZapMenuExpanded) {
+        social.mycelium.android.ui.components.ZapBottomSheet(
+            onDismiss = { onExpandZapMenu(reply.id) },
+            onZap = { amount ->
+                onExpandZapMenu(reply.id)
+                onZap(reply.id, amount)
+            },
+            onCustomZapSend = null,
+            onSettingsClick = {
+                onExpandZapMenu(reply.id)
+                onZapSettings()
             }
-        }
+        )
     }
 }
 

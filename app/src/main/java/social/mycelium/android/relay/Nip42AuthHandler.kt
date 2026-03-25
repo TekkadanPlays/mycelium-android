@@ -73,6 +73,18 @@ class Nip42AuthHandler(
         Log.d(TAG, "Allowed relay URLs updated: ${allowedRelayUrls.size} relays")
     }
 
+    /** Add relay URLs to the allowed set without replacing existing entries.
+     *  Use when a subsystem (e.g. DM relays) discovers relays after the initial
+     *  allowed set is populated at login. Thread-safe (volatile read + immutable set). */
+    fun addAllowedRelayUrls(urls: Collection<String>) {
+        if (urls.isEmpty()) return
+        val normalized = urls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
+        val newUrls = normalized - allowedRelayUrls
+        if (newUrls.isEmpty()) return
+        allowedRelayUrls = allowedRelayUrls + newUrls
+        Log.d(TAG, "Added ${newUrls.size} relay(s) to allowed set (total: ${allowedRelayUrls.size})")
+    }
+
     /** Per-relay auth status for UI observation. */
     enum class AuthStatus { NONE, CHALLENGED, AUTHENTICATING, AUTHENTICATED, FAILED }
 

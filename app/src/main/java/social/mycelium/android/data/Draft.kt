@@ -25,5 +25,5 @@ data class Draft(
 
 @Serializable
 enum class DraftType {
-    NOTE, TOPIC, REPLY_KIND1, REPLY_KIND1111, TOPIC_REPLY
+    NOTE, ARTICLE, TOPIC, REPLY_KIND1, REPLY_KIND1111, TOPIC_REPLY
 }

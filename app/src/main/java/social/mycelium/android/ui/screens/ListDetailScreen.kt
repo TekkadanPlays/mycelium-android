@@ -192,15 +192,13 @@ fun ListDetailScreen(
 
     // ── Add Member Dialog ─────────────────────────────────────────────────
     if (showAddMemberDialog) {
-        AddMemberDialog(
+        AddMemberBottomSheet(
+            existingPubkeys = list?.pubkeys ?: emptySet(),
             onDismiss = { showAddMemberDialog = false },
-            onAdd = { npubOrHex, isPrivate ->
-                val signer = getSigner() ?: return@AddMemberDialog
+            onAdd = { hex, isPrivate ->
+                val signer = getSigner() ?: return@AddMemberBottomSheet
                 val relays = getOutboxRelays()
-                val hex = resolveToHex(npubOrHex)
-                if (hex != null) {
-                    PeopleListRepository.addToPeopleList(dTag, hex, isPrivate, signer, relays)
-                }
+                PeopleListRepository.addToPeopleList(dTag, hex, isPrivate, signer, relays)
                 showAddMemberDialog = false
             }
         )
@@ -347,50 +345,268 @@ private fun MemberRow(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AddMemberDialog(
+private fun AddMemberBottomSheet(
+    existingPubkeys: Set<String>,
     onDismiss: () -> Unit,
-    onAdd: (npubOrHex: String, isPrivate: Boolean) -> Unit,
+    onAdd: (hex: String, isPrivate: Boolean) -> Unit,
 ) {
-    var input by remember { mutableStateOf("") }
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+    var query by remember { mutableStateOf("") }
     var isPrivate by remember { mutableStateOf(false) }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    AlertDialog(
+    // Search results: filter cached profiles by display name, username, or npub
+    val allCached = remember { profileCache.getAllCached() }
+    val searchResults = remember(query, allCached) {
+        if (query.isBlank()) {
+            // Show most recently cached profiles when no search query
+            allCached.entries
+                .filter { it.key !in existingPubkeys }
+                .take(50)
+                .map { it.key to it.value }
+        } else {
+            val lowerQuery = query.lowercase().trim()
+            // Check if query is a valid NIP-19 identifier or hex pubkey
+            val resolvedHex = resolveToHex(query)
+            val results = allCached.entries
+                .filter { (pubkey, author) ->
+                    pubkey !in existingPubkeys && (
+                        author.displayName.lowercase().contains(lowerQuery) ||
+                        (author.username?.lowercase()?.contains(lowerQuery) == true) ||
+                        pubkey.startsWith(lowerQuery) ||
+                        (author.nip05?.lowercase()?.contains(lowerQuery) == true)
+                    )
+                }
+                .sortedBy { (_, author) ->
+                    // Exact prefix matches first, then contains matches
+                    val name = author.displayName.lowercase()
+                    when {
+                        name.startsWith(lowerQuery) -> 0
+                        author.username?.lowercase()?.startsWith(lowerQuery) == true -> 1
+                        else -> 2
+                    }
+                }
+                .take(50)
+                .map { it.key to it.value }
+                .toMutableList()
+
+            // If the resolved hex isn't in the results, add a placeholder entry
+            if (resolvedHex != null && results.none { it.first == resolvedHex }) {
+                val author = profileCache.getAuthor(resolvedHex)
+                    ?: social.mycelium.android.data.Author(
+                        id = resolvedHex,
+                        username = resolvedHex.take(8) + "...",
+                        displayName = resolvedHex.take(12) + "...",
+                        avatarUrl = null,
+                        isVerified = false
+                    )
+                results.add(0, resolvedHex to author)
+            }
+            results
+        }
+    }
+
+    ModalBottomSheet(
         onDismissRequest = onDismiss,
-        title = { Text("Add Member") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = { input = it },
-                    label = { Text("npub or hex pubkey") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.clickable { isPrivate = !isPrivate }
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 32.dp)
+        ) {
+            // Header
+            Text(
+                text = "Add Member",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+            )
+
+            // Search field
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = { Text("Search by name, username, or paste npub/hex") },
+                singleLine = true,
+                leadingIcon = {
+                    Icon(
+                        Icons.Outlined.Search,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { query = "" }) {
+                            Icon(Icons.Outlined.Close, contentDescription = "Clear")
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+
+            // Private toggle
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clickable { isPrivate = !isPrivate }
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                Checkbox(checked = isPrivate, onCheckedChange = { isPrivate = it })
+                Spacer(Modifier.width(4.dp))
+                Text("Add as private (encrypted)", style = MaterialTheme.typography.bodyMedium)
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 4.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+
+            // Results list
+            if (searchResults.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 48.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Checkbox(checked = isPrivate, onCheckedChange = { isPrivate = it })
-                    Spacer(Modifier.width(4.dp))
-                    Text("Add as private (encrypted)", style = MaterialTheme.typography.bodyMedium)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Outlined.PersonSearch,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(40.dp)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = if (query.isBlank()) "Search for a user" else "No results found",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (query.isNotBlank()) {
+                            Text(
+                                text = "Try pasting an npub or hex pubkey",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp)
+                ) {
+                    items(searchResults, key = { it.first }) { (pubkey, author) ->
+                        SearchResultRow(
+                            pubkey = pubkey,
+                            author = author,
+                            onClick = {
+                                onAdd(pubkey, isPrivate)
+                                onDismiss()
+                            }
+                        )
+                    }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onAdd(input.trim(), isPrivate) },
-                enabled = input.isNotBlank()
-            ) { Text("Add") }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
         }
-    )
+    }
+}
+
+@Composable
+private fun SearchResultRow(
+    pubkey: String,
+    author: social.mycelium.android.data.Author,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Avatar
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            if (author.avatarUrl != null) {
+                AsyncImage(
+                    model = author.avatarUrl,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    Icons.Outlined.Person,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier
+                        .size(24.dp)
+                        .align(Alignment.Center)
+                )
+            }
+        }
+
+        Spacer(Modifier.width(12.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = author.displayName,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row {
+                if (author.username != null && author.username != author.displayName) {
+                    Text(
+                        text = "@${author.username}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (author.nip05 != null) {
+                    Text(
+                        text = author.nip05!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+
+        // Add button hint
+        Icon(
+            Icons.Outlined.PersonAdd,
+            contentDescription = "Add",
+            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f),
+            modifier = Modifier.size(20.dp)
+        )
+    }
 }
 
 /**
- * Resolve an npub1 or hex string to a 64-char hex pubkey.
+ * Resolve an npub1, nprofile1, or hex string to a 64-char hex pubkey.
  * Returns null if parsing fails.
  */
 private fun resolveToHex(input: String): String? {
@@ -412,3 +628,4 @@ private fun resolveToHex(input: String): String? {
     }
     return null
 }
+

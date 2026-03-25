@@ -24,6 +24,10 @@ object FeedPreferences {
     private val _defaultListDTag = MutableStateFlow<String?>(null)
     val defaultListDTag: StateFlow<String?> = _defaultListDTag.asStateFlow()
 
+    /** Auto-save drafts while composing (timer-based). Default: enabled. */
+    private val _autoSaveDrafts = MutableStateFlow(true)
+    val autoSaveDrafts: StateFlow<Boolean> = _autoSaveDrafts.asStateFlow()
+
     fun setDefaultFeedView(value: String) {
         if (_defaultFeedView.value != value) {
             _defaultFeedView.value = value
@@ -43,5 +47,9 @@ object FeedPreferences {
             _defaultListDTag.value = value
             SettingsSyncManager.notifySettingChanged()
         }
+    }
+
+    fun setAutoSaveDrafts(enabled: Boolean) {
+        _autoSaveDrafts.value = enabled
     }
 }

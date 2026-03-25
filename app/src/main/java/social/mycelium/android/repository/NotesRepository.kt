@@ -12,6 +12,7 @@ import social.mycelium.android.utils.Nip10ReplyDetector
 import social.mycelium.android.utils.Nip19QuoteParser
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.extractPubkeysFromContent
+import social.mycelium.android.utils.extractPubkeysWithHintsFromContent
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -111,6 +112,7 @@ class NotesRepository private constructor() {
     private val CONTINUATION_FLUSH_MS = 16L
 
     private val outboxFeedManager = OutboxFeedManager.getInstance()
+    private val globalFeedManager = GlobalFeedManager.getInstance()
 
     init {
         if (BuildConfig.DEBUG) {
@@ -139,6 +141,14 @@ class NotesRepository private constructor() {
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             scheduleKind1Flush()
         }
+        // Wire global feed enrichment events (hashtag/list indexer subscriptions) into the pipeline.
+        // These arrive during Global mode and should bypass the follow filter but not the age gate.
+        globalFeedManager.onNoteReceived = { event, relayUrl ->
+            Log.d(TAG, "\uD83C\uDF0D Global enrichment event: ${event.id.take(8)} from $relayUrl")
+            EventRelayTracker.addRelay(event.id, relayUrl)
+            pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = false))
+            scheduleKind1Flush()
+        }
         startProfileUpdateCoalescer()
     }
 
@@ -160,6 +170,23 @@ class NotesRepository private constructor() {
             indexerRelayUrls = indexerRelayUrls,
             inboxRelayUrls = subscriptionRelays
         )
+    }
+
+    /**
+     * Update global enrichment subscriptions (hashtags + list members on indexer relays).
+     * Call from the dashboard when the user changes hashtag/list selections while in Global mode.
+     * No-op when not in global mode.
+     *
+     * @param hashtags  Active hashtags to subscribe to on indexers (from kind-10015 or dropdown)
+     * @param listDTags Active people list d-tags (their pubkeys will be used as author filter)
+     */
+    fun updateGlobalEnrichment(hashtags: Set<String>, listDTags: Set<String>) {
+        if (!isGlobalMode) return
+        if (hashtags.isEmpty() && listDTags.isEmpty()) {
+            globalFeedManager.stop()
+        } else {
+            globalFeedManager.start(hashtags = hashtags, listDTags = listDTags)
+        }
     }
 
     /**
@@ -561,8 +588,30 @@ class NotesRepository private constructor() {
             if (pendingNew.isNotEmpty()) {
                 synchronized(pendingNotesLock) { _pendingNewNotes.addAll(pendingNew) }
                 updateDisplayedNewNotesCount()
-                // Prefetch URL previews for pending notes so they're ready when the
-                // user pulls to refresh and taps "show X new notes".
+                // ── Full pre-enrichment for pending notes ──
+                // These notes sit in the "X new notes" holding area until the user
+                // taps the banner. Pre-fetch ALL data now so when they're revealed
+                // everything renders instantly — no loading spinners for counts,
+                // quoted embeds, or link previews.
+                //
+                // 1. Counts subscription (reactions, zaps, replies, reposts)
+                val pendingRelayMap = LinkedHashMap<String, List<String>>(pendingNew.size)
+                for (note in pendingNew) {
+                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    val effectiveId = note.originalNoteId ?: note.id
+                    if (effectiveId !in pendingRelayMap) {
+                        pendingRelayMap[effectiveId] = relays
+                    }
+                    note.quotedEventIds.forEach { qid ->
+                        if (qid !in pendingRelayMap) {
+                            pendingRelayMap[qid] = relays
+                        }
+                    }
+                }
+                NoteCountsRepository.setNoteIdsOfInterest(pendingRelayMap)
+                // 2. Quoted note content (memory cache → RawEventCache → Room → relay)
+                QuotedNoteCache.prefetchForNotes(pendingNew)
+                // 3. URL preview metadata
                 scheduleUrlPreviewPrefetch(pendingNew)
             }
 
@@ -841,6 +890,9 @@ class NotesRepository private constructor() {
 
     /** Batched kind-0 profile requests: uncached authors are added here and fetched in batches to avoid flooding relays and speed up feed resolution. */
     private val pendingProfilePubkeys = Collections.synchronizedSet(LinkedHashSet<String>())
+    /** Relay hints from nprofile TLV data, keyed by pubkey. Used to resolve profiles
+     *  that aren't on indexer relays (e.g. relays specified in nprofile1 mentions). */
+    private val pendingProfileRelayHints = java.util.concurrent.ConcurrentHashMap<String, List<String>>()
     /** Track in-flight tag-only repost fetches to avoid duplicate requests for the same repost event. */
     private val pendingRepostFetches = Collections.synchronizedSet(HashSet<String>())
 
@@ -1209,6 +1261,12 @@ class NotesRepository private constructor() {
             _paginationExhausted.value = false
             feedCutoffTimestampMs = System.currentTimeMillis()
             Log.d(TAG, "Entering Global mode — feed cleared, outbox stopped, live-only")
+            // Start global enrichment with user's subscribed hashtags and any active lists
+            val hashtags = PeopleListRepository.subscribedHashtags.value
+            val listDTags = emptySet<String>() // Will be updated from DashboardScreen
+            if (hashtags.isNotEmpty() || listDTags.isNotEmpty()) {
+                globalFeedManager.start(hashtags = hashtags, listDTags = listDTags)
+            }
         } else if (leavingGlobal) {
             // Leaving Global/All: destroy global notes, restore following feed from memory snapshot
             isGlobalMode = false
@@ -1238,6 +1296,8 @@ class NotesRepository private constructor() {
                 scope.launch { loadFeedCacheFromRoom() }
                 Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from Room")
             }
+            // Stop global enrichment subscriptions when leaving global mode
+            globalFeedManager.stop()
         } else {
             // Not entering or leaving global — just updating follow list within same mode.
             // Do NOT touch isGlobalMode here; it was already set correctly on mode entry/exit.
@@ -2555,8 +2615,17 @@ class NotesRepository private constructor() {
                         break
                     }
                     try {
-                        Log.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} relays")
-                        profileCache.requestProfiles(batch, urls)
+                        // Collect nprofile relay hints for this batch
+                        val batchHints = batch.flatMap { pk ->
+                            pendingProfileRelayHints.remove(pk) ?: emptyList()
+                        }.distinct()
+                        if (batchHints.isNotEmpty()) {
+                            Log.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} indexer + ${batchHints.size} hint relays")
+                            profileCache.requestProfileWithHints(batch, urls, batchHints)
+                        } else {
+                            Log.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} relays")
+                            profileCache.requestProfiles(batch, urls)
+                        }
                     } catch (e: Throwable) {
                         Log.e(TAG, "Batch profile request failed: ${e.message}", e)
                     }
@@ -2587,10 +2656,14 @@ class NotesRepository private constructor() {
         if (profileCache.getAuthor(pubkeyHex) == null && profileRelayUrls.isNotEmpty()) {
             pendingProfilePubkeys.add(pubkeyHex.lowercase())
         }
-        // Request kind-0 for pubkeys mentioned in content (npub + hex) so @mentions resolve to display names
-        extractPubkeysFromContent(event.content).forEach { hex ->
+        // Request kind-0 for pubkeys mentioned in content (npub + nprofile + hex)
+        // nprofile relay hints are preserved so profiles not on indexer relays can be resolved
+        extractPubkeysWithHintsFromContent(event.content).forEach { (hex, relayHints) ->
             if (profileCache.getAuthor(hex) == null && profileRelayUrls.isNotEmpty()) {
                 pendingProfilePubkeys.add(hex.lowercase())
+                if (relayHints.isNotEmpty()) {
+                    pendingProfileRelayHints[hex.lowercase()] = relayHints
+                }
             }
         }
         val hashtags = event.tags.toList()

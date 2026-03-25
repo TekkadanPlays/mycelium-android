@@ -325,6 +325,11 @@ object StartupOrchestrator {
             Log.d(TAG, "Phase 3: outbox feed started (${followedPubkeys.size} followed)")
         }
 
+        // Topics (kind-11) — separate subscription slot, pre-populates for Topics screen
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        stateMachine.startTopicsSubscription(allUserRelayUrls)
+        Log.d(TAG, "Phase 3: topics subscription started (separate slot)")
+
         // Bookmarks, emoji packs, anchor subs
         BookmarkRepository.fetchBookmarks(userPubkey, allUserRelayUrls)
         EmojiPackRepository.setUserRelays(allUserRelayUrls)
@@ -373,9 +378,9 @@ object StartupOrchestrator {
         _currentPhase.value = StartupPhase.BACKGROUND
         Log.d(TAG, "Phase 4: starting background subscriptions")
 
-        // DMs (fetch-only, no Amber interaction until user visits DM page)
-        DirectMessageRepository.startSubscription(userPubkey, signer, inboxUrls, outboxUrls)
-        Log.d(TAG, "Phase 4: DM subscription started")
+        // DMs (deferred: store credentials but don't connect until user visits DM page)
+        DirectMessageRepository.startSubscription(userPubkey, signer, inboxUrls, outboxUrls, deferred = true)
+        Log.d(TAG, "Phase 4: DM credentials stored (deferred — relay connection starts on DM page visit)")
 
         // Fetch kind-10050 DM relay lists for self + followed network.
         // Results are stored in DirectMessageRepository for the DM system to use.

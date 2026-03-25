@@ -323,7 +323,10 @@ class RelayManagementViewModel(
         // Without this, AUTH challenges from new relays are silently ignored.
         val allRelayUrls = (subscribedRelayUrls + profileRelayUrls + outboxUrls +
             state.inboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) } +
-            state.indexerRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+            state.indexerRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) } +
+            // Include NIP-17 DM relays so auth challenges from DM relays are accepted
+            social.mycelium.android.repository.DirectMessageRepository.dmRelayUrls.value
+                .map { social.mycelium.android.utils.normalizeRelayUrl(it) }
         ).toSet()
         authHandler.setAllowedRelayUrls(allRelayUrls)
         // Invalidate the idempotency guard so the feed re-subscribes with the new relay set

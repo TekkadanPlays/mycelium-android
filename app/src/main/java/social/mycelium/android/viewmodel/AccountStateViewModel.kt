@@ -1332,7 +1332,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             .flatMap { it.categories }
             .flatMap { it.relays }
             .map { it.url }
-        val all = (outbox + inbox + indexer + categories + profileRelays).toSet()
+        // Include NIP-17 DM relays (kind-10050) — some DM relays require auth
+        // before they'll serve kind-1059 gift wraps or accept published events
+        val dmRelays = social.mycelium.android.repository.DirectMessageRepository.dmRelayUrls.value
+        val all = (outbox + inbox + indexer + categories + profileRelays + dmRelays).toSet()
         RelayConnectionStateMachine.getInstance().nip42AuthHandler.setAllowedRelayUrls(all)
     }
 

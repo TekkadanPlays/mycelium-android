@@ -478,6 +478,10 @@ object RelayHealthTracker {
         RelayLogBuffer.logError(url, error ?: "Connection failed")
     }
 
+    /** Debounce job for batching event-count emissions (avoids thousands of StateFlow updates). */
+    private val eventFlushScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    @Volatile private var eventFlushScheduled = false
+
     /** Call when an event is received from a relay (any kind). */
     fun recordEventReceived(relayUrl: String) {
         val url = normalize(relayUrl)
@@ -486,7 +490,15 @@ object RelayHealthTracker {
             data.eventsReceived++
             data.lastEventAt = System.currentTimeMillis()
         }
-        // Don't emit on every event — too noisy. Batch via periodic or threshold.
+        // Debounced flush: schedule a single delayed emit that coalesces rapid event bursts
+        if (!eventFlushScheduled) {
+            eventFlushScheduled = true
+            eventFlushScope.launch {
+                delay(2_000) // emit at most every 2 seconds
+                eventFlushScheduled = false
+                emitState()
+            }
+        }
     }
 
     /** Batch-emit after a burst of events (call periodically or after EOSE). */

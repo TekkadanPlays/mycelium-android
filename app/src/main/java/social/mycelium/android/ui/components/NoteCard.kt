@@ -1044,14 +1044,27 @@ internal fun NoteMediaCarousel(
     // When no ratio is known, default to 16:9 placeholder. Once the image loads and
     // reports its intrinsic dimensions, update to the real ratio (one-time resize).
     // On subsequent visits the cache provides the real ratio instantly (no shift).
+    //
+    // KEY FIX: Use a content-based key (joined URLs) rather than list identity.
+    // This prevents ratio resets when a Note re-emits with the same media URLs
+    // but a different List instance (e.g. relay URL merge, counts update).
+    val mediaListKey = remember(mediaList) { mediaList.joinToString(",") }
     val currentUrl = mediaList.getOrNull(pagerState.currentPage)
-    val knownRatio = remember(mediaList) {
+    val knownRatio = remember(mediaListKey) {
         if (currentUrl != null) {
             mediaMeta[currentUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(currentUrl)
         } else null
     }
-    var containerRatio by remember(mediaList) {
+    var containerRatio by remember(mediaListKey) {
         mutableFloatStateOf(knownRatio ?: (16f / 9f))
+    }
+    // Update container ratio when user swipes to a page with a known ratio
+    LaunchedEffect(pagerState.currentPage, mediaListKey) {
+        val pageUrl = mediaList.getOrNull(pagerState.currentPage) ?: return@LaunchedEffect
+        val pageRatio = mediaMeta[pageUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(pageUrl)
+        if (pageRatio != null) {
+            containerRatio = pageRatio
+        }
     }
     val ratioWasKnown = knownRatio != null
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
@@ -3946,68 +3959,16 @@ fun NoteCard(
             )
         }
 
-        // Zap drawer — full-screen Popup so it escapes the card's Column bounds
+        // Zap drawer — ModalBottomSheet for smooth animate-in/out
         if (showZapDrawer) {
-            androidx.compose.ui.window.Popup(
-                alignment = Alignment.BottomCenter,
-                onDismissRequest = { showZapDrawer = false },
-                properties = androidx.compose.ui.window.PopupProperties(focusable = true)
-            ) {
-                // AnimatedVisibility inside the Popup for smooth slide/fade
-                val drawerVisible = remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) { drawerVisible.value = true }
-
-                androidx.compose.foundation.layout.Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.BottomCenter
-                ) {
-                    // Dismiss scrim — covers entire screen
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = drawerVisible.value,
-                        enter = androidx.compose.animation.fadeIn(
-                            animationSpec = androidx.compose.animation.core.tween(200)
-                        ),
-                        exit = androidx.compose.animation.fadeOut(
-                            animationSpec = androidx.compose.animation.core.tween(150)
-                        )
-                    ) {
-                        androidx.compose.foundation.layout.Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.4f))
-                                .clickable(
-                                    indication = null,
-                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                                ) { showZapDrawer = false }
-                        )
-                    }
-                    // Drawer slides up from bottom
-                    androidx.compose.animation.AnimatedVisibility(
-                        visible = drawerVisible.value,
-                        enter = androidx.compose.animation.slideInVertically(
-                            initialOffsetY = { it },
-                            animationSpec = androidx.compose.animation.core.tween(300)
-                        ) + androidx.compose.animation.fadeIn(
-                            animationSpec = androidx.compose.animation.core.tween(200)
-                        ),
-                        exit = androidx.compose.animation.slideOutVertically(
-                            targetOffsetY = { it },
-                            animationSpec = androidx.compose.animation.core.tween(250)
-                        ) + androidx.compose.animation.fadeOut(
-                            animationSpec = androidx.compose.animation.core.tween(150)
-                        )
-                    ) {
-                        ZapDrawer(
-                            onDismiss = { showZapDrawer = false },
-                            onZap = { amount -> onZap(note.id, amount) },
-                            onCustomZapSend = { amount, zapType, message ->
-                                onCustomZapSend?.invoke(note, amount, zapType, message)
-                            },
-                            onSettingsClick = onZapSettings
-                        )
-                    }
-                }
-            }
+            ZapBottomSheet(
+                onDismiss = { showZapDrawer = false },
+                onZap = { amount -> onZap(note.id, amount) },
+                onCustomZapSend = { amount, zapType, message ->
+                    onCustomZapSend?.invoke(note, amount, zapType, message)
+                },
+                onSettingsClick = onZapSettings
+            )
         }
 
     }

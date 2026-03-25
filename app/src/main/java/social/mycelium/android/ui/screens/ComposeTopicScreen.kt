@@ -86,6 +86,26 @@ fun ComposeTopicScreen(
     // Intercept system back gesture to save draft before leaving
     androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
 
+    // Auto-save draft every 10 seconds while editing (if enabled in settings)
+    val autoSaveEnabled by social.mycelium.android.ui.settings.FeedPreferences.autoSaveDrafts.collectAsState()
+    val draftIdForAutoSave = remember { loadedDraft?.id ?: java.util.UUID.randomUUID().toString() }
+    LaunchedEffect(autoSaveEnabled) {
+        if (!autoSaveEnabled) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(10_000L)
+            if (title.isNotBlank() || content.isNotBlank()) {
+                social.mycelium.android.repository.DraftsRepository.saveDraft(
+                    social.mycelium.android.data.Draft(
+                        id = draftIdForAutoSave,
+                        type = social.mycelium.android.data.DraftType.TOPIC,
+                        content = content,
+                        title = title
+                    )
+                )
+            }
+        }
+    }
+
     var hashtags by remember { mutableStateOf(initialHashtag ?: "") }
     var showRelayPicker by remember { mutableStateOf(false) }
     var markdownEnabled by remember { mutableStateOf(false) }

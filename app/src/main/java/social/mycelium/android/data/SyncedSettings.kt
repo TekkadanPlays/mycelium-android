@@ -35,7 +35,10 @@ data class SyncedSettings(
     // Tier 4 — Feed preferences (cold-start defaults)
     val defaultFeedView: String = "HOME",       // HOME or TOPICS
     val defaultSortOrder: String = "LATEST",     // LATEST or POPULAR
-    val defaultListDTag: String? = null           // NIP-51 list d-tag for cold start, null = Following
+    val defaultListDTag: String? = null,           // NIP-51 list d-tag for cold start, null = Following
+
+    // Tier 5 — DM preferences
+    val autoDecryptDMs: Boolean = false             // Auto-decrypt without user confirmation (off by default)
 ) {
     fun toJson(): String {
         val obj = JSONObject()
@@ -57,6 +60,7 @@ data class SyncedSettings(
         obj.put("defaultFeedView", defaultFeedView)
         obj.put("defaultSortOrder", defaultSortOrder)
         if (defaultListDTag != null) obj.put("defaultListDTag", defaultListDTag)
+        obj.put("autoDecryptDMs", autoDecryptDMs)
         return obj.toString()
     }
 
@@ -87,7 +91,8 @@ data class SyncedSettings(
                     notifyDMs = obj.optBoolean("notifyDMs", true),
                     defaultFeedView = obj.optString("defaultFeedView", "HOME"),
                     defaultSortOrder = obj.optString("defaultSortOrder", "LATEST"),
-                    defaultListDTag = obj.optString("defaultListDTag", null)
+                    defaultListDTag = obj.optString("defaultListDTag", null),
+                    autoDecryptDMs = obj.optBoolean("autoDecryptDMs", false)
                 )
             } catch (e: Exception) {
                 SyncedSettings() // Return defaults on parse failure
@@ -116,7 +121,8 @@ data class SyncedSettings(
                 notifyDMs = social.mycelium.android.ui.settings.NotificationPreferences.notifyDMs.value,
                 defaultFeedView = social.mycelium.android.ui.settings.FeedPreferences.defaultFeedView.value,
                 defaultSortOrder = social.mycelium.android.ui.settings.FeedPreferences.defaultSortOrder.value,
-                defaultListDTag = social.mycelium.android.ui.settings.FeedPreferences.defaultListDTag.value
+                defaultListDTag = social.mycelium.android.ui.settings.FeedPreferences.defaultListDTag.value,
+                autoDecryptDMs = social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.value
             )
         }
 
@@ -154,6 +160,9 @@ data class SyncedSettings(
             social.mycelium.android.ui.settings.FeedPreferences.setDefaultFeedView(settings.defaultFeedView)
             social.mycelium.android.ui.settings.FeedPreferences.setDefaultSortOrder(settings.defaultSortOrder)
             social.mycelium.android.ui.settings.FeedPreferences.setDefaultListDTag(settings.defaultListDTag)
+
+            // Tier 5 — DM preferences
+            social.mycelium.android.ui.settings.DmPreferences.applyAutoDecryptDMs(settings.autoDecryptDMs)
         }
     }
 }

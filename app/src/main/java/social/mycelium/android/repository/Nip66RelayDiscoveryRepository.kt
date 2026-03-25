@@ -264,11 +264,22 @@ object Nip66RelayDiscoveryRepository {
         _isLoading.value = true
 
         scope.launch {
-            // On cold start the relay pool hasn't connected yet — wait for it.
-            // The mux needs time to flush subscriptions and open WebSockets.
+            // On cold start the relay pool hasn't connected yet — poll until
+            // at least one relay is connected, capped at 3s. Replaces the old
+            // hardcoded 4s delay that wasted time on warm pools.
             if (_discoveredRelays.value.isEmpty() && !_hasFetched.value) {
-                Log.d(TAG, "Cold start — waiting for relay pool before NIP-66 fetch")
-                delay(4_000L)
+                Log.d(TAG, "Cold start — polling for relay pool readiness")
+                val poolDeadline = System.currentTimeMillis() + 3_000L
+                while (System.currentTimeMillis() < poolDeadline) {
+                    try {
+                        val pool = RelayConnectionStateMachine.getInstance().relayPool
+                        if (pool.getConnectedCount() > 0) {
+                            Log.d(TAG, "Relay pool ready (${pool.getConnectedCount()} connected)")
+                            break
+                        }
+                    } catch (_: Exception) { /* pool not initialized yet */ }
+                    delay(200L)
+                }
             }
             fetchRelayDiscoveryViaWebSocket(discoveryRelays, monitorPubkeys)
         }
@@ -277,6 +288,9 @@ object Nip66RelayDiscoveryRepository {
     /**
      * WebSocket-based NIP-66 discovery. Subscribes to kind 30166 events
      * from monitor relays and aggregates the results.
+     *
+     * Uses HIGH priority because NIP-66 data gates all downstream indexer
+     * discovery (NIP-65, kind-10002 lookup, etc.).
      */
     private suspend fun fetchRelayDiscoveryViaWebSocket(
         discoveryRelays: List<String>,
@@ -309,7 +323,7 @@ object Nip66RelayDiscoveryRepository {
             }
 
             val handle = RelayConnectionStateMachine.getInstance()
-                .requestTemporarySubscription(allRelays, filter, priority = SubscriptionPriority.BACKGROUND) { event ->
+                .requestTemporarySubscription(allRelays, filter, priority = SubscriptionPriority.HIGH) { event ->
                     if (event.kind == KIND_RELAY_DISCOVERY) {
                         synchronized(rawEvents) { rawEvents.add(event) }
                         lastEventAt.set(System.currentTimeMillis())
@@ -345,6 +359,9 @@ object Nip66RelayDiscoveryRepository {
                 _hasFetched.value = true
                 Log.d(TAG, "Discovered ${aggregated.size} relays from ${parsed.size} monitor events")
             } else {
+                // Mark as fetched even on empty results so the UI shows the empty state
+                // with retry button instead of an infinite loading spinner
+                _hasFetched.value = true
                 Log.w(TAG, "No events received — relays may not be connected yet")
             }
 

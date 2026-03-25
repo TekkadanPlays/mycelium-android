@@ -564,28 +564,44 @@ fun buildNoteContentWithInlinePreviews(
  * Use in NotesRepository (and reply repos) to request profiles for tagged/mentioned users.
  */
 fun extractPubkeysFromContent(content: String): List<String> {
+    return extractPubkeysWithHintsFromContent(content).map { it.first }
+}
+
+/**
+ * Extracts pubkey hex values from note content (npub, nprofile, 64-char hex) for kind-0 requests.
+ * Returns `List<Pair<pubkey, relayHints>>` — relay hints come from nprofile TLV data.
+ * npub and bare hex entries have empty relay hint lists.
+ *
+ * Order is preserved: entries appear in the order they are encountered in the content,
+ * so first-seen nprofile hints get priority when constructing profile fetch relay sets.
+ */
+fun extractPubkeysWithHintsFromContent(content: String): List<Pair<String, List<String>>> {
     val seen = mutableSetOf<String>()
-    val result = mutableListOf<String>()
+    val result = mutableListOf<Pair<String, List<String>>>()
     npubPattern.findAll(content).forEach { match ->
         val fullUri = if (match.value.startsWith("nostr:", ignoreCase = true)) match.value else "nostr:${match.value}"
         try {
             val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@forEach
             val hex = (parsed.entity as? NPub)?.hex?.lowercase() ?: return@forEach
-            if (hex.length == 64 && seen.add(hex)) result.add(hex)
+            if (hex.length == 64 && seen.add(hex)) result.add(hex to emptyList())
         } catch (_: Exception) { }
     }
-    // NIP-19 nprofile mentions (profile with relay hints)
+    // NIP-19 nprofile mentions (profile with relay hints) — relay hints are preserved
     nprofilePattern.findAll(content).forEach { match ->
         val fullUri = if (match.value.startsWith("nostr:", ignoreCase = true)) match.value else "nostr:${match.value}"
         try {
             val parsed = Nip19Parser.uriToRoute(fullUri) ?: return@forEach
-            val hex = (parsed.entity as? NProfile)?.hex?.lowercase() ?: return@forEach
-            if (hex.length == 64 && seen.add(hex)) result.add(hex)
+            val profile = parsed.entity as? NProfile ?: return@forEach
+            val hex = profile.hex.lowercase()
+            if (hex.length == 64 && seen.add(hex)) {
+                result.add(hex to profile.relays.filter { it.startsWith("wss://") || it.startsWith("ws://") })
+            }
         } catch (_: Exception) { }
     }
     hexPubkeyPattern.findAll(content).forEach { match ->
         val hex = match.groupValues.getOrNull(1)?.takeIf { it.length == 64 }?.lowercase() ?: return@forEach
-        if (seen.add(hex)) result.add(hex)
+        if (seen.add(hex)) result.add(hex to emptyList())
     }
     return result
 }
+

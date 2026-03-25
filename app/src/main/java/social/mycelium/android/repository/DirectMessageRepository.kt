@@ -1,5 +1,7 @@
 package social.mycelium.android.repository
 
+import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -48,11 +50,29 @@ object DirectMessageRepository {
     private const val KIND_GIFT_WRAP = 1059
     private const val KIND_SEAL = 13
     private const val KIND_DM = 14
+    private const val PREFS_NAME = "dm_relay_prefs"
+    private const val PREFS_KEY_DM_RELAYS = "dm_relay_urls"
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
             Log.e(TAG, "Coroutine failed: ${t.message}", t)
         }
     )
+
+    private var prefs: SharedPreferences? = null
+
+    /** Call once from Application/Activity to provide app context and restore persisted DM relays. */
+    fun init(context: Context) {
+        prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // Restore DM relay URLs from previous session (instant cold-start, before Phase 4 re-fetches)
+        val saved = prefs?.getString(PREFS_KEY_DM_RELAYS, null)
+        if (!saved.isNullOrBlank()) {
+            val urls = saved.split(",").filter { it.isNotBlank() }
+            if (urls.isNotEmpty() && _dmRelayUrls.value.isEmpty()) {
+                _dmRelayUrls.value = urls
+                Log.d(TAG, "init: restored ${urls.size} DM relays from prefs")
+            }
+        }
+    }
 
     private val profileCache = ProfileMetadataCache.getInstance()
 
@@ -81,6 +101,11 @@ object DirectMessageRepository {
     /** IDs already successfully decrypted — never re-attempt. */
     private val decryptedIds = ConcurrentHashMap.newKeySet<String>()
 
+    /** Check if an event ID is a known gift wrap (either pending or decrypted).
+     *  Used by NotificationsRepository to detect DM zaps. */
+    fun isKnownGiftWrapId(eventId: String): Boolean =
+        decryptedIds.contains(eventId) || pendingGiftWraps.containsKey(eventId)
+
     /** Number of undecrypted gift wraps available (for badge display). */
     private val _pendingGiftWrapCount = MutableStateFlow(0)
     val pendingGiftWrapCount: StateFlow<Int> = _pendingGiftWrapCount.asStateFlow()
@@ -99,6 +124,15 @@ object DirectMessageRepository {
     private val _debugStatus = MutableStateFlow("Not started")
     val debugStatus: StateFlow<String> = _debugStatus.asStateFlow()
 
+    /** Whether the user has opened the DM page at least once this session.
+     *  When false, the subscription is deferred — no relay connections for DMs. */
+    private val _hasUserUnlockedDMs = MutableStateFlow(false)
+    val hasUserUnlockedDMs: StateFlow<Boolean> = _hasUserUnlockedDMs.asStateFlow()
+
+    /** Whether the user has confirmed decryption this session (tapped "Decrypt"). */
+    private val _hasUserApprovedDecrypt = MutableStateFlow(false)
+    val hasUserApprovedDecrypt: StateFlow<Boolean> = _hasUserApprovedDecrypt.asStateFlow()
+
     /** Cache of fetched inbox relays per pubkey (NIP-65 kind-10002 only — kind-10050 intentionally ignored). */
     private val inboxRelayCache = ConcurrentHashMap<String, List<String>>()
 
@@ -113,6 +147,7 @@ object DirectMessageRepository {
     /** Store kind-10050 DM relay URLs fetched by StartupOrchestrator. */
     fun setDmRelayUrls(urls: List<String>) {
         _dmRelayUrls.value = urls.map { it.trim().removeSuffix("/") }.distinct()
+        persistDmRelayUrls()
         Log.d(TAG, "DM relay list set: ${urls.size} relays")
     }
 
@@ -120,12 +155,21 @@ object DirectMessageRepository {
         val current = _dmRelayUrls.value.toMutableList()
         current.add(url.trim().removeSuffix("/"))
         _dmRelayUrls.value = current.distinct()
+        persistDmRelayUrls()
     }
 
     fun removeDmRelay(url: String) {
         val current = _dmRelayUrls.value.toMutableList()
         current.remove(url.trim().removeSuffix("/"))
         _dmRelayUrls.value = current.distinct()
+        persistDmRelayUrls()
+    }
+
+    /** Persist current DM relay URLs to SharedPreferences. */
+    private fun persistDmRelayUrls() {
+        scope.launch(Dispatchers.IO) {
+            prefs?.edit()?.putString(PREFS_KEY_DM_RELAYS, _dmRelayUrls.value.joinToString(","))?.apply()
+        }
     }
 
     suspend fun publishDmRelays(
@@ -180,18 +224,51 @@ object DirectMessageRepository {
      * Start subscribing to gift-wrapped DMs for the given user.
      * **Fetch only** — raw kind-1059 events are buffered without any Amber interaction.
      * Call [decryptPending] when the user visits the DM page to trigger decryption.
+     *
+     * If [deferred] is true, credentials are stored but no relay connection is made.
+     * The actual subscription starts when the user visits the DM page and calls
+     * [ensureSubscriptionStarted].
      */
     fun startSubscription(
         pubkey: String,
         signer: NostrSigner,
         inboxRelays: List<String>,
-        outboxRelays: List<String> = emptyList()
+        outboxRelays: List<String> = emptyList(),
+        deferred: Boolean = false
     ) {
         userPubkey = pubkey
         userSigner = signer
         userInboxRelays = inboxRelays.map { it.trim().removeSuffix("/") }.distinct()
         userOutboxRelays = outboxRelays.map { it.trim().removeSuffix("/") }.distinct()
 
+        if (deferred) {
+            _debugStatus.value = "Ready (deferred until DM page visit)"
+            Log.d(TAG, "startSubscription: credentials stored, subscription deferred")
+            return
+        }
+
+        startRelaySubscription(pubkey)
+    }
+
+    /**
+     * Lazily start the DM relay subscription when the user first visits the DM page.
+     * No-op if already subscribed or if credentials haven't been stored.
+     */
+    fun ensureSubscriptionStarted() {
+        val pubkey = userPubkey ?: return
+        if (dmHandle != null) return // Already subscribed
+        _hasUserUnlockedDMs.value = true
+        Log.d(TAG, "ensureSubscriptionStarted: user visited DM page, starting subscription")
+        startRelaySubscription(pubkey)
+        // Fetch deeper DM history after initial subscription settles
+        scope.launch {
+            kotlinx.coroutines.delay(5_000)
+            fetchDmHistory()
+        }
+    }
+
+    /** Internal: actually opens relay connections for DM events. */
+    private fun startRelaySubscription(pubkey: String) {
         val stateMachine = RelayConnectionStateMachine.getInstance()
 
         dmRelaysJob?.cancel()
@@ -205,7 +282,14 @@ object DirectMessageRepository {
                 }
 
                 _debugStatus.value = "Subscribing on ${dmRelays.size} relays..."
-                Log.d(TAG, "startSubscription: pubkey=${pubkey.take(8)}, dmRelays=${dmRelays.size}")
+                Log.d(TAG, "startRelaySubscription: pubkey=${pubkey.take(8)}, dmRelays=${dmRelays.size}")
+
+                // ── NIP-42: ensure DM relays are in the auth allowlist ──
+                // DM relays (kind-10050) are loaded during Phase 4 of startup, AFTER the
+                // initial NIP-42 allowed set is populated at login. Without this update,
+                // AUTH challenges from DM relays are silently ignored and the subscription
+                // returns no events on auth-required relays.
+                stateMachine.nip42AuthHandler.addAllowedRelayUrls(dmRelays)
 
                 val filter = Filter(
                     kinds = listOf(KIND_GIFT_WRAP),
@@ -241,7 +325,100 @@ object DirectMessageRepository {
     fun stopSubscription() {
         dmHandle?.cancel()
         dmHandle = null
+        deepHistoryJob?.cancel()
+        deepHistoryJob = null
         Log.d(TAG, "DM subscription stopped")
+    }
+
+    // ── Deep DM History Fetch ────────────────────────────────────────────────
+
+    private var deepHistoryJob: kotlinx.coroutines.Job? = null
+    /** True while deep DM history is being fetched. */
+    private val _isFetchingHistory = MutableStateFlow(false)
+    val isFetchingHistory: StateFlow<Boolean> = _isFetchingHistory.asStateFlow()
+
+    /**
+     * Fetch older DM history by paginating backward from the oldest known gift wrap.
+     * Uses one-shot subscriptions with `until` to walk backward through relay history.
+     * Each page buffers gift wraps for decryption; the user sees conversations appear
+     * as each page is decrypted.
+     *
+     * @param maxPages Maximum backward pages to fetch (each page = 500 events).
+     *   Default 5 gives coverage of ~2500 historical DMs.
+     */
+    fun fetchDmHistory(maxPages: Int = 5) {
+        val pubkey = userPubkey ?: return
+        val dmRelays = _dmRelayUrls.value
+        if (dmRelays.isEmpty()) {
+            Log.w(TAG, "fetchDmHistory: no DM relays configured")
+            return
+        }
+        if (deepHistoryJob?.isActive == true) {
+            Log.d(TAG, "fetchDmHistory: already in progress")
+            return
+        }
+
+        deepHistoryJob = scope.launch {
+            _isFetchingHistory.value = true
+            val stateMachine = RelayConnectionStateMachine.getInstance()
+            // Ensure DM relays are in auth allowlist for history fetch
+            stateMachine.nip42AuthHandler.addAllowedRelayUrls(dmRelays)
+
+            var pagesCompleted = 0
+            // Start from the oldest known gift wrap timestamp, or current time if none
+            var until = pendingGiftWraps.values.minOfOrNull { it.createdAt }
+                ?: messagesById.values.minOfOrNull { it.createdAt }
+                ?: (System.currentTimeMillis() / 1000)
+
+            Log.d(TAG, "fetchDmHistory: starting backward pagination from $until on ${dmRelays.size} relays")
+
+            while (pagesCompleted < maxPages) {
+                var pageCount = 0
+                var oldestInPage = until
+
+                val filter = Filter(
+                    kinds = listOf(KIND_GIFT_WRAP),
+                    tags = mapOf("p" to listOf(pubkey)),
+                    until = until,
+                    limit = 500
+                )
+
+                stateMachine.awaitOneShotSubscription(
+                    dmRelays, filter,
+                    priority = SubscriptionPriority.LOW,
+                    settleMs = 1_000L,
+                    maxWaitMs = 10_000L
+                ) { event ->
+                    if (event.kind == KIND_GIFT_WRAP) {
+                        // Buffer with a synthetic relay URL since we don't get relay info in one-shot
+                        bufferGiftWrap(event, dmRelays.firstOrNull() ?: "")
+                        pageCount++
+                        if (event.createdAt < oldestInPage) {
+                            oldestInPage = event.createdAt
+                        }
+                    }
+                }
+
+                pagesCompleted++
+                Log.d(TAG, "fetchDmHistory: page $pagesCompleted fetched $pageCount events (oldest=$oldestInPage)")
+
+                if (pageCount == 0) {
+                    // No more history available
+                    Log.d(TAG, "fetchDmHistory: no more history, stopping after $pagesCompleted pages")
+                    break
+                }
+
+                // Move the window backward
+                until = oldestInPage - 1
+
+                // Small pause between pages to avoid overwhelming relays
+                kotlinx.coroutines.delay(500)
+            }
+
+            _isFetchingHistory.value = false
+            _debugStatus.value = "${pendingGiftWraps.size} encrypted, ${messagesById.size} decrypted"
+            Log.d(TAG, "fetchDmHistory: complete — $pagesCompleted pages, ${pendingGiftWraps.size} pending decrypt")
+        }
     }
 
     /** Buffer a raw gift wrap event without decrypting. */
@@ -249,12 +426,14 @@ object DirectMessageRepository {
         if (event.kind != KIND_GIFT_WRAP) return
         // Track relay source even for already-decrypted events (merge relay URLs)
         giftWrapRelays.getOrPut(event.id) { java.util.Collections.synchronizedSet(mutableSetOf()) }.add(relayUrl)
-        if (event.id in decryptedIds) {
-            // Already decrypted — update relay URLs on existing message
-            messagesById[event.id]?.let { existing ->
+        if (decryptedIds.contains(event.id)) {
+            // Already decrypted — update relay URLs on the canonical DM entry
+            // DM ID is now seal.id (not gift-wrap event.id), so look up the mapping
+            val dmId = giftWrapToDmId[event.id] ?: event.id
+            messagesById[dmId]?.let { existing ->
                 val updatedRelays = giftWrapRelays[event.id]?.toList() ?: existing.relayUrls
                 if (updatedRelays.size > existing.relayUrls.size) {
-                    messagesById[event.id] = existing.copy(relayUrls = updatedRelays)
+                    messagesById[dmId] = existing.copy(relayUrls = updatedRelays)
                 }
             }
             return
@@ -274,11 +453,22 @@ object DirectMessageRepository {
      * decrypting immediately — no harassment. The user can retry by navigating away
      * and back to the DM page.
      *
+     * @param userConfirmed True if the user explicitly tapped "Decrypt Messages".
+     *   When false, decryption only proceeds if auto-decrypt is enabled.
+     *
      * Successfully decrypted events are removed from the pending buffer and never
      * re-attempted. Events that fail for non-decline reasons (invalid JSON, wrong kind)
      * are also removed permanently.
      */
-    fun decryptPending() {
+    fun decryptPending(userConfirmed: Boolean = false) {
+        if (userConfirmed) {
+            _hasUserApprovedDecrypt.value = true
+        } else if (!_hasUserApprovedDecrypt.value &&
+            !social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.value) {
+            // Neither user-confirmed nor auto-decrypt — do nothing
+            Log.d(TAG, "decryptPending: skipped — awaiting user confirmation")
+            return
+        }
         val signer = userSigner ?: return
         val myPubkey = userPubkey ?: return
         val pending = pendingGiftWraps.values.toList()
@@ -304,6 +494,8 @@ object DirectMessageRepository {
                     val dm = decryptGiftWrap(event, signer, myPubkey, eventRelays)
                     if (dm != null) {
                         messagesById[dm.id] = dm
+                        // Track gift-wrap → canonical DM ID so relay URL merges work
+                        giftWrapToDmId[event.id] = dm.id
                         decryptedCount++
                     } else {
                         failedCount++
@@ -379,21 +571,36 @@ object DirectMessageRepository {
         }
 
         // Step 3: Build DirectMessage
+        // Use seal.id as the canonical DM identifier — this is consistent with
+        // sendDirectMessage() which stores the local DM using signedSeal.id.
+        // When the self-addressed gift wrap echoes back from the relay and gets
+        // decrypted here, using seal.id ensures it maps to the same key in
+        // messagesById, merging relay URLs instead of creating a duplicate.
+        val canonicalId = seal.id
         val senderPubkey = seal.pubKey
         val recipientPubkey = rumor.tags.firstOrNull { it.firstOrNull() == "p" }?.getOrNull(1) ?: myPubkey
         val replyToId = rumor.tags.firstOrNull { it.firstOrNull() == "e" }?.getOrNull(1)
         val subject = rumor.tags.firstOrNull { it.firstOrNull() == "subject" }?.getOrNull(1)
+        val isOutgoing = senderPubkey.equals(myPubkey, ignoreCase = true)
+
+        // Check if this message was already added locally (send flow) — merge relay URLs
+        val existing = messagesById[canonicalId]
+        if (existing != null) {
+            val mergedRelays = (existing.relayUrls + relayUrls).distinct()
+            Log.d(TAG, "Merging relay echo for DM ${canonicalId.take(8)} (${mergedRelays.size} relays)")
+            return existing.copy(relayUrls = mergedRelays)
+        }
 
         Log.d(TAG, "Decrypted DM from ${senderPubkey.take(8)}: ${rumor.content.take(30)}...")
         return DirectMessage(
-            id = event.id,
+            id = canonicalId,
             senderPubkey = senderPubkey,
             recipientPubkey = recipientPubkey,
             content = rumor.content,
             createdAt = rumor.createdAt,
             replyToId = replyToId,
             subject = subject,
-            isOutgoing = senderPubkey.equals(myPubkey, ignoreCase = true),
+            isOutgoing = isOutgoing,
             relayUrls = relayUrls
         )
     }
@@ -726,6 +933,8 @@ object DirectMessageRepository {
         confirmationObserverJob = null
         _pendingGiftWrapCount.value = 0
         _isDecrypting.value = false
+        _hasUserUnlockedDMs.value = false
+        _hasUserApprovedDecrypt.value = false
         _conversations.value = emptyList()
         _activeMessages.value = emptyList()
         _debugStatus.value = "Not started"

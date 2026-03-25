@@ -73,6 +73,19 @@ fun DmSettingsScreen(
 
             Spacer(Modifier.height(16.dp))
 
+            // ── Decryption ──
+            DmSettingsSectionHeader("Decryption")
+
+            val autoDecrypt by social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.collectAsState()
+            DmSettingsToggleRow(
+                title = "Auto-decrypt messages",
+                description = "Automatically decrypt new DMs when you open messages. When off, you'll be asked to confirm decryption each time.",
+                checked = autoDecrypt,
+                onCheckedChange = {
+                    social.mycelium.android.ui.settings.DmPreferences.setAutoDecryptDMs(it)
+                }
+            )
+
             // ── DM Relays (kind-10050) ──
             DmSettingsSectionHeader("DM Relays")
 

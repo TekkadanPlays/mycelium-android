@@ -34,6 +34,42 @@ object QuotedNoteCache {
     private const val BATCH_DEBOUNCE_MS = 300L
     private const val MAX_BATCH_SIZE = 40
     private const val SNIPPET_MAX_LEN = 500
+
+    /** Event kinds accepted for quoted note rendering (includes polls for recursive polling). */
+    private val ACCEPTED_KINDS = setOf(1, 11, 1111, 1068, 6969)
+
+    /** Build QuotedNoteMeta from a parsed Event. Includes raw tags for poll kinds. */
+    private fun buildMetaFromEvent(event: Event, relayUrl: String?): QuotedNoteMeta {
+        val snippet = buildSmartSnippet(event.content, SNIPPET_MAX_LEN)
+        val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
+        val tags = if (event.kind == 1068 || event.kind == 6969) {
+            event.tags.map { it.toList() }
+        } else emptyList()
+
+        // Seed MediaAspectRatioCache from NIP-92 imeta tags so quoted note images
+        // have correct aspect ratios on first render (before Coil loads them).
+        // Without this, quoted media renders at 16:9 default until the image loads
+        // in fullscreen, at which point the SideEffect caches the real ratio.
+        val mediaMeta = social.mycelium.android.data.IMetaData.parseAll(event.tags)
+        for ((url, meta) in mediaMeta) {
+            if (meta.width != null && meta.height != null && meta.height > 0) {
+                social.mycelium.android.utils.MediaAspectRatioCache.add(url, meta.width, meta.height)
+            }
+        }
+
+        return QuotedNoteMeta(
+            eventId = event.id,
+            authorId = event.pubKey,
+            contentSnippet = snippet,
+            fullContent = event.content,
+            createdAt = event.createdAt,
+            relayUrl = relayUrl,
+            rootNoteId = rootId,
+            kind = event.kind,
+            tags = tags
+        )
+    }
+
     private const val MAX_ENTRIES = 200
     private const val DISK_CACHE_MAX = 150
     private const val PREFS_NAME = "quoted_note_cache"
@@ -47,8 +83,10 @@ object QuotedNoteCache {
 
     private val diskScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val diskJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
-    @Volatile private var prefs: SharedPreferences? = null
-    @Volatile private var diskDirty = false
+    @Volatile
+    private var prefs: SharedPreferences? = null
+    @Volatile
+    private var diskDirty = false
 
     /** IDs currently being fetched — prevents duplicate concurrent requests. */
     private val inFlightIds = Collections.synchronizedSet(HashSet<String>())
@@ -121,6 +159,179 @@ object QuotedNoteCache {
     fun getCached(eventId: String): QuotedNoteMeta? = memoryCache[eventId]
 
     /**
+     * Try to resolve a quoted note from [RawEventCache] (events already seen on the
+     * main feed subscription). Returns non-null if the raw JSON was cached and parseable.
+     * Zero network cost — pure in-memory parse.
+     */
+    private fun resolveFromRawCache(eventId: String): QuotedNoteMeta? {
+        val rawJson = social.mycelium.android.utils.RawEventCache.get(eventId) ?: return null
+        return try {
+            val event = Event.fromJson(rawJson)
+            if (event.kind !in ACCEPTED_KINDS) return null
+            val meta = buildMetaFromEvent(event, userRelayUrls.firstOrNull())
+            memoryCache[event.id] = meta
+            meta
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Eagerly prefetch quoted notes for a batch of feed notes.
+     * Called from [NotesRepository.flushKind1Events] so quotes are resolved BEFORE
+     * the display update fires — cards render with content already available.
+     *
+     * Resolution order: memory cache → RawEventCache → Room DB → batched relay fetch.
+     * Only the relay fetch is async; the rest are instant.
+     */
+    fun prefetchForNotes(notes: List<social.mycelium.android.data.Note>) {
+        val allQuotedIds = notes.flatMap { it.quotedEventIds }.distinct()
+        if (allQuotedIds.isEmpty()) return
+        // Phase 1: resolve from memory + RawEventCache (instant)
+        val unresolved = mutableListOf<String>()
+        var resolvedFromRaw = 0
+        for (id in allQuotedIds) {
+            if (memoryCache.containsKey(id)) continue
+            val fromRaw = resolveFromRawCache(id)
+            if (fromRaw != null) {
+                resolvedFromRaw++; continue
+            }
+            unresolved.add(id)
+        }
+        if (resolvedFromRaw > 0) {
+            Log.d(TAG, "Prefetch: $resolvedFromRaw quoted notes resolved from RawEventCache")
+            scheduleDiskSave()
+        }
+        // Phase 2: check Room DB for persisted events
+        // Phase 3: batch-fetch remaining from relays (async, but starts immediately)
+        if (unresolved.isNotEmpty()) {
+            Log.d(TAG, "Prefetch: ${unresolved.size} quoted notes need relay fetch")
+            batchScope.launch {
+                // Try Room DB first
+                val dao = roomEventDao
+                if (dao != null && unresolved.isNotEmpty()) {
+                    try {
+                        val roomEntities = dao.getByIds(unresolved.take(50))
+                        var fromRoom = 0
+                        for (entity in roomEntities) {
+                            if (memoryCache.containsKey(entity.eventId)) continue
+                            try {
+                                val event = Event.fromJson(entity.eventJson)
+                                if (event.kind !in ACCEPTED_KINDS) continue
+                                memoryCache[event.id] = buildMetaFromEvent(event, entity.relayUrl)
+                                fromRoom++
+                            } catch (_: Exception) {
+                            }
+                        }
+                        if (fromRoom > 0) {
+                            Log.d(TAG, "Prefetch: $fromRoom quoted notes resolved from Room DB")
+                            unresolved.removeAll(roomEntities.map { it.eventId }.toSet())
+                            scheduleDiskSave()
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Prefetch Room lookup failed: ${e.message}")
+                    }
+                }
+                // Remaining: fire relay fetch (no debounce — these are needed NOW)
+                val stillNeeded = unresolved.filter { !memoryCache.containsKey(it) && it !in inFlightIds }
+                if (stillNeeded.isNotEmpty()) {
+                    Log.d(TAG, "Prefetch: ${stillNeeded.size} quoted notes fetching from relays")
+                    val relays = userRelayUrls.take(6)
+                    if (relays.isNotEmpty()) {
+                        val filter = Filter(
+                            kinds = ACCEPTED_KINDS.toList(),
+                            ids = stillNeeded.take(MAX_BATCH_SIZE),
+                            limit = stillNeeded.size
+                        )
+                        val stateMachine = RelayConnectionStateMachine.getInstance()
+                        try {
+                            stateMachine.awaitOneShotSubscription(
+                                relays, filter, priority = SubscriptionPriority.NORMAL,
+                                settleMs = 400L, maxWaitMs = FETCH_TIMEOUT_MS
+                            ) { event ->
+                                if (memoryCache.containsKey(event.id)) return@awaitOneShotSubscription
+                                memoryCache[event.id] = buildMetaFromEvent(event, relays.firstOrNull())
+                                failedIds.remove(event.id)
+                            }
+                            scheduleDiskSave()
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Prefetch relay fetch error: ${e.message}")
+                        }
+                    }
+                }
+
+                // ── Depth-2 prefetch: scan resolved quotes for nested nostr: references ──
+                // This eliminates loading spinners for quote-within-quote rendering.
+                prefetchNestedQuotes(allQuotedIds, relays = userRelayUrls.take(6))
+            }
+        }
+    }
+
+    /**
+     * Scan resolved quoted notes for nested nostr:nevent1/note1 references
+     * and prefetch those too (depth-2). Avoids infinite recursion by only
+     * going one extra level deep.
+     */
+    private suspend fun prefetchNestedQuotes(parentIds: List<String>, relays: List<String>) {
+        val nestedIds = mutableSetOf<String>()
+        for (id in parentIds) {
+            val meta = memoryCache[id] ?: continue
+            val nested = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(meta.fullContent)
+            for (nid in nested) {
+                if (!memoryCache.containsKey(nid) && nid !in inFlightIds) nestedIds.add(nid)
+            }
+        }
+        if (nestedIds.isEmpty()) return
+        Log.d(TAG, "Depth-2 prefetch: ${nestedIds.size} nested quoted notes")
+        // Phase 1: RawEventCache + Room
+        val stillNeeded = mutableListOf<String>()
+        for (nid in nestedIds) {
+            if (resolveFromRawCache(nid) != null) continue
+            stillNeeded.add(nid)
+        }
+        val dao = roomEventDao
+        if (dao != null && stillNeeded.isNotEmpty()) {
+            try {
+                val roomEntities = dao.getByIds(stillNeeded.take(50))
+                for (entity in roomEntities) {
+                    if (memoryCache.containsKey(entity.eventId)) continue
+                    try {
+                        val event = Event.fromJson(entity.eventJson)
+                        if (event.kind !in ACCEPTED_KINDS) continue
+                        memoryCache[event.id] = buildMetaFromEvent(event, entity.relayUrl)
+                    } catch (_: Exception) {
+                    }
+                }
+                stillNeeded.removeAll(roomEntities.map { it.eventId }.toSet())
+            } catch (_: Exception) {
+            }
+        }
+        // Phase 2: relay fetch for remaining
+        val remaining = stillNeeded.filter { !memoryCache.containsKey(it) && it !in inFlightIds }
+        if (remaining.isNotEmpty() && relays.isNotEmpty()) {
+            val filter =
+                Filter(kinds = ACCEPTED_KINDS.toList(), ids = remaining.take(MAX_BATCH_SIZE), limit = remaining.size)
+            try {
+                RelayConnectionStateMachine.getInstance().awaitOneShotSubscription(
+                    relays, filter, priority = SubscriptionPriority.LOW,
+                    settleMs = 400L, maxWaitMs = FETCH_TIMEOUT_MS
+                ) { event ->
+                    if (memoryCache.containsKey(event.id)) return@awaitOneShotSubscription
+                    memoryCache[event.id] = buildMetaFromEvent(event, relays.firstOrNull())
+                    failedIds.remove(event.id)
+                }
+                scheduleDiskSave()
+            } catch (e: Exception) {
+                Log.w(TAG, "Depth-2 prefetch relay error: ${e.message}")
+            }
+        }
+    }
+
+    /** Room DAO reference for prefetch lookups. Set from NotesRepository. */
+    @Volatile
+    var roomEventDao: social.mycelium.android.db.EventDao? = null
+
+    /**
      * Get quoted note metadata by event id (hex). Returns from memory cache or fetches from relays.
      * Relay hints registered via [putRelayHints] are used automatically; explicit hints take priority.
      *
@@ -130,11 +341,26 @@ object QuotedNoteCache {
     suspend fun get(eventId: String, relayHints: List<String> = emptyList()): QuotedNoteMeta? {
         if (eventId.isBlank() || eventId.length != 64) return null
         memoryCache[eventId]?.let { return it }
-        // Skip if already in-flight or recently failed
-        if (eventId in inFlightIds) return null
+        // Try RawEventCache before going to network (event may have arrived on feed sub)
+        resolveFromRawCache(eventId)?.let { return it }
+        // Skip if recently failed
         val failedAt = failedIds[eventId]
         if (failedAt != null && System.currentTimeMillis() - failedAt < FAILED_TTL_MS) return null
-        if (!inFlightIds.add(eventId)) return null
+        // If already in-flight, share the existing deferred instead of returning null.
+        // This prevents permanent spinners when the same quoted note appears in multiple cards.
+        val existingDeferred = synchronized(pendingBatch) { pendingBatch[eventId]?.deferred }
+        if (existingDeferred != null) {
+            return try {
+                existingDeferred.await()
+            } catch (_: CancellationException) {
+                null
+            }
+        }
+        if (!inFlightIds.add(eventId)) {
+            // Race: just missed the batch but inFlightIds is set — poll briefly for result
+            kotlinx.coroutines.delay(500)
+            return memoryCache[eventId]
+        }
         // Merge explicit hints with any previously registered hints from nevent1 TLV
         val allHints = (relayHints + (relayHintsCache[eventId] ?: emptyList())).distinct()
         // Enqueue into batch and wait for the result
@@ -164,7 +390,8 @@ object QuotedNoteCache {
 
     private val pendingBatch = LinkedHashMap<String, PendingQuoteFetch>()
     private val batchScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    @Volatile private var batchFlushJob: kotlinx.coroutines.Job? = null
+    @Volatile
+    private var batchFlushJob: kotlinx.coroutines.Job? = null
 
     private fun scheduleBatchFlush() {
         // If the batch is full, flush immediately; otherwise debounce.
@@ -206,7 +433,7 @@ object QuotedNoteCache {
         // Single subscription with all IDs
         val ids = batch.keys.toList()
         val filter = Filter(
-            kinds = listOf(1, 11, 1111),
+            kinds = ACCEPTED_KINDS.toList(),
             ids = ids,
             limit = ids.size
         )
@@ -220,18 +447,7 @@ object QuotedNoteCache {
             ) { event ->
                 val entry = batch[event.id] ?: return@awaitOneShotSubscription
                 if (fulfilled.putIfAbsent(event.id, true) != null) return@awaitOneShotSubscription
-                val snippet = buildSmartSnippet(event.content, SNIPPET_MAX_LEN)
-                val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
-                val meta = QuotedNoteMeta(
-                    eventId = event.id,
-                    authorId = event.pubKey,
-                    contentSnippet = snippet,
-                    fullContent = event.content,
-                    createdAt = event.createdAt,
-                    relayUrl = relays.firstOrNull(),
-                    rootNoteId = rootId,
-                    kind = event.kind
-                )
+                val meta = buildMetaFromEvent(event, relays.firstOrNull())
                 memoryCache[event.id] = meta
                 failedIds.remove(event.id)
                 entry.deferred.complete(meta)

@@ -378,6 +378,22 @@ class SubscriptionMultiplexer private constructor(
         maxWaitMs: Long = 8_000L,
         onEvent: (Event) -> Unit,
     ): TemporarySubscriptionHandle {
+        return subscribeOneShotCallbackWithRelay(relayUrls, filters, priority, settleMs, maxWaitMs) { event, _ -> onEvent(event) }
+    }
+
+    /**
+     * EOSE-based one-shot subscription with relay URL passthrough.
+     * Same lifecycle as [subscribeOneShotCallback] but the callback receives
+     * (Event, relayUrl) so callers know which relay delivered each event.
+     */
+    fun subscribeOneShotCallbackWithRelay(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event, String) -> Unit,
+    ): TemporarySubscriptionHandle {
         if (relayUrls.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
         val consumerId = "mux-os-${nextConsumerId.incrementAndGet()}"
         val filterKey = FilterKey.of(relayUrls, filters)
@@ -387,17 +403,17 @@ class SubscriptionMultiplexer private constructor(
         val collectJob = scope.launch {
             val h = subscribe(relayUrls, filters, priority, isOneShot = true)
 
-            // Collect events in background
-            val eventJob = launch { h.events.collect { onEvent(it) } }
+            // Collect events with relay URL from the full MultiplexedEvent flow
+            val eventJob = launch {
+                _events
+                    .filter { it.consumerId == consumerId || it.filterKey == filterKey }
+                    .collect { onEvent(it.event, it.relayUrl) }
+            }
 
             // Wait for EOSE or timeout
             val eoseJob = launch {
-                h.eose.collect { isEose ->
-                    if (isEose) {
-                        delay(settleMs)
-                        return@collect
-                    }
-                }
+                h.eose.first { it }
+                delay(settleMs)
             }
 
             // Hard timeout
@@ -442,12 +458,8 @@ class SubscriptionMultiplexer private constructor(
         val eventJob = scope.launch { h.events.collect { onEvent(it) } }
 
         val eoseJob = scope.launch {
-            h.eose.collect { isEose ->
-                if (isEose) {
-                    kotlinx.coroutines.delay(settleMs)
-                    return@collect
-                }
-            }
+            h.eose.first { it }
+            kotlinx.coroutines.delay(settleMs)
         }
 
         val timeoutJob = scope.launch { kotlinx.coroutines.delay(maxWaitMs) }

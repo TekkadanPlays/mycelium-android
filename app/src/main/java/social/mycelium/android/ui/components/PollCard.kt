@@ -100,7 +100,7 @@ fun PollBlock(
 
     val hasVoted = tally?.myVotedOptions?.isNotEmpty() == true
     val totalVoters = tally?.totalVoters ?: 0
-    val showResults = hasVoted || pollData.hasEnded
+    val showResults = hasVoted || pollData.hasEnded || pollData.showResults
     var pendingSelections by remember(noteId) { mutableStateOf<Set<String>>(emptySet()) }
 
     // Find the leading option for highlight
@@ -127,6 +127,10 @@ fun PollBlock(
         }
     }
     @Suppress("UNUSED_EXPRESSION") voterProfileRevision
+
+    // Auto-collapse polls with many options to reduce UI clutter
+    val manyOptions = pollData.options.size > 4
+    var optionsExpanded by remember(noteId) { mutableStateOf(!manyOptions) }
 
     Column(modifier = modifier.fillMaxWidth()) {
         // ── Header bar ──
@@ -195,7 +199,7 @@ fun PollBlock(
                         }
                         Text(
                             text = if (tally?.isFetching == true) "loading\u2026"
-                                   else "$totalVoters vote${if (totalVoters != 1) "s" else ""}",
+                            else "$totalVoters vote${if (totalVoters != 1) "s" else ""}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                         )
@@ -204,8 +208,9 @@ fun PollBlock(
             }
         }
 
-        // ── Options ──
-        pollData.options.forEachIndexed { index, option ->
+        // ── Options ── (collapse to first 4 when poll has many options)
+        val visibleOptions = if (optionsExpanded) pollData.options else pollData.options.take(4)
+        visibleOptions.forEachIndexed { index, option ->
             val isMyVote = tally?.myVotedOptions?.contains(option.code) == true
             val isPending = option.code in pendingSelections
             val voteCount = tally?.votesByOption?.get(option.code)?.size ?: 0
@@ -286,11 +291,38 @@ fun PollBlock(
                 }
             }
 
-            if (index < pollData.options.lastIndex) {
+            if (index < visibleOptions.lastIndex) {
                 HorizontalDivider(
                     thickness = 0.5.dp,
                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
                 )
+            }
+        }
+
+        // ── "Show all / Show fewer" toggle for collapsed polls ──
+        if (manyOptions) {
+            val hiddenCount = pollData.options.size - 4
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+                shape = RectangleShape,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { optionsExpanded = !optionsExpanded }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (optionsExpanded) "Show fewer" else "Show all ${pollData.options.size} options (+$hiddenCount more)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
 
@@ -598,12 +630,16 @@ fun ZapPollBlock(
                     if (totalVoters > 0 || tally?.isFetching == true) {
                         if (zapPollData.closedAt != null || zapPollData.hasEnded) {
                             Spacer(Modifier.width(8.dp))
-                            Text("·", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                            Text(
+                                "·",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            )
                             Spacer(Modifier.width(8.dp))
                         }
                         Text(
                             text = if (tally?.isFetching == true) "loading\u2026"
-                                   else "${social.mycelium.android.utils.ZapUtils.formatZapAmount(totalSats)} sats · $totalVoters vote${if (totalVoters != 1) "s" else ""}",
+                            else "${social.mycelium.android.utils.ZapUtils.formatZapAmount(totalSats)} sats · $totalVoters vote${if (totalVoters != 1) "s" else ""}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                         )
@@ -623,6 +659,7 @@ fun ZapPollBlock(
                 val rangeText = when {
                     zapPollData.valueMinimum != null && zapPollData.valueMaximum != null ->
                         "${zapPollData.valueMinimum}–${zapPollData.valueMaximum} sats per vote"
+
                     zapPollData.valueMinimum != null -> "min ${zapPollData.valueMinimum} sats"
                     else -> "max ${zapPollData.valueMaximum} sats"
                 }
@@ -634,8 +671,11 @@ fun ZapPollBlock(
             }
         }
 
-        // ── Options ──
-        zapPollData.options.forEachIndexed { index, option ->
+        // ── Options ── (collapse to first 4 when > 4 options)
+        val zapManyOptions = zapPollData.options.size > 4
+        var zapOptionsExpanded by remember(noteId) { mutableStateOf(!zapManyOptions) }
+        val visibleOptions = if (zapOptionsExpanded) zapPollData.options else zapPollData.options.take(4)
+        visibleOptions.forEachIndexed { index, option ->
             val isMyVote = tally?.myVotedOptions?.contains(option.index) == true
             val optionSats = satsByOption[option.index] ?: 0L
             val optionVoters = tally?.votesByOption?.get(option.index)?.size ?: 0
@@ -678,8 +718,15 @@ fun ZapPollBlock(
                                     .padding(start = (avatarIdx * 14).dp)
                                     .zIndex((displayVoters.size - avatarIdx).toFloat())
                                     .size(20.dp)
-                                    .background(MaterialTheme.colorScheme.surface, shape = androidx.compose.foundation.shape.CircleShape)
-                                    .border(1.dp, MaterialTheme.colorScheme.surface, shape = androidx.compose.foundation.shape.CircleShape)
+                                    .background(
+                                        MaterialTheme.colorScheme.surface,
+                                        shape = androidx.compose.foundation.shape.CircleShape
+                                    )
+                                    .border(
+                                        1.dp,
+                                        MaterialTheme.colorScheme.surface,
+                                        shape = androidx.compose.foundation.shape.CircleShape
+                                    )
                             ) {
                                 ProfilePicture(author = author, size = 20.dp, onClick = {})
                             }
@@ -697,8 +744,38 @@ fun ZapPollBlock(
                 }
             }
 
-            if (index < zapPollData.options.lastIndex) {
-                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+            if (index < visibleOptions.lastIndex) {
+                HorizontalDivider(
+                    thickness = 0.5.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+                )
+            }
+        }
+
+        // ── "Show all / Show fewer" toggle for collapsed zap polls ──
+        if (zapManyOptions) {
+            val hiddenCount = zapPollData.options.size - 4
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+                shape = RectangleShape,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { zapOptionsExpanded = !zapOptionsExpanded }
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (zapOptionsExpanded) "Show fewer" else "Show all ${zapPollData.options.size} options (+$hiddenCount more)",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
             }
         }
     }
@@ -749,8 +826,16 @@ private fun ZapPollOptionRow(
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .drawBehind {
                 if (showResults && animatedProgress > 0f) {
-                    drawRect(color = progressColor, topLeft = Offset.Zero, size = Size(size.width * animatedProgress, size.height))
-                    drawRect(color = barAccentColor, topLeft = Offset(0f, size.height - 2.dp.toPx()), size = Size(size.width * animatedProgress, 2.dp.toPx()))
+                    drawRect(
+                        color = progressColor,
+                        topLeft = Offset.Zero,
+                        size = Size(size.width * animatedProgress, size.height)
+                    )
+                    drawRect(
+                        color = barAccentColor,
+                        topLeft = Offset(0f, size.height - 2.dp.toPx()),
+                        size = Size(size.width * animatedProgress, 2.dp.toPx())
+                    )
                 }
                 if (leftBorderColor != Color.Transparent) {
                     drawRect(color = leftBorderColor, topLeft = Offset.Zero, size = Size(3.dp.toPx(), size.height))
@@ -900,8 +985,11 @@ private fun RichPollOptionContent(
                                 maxLines = maxLines,
                                 emojiUrls = block.emojiUrls,
                                 onClick = { offset ->
-                                    val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                    val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                    val profile =
+                                        annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset)
+                                            .firstOrNull()
+                                    val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset)
+                                        .firstOrNull()
                                     when {
                                         profile != null -> onProfileClick(profile.item)
                                         url != null -> uriHandler.openUri(url.item)
@@ -910,6 +998,7 @@ private fun RichPollOptionContent(
                             )
                         }
                     }
+
                     is NoteContentBlock.MediaGroup -> {
                         NoteMediaCarousel(
                             mediaList = block.urls,
@@ -923,6 +1012,7 @@ private fun RichPollOptionContent(
                             onVideoClick = onVideoClick,
                         )
                     }
+
                     is NoteContentBlock.QuotedNote -> {
                         val eventId = block.eventId
                         var meta by remember(eventId) { mutableStateOf(QuotedNoteCache.getCached(eventId)) }
@@ -957,6 +1047,7 @@ private fun RichPollOptionContent(
                             )
                         }
                     }
+
                     is NoteContentBlock.Preview -> {
                         // Compact URL embed instead of full UrlPreviewCard
                         PollOptionUrlEmbed(
@@ -964,7 +1055,9 @@ private fun RichPollOptionContent(
                             style = style,
                         )
                     }
-                    else -> { /* LiveEventReference, EmojiPack, Article — rare in poll options */ }
+
+                    else -> { /* LiveEventReference, EmojiPack, Article — rare in poll options */
+                    }
                 }
             }
         }
@@ -1000,7 +1093,10 @@ private fun PollOptionUrlEmbed(
             return@LaunchedEffect
         }
         if (!social.mycelium.android.services.UrlPreviewCache.isLoading(url)) {
-            social.mycelium.android.services.UrlPreviewCache.setLoadingState(url, social.mycelium.android.data.UrlPreviewState.Loading)
+            social.mycelium.android.services.UrlPreviewCache.setLoadingState(
+                url,
+                social.mycelium.android.data.UrlPreviewState.Loading
+            )
             val result = urlPreviewService.fetchPreview(url)
             social.mycelium.android.services.UrlPreviewCache.setLoadingState(url, result)
             if (result is social.mycelium.android.data.UrlPreviewState.Loaded) {

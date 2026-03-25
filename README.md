@@ -29,16 +29,16 @@ A native Nostr protocol client for Android built with Jetpack Compose and Materi
 Single-activity MVVM with Jetpack Navigation Compose. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full reference.
 
 **Key layers:**
-- **Cybin** (`cybin/`) — In-repo Nostr protocol library: event model, filters, secp256k1 signing, NIP implementations, Ktor WebSocket relay client with priority-based subscription scheduler
-- **Relay Layer** (`relay/`) — `RelayConnectionStateMachine`, `SubscriptionMultiplexer` (filter merging, ref-counting, dedup), `RelayHealthTracker`, `Nip42AuthHandler`, `NetworkConnectivityMonitor`
-- **Repository Layer** (`repository/`) — 33 specialized data repositories handling feed ingestion, thread resolution, notifications, profile metadata, relay lists, bookmarks, moderation, and payments
-- **ViewModel Layer** (`viewmodel/`) — 11 ViewModels (3 activity-scoped global, 8 screen-scoped)
-- **UI Layer** (`ui/`) — 44 screen composables, 42 reusable components, Material Design 3 theming
+- **Cybin** (`cybin/`, 28 files) — In-repo Nostr protocol library: event model, filters, secp256k1 signing, NIP implementations (NIP-04, NIP-19, NIP-25, NIP-44, NIP-47, NIP-55, NIP-57), Ktor CIO WebSocket relay client with priority-based subscription scheduler
+- **Relay Layer** (`relay/`, 7 files) — `RelayConnectionStateMachine` (1,054 lines), `SubscriptionMultiplexer` (774 lines — filter merging, ref-counting, dedup), `RelayHealthTracker` (666 lines), `Nip42AuthHandler`, `RelayDeliveryTracker`, `NetworkConnectivityMonitor`, `RelayLogBuffer`
+- **Repository Layer** (`repository/`, 49 files) — Repositories, caches, managers, and services handling feed ingestion, thread resolution, notifications, profile metadata, relay lists, bookmarks, moderation, polls, payments, settings sync, and startup orchestration
+- **ViewModel Layer** (`viewmodel/`, 12 files) — 3 activity-scoped global (`AppViewModel`, `AccountStateViewModel`, `FeedStateViewModel`) + 9 screen-scoped
+- **UI Layer** (`ui/`) — 52 screen composables, 59 reusable components, Material Design 3 theming
 
 ## Prerequisites
 
 - **JDK 11** or later
-- **Android SDK** (API 35+, compileSdk/targetSdk 36, minSdk 35)
+- **Android SDK** — compileSdk 36, targetSdk 36, minSdk 35 (Android 15+)
 - Android Studio or command-line build tools
 
 ## Build
@@ -57,23 +57,28 @@ Single-activity MVVM with Jetpack Navigation Compose. See [`docs/ARCHITECTURE.md
 
 ## Install
 
+### GitHub Releases (recommended)
+
+Download the latest APK directly from [GitHub Releases](https://github.com/TekkadanPlays/mycelium-android/releases).
+
+### Obtainium
+
+You can install and stay up to date via [Obtainium](https://obtainium.imranr.dev/) using either:
+
+- **GitHub repo URL (recommended):** `https://github.com/TekkadanPlays/mycelium-android` — add the repo directly and Obtainium will track releases automatically.
+- **Update manifest:** `https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/obtanium.json`
+
+### Manual APK install
+
 ```bash
 adb install app/build/outputs/apk/release/app-release.apk
 ```
-
-## Obtainium
-
-You can install or update Mycelium via [Obtainium](https://obtainium.imranr.dev/) using the app's update manifest:
-
-- **Raw URL:** `https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/obtanium.json`
-
-Add this URL in Obtainium to get release updates and download the APK from GitHub Releases.
 
 ## Dependencies
 
 | Library | Version | Purpose |
 |---------|---------|---------|
-| Ktor | 3.4.1 | HTTP client + WebSocket (OkHttp engine) |
+| Ktor | 3.4.1 | HTTP client + WebSocket (CIO engine — no OkHttp) |
 | Compose BOM | 2024.12.01 | UI framework (strong skipping mode) |
 | Coil | 2.5.0 | Image loading with GIF support |
 | Media3 | 1.3.1 | Video/livestream playback (ExoPlayer) |
@@ -81,15 +86,19 @@ Add this URL in Obtainium to get release updates and download the APK from GitHu
 | lightning-kmp | 1.11.5-SNAPSHOT | Embedded Lightning node (ACINQ) |
 | bitcoin-kmp | 0.29.0 | Bitcoin primitives (ACINQ) |
 | Kotlinx Serialization | 1.7.3 | JSON parsing |
+| Room | 2.7.1 | Local database (profiles, NIP-65, NIP-11, events, follow lists, emoji packs) |
+| WorkManager | 2.10.0 | Periodic background relay checks (Adaptive connection mode) |
+| Jsoup | 1.17.2 | HTML parsing for URL previews |
+| Compose RichText | 1.0.0-alpha03 | Markdown rendering for long-form articles (kind 30023) |
 | Google ML Kit | — | Language detection + translation |
 
 ## NIP Support
 
-NIP-01 (protocol), NIP-02 (contacts), NIP-04 (encryption), NIP-10 (reply threading), NIP-11 (relay info), NIP-17 (gift-wrapped DMs), NIP-19 (bech32 entities), NIP-22 (topics), NIP-25 (reactions), NIP-42 (relay auth), NIP-44 (encryption v2), NIP-47 (wallet connect), NIP-53 (live activities), NIP-55 (external signer), NIP-57 (zaps), NIP-65 (relay lists), NIP-66 (relay discovery), NIP-86 (relay management), NIP-89 (client tags)
+NIP-01 (protocol), NIP-02 (contacts), NIP-04 (encryption v1), NIP-05 (DNS identifiers), NIP-10 (reply threading), NIP-11 (relay info), NIP-17 (gift-wrapped DMs), NIP-19 (bech32 entities), NIP-22 (topics/comments), NIP-23 (long-form content), NIP-25 (reactions), NIP-30 (custom emoji), NIP-33 (parameterized replaceable), NIP-42 (relay auth), NIP-44 (encryption v2), NIP-47 (wallet connect), NIP-53 (live activities), NIP-55 (external signer), NIP-57 (zaps), NIP-58 (badges), NIP-65 (relay lists), NIP-66 (relay discovery), NIP-78 (settings sync), NIP-86 (relay management), NIP-88 (polls), NIP-89 (client tags), NIP-92 (imeta), NIP-96 (file storage)
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+See [CHANGELOG.md](CHANGELOG.md) for release history and [`docs/`](docs/README.md) for comprehensive documentation.
 
 ## Credits & Acknowledgments
 

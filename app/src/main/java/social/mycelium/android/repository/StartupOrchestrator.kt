@@ -99,6 +99,7 @@ object StartupOrchestrator {
     fun reset() {
         // Stop any in-progress deep history fetch from the previous account
         DeepHistoryFetcher.stop()
+        RelayCategorySyncRepository.clearAll()
         activePubkey = null
         _currentPhase.value = StartupPhase.IDLE
         _settingsReady.value = false
@@ -207,6 +208,7 @@ object StartupOrchestrator {
         followRelayUrls: List<String>,
         allUserRelayUrls: List<String>,
         signer: com.example.cybin.signer.NostrSigner? = null,
+        context: Context? = null,
     ): CompletableDeferred<Unit> {
         // Guard against double-execution when LaunchedEffect re-fires
         phase1Deferred?.let { return it }
@@ -249,10 +251,14 @@ object StartupOrchestrator {
                 if (!followJob.isCompleted) Log.w(TAG, "Phase 1: follow list timed out")
                 if (!muteJob.isCompleted) Log.w(TAG, "Phase 1: mute list timed out")
 
-                // Fire-and-forget: people lists + hashtag interests (LOW priority, don't block feed)
+                // Fire-and-forget: people lists + hashtag interests + relay sets + indexer list (LOW priority, don't block feed)
                 PeopleListRepository.fetchPeopleLists(userPubkey, allUserRelayUrls, signer)
                 PeopleListRepository.fetchHashtagList(userPubkey, allUserRelayUrls)
-                Log.d(TAG, "Phase 1: people lists + hashtag interests fetch launched (non-blocking)")
+                if (context != null) {
+                    RelayCategorySyncRepository.fetchRelaySets(userPubkey, allUserRelayUrls, context)
+                    RelayCategorySyncRepository.fetchIndexerList(userPubkey, allUserRelayUrls, context)
+                }
+                Log.d(TAG, "Phase 1: people lists + hashtag interests + relay sets + indexer list fetch launched (non-blocking)")
             } catch (e: Exception) {
                 Log.e(TAG, "Phase 1: failed: ${e.message}", e)
             } finally {

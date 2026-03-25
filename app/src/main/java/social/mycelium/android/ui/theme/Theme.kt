@@ -31,21 +31,24 @@ fun MyceliumTheme(
         if (isDark) accentDarkScheme(accent) else accentLightScheme(accent)
     }
 
-    val squareShapes = remember {
+    // Shape scale: small interactive elements (chips, buttons, menus) keep rounded corners
+    // for visual polish; larger surfaces (cards, sheets, dialogs) stay square for the
+    // edge-to-edge design language used in the home feed and note cards.
+    val appShapes = remember {
         val square = RoundedCornerShape(0.dp)
         Shapes(
-            extraSmall = square,
-            small = square,
-            medium = square,
-            large = square,
-            extraLarge = square
+            extraSmall = RoundedCornerShape(8.dp),   // Chips, menus, tooltips
+            small      = RoundedCornerShape(8.dp),   // Buttons, small cards, text fields
+            medium     = square,                      // Cards, elevated cards — edge-to-edge
+            large      = square,                      // Sheets, navigation drawers
+            extraLarge = square                       // Full-screen dialogs
         )
     }
 
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
-        shapes = squareShapes,
+        shapes = appShapes,
     ) {
         CompositionLocalProvider(LocalRippleConfiguration provides null) {
             content()

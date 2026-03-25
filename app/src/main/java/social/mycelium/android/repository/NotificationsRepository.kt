@@ -29,6 +29,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -48,7 +51,7 @@ class NotificationsRepository(
 
     private val scope = CoroutineScope(
         parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[kotlinx.coroutines.Job]) +
-        CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+                CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
     private val profileCache = ProfileMetadataCache.getInstance()
 
@@ -75,9 +78,11 @@ class NotificationsRepository(
         private const val TARGET_FETCH_TIMEOUT_MS = 2500L
         private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 4000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
+
         /** Maximum time to wait for profile/enrichment data before firing the notification anyway. */
         private const val ENRICHMENT_WAIT_MS = 3000L
         private const val ENRICHMENT_POLL_MS = 200L
+
         /** Matches placeholder author names from resolveAuthor (e.g. "a1b2c3d4..."). */
         private val HEX_PLACEHOLDER_REGEX = Regex("^[0-9a-f]{8}\\.\\.\\.$")
 
@@ -91,7 +96,10 @@ class NotificationsRepository(
             AccountScopedRegistry.getActiveScope()?.notificationsRepository
 
         // ── Static property shims ──
-        val notifications: StateFlow<List<NotificationData>> get() = active()?.notifications ?: MutableStateFlow(emptyList())
+        val notifications: StateFlow<List<NotificationData>>
+            get() = active()?.notifications ?: MutableStateFlow(
+                emptyList()
+            )
         val seenIds: StateFlow<Set<String>> get() = active()?.seenIds ?: MutableStateFlow(emptySet())
         val unseenCount: StateFlow<Int> get() = active()?.unseenCount ?: MutableStateFlow(0)
         val todayReplies: StateFlow<Int> get() = active()?.todayReplies ?: MutableStateFlow(0)
@@ -100,23 +108,54 @@ class NotificationsRepository(
         val todayZapSats: StateFlow<Long> get() = active()?.todayZapSats ?: MutableStateFlow(0L)
 
         // ── Static method shims ──
-        fun init(context: Context) { active()?.init(context) }
-        fun enableAndroidNotifications() { active()?.enableAndroidNotifications() }
-        fun setCacheRelayUrls(urls: List<String>) { active()?.setCacheRelayUrls(urls) }
+        fun init(context: Context) {
+            active()?.init(context)
+        }
+
+        fun enableAndroidNotifications() {
+            active()?.enableAndroidNotifications()
+        }
+
+        fun setCacheRelayUrls(urls: List<String>) {
+            active()?.setCacheRelayUrls(urls)
+        }
+
         fun getCacheRelayUrls(): List<String> = active()?.getCacheRelayUrls() ?: emptyList()
         fun getMyPubkeyHex(): String? = active()?.getMyPubkeyHex()
-        fun markAllAsSeen() { active()?.markAllAsSeen() }
-        fun markAsSeen(notificationId: String) { active()?.markAsSeen(notificationId) }
-        fun markAsSeenByType(type: NotificationType) { active()?.markAsSeenByType(type) }
+        fun markAllAsSeen() {
+            active()?.markAllAsSeen()
+        }
+
+        fun markAsSeen(notificationId: String) {
+            active()?.markAsSeen(notificationId)
+        }
+
+        fun markAsSeenByType(type: NotificationType) {
+            active()?.markAsSeenByType(type)
+        }
+
+        fun updateSubscriptionRelayUrls(allRelays: List<String>) {
+            active()?.updateSubscriptionRelayUrls(allRelays)
+        }
+
         fun findNotificationByNoteId(noteId: String): NotificationData? = active()?.findNotificationByNoteId(noteId)
-        fun startSubscription(pubkey: String, inboxRelayUrls: List<String>, outboxRelayUrls: List<String>, categoryRelayUrls: List<String>) {
+        fun startSubscription(
+            pubkey: String,
+            inboxRelayUrls: List<String>,
+            outboxRelayUrls: List<String>,
+            categoryRelayUrls: List<String>
+        ) {
             // Route to the correct account's repo by pubkey (not just active).
             // This enables starting subscriptions for background accounts too.
             val target = AccountScopedRegistry.getScope(pubkey)?.notificationsRepository
                 ?: active() // Fallback to active if scope not found (legacy path)
             target?.startSubscription(pubkey, inboxRelayUrls, outboxRelayUrls, categoryRelayUrls)
         }
-        fun stopSubscription() { active()?.stopSubscription() }
+
+        fun stopSubscription() {
+            active()?.stopSubscription()
+        }
+
         /**
          * Fan out cross-pollinated events to ALL loaded account repos.
          * Each instance's own p-tag/E-tag/q-tag gate rejects events that
@@ -131,6 +170,7 @@ class NotificationsRepository(
                 }
             }
         }
+
         /** Ingest a historical event (e.g. from DeepHistoryFetcher) into all loaded account repos.
          *  Auto-marks as seen so it populates the list but does NOT increment the badge. */
         fun ingestEventAsHistorical(event: Event) {
@@ -152,6 +192,7 @@ class NotificationsRepository(
     /** IDs of notifications the user has "seen" (opened notifications screen or tapped one). Badge and dropdown use unseen count. */
     private val _seenIds = MutableStateFlow<Set<String>>(emptySet())
     val seenIds: StateFlow<Set<String>> = _seenIds.asStateFlow()
+
     /** Suppresses unseen count during initial relay replay so the badge doesn't flicker
      *  as historical events arrive before the markAllSeen watermark auto-marks them. */
     private val _replaySettled = MutableStateFlow(false)
@@ -160,14 +201,29 @@ class NotificationsRepository(
     }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     private val notificationsById = ConcurrentHashMap<String, NotificationData>()
+
     /** Active notification subscription handles (inbox deep + sweep + extras). */
     private val notificationHandles = CopyOnWriteArrayList<TemporarySubscriptionHandle>()
+
+    // ── Debounced emitSorted ────────────────────────────────────────────────
+    // Instead of emitting on every single event (thousands during Phase 1 replay),
+    // coalesce emissions with a 100ms debounce. This reduces StateFlow emissions
+    // from ~5000 to ~50 during startup, dramatically cutting recomposition churn
+    // in NotificationsScreen.
+    private var emitJob: Job? = null
+    private val EMIT_DEBOUNCE_MS = 100L
+
+    /** Force an immediate emit (bypass debounce). Used after critical operations
+     *  like markAllAsSeen or notification removal where the UI must update instantly. */
+    @Volatile
+    private var emitDirty = false
 
     /** Fallback inbox relays for users without a NIP-65 relay list. */
     private val BOOTSTRAP_INBOX_RELAYS = listOf(
         "wss://relay.damus.io", "wss://relay.primal.net", "wss://nos.lol",
         "wss://nostr.mom", "wss://relay.nostr.band",
     )
+
     /** Event IDs already processed — prevents re-processing on relay reconnect (which replays all stored events). */
     private val seenEventIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
@@ -182,29 +238,38 @@ class NotificationsRepository(
     val todayZapSats: StateFlow<Long> = _todayZapSats.asStateFlow()
     private var cacheRelayUrls = listOf<String>()
     private var subscriptionRelayUrls = listOf<String>()
+
     /** Current user hex pubkey (p-tag); used to filter kind-7 so we only show reactions to our notes.
      *  Initialized from [ownerPubkeyHex] — immutable for the lifetime of this instance.
      *  This is the primary cross-account leakage guard: events that don't reference this pubkey are rejected. */
     private var myPubkeyHex: String? = ownerPubkeyHex
+
     /** Our kind-11 topic IDs — replies to these are "Thread replies" (replyKind=11), not "Comments" (1111). */
     private val myTopicIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
     /** Our kind-1 note IDs — used to detect quotes (q-tag references to our notes). */
     private val myNoteIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
     /** Cached event tags for kind-1 notifications, keyed by event ID.
      *  Used by Phase 3 reclassification sweep to detect q-tags retroactively
      *  (since myNoteIds isn't populated until after Phase 1 EOSE). */
     private val kind1EventTags = ConcurrentHashMap<String, List<List<String>>>()
 
     private var prefs: SharedPreferences? = null
-    @Volatile private var appContext: Context? = null
+    @Volatile
+    private var appContext: Context? = null
+
     /** Wall-clock millis when the user last pressed "Read All".
      *  Any notification with sortTimestamp <= this is auto-marked as seen,
      *  even if it arrives from a later subscription phase (e.g. Phase 3). */
-    @Volatile private var markAllSeenEpochMs: Long = 0L
+    @Volatile
+    private var markAllSeenEpochMs: Long = 0L
+
     /** Epoch seconds when the current notification subscription session started.
      *  Push notifications are only fired for events created AFTER this timestamp,
      *  so historical relay replay never spams the notification shade. */
-    @Volatile private var sessionStartEpochSec = Long.MAX_VALUE
+    @Volatile
+    private var sessionStartEpochSec = Long.MAX_VALUE
 
     // ── Batched target note fetch ──────────────────────────────────────────────
     /** Pending target note fetch entry. */
@@ -214,9 +279,11 @@ class NotificationsRepository(
         val update: (NotificationData) -> (Note?) -> NotificationData,
         val retryCount: Int = 0,
     )
+
     /** Buffer of pending target note fetches waiting to be flushed as one subscription.
      *  Keyed by parent noteId → list of notifications that need that parent verified. */
     private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, MutableList<PendingTargetFetch>>()
+
     /** Debounce job for batched target note flush. */
     private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
     private val targetFetchMutex = kotlinx.coroutines.sync.Mutex()
@@ -225,14 +292,16 @@ class NotificationsRepository(
     fun init(context: Context) {
         appContext = context.applicationContext
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        // Seen IDs are NOT persisted — system notifications are cleared when read,
-        // and on restart all notifications are re-fetched fresh with a clean unseen state.
         // Restore last-known pubkey so cold-start of the same user isn't treated as "new user"
         myPubkeyHex = prefs?.getString(PREFS_KEY_PUBKEY, null)
         if (myPubkeyHex != null) Log.d(TAG, "init: restored myPubkeyHex=${myPubkeyHex?.take(8)}")
         // Restore "Read All" watermark so historical events stay seen across restarts
         markAllSeenEpochMs = prefs?.getLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, 0L) ?: 0L
         if (markAllSeenEpochMs > 0) Log.d(TAG, "init: restored markAllSeenEpochMs=$markAllSeenEpochMs")
+        // Restore persisted seen IDs so read state survives restarts.
+        // Without this, every restart creates a burst of "new" notifications
+        // for events between the watermark and now.
+        restoreSeenIds()
     }
 
     /** Allow Android notifications for events created after this moment.
@@ -255,7 +324,12 @@ class NotificationsRepository(
     ) {
         // Suppress historical replay: only fire for events created after session start
         if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) {
-            Log.d(TAG, "fireNotif SUPPRESSED (historical): type=$type epoch=$eventEpochSec < session=$sessionStartEpochSec suffix=${notifIdSuffix.take(8)}")
+            Log.d(
+                TAG,
+                "fireNotif SUPPRESSED (historical): type=$type epoch=$eventEpochSec < session=$sessionStartEpochSec suffix=${
+                    notifIdSuffix.take(8)
+                }"
+            )
             return
         }
         if (sessionStartEpochSec == Long.MAX_VALUE) {
@@ -278,7 +352,12 @@ class NotificationsRepository(
         // Use per-account preference lookup so background accounts respect their own settings
         // (not the active account's in-memory state flows).
         if (!prefs.isNotificationAllowedForAccount(ownerPubkeyHex, type)) {
-            Log.d(TAG, "fireNotif SUPPRESSED (channel disabled for ${ownerPubkeyHex.take(8)}): type=$type suffix=${notifIdSuffix.take(8)}")
+            Log.d(
+                TAG,
+                "fireNotif SUPPRESSED (channel disabled for ${ownerPubkeyHex.take(8)}): type=$type suffix=${
+                    notifIdSuffix.take(8)
+                }"
+            )
             return
         }
 
@@ -302,7 +381,10 @@ class NotificationsRepository(
                 }
                 // Notification may have been removed during enrichment
                 if (notificationsById[notifIdSuffix] == null) {
-                    Log.d(TAG, "fireNotif CANCELLED (removed during enrichment): type=$type suffix=${notifIdSuffix.take(8)}")
+                    Log.d(
+                        TAG,
+                        "fireNotif CANCELLED (removed during enrichment): type=$type suffix=${notifIdSuffix.take(8)}"
+                    )
                     return@launch
                 }
             }
@@ -327,8 +409,14 @@ class NotificationsRepository(
                 NotificationType.REPORT -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_MENTIONS
                 NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
             }
-            val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
-            Log.d(TAG, "fireNotif POSTING: type=$finalType channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${ownerPubkeyHex.take(8)} title=$finalTitle")
+            val notifId =
+                social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+            Log.d(
+                TAG,
+                "fireNotif POSTING: type=$finalType channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${
+                    ownerPubkeyHex.take(8)
+                } title=$finalTitle"
+            )
             social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
                 ctx, channelId, notifId, finalTitle, finalBody,
                 noteId = noteId, rootNoteId = rootNoteId, notifType = finalType.name,
@@ -354,7 +442,10 @@ class NotificationsRepository(
     fun markAllAsSeen() {
         _seenIds.value = _seenIds.value + _notifications.value.mapTo(mutableSetOf()) { it.id }
         markAllSeenEpochMs = System.currentTimeMillis()
-        scope.launch(Dispatchers.IO) { prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply() }
+        scope.launch(Dispatchers.IO) {
+            prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply()
+        }
+        persistSeenIds()
         cancelAllSystemNotifications()
         Log.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
     }
@@ -374,6 +465,7 @@ class NotificationsRepository(
     fun markAsSeen(notificationId: String) {
         _seenIds.value = _seenIds.value + notificationId
         cancelSystemNotification(notificationId)
+        persistSeenIds()
     }
 
     /** Mark all notifications of a specific type as seen (e.g. when user switches to that tab). */
@@ -382,26 +474,43 @@ class NotificationsRepository(
         if (idsForType.isNotEmpty()) {
             _seenIds.value = _seenIds.value + idsForType
             idsForType.forEach { cancelSystemNotification(it) }
+            persistSeenIds()
         }
     }
 
     /** Cancel a single Android system notification by its notification ID suffix. */
     private fun cancelSystemNotification(notifIdSuffix: String) {
         val ctx = appContext ?: return
-        val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager ?: return
-        val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+        val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+            ?: return
+        val notifId =
+            social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
         mgr.cancel(notifId)
     }
 
     /** Cancel all social Android system notifications (IDs in the social range). */
     private fun cancelAllSystemNotifications() {
         val ctx = appContext ?: return
-        val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager ?: return
+        val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
+            ?: return
         // Cancel all active notifications from our app except the foreground service notification
         mgr.activeNotifications.forEach { sbn ->
             if (sbn.id != social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_RELAY_SERVICE) {
                 mgr.cancel(sbn.id)
             }
+        }
+    }
+
+    /** Update the relay URLs used for notification enrichment (target-note fetches, badge
+     *  definitions, poll enrichment). Call when the user adds/removes relays so new relays
+     *  are included in subsequent notification fetches. */
+    fun updateSubscriptionRelayUrls(allRelays: List<String>) {
+        if (allRelays.isEmpty()) return
+        val old = subscriptionRelayUrls
+        subscriptionRelayUrls = allRelays
+        cacheRelayUrls = allRelays
+        if (old.sorted() != allRelays.sorted()) {
+            Log.d(TAG, "Notification relay URLs updated: ${old.size} → ${allRelays.size}")
         }
     }
 
@@ -411,6 +520,41 @@ class NotificationsRepository(
         val trimmed = _seenIds.value.intersect(currentIds)
         if (trimmed.size != _seenIds.value.size) {
             _seenIds.value = trimmed
+            persistSeenIds()
+        }
+    }
+
+    // ── Seen ID persistence ──────────────────────────────────────────────────
+    // Persist seen IDs to SharedPreferences so read state survives app restarts.
+    // Without this, every restart creates a burst of "new" notifications for events
+    // between the markAllSeen watermark and the current time.
+
+    private val PREFS_KEY_SEEN_IDS_SET = "seen_ids_set"
+    private val MAX_PERSISTED_SEEN_IDS = 2000
+    private var seenIdsPersistJob: Job? = null
+
+    /** Debounced persist of seen IDs. Called after any seen state change. */
+    private fun persistSeenIds() {
+        seenIdsPersistJob?.cancel()
+        seenIdsPersistJob = scope.launch(Dispatchers.IO) {
+            delay(500L) // Debounce: batch rapid seen changes
+            val ids = _seenIds.value
+            // Cap at MAX to prevent SharedPreferences from growing unbounded
+            val toSave = if (ids.size > MAX_PERSISTED_SEEN_IDS) {
+                // Keep the most recent IDs (intersection with current notifications)
+                val currentNotifIds = _notifications.value.mapTo(mutableSetOf()) { it.id }
+                ids.intersect(currentNotifIds).take(MAX_PERSISTED_SEEN_IDS)
+            } else ids
+            prefs?.edit()?.putStringSet(PREFS_KEY_SEEN_IDS_SET, toSave.toSet())?.apply()
+        }
+    }
+
+    /** Restore seen IDs from SharedPreferences. Called during init(). */
+    private fun restoreSeenIds() {
+        val saved = prefs?.getStringSet(PREFS_KEY_SEEN_IDS_SET, null)
+        if (saved != null && saved.isNotEmpty()) {
+            _seenIds.value = saved.toSet()
+            Log.d(TAG, "Restored ${saved.size} seen IDs from disk")
         }
     }
 
@@ -448,7 +592,10 @@ class NotificationsRepository(
         // Each NotificationsRepository instance is bound to ownerPubkeyHex.
         // Reject any attempt to start a subscription for a different pubkey.
         if (pubkey != ownerPubkeyHex) {
-            Log.e(TAG, "startSubscription REJECTED: pubkey ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — use the correct account's repo")
+            Log.e(
+                TAG,
+                "startSubscription REJECTED: pubkey ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — use the correct account's repo"
+            )
             return
         }
         val allRelays = (inboxRelayUrls + outboxRelayUrls + categoryRelayUrls)
@@ -463,7 +610,10 @@ class NotificationsRepository(
             return
         }
         val isNewUser = myPubkeyHex != pubkey
-        Log.d(TAG, "startSubscription: isNewUser=$isNewUser (myPubkeyHex=${myPubkeyHex?.take(8)}, pubkey=${pubkey.take(8)}), seenIds=${_seenIds.value.size}")
+        Log.d(
+            TAG,
+            "startSubscription: isNewUser=$isNewUser (myPubkeyHex=${myPubkeyHex?.take(8)}, pubkey=${pubkey.take(8)}), seenIds=${_seenIds.value.size}"
+        )
         stopSubscription()
         // Re-suppress push notifications until enableAndroidNotifications() is called
         sessionStartEpochSec = Long.MAX_VALUE
@@ -482,6 +632,10 @@ class NotificationsRepository(
         myPubkeyHex = pubkey
         // Persist pubkey so cold-start recognises the same user
         scope.launch(Dispatchers.IO) { prefs?.edit()?.putString(PREFS_KEY_PUBKEY, pubkey)?.apply() }
+        // ── Restore notifications from Room before relay fetch (instant cold-start) ──
+        scope.launch(Dispatchers.IO) { loadNotificationsFromRoom(pubkey) }
+        // ── Start single profile watcher (replaces N per-event coroutines) ──
+        startProfileWatcher()
         val stateMachine = RelayConnectionStateMachine.getInstance()
 
         // ── Phase 1: Deep inbox fetch (immediate) ────────────────────────────
@@ -490,7 +644,17 @@ class NotificationsRepository(
         val inboxFilters = listOf(
             // High-volume: text, reaction, repost, zap, topic reply, polls — complete history
             Filter(
-                kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL, NOTIFICATION_KIND_POLL_RESPONSE),
+                kinds = listOf(
+                    NOTIFICATION_KIND_TEXT,
+                    NOTIFICATION_KIND_REPOST,
+                    NOTIFICATION_KIND_GENERIC_REPOST,
+                    NOTIFICATION_KIND_REACTION,
+                    NOTIFICATION_KIND_ZAP,
+                    NOTIFICATION_KIND_TOPIC_REPLY,
+                    NOTIFICATION_KIND_BADGE_AWARD,
+                    NOTIFICATION_KIND_POLL,
+                    NOTIFICATION_KIND_POLL_RESPONSE
+                ),
                 tags = mapOf("p" to listOf(pubkey)),
                 limit = 5000
             ),
@@ -531,7 +695,17 @@ class NotificationsRepository(
                 val sweepSince = (System.currentTimeMillis() / 1000) - ONE_MONTH_SEC
                 val sweepFilters = listOf(
                     Filter(
-                        kinds = listOf(NOTIFICATION_KIND_TEXT, NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_ZAP, NOTIFICATION_KIND_TOPIC_REPLY, NOTIFICATION_KIND_BADGE_AWARD, NOTIFICATION_KIND_POLL, NOTIFICATION_KIND_POLL_RESPONSE),
+                        kinds = listOf(
+                            NOTIFICATION_KIND_TEXT,
+                            NOTIFICATION_KIND_REPOST,
+                            NOTIFICATION_KIND_GENERIC_REPOST,
+                            NOTIFICATION_KIND_REACTION,
+                            NOTIFICATION_KIND_ZAP,
+                            NOTIFICATION_KIND_TOPIC_REPLY,
+                            NOTIFICATION_KIND_BADGE_AWARD,
+                            NOTIFICATION_KIND_POLL,
+                            NOTIFICATION_KIND_POLL_RESPONSE
+                        ),
                         tags = mapOf("p" to listOf(pubkey)),
                         since = sweepSince,
                         limit = 500
@@ -555,8 +729,10 @@ class NotificationsRepository(
             }
         }
 
-        Log.d(TAG, "Tiered notification sub started for ${pubkey.take(8)}...: " +
-            "inbox=${inboxUrls.size} (deep), sweep=${sweepUrls.size}")
+        Log.d(
+            TAG, "Tiered notification sub started for ${pubkey.take(8)}...: " +
+                    "inbox=${inboxUrls.size} (deep), sweep=${sweepUrls.size}"
+        )
 
         // ── Phase 3: Discover user content IDs → thread reply + quote subs ───
         // Chains off Phase 1 EOSE so topic/note IDs are fetched after inbox events arrive
@@ -572,27 +748,33 @@ class NotificationsRepository(
             val extraFilters = mutableListOf<Filter>()
             if (topicIds.isNotEmpty()) {
                 Log.d(TAG, "Phase 3: Found ${topicIds.size} topics, adding thread replies filter")
-                extraFilters.add(Filter(
-                    kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
-                    tags = mapOf("E" to topicIds),
-                    limit = 5000
-                ))
+                extraFilters.add(
+                    Filter(
+                        kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
+                        tags = mapOf("E" to topicIds),
+                        limit = 5000
+                    )
+                )
             }
             if (noteIds.isNotEmpty()) {
                 Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes + comment replies filters")
-                extraFilters.add(Filter(
-                    kinds = listOf(NOTIFICATION_KIND_TEXT),
-                    tags = mapOf("q" to noteIds),
-                    limit = 5000
-                ))
+                extraFilters.add(
+                    Filter(
+                        kinds = listOf(NOTIFICATION_KIND_TEXT),
+                        tags = mapOf("q" to noteIds),
+                        limit = 5000
+                    )
+                )
                 // NIP-22: kind-1111 comments can reply to kind-1 notes too (E-tag = root note ID).
                 // Phase 1 only catches kind-1111 with p-tag; comments that don't p-tag the
                 // root author are missed. Subscribe for E-tag matches on our kind-1 note IDs.
-                extraFilters.add(Filter(
-                    kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
-                    tags = mapOf("E" to noteIds),
-                    limit = 5000
-                ))
+                extraFilters.add(
+                    Filter(
+                        kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
+                        tags = mapOf("E" to noteIds),
+                        limit = 5000
+                    )
+                )
             }
             if (extraFilters.isNotEmpty()) {
                 val extraHandle = stateMachine.requestTemporarySubscription(
@@ -628,9 +810,18 @@ class NotificationsRepository(
     fun stopSubscription() {
         val count = notificationHandles.size
         for (handle in notificationHandles) {
-            try { handle.cancel() } catch (_: Exception) { }
+            try {
+                handle.cancel()
+            } catch (_: Exception) {
+            }
         }
         notificationHandles.clear()
+        stopProfileWatcher()
+        // Flush any pending notification save
+        val ctx = appContext
+        if (ctx != null && notificationsById.isNotEmpty()) {
+            scope.launch(Dispatchers.IO) { saveNotificationsToRoom(ctx) }
+        }
         Log.d(TAG, "Notifications subscription stopped ($count handles)")
     }
 
@@ -693,7 +884,10 @@ class NotificationsRepository(
         // This instance only processes events for ownerPubkeyHex.
         // Reject events from another account's subscription that leaked here.
         if (pubkey != ownerPubkeyHex) {
-            Log.w(TAG, "handleEvent REJECTED: myPubkeyHex ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — stale state")
+            Log.w(
+                TAG,
+                "handleEvent REJECTED: myPubkeyHex ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — stale state"
+            )
             return
         }
         // ── Client-side relevance gate ──────────────────────────────────────
@@ -709,7 +903,10 @@ class NotificationsRepository(
         val isCitedInContent = event.kind == NOTIFICATION_KIND_TEXT &&
                 isUserCitedInContent(event.content, pubkey)
         if (!hasPTag && !hasETag && !hasQTag && !isCitedInContent) {
-            Log.d(TAG, "Dropping irrelevant event ${event.id.take(8)} kind=${event.kind} — no p/E/q tag or content cite matching us")
+            Log.d(
+                TAG,
+                "Dropping irrelevant event ${event.id.take(8)} kind=${event.kind} — no p/E/q tag or content cite matching us"
+            )
             return
         }
         // Skip notifications from muted/blocked users
@@ -717,42 +914,35 @@ class NotificationsRepository(
         val profileIsCached = profileCache.getAuthor(event.pubKey) != null
         val author = profileCache.resolveAuthor(event.pubKey)
         // Dispatch immediately with whatever author info we have.
-        // If profile isn't cached, request it and update the notification when it arrives.
+        // If profile isn't cached, queue it for batched resolution —
+        // the profileWatcher coroutine will update all affected notifications when it resolves.
         dispatchEvent(event, author)
         if (!profileIsCached && cacheRelayUrls.isNotEmpty()) {
-            scope.launch {
-                profileCache.requestProfiles(listOf(event.pubKey), cacheRelayUrls)
-                // Wait for profile arrival via Flow signal (up to 3s)
-                try {
-                    kotlinx.coroutines.withTimeoutOrNull(3_000L) {
-                        profileCache.profileUpdated
-                            .filter { it == event.pubKey || normalizeAuthorIdForCache(it) == normalizeAuthorIdForCache(event.pubKey) }
-                            .first()
-                    }
-                } catch (_: Exception) { }
-                val resolved = profileCache.getAuthor(event.pubKey)
-                if (resolved != null) {
-                    notificationsById[event.id]?.let { existing ->
-                        if (existing.author?.displayName != resolved.displayName) {
-                            val oldName = existing.author?.displayName ?: "Someone"
-                            val newName = resolved.displayName ?: "Someone"
-                            val newText = existing.text.replaceFirst(oldName, newName)
-                            notificationsById[event.id] = existing.copy(author = resolved, text = newText)
-                            emitSorted()
-                        }
-                    }
-                }
-            }
+            queueProfileFetch(event.pubKey)
         }
     }
 
     private fun dispatchEvent(event: Event, author: Author) {
         val ts = event.createdAt * 1000L
+        // Auto-mark as seen if this event arrived after the user pressed "Read All".
+        // Phase 3 (kind-1111 thread replies) can deliver events seconds after the
+        // watermark was set — pre-adding the ID prevents them from appearing as unread.
+        // For consolidated types (like/zap/repost), the handlers mark the consolidated
+        // ID themselves since event.id != notification ID for those types.
+        val isConsolidatedKind = event.kind in setOf(
+            NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_REPOST,
+            NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_ZAP
+        )
+        val watermark = markAllSeenEpochMs
+        if (watermark > 0 && ts <= watermark && !isConsolidatedKind) {
+            _seenIds.value = _seenIds.value + event.id
+        }
         when (event.kind) {
             NOTIFICATION_KIND_REACTION -> handleLike(event, author, ts)
             NOTIFICATION_KIND_TEXT -> {
                 // Check if this is a quote: q-tag OR nostr:nevent1/nostr:note1 in content referencing our notes
-                val quotedIdFromTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
+                val quotedIdFromTag =
+                    event.tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
                 val quotedId = quotedIdFromTag ?: findQuotedNoteIdInContent(event.content)
                 if (quotedId != null) {
                     handleQuote(event, author, ts, quotedId)
@@ -760,6 +950,7 @@ class NotificationsRepository(
                     handleReply(event, author, ts)
                 }
             }
+
             NOTIFICATION_KIND_TOPIC_REPLY -> handleTopicReply(event, author, ts)
             NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST -> handleRepost(event, author, ts)
             NOTIFICATION_KIND_ZAP -> handleZap(event, author, ts)
@@ -768,7 +959,7 @@ class NotificationsRepository(
             NOTIFICATION_KIND_BADGE_AWARD -> handleBadgeAward(event, author, ts)
             NOTIFICATION_KIND_POLL -> handlePollMention(event, author, ts)
             NOTIFICATION_KIND_POLL_RESPONSE -> handlePollVote(event, author, ts)
-            else -> { }
+            else -> {}
         }
     }
 
@@ -791,29 +982,59 @@ class NotificationsRepository(
         } else null
         val customUrls = if (customEmojiUrl != null && emoji.startsWith(":") && emoji.endsWith(":"))
             mapOf(emoji to customEmojiUrl) else emptyMap()
-        val action = when {
-            emoji == "❤️" -> "liked your post"
-            else -> "reacted to your post"
+        // ── Consolidated: one notification per liked note ──
+        val consolidatedId = "like:$eTag"
+        val existing = notificationsById[consolidatedId]
+        val shouldAutoMark = (event.id in _seenIds.value) ||
+                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
+        if (existing != null) {
+            val updatedActors = (existing.actorPubkeys + event.pubKey).distinct()
+            val updatedEmojis = (existing.reactionEmojis + emoji).distinct()
+            val updatedCustomUrls = existing.customEmojiUrls + customUrls
+            val updatedTs = maxOf(existing.sortTimestamp, ts)
+            val action = if (updatedEmojis.all { it == "❤️" }) "liked your post" else "reacted to your post"
+            val text = buildActorText(updatedActors, action)
+            notificationsById[consolidatedId] = existing.copy(
+                actorPubkeys = updatedActors,
+                reactionEmojis = updatedEmojis,
+                customEmojiUrls = updatedCustomUrls,
+                sortTimestamp = updatedTs,
+                text = text,
+                author = author
+            )
+        } else {
+            val action = if (emoji == "❤️") "liked your post" else "reacted to your post"
+            val text = "${author.displayName ?: "Someone"} $action"
+            notificationsById[consolidatedId] = NotificationData(
+                id = consolidatedId,
+                type = NotificationType.LIKE,
+                text = text,
+                note = null,
+                author = author,
+                targetNoteId = eTag,
+                sortTimestamp = ts,
+                reactionEmoji = emoji,
+                reactionEmojis = listOf(emoji),
+                actorPubkeys = listOf(event.pubKey),
+                customEmojiUrl = customEmojiUrl,
+                customEmojiUrls = customUrls
+            )
         }
-        val text = "${author.displayName ?: "Someone"} $action"
-        val data = NotificationData(
-            id = event.id,
-            type = NotificationType.LIKE,
-            text = text,
-            note = null,
-            author = author,
-            targetNoteId = eTag,
-            sortTimestamp = ts,
-            reactionEmoji = emoji,
-            reactionEmojis = listOf(emoji),
-            customEmojiUrl = customEmojiUrl,
-            customEmojiUrls = customUrls
-        )
-        notificationsById[data.id] = data
+        if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
         emitSorted()
-        fireAndroidNotification(NotificationType.LIKE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = eTag)
-        scope.launch { fetchAndSetTargetNote(eTag, event.id) { d -> { note -> d.copy(targetNote = note) } } }
+        fireAndroidNotification(
+            NotificationType.LIKE,
+            author.displayName ?: "Someone",
+            notificationsById[consolidatedId]?.text ?: "liked your post",
+            consolidatedId,
+            eventEpochSec = ts / 1000,
+            noteId = eTag
+        )
+        if (notificationsById[consolidatedId]?.targetNote == null) {
+            scope.launch { fetchAndSetTargetNote(eTag, consolidatedId) { d -> { note -> d.copy(targetNote = note) } } }
+        }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
+        scheduleNotificationSave()
     }
 
     private fun handleReply(event: Event, author: Author, ts: Long) {
@@ -833,7 +1054,8 @@ class NotificationsRepository(
         // This avoids the previous bug where cited-in-content replies were immediately
         // classified as MENTION and skipped parent verification entirely.
         val isPureMention = rootId == null
-        val text = if (isPureMention) "${author.displayName} mentioned you" else "${author.displayName} replied to your post"
+        val text =
+            if (isPureMention) "${author.displayName} mentioned you" else "${author.displayName} replied to your post"
         val notifType = if (isPureMention) NotificationType.MENTION else NotificationType.REPLY
         val parentId = if (rootId != null) (replyToId ?: rootId) else null
         val data = NotificationData(
@@ -851,7 +1073,15 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(notifType, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = rootId)
+        fireAndroidNotification(
+            notifType,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id,
+            rootNoteId = rootId
+        )
         if (parentId != null) {
             // Always fetch parent for verification — even if user is cited in content.
             // fetchAndSetTargetNote will reclassify REPLY→MENTION if parent isn't ours,
@@ -860,6 +1090,7 @@ class NotificationsRepository(
         }
         // Update today's summary
         updateTodaySummary(notifType, ts, 0L)
+        scheduleNotificationSave()
     }
 
     /** Handle a kind-1 event that quotes one of our notes (q-tag). */
@@ -877,7 +1108,15 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.QUOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = quotedNoteId)
+        fireAndroidNotification(
+            NotificationType.QUOTE,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id,
+            rootNoteId = quotedNoteId
+        )
         // Fetch the quoted note for display
         scope.launch { fetchAndSetTargetNote(quotedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
     }
@@ -897,7 +1136,7 @@ class NotificationsRepository(
             if (existing.type != NotificationType.REPLY && existing.type != NotificationType.MENTION) continue
             // Check q-tag first
             val quotedId = tags.firstOrNull { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }?.get(1)
-                // Also check content for nostr:nevent/note references
+            // Also check content for nostr:nevent/note references
                 ?: existing.rawContent?.let { findQuotedNoteIdInContent(it) }
             if (quotedId != null) {
                 val authorName = existing.author?.displayName ?: "Someone"
@@ -929,14 +1168,16 @@ class NotificationsRepository(
                 val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
                 val hex = (parsed?.entity as? com.example.cybin.nip19.NPub)?.hex
                 if (hex != null && normalizeAuthorIdForCache(hex) == myPubkey) return true
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         for (match in nprofileRegex.findAll(content)) {
             try {
                 val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
                 val hex = (parsed?.entity as? com.example.cybin.nip19.NProfile)?.hex
                 if (hex != null && normalizeAuthorIdForCache(hex) == myPubkey) return true
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         return false
     }
@@ -953,14 +1194,16 @@ class NotificationsRepository(
                 val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
                 val hex = (parsed?.entity as? com.example.cybin.nip19.NEvent)?.hex
                 if (hex != null && hex in myNoteIds) return hex
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         for (match in nnoteRegex.findAll(content)) {
             try {
                 val parsed = com.example.cybin.nip19.Nip19Parser.uriToRoute("nostr:${match.groupValues[1]}")
                 val hex = (parsed?.entity as? com.example.cybin.nip19.NNote)?.hex
                 if (hex != null && hex in myNoteIds) return hex
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         return null
     }
@@ -990,7 +1233,8 @@ class NotificationsRepository(
         // so it appears in the Threads tab without waiting for target fetch enrichment.
         val isOurTopic = rootId in myTopicIds
         val kind = if (isOurTopic) 11 else NOTIFICATION_KIND_TOPIC_REPLY
-        val text = if (isOurTopic) "${author.displayName} replied to your thread" else "${author.displayName} commented on your post"
+        val text =
+            if (isOurTopic) "${author.displayName} replied to your thread" else "${author.displayName} commented on your post"
         val data = NotificationData(
             id = event.id,
             type = NotificationType.REPLY,
@@ -1004,9 +1248,18 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.COMMENT, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id, rootNoteId = rootId)
+        fireAndroidNotification(
+            NotificationType.COMMENT,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id,
+            rootNoteId = rootId
+        )
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         updateTodaySummary(NotificationType.REPLY, ts, 0L)
+        scheduleNotificationSave()
     }
 
     private fun handleHighlight(event: Event, author: Author, ts: Long) {
@@ -1021,6 +1274,7 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
+        scheduleNotificationSave()
     }
 
     private fun handleReport(event: Event, author: Author, ts: Long) {
@@ -1035,14 +1289,19 @@ class NotificationsRepository(
         val targetsUs = reportedPubkey == pubkey
         val targetsOurNote = reportedNoteId != null && reportedNoteId in myNoteIds
         if (!targetsUs && !targetsOurNote) {
-            Log.d(TAG, "Dropping irrelevant report ${event.id.take(8)}: p=${reportedPubkey?.take(8)}, e=${reportedNoteId?.take(8)}, us=${pubkey.take(8)}")
+            Log.d(
+                TAG,
+                "Dropping irrelevant report ${event.id.take(8)}: p=${reportedPubkey?.take(8)}, e=${
+                    reportedNoteId?.take(8)
+                }, us=${pubkey.take(8)}"
+            )
             return
         }
         val reportType = event.tags.firstOrNull { it.size >= 3 && it[0] == "report" }?.get(2)
             ?: event.tags.firstOrNull { it.size >= 3 && it[0] == "p" && it[1] == pubkey }?.getOrNull(2)
             ?: "unknown"
         val text = if (targetsOurNote) "${author.displayName} reported your post ($reportType)"
-                   else "${author.displayName} reported you ($reportType)"
+        else "${author.displayName} reported you ($reportType)"
         val data = NotificationData(
             id = event.id,
             type = NotificationType.REPORT,
@@ -1053,6 +1312,7 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
+        scheduleNotificationSave()
     }
 
     private fun handleBadgeAward(event: Event, author: Author, ts: Long) {
@@ -1068,11 +1328,19 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.BADGE_AWARD, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id)
+        fireAndroidNotification(
+            NotificationType.BADGE_AWARD,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id
+        )
         // Asynchronously resolve badge definition for name + image
         if (aTagValue != null && subscriptionRelayUrls.isNotEmpty()) {
             scope.launch { resolveBadgeDefinition(event.id, aTagValue) }
         }
+        scheduleNotificationSave()
     }
 
     /** Fetch kind 30009 badge definition from a-tag and enrich the notification with badge name/image. */
@@ -1092,8 +1360,10 @@ class NotificationsRepository(
             )
             var bestEvent: Event? = null
             RelayConnectionStateMachine.getInstance()
-                .awaitOneShotSubscription(subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.NORMAL,
-                    settleMs = 300L, maxWaitMs = 3_000L) { ev ->
+                .awaitOneShotSubscription(
+                    subscriptionRelayUrls, defFilter, priority = SubscriptionPriority.NORMAL,
+                    settleMs = 300L, maxWaitMs = 3_000L
+                ) { ev ->
                     if (ev.kind == 30009 && (bestEvent == null || ev.createdAt > (bestEvent?.createdAt ?: 0))) {
                         bestEvent = ev
                     }
@@ -1137,8 +1407,16 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.MENTION, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = event.id)
+        fireAndroidNotification(
+            NotificationType.MENTION,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id
+        )
         updateTodaySummary(NotificationType.MENTION, ts, 0L)
+        scheduleNotificationSave()
     }
 
     private fun handlePollVote(event: Event, author: Author, ts: Long) {
@@ -1163,17 +1441,29 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
-        fireAndroidNotification(NotificationType.POLL_VOTE, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = pollId)
+        fireAndroidNotification(
+            NotificationType.POLL_VOTE,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = pollId
+        )
         // Fetch the poll note so tapping the notification can navigate to it
         scope.launch { fetchAndSetTargetNote(pollId, event.id) { d -> { note -> d.copy(targetNote = note) } } }
         // Asynchronously fetch the poll event to enrich with question + option labels
         if (subscriptionRelayUrls.isNotEmpty()) {
             scope.launch { enrichPollVoteNotification(event.id, pollId, responseCodes) }
         }
+        scheduleNotificationSave()
     }
 
     /** Fetch the kind-1068 poll event and enrich the POLL_VOTE notification with question and option labels. */
-    private suspend fun enrichPollVoteNotification(notificationId: String, pollId: String, responseCodes: List<String>) {
+    private suspend fun enrichPollVoteNotification(
+        notificationId: String,
+        pollId: String,
+        responseCodes: List<String>
+    ) {
         try {
             val filter = Filter(
                 ids = listOf(pollId),
@@ -1181,8 +1471,10 @@ class NotificationsRepository(
             )
             var pollEvent: Event? = null
             RelayConnectionStateMachine.getInstance()
-                .awaitOneShotSubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL,
-                    settleMs = 300L, maxWaitMs = 3_000L) { ev ->
+                .awaitOneShotSubscription(
+                    subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL,
+                    settleMs = 300L, maxWaitMs = 3_000L
+                ) { ev ->
                     if (ev.id == pollId) pollEvent = ev
                 }
 
@@ -1236,7 +1528,7 @@ class NotificationsRepository(
             NotificationType.REPOST -> _todayBoosts.value++
             NotificationType.LIKE -> _todayReactions.value++
             NotificationType.ZAP -> _todayZapSats.value += zapSats
-            else -> { }
+            else -> {}
         }
     }
 
@@ -1271,25 +1563,53 @@ class NotificationsRepository(
         // NIP-18: last e-tag is the reposted event
         val repostedNoteId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
             ?: parseRepostedNoteIdFromContent(event.content)
-        val targetNote = if (repostedNoteId != null) parseRepostedNoteFromContent(event.content) else null
-        val text = "${author.displayName ?: "Someone"} reposted your post"
-        val data = NotificationData(
-            id = event.id,
-            type = NotificationType.REPOST,
-            text = text,
-            note = null,
-            author = author,
-            targetNote = targetNote,
-            targetNoteId = if (targetNote == null) repostedNoteId else null,
-            sortTimestamp = ts
-        )
-        notificationsById[event.id] = data
+        if (repostedNoteId == null) return
+        val targetNote = parseRepostedNoteFromContent(event.content)
+        // ── Consolidated: one notification per reposted note ──
+        val consolidatedId = "repost:$repostedNoteId"
+        val existing = notificationsById[consolidatedId]
+        val shouldAutoMark = (event.id in _seenIds.value) ||
+                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
+        if (existing != null) {
+            val updatedActors = (existing.actorPubkeys + event.pubKey).distinct()
+            val updatedTs = maxOf(existing.sortTimestamp, ts)
+            val text = buildActorText(updatedActors, "reposted your post")
+            notificationsById[consolidatedId] = existing.copy(
+                actorPubkeys = updatedActors,
+                sortTimestamp = updatedTs,
+                text = text,
+                author = author,
+                targetNote = existing.targetNote ?: targetNote
+            )
+        } else {
+            val text = "${author.displayName ?: "Someone"} reposted your post"
+            notificationsById[consolidatedId] = NotificationData(
+                id = consolidatedId,
+                type = NotificationType.REPOST,
+                text = text,
+                note = null,
+                author = author,
+                targetNote = targetNote,
+                targetNoteId = if (targetNote == null) repostedNoteId else null,
+                actorPubkeys = listOf(event.pubKey),
+                sortTimestamp = ts
+            )
+        }
+        if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
         emitSorted()
-        fireAndroidNotification(NotificationType.REPOST, author.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = repostedNoteId)
-        if (repostedNoteId != null) {
-            scope.launch { fetchAndSetTargetNote(repostedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
+        fireAndroidNotification(
+            NotificationType.REPOST,
+            author.displayName ?: "Someone",
+            notificationsById[consolidatedId]?.text ?: "reposted your post",
+            consolidatedId,
+            eventEpochSec = ts / 1000,
+            noteId = repostedNoteId
+        )
+        if (notificationsById[consolidatedId]?.targetNote == null) {
+            scope.launch { fetchAndSetTargetNote(repostedNoteId, consolidatedId) { d -> { n -> d.copy(targetNote = n) } } }
         }
         updateTodaySummary(NotificationType.REPOST, ts, 0L)
+        scheduleNotificationSave()
     }
 
     private fun parseRepostedNoteIdFromContent(content: String): String? {
@@ -1324,45 +1644,61 @@ class NotificationsRepository(
         val zapperAuthor = if (realZapperPubkey != null) {
             profileCache.resolveAuthor(realZapperPubkey)
         } else author
-        val satsLabel = if (amountSats > 0) formatSats(amountSats) else ""
-        val text = "${zapperAuthor.displayName ?: "Someone"} ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
-        val data = NotificationData(
-            id = event.id,
-            type = NotificationType.ZAP,
-            text = text,
-            note = null,
-            author = zapperAuthor,
-            targetNoteId = eTag,
-            sortTimestamp = ts,
-            zapAmountSats = amountSats
-        )
-        notificationsById[event.id] = data
+        val zapperPk = realZapperPubkey ?: event.pubKey
+        // ── Consolidated: one notification per zapped note ──
+        val consolidatedId = "zap:$eTag"
+        val existing = notificationsById[consolidatedId]
+        val shouldAutoMark = (event.id in _seenIds.value) ||
+                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
+        if (existing != null) {
+            val updatedActors = (existing.actorPubkeys + zapperPk).distinct()
+            val updatedSats = existing.zapAmountSats + amountSats
+            val updatedTs = maxOf(existing.sortTimestamp, ts)
+            val satsLabel = if (updatedSats > 0) formatSats(updatedSats) else ""
+            val action = if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"
+            val text = buildActorText(updatedActors, action)
+            notificationsById[consolidatedId] = existing.copy(
+                actorPubkeys = updatedActors,
+                zapAmountSats = updatedSats,
+                sortTimestamp = updatedTs,
+                text = text,
+                author = zapperAuthor
+            )
+        } else {
+            val satsLabel = if (amountSats > 0) formatSats(amountSats) else ""
+            val text =
+                "${zapperAuthor.displayName ?: "Someone"} ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
+            notificationsById[consolidatedId] = NotificationData(
+                id = consolidatedId,
+                type = NotificationType.ZAP,
+                text = text,
+                note = null,
+                author = zapperAuthor,
+                targetNoteId = eTag,
+                sortTimestamp = ts,
+                zapAmountSats = amountSats,
+                actorPubkeys = listOf(zapperPk)
+            )
+        }
+        if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
         emitSorted()
-        fireAndroidNotification(NotificationType.ZAP, zapperAuthor.displayName ?: "Someone", text, event.id, eventEpochSec = ts / 1000, noteId = eTag)
-        scope.launch { fetchAndSetTargetNote(eTag, event.id) { d -> { note -> d.copy(targetNote = note) } } }
+        fireAndroidNotification(
+            NotificationType.ZAP,
+            zapperAuthor.displayName ?: "Someone",
+            notificationsById[consolidatedId]?.text ?: "zapped your post",
+            consolidatedId,
+            eventEpochSec = ts / 1000,
+            noteId = eTag
+        )
+        if (notificationsById[consolidatedId]?.targetNote == null) {
+            scope.launch { fetchAndSetTargetNote(eTag, consolidatedId) { d -> { note -> d.copy(targetNote = note) } } }
+        }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
-        // If the zapper's profile isn't cached yet, fetch it and re-enrich the notification
-        // once it resolves so the display name shows the real sender, not the wallet service.
+        scheduleNotificationSave()
+        // If the zapper's profile isn't cached yet, queue it for batched resolution.
+        // The profileWatcher coroutine will update all affected notifications when it resolves.
         if (needsProfileFetch && realZapperPubkey != null && cacheRelayUrls.isNotEmpty()) {
-            scope.launch {
-                profileCache.requestProfiles(listOf(realZapperPubkey), cacheRelayUrls)
-                // requestProfiles is async (queues for debounced batch fetch).
-                // Wait for profileUpdated to signal this pubkey has resolved,
-                // then re-enrich the notification with the real display name.
-                val normalizedPk = realZapperPubkey.lowercase()
-                val resolved = kotlinx.coroutines.withTimeoutOrNull(15_000L) {
-                    profileCache.profileUpdated.first { it.lowercase() == normalizedPk }
-                    profileCache.getAuthor(realZapperPubkey)
-                }
-                if (resolved != null) {
-                    val current = notificationsById[event.id] ?: return@launch
-                    val newName = resolved.displayName ?: "Someone"
-                    val newText = "$newName ${if (satsLabel.isNotEmpty()) "zapped $satsLabel" else "zapped your post"}"
-                    notificationsById[event.id] = current.copy(text = newText, author = resolved)
-                    emitSorted()
-                    Log.d(TAG, "Zap sender re-enriched: ${event.id.take(8)} -> $newName")
-                }
-            }
+            queueProfileFetch(realZapperPubkey)
         }
     }
 
@@ -1373,7 +1709,9 @@ class NotificationsRepository(
         return try {
             val pubkeyMatch = Regex(""""pubkey"\s*:\s*"([a-f0-9]{64})"""").find(descTag)
             pubkeyMatch?.groupValues?.get(1)
-        } catch (_: Exception) { null }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** Parse zap amount from bolt11 tag or description tag's bolt11 field. */
@@ -1395,7 +1733,8 @@ class NotificationsRepository(
                 val milliSats = amountMatch?.groupValues?.get(1)?.toLongOrNull()
                 Log.d(TAG, "parseZapAmount: description amount match=$milliSats (milliSats)")
                 if (milliSats != null && milliSats > 0) return milliSats / 1000
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         Log.d(TAG, "parseZapAmount: returning 0 for event ${event.id.take(8)}")
         return 0L
@@ -1441,7 +1780,8 @@ class NotificationsRepository(
             since = since,
             limit = 500
         )
-        stateMachine.awaitOneShotSubscription(relayUrls, filter,
+        stateMachine.awaitOneShotSubscription(
+            relayUrls, filter,
             priority = SubscriptionPriority.NORMAL, settleMs = 300L, maxWaitMs = 4_000L,
         ) { ev ->
             if (ev.kind == 11) {
@@ -1465,7 +1805,8 @@ class NotificationsRepository(
             since = since,
             limit = 2000
         )
-        stateMachine.awaitOneShotSubscription(allRelays, filter,
+        stateMachine.awaitOneShotSubscription(
+            allRelays, filter,
             priority = SubscriptionPriority.NORMAL, settleMs = 300L, maxWaitMs = 5_000L,
         ) { ev ->
             if (ev.kind == 1) {
@@ -1489,7 +1830,26 @@ class NotificationsRepository(
         }
     }
 
+    /**
+     * Debounced notification list emission. Instead of emitting a new sorted list
+     * on every individual event (5000+ during Phase 1 replay), this coalesces
+     * rapid updates into a single emission after 100ms of quiet.
+     *
+     * Call [emitSortedImmediate] when the UI must update instantly (e.g. after
+     * markAllAsSeen, notification removal, or target note enrichment).
+     */
     private fun emitSorted() {
+        emitDirty = true
+        emitJob?.cancel()
+        emitJob = scope.launch {
+            delay(EMIT_DEBOUNCE_MS)
+            emitSortedImmediate()
+        }
+    }
+
+    /** Immediate (non-debounced) emit. Used after critical state changes. */
+    private fun emitSortedImmediate() {
+        emitDirty = false
         val sorted = notificationsById.values
             .sortedByDescending { it.sortTimestamp }
             .toList()
@@ -1507,7 +1867,209 @@ class NotificationsRepository(
         }
     }
 
-    private fun fetchAndSetTargetNote(noteId: String, notificationId: String, update: (NotificationData) -> (Note?) -> NotificationData) {
+    // ── Batched profile resolution (Item 2) ──────────────────────────────────
+    // Instead of launching individual coroutines per event that each wait 3s,
+    // buffer uncached pubkeys and request them in one batch, then update all
+    // affected notifications via a single profileUpdated collector.
+
+    private val pendingProfilePubkeys = java.util.Collections.synchronizedSet(HashSet<String>())
+    private var profileBatchJob: Job? = null
+    private var profileWatcherJob: Job? = null
+    private val PROFILE_BATCH_DELAY_MS = 200L
+
+    /** Queue a pubkey for batched profile resolution. */
+    private fun queueProfileFetch(pubkey: String) {
+        pendingProfilePubkeys.add(normalizeAuthorIdForCache(pubkey))
+        scheduleProfileBatchFlush()
+    }
+
+    private fun scheduleProfileBatchFlush() {
+        profileBatchJob?.cancel()
+        profileBatchJob = scope.launch {
+            delay(PROFILE_BATCH_DELAY_MS)
+            val batch = synchronized(pendingProfilePubkeys) {
+                pendingProfilePubkeys.toList().also { pendingProfilePubkeys.clear() }
+            }
+            if (batch.isNotEmpty() && cacheRelayUrls.isNotEmpty()) {
+                profileCache.requestProfiles(batch, cacheRelayUrls)
+            }
+        }
+    }
+
+    /** Single watcher that updates all affected notifications when a profile resolves.
+     *  Replaces N individual coroutines (one per event) that each waited up to 3s. */
+    private fun startProfileWatcher() {
+        profileWatcherJob?.cancel()
+        profileWatcherJob = scope.launch {
+            profileCache.profileUpdated.collect { pubkey ->
+                val normalized = normalizeAuthorIdForCache(pubkey)
+                var changed = false
+                for ((id, data) in notificationsById) {
+                    val authorNorm = data.author?.id?.let { normalizeAuthorIdForCache(it) }
+                    if (authorNorm == normalized) {
+                        val resolved = profileCache.getAuthor(normalized) ?: continue
+                        if (data.author?.displayName != resolved.displayName) {
+                            val oldName = data.author?.displayName ?: "Someone"
+                            val newName = resolved.displayName ?: "Someone"
+                            val newText = data.text.replaceFirst(oldName, newName)
+                            notificationsById[id] = data.copy(author = resolved, text = newText)
+                            changed = true
+                        }
+                    }
+                }
+                if (changed) emitSorted()
+            }
+        }
+    }
+
+    private fun stopProfileWatcher() {
+        profileWatcherJob?.cancel()
+        profileWatcherJob = null
+    }
+
+    // ── Room persistence (Item 3) ────────────────────────────────────────────
+    // Persist notifications to Room so cold-start has full notification history
+    // without re-fetching from relays.
+
+    private var notifSaveJob: Job? = null
+    private val NOTIF_SAVE_DEBOUNCE_MS = 3000L
+    private val MAX_PERSISTED_NOTIFICATIONS = 3000
+
+    /** Debounced save of notifications to Room. Called after any notification state change. */
+    private fun scheduleNotificationSave() {
+        val ctx = appContext ?: return
+        notifSaveJob?.cancel()
+        notifSaveJob = scope.launch(Dispatchers.IO) {
+            delay(NOTIF_SAVE_DEBOUNCE_MS)
+            saveNotificationsToRoom(ctx)
+        }
+    }
+
+    private suspend fun saveNotificationsToRoom(context: Context) {
+        try {
+            val pubkey = myPubkeyHex ?: return
+            val dao = social.mycelium.android.db.AppDatabase.getInstance(context).notificationDao()
+            val notifications = notificationsById.values.toList()
+            val entities = notifications.map { it.toEntity(pubkey) }
+            dao.upsertAll(entities)
+            dao.trimToNewest(pubkey, MAX_PERSISTED_NOTIFICATIONS)
+            Log.d(TAG, "Saved ${entities.size} notifications to Room")
+        } catch (e: Exception) {
+            Log.e(TAG, "saveNotificationsToRoom failed: ${e.message}", e)
+        }
+    }
+
+    /** Restore notifications from Room on cold start. Called in startSubscription before Phase 1. */
+    private suspend fun loadNotificationsFromRoom(pubkey: String) {
+        val ctx = appContext ?: return
+        try {
+            val dao = social.mycelium.android.db.AppDatabase.getInstance(ctx).notificationDao()
+            val entities = dao.getForOwner(pubkey)
+            if (entities.isEmpty()) {
+                Log.d(TAG, "No cached notifications in Room for ${pubkey.take(8)}")
+                return
+            }
+            var restored = 0
+            for (entity in entities) {
+                if (!notificationsById.containsKey(entity.id)) {
+                    notificationsById[entity.id] = entity.toNotificationData()
+                    restored++
+                }
+            }
+            if (restored > 0) {
+                emitSortedImmediate()
+                Log.d(TAG, "Restored $restored notifications from Room (${entities.size} total)")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "loadNotificationsFromRoom failed: ${e.message}", e)
+        }
+    }
+
+    /** Convert NotificationData to Room entity. */
+    private fun NotificationData.toEntity(ownerPubkey: String): social.mycelium.android.db.CachedNotificationEntity {
+        return social.mycelium.android.db.CachedNotificationEntity(
+            id = id,
+            ownerPubkey = ownerPubkey,
+            type = type.name,
+            text = text,
+            sortTimestamp = sortTimestamp,
+            authorId = author?.id,
+            authorDisplayName = author?.displayName,
+            authorUsername = author?.username,
+            authorAvatarUrl = author?.avatarUrl,
+            targetNoteId = targetNoteId,
+            rootNoteId = rootNoteId,
+            replyNoteId = replyNoteId,
+            replyKind = replyKind,
+            reactionEmoji = reactionEmoji,
+            reactionEmojisJson = if (reactionEmojis.isNotEmpty()) json.encodeToString(ListSerializer(String.serializer()), reactionEmojis) else null,
+            zapAmountSats = zapAmountSats,
+            actorPubkeysJson = if (actorPubkeys.isNotEmpty()) json.encodeToString(ListSerializer(String.serializer()), actorPubkeys) else null,
+            customEmojiUrlsJson = if (customEmojiUrls.isNotEmpty()) json.encodeToString(MapSerializer(String.serializer(), String.serializer()), customEmojiUrls) else null,
+            customEmojiUrl = customEmojiUrl,
+            badgeName = badgeName,
+            badgeImageUrl = badgeImageUrl,
+            pollId = pollId,
+            pollQuestion = pollQuestion,
+            pollOptionCodesJson = if (pollOptionCodes.isNotEmpty()) json.encodeToString(ListSerializer(String.serializer()), pollOptionCodes) else null,
+            pollOptionLabelsJson = if (pollOptionLabels.isNotEmpty()) json.encodeToString(ListSerializer(String.serializer()), pollOptionLabels) else null,
+            pollAllOptionsJson = if (pollAllOptions.isNotEmpty()) json.encodeToString(ListSerializer(String.serializer()), pollAllOptions) else null,
+            pollIsMultipleChoice = pollIsMultipleChoice,
+            rawContent = rawContent,
+            noteContent = note?.content,
+            targetNoteContent = targetNote?.content,
+        )
+    }
+
+    /** Convert Room entity to NotificationData. Note/targetNote are null until re-enriched. */
+    private fun social.mycelium.android.db.CachedNotificationEntity.toNotificationData(): NotificationData {
+        val notifType = try { NotificationType.valueOf(type) } catch (_: Exception) { NotificationType.LIKE }
+        val author = if (authorId != null) Author(
+            id = authorId,
+            username = authorUsername ?: authorId.take(8) + "...",
+            displayName = authorDisplayName ?: authorId.take(8) + "...",
+            avatarUrl = authorAvatarUrl,
+            isVerified = false
+        ) else null
+        val stringSerializer = String.serializer()
+        val listSerializer = ListSerializer(stringSerializer)
+        val mapSerializer = MapSerializer(stringSerializer, stringSerializer)
+        return NotificationData(
+            id = id,
+            type = notifType,
+            text = text,
+            sortTimestamp = sortTimestamp,
+            author = author,
+            targetNoteId = targetNoteId,
+            rootNoteId = rootNoteId,
+            replyNoteId = replyNoteId,
+            replyKind = replyKind,
+            reactionEmoji = reactionEmoji,
+            reactionEmojis = reactionEmojisJson?.let { try { json.decodeFromString(listSerializer, it) } catch (_: Exception) { emptyList<String>() } } ?: emptyList(),
+            zapAmountSats = zapAmountSats,
+            actorPubkeys = actorPubkeysJson?.let { try { json.decodeFromString(listSerializer, it) } catch (_: Exception) { emptyList<String>() } } ?: emptyList(),
+            customEmojiUrls = customEmojiUrlsJson?.let { try { json.decodeFromString(mapSerializer, it) } catch (_: Exception) { emptyMap<String, String>() } } ?: emptyMap(),
+            customEmojiUrl = customEmojiUrl,
+            badgeName = badgeName,
+            badgeImageUrl = badgeImageUrl,
+            pollId = pollId,
+            pollQuestion = pollQuestion,
+            pollOptionCodes = pollOptionCodesJson?.let { try { json.decodeFromString(listSerializer, it) } catch (_: Exception) { emptyList<String>() } } ?: emptyList(),
+            pollOptionLabels = pollOptionLabelsJson?.let { try { json.decodeFromString(listSerializer, it) } catch (_: Exception) { emptyList<String>() } } ?: emptyList(),
+            pollAllOptions = pollAllOptionsJson?.let { try { json.decodeFromString(listSerializer, it) } catch (_: Exception) { emptyList<String>() } } ?: emptyList(),
+            pollIsMultipleChoice = pollIsMultipleChoice,
+            rawContent = rawContent,
+        )
+    }
+
+    /** Maximum pending target fetches before forcing an immediate flush (prevents starvation). */
+    private val MAX_TARGET_FETCH_BATCH = 50
+
+    private fun fetchAndSetTargetNote(
+        noteId: String,
+        notificationId: String,
+        update: (NotificationData) -> (Note?) -> NotificationData
+    ) {
         // Fast path: check feed cache immediately — avoids the debounce delay entirely
         // for target notes that are already in the local feed (common for replies/likes to your recent posts).
         val cached = NotesRepository.getInstance().getNoteFromCache(noteId)
@@ -1519,39 +2081,42 @@ class NotificationsRepository(
                 // Verify relevance (same logic as flushTargetFetchBatch Step 3)
                 if (current.type == NotificationType.LIKE && !isOurNote) {
                     notificationsById.remove(notificationId)
-                    emitSorted()
+                    emitSortedImmediate()
                     return
                 }
                 if (current.type == NotificationType.REPOST && !isOurNote) {
                     notificationsById.remove(notificationId)
-                    emitSorted()
+                    emitSortedImmediate()
                     return
                 }
                 if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
                     val contentToCheck = current.rawContent ?: current.note?.content ?: ""
                     val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
-                        isUserCitedInContent(contentToCheck, myPubkeyHex!!)
+                            isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                     if (!isCited) {
                         notificationsById.remove(notificationId)
-                        emitSorted()
+                        emitSortedImmediate()
                         return
                     }
                     notificationsById[notificationId] = current.copy(
                         type = NotificationType.MENTION,
                         text = "${current.author?.displayName ?: "Someone"} mentioned you"
                     )
-                    emitSorted()
+                    emitSortedImmediate()
                     return
                 }
                 var updated = update(current)(cached)
                 if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && cached.kind == 11 && myPubkeyHex != null) {
                     val rootAuthorHex = normalizeAuthorIdForCache(cached.author.id)
                     if (rootAuthorHex == myPubkeyHex) {
-                        updated = updated.copy(replyKind = 11, text = "${current.author?.displayName ?: "Someone"} replied to your thread")
+                        updated = updated.copy(
+                            replyKind = 11,
+                            text = "${current.author?.displayName ?: "Someone"} replied to your thread"
+                        )
                     }
                 }
                 notificationsById[notificationId] = updated
-                emitSorted()
+                emitSortedImmediate()
                 return
             }
         }
@@ -1570,45 +2135,57 @@ class NotificationsRepository(
                             val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
                             val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
                             if (current.type == NotificationType.LIKE && !isOurNote) {
-                                notificationsById.remove(notificationId); emitSorted(); return@launch
+                                notificationsById.remove(notificationId); emitSortedImmediate(); return@launch
                             }
                             if (current.type == NotificationType.REPOST && !isOurNote) {
-                                notificationsById.remove(notificationId); emitSorted(); return@launch
+                                notificationsById.remove(notificationId); emitSortedImmediate(); return@launch
                             }
                             if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
                                 val contentToCheck = current.rawContent ?: current.note?.content ?: ""
                                 val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
-                                    isUserCitedInContent(contentToCheck, myPubkeyHex!!)
+                                        isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                                 if (!isCited) {
-                                    notificationsById.remove(notificationId); emitSorted(); return@launch
+                                    notificationsById.remove(notificationId); emitSortedImmediate(); return@launch
                                 }
                                 notificationsById[notificationId] = current.copy(
                                     type = NotificationType.MENTION,
                                     text = "${current.author?.displayName ?: "Someone"} mentioned you"
                                 )
-                                emitSorted(); return@launch
+                                emitSortedImmediate(); return@launch
                             }
                             notificationsById[notificationId] = update(current)(note)
-                            emitSorted()
+                            emitSortedImmediate()
                         }
                         return@launch
                     }
-                } catch (_: Exception) { }
+                } catch (_: Exception) {
+                }
                 // Room miss — fall through to batched relay fetch
                 if (subscriptionRelayUrls.isEmpty()) return@launch
-                pendingTargetFetches.getOrPut(noteId) { mutableListOf() }.add(PendingTargetFetch(noteId, notificationId, update))
+                pendingTargetFetches.getOrPut(noteId) { mutableListOf() }
+                    .add(PendingTargetFetch(noteId, notificationId, update))
                 scheduleTargetFetchFlush()
             }
             return
         }
         if (subscriptionRelayUrls.isEmpty()) return
         // Slow path: buffer for batched relay fetch
-        pendingTargetFetches.getOrPut(noteId) { mutableListOf() }.add(PendingTargetFetch(noteId, notificationId, update))
+        pendingTargetFetches.getOrPut(noteId) { mutableListOf() }
+            .add(PendingTargetFetch(noteId, notificationId, update))
         scheduleTargetFetchFlush()
     }
 
-    /** Schedule a debounced flush of the target note fetch buffer. */
+    /** Schedule a debounced flush of the target note fetch buffer.
+     *  Flushes immediately when the batch buffer exceeds [MAX_TARGET_FETCH_BATCH]
+     *  to prevent starvation during continuous event delivery (Phase 1 replay). */
     private fun scheduleTargetFetchFlush() {
+        val totalPending = pendingTargetFetches.values.sumOf { it.size }
+        if (totalPending >= MAX_TARGET_FETCH_BATCH) {
+            // Buffer full — flush immediately to prevent starvation
+            targetFetchBatchJob?.cancel()
+            targetFetchBatchJob = scope.launch { flushTargetFetchBatch() }
+            return
+        }
         targetFetchBatchJob?.cancel()
         targetFetchBatchJob = scope.launch {
             delay(TARGET_FETCH_BATCH_DELAY_MS)
@@ -1622,154 +2199,173 @@ class NotificationsRepository(
         // Mutex ensures only one flush runs at a time — prevents duplicate retry processing
         // when a new flush fires while the previous one is waiting on its one-shot delay.
         targetFetchMutex.withLock {
-        if (pendingTargetFetches.isEmpty()) return
-        val batch = pendingTargetFetches.toMap()
-        pendingTargetFetches.clear()
+            if (pendingTargetFetches.isEmpty()) return
+            val batch = pendingTargetFetches.toMap()
+            pendingTargetFetches.clear()
 
-        val allNoteIds = batch.keys.toList()
-        val maxRetry = batch.values.flatten().maxOfOrNull { it.retryCount } ?: 0
-        val timeoutMs = if (maxRetry > 0) TARGET_FETCH_RETRY_TIMEOUT_MS else TARGET_FETCH_TIMEOUT_MS
-        Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (retry=$maxRetry, timeout=${timeoutMs}ms)")
+            val allNoteIds = batch.keys.toList()
+            val maxRetry = batch.values.flatten().maxOfOrNull { it.retryCount } ?: 0
+            val timeoutMs = if (maxRetry > 0) TARGET_FETCH_RETRY_TIMEOUT_MS else TARGET_FETCH_TIMEOUT_MS
+            Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (retry=$maxRetry, timeout=${timeoutMs}ms)")
 
-        // ── Step 1: Check local caches before hitting relays ──────────────
-        val fetched = java.util.concurrent.ConcurrentHashMap<String, Note>()
-        val notesRepo = NotesRepository.getInstance()
-        val remainingIds = mutableListOf<String>()
-        for (noteId in allNoteIds) {
-            val cached = notesRepo.getNoteFromCache(noteId)
-            if (cached != null) {
-                fetched[noteId] = cached
-            } else {
-                remainingIds.add(noteId)
-            }
-        }
-        if (remainingIds.isNotEmpty()) Log.d(TAG, "In-memory cache hit ${fetched.size}/${allNoteIds.size}, checking Room for ${remainingIds.size}")
-
-        // ── Step 1b: Check Room DB before hitting relays ────────────────
-        // DeepHistoryFetcher and NotesRepository persist events to Room —
-        // many target notes are already stored locally from previous sessions.
-        if (remainingIds.isNotEmpty()) {
-            try {
-                val roomContext = appContext
-                if (roomContext != null) {
-                    val dao = social.mycelium.android.db.AppDatabase.getInstance(roomContext).eventDao()
-                    val roomEntities = dao.getByIds(remainingIds)
-                    for (entity in roomEntities) {
-                        try {
-                            val event = Event.fromJson(entity.eventJson)
-                            fetched[event.id] = eventToNote(event)
-                        } catch (_: Exception) { }
-                    }
-                    val roomHits = remainingIds.count { fetched.containsKey(it) }
-                    if (roomHits > 0) {
-                        remainingIds.removeAll(fetched.keys)
-                        Log.d(TAG, "Room cache hit $roomHits more, ${remainingIds.size} still need relay fetch")
-                    }
+            // ── Step 1: Check local caches before hitting relays ──────────────
+            val fetched = java.util.concurrent.ConcurrentHashMap<String, Note>()
+            val notesRepo = NotesRepository.getInstance()
+            val remainingIds = mutableListOf<String>()
+            for (noteId in allNoteIds) {
+                val cached = notesRepo.getNoteFromCache(noteId)
+                if (cached != null) {
+                    fetched[noteId] = cached
+                } else {
+                    remainingIds.add(noteId)
                 }
-            } catch (e: Exception) {
-                Log.w(TAG, "Room lookup failed: ${e.message}")
             }
-        }
+            if (remainingIds.isNotEmpty()) Log.d(
+                TAG,
+                "In-memory cache hit ${fetched.size}/${allNoteIds.size}, checking Room for ${remainingIds.size}"
+            )
 
-        // ── Step 2: Fetch remaining from relays (EOSE-driven, no blind delay) ──
-        if (remainingIds.isNotEmpty()) {
-            val filter = Filter(ids = remainingIds, limit = remainingIds.size)
-            RelayConnectionStateMachine.getInstance()
-                .awaitOneShotSubscription(subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL,
-                    settleMs = 500L, maxWaitMs = timeoutMs) { ev ->
-                    fetched[ev.id] = eventToNote(ev)
-                }
-        }
-
-        // ── Step 3: Apply fetched notes; verify reactions are to our notes ─
-        var removedCount = 0
-        val retryQueue = mutableListOf<PendingTargetFetch>()
-        for ((noteId, pendingList) in batch) {
-            val note = fetched[noteId]
-            for (pending in pendingList) {
-                val current = notificationsById[pending.notificationId] ?: continue
-                if (note == null) {
-                    // Target note not fetched. Retry with longer timeout before giving up.
-                    if (pending.retryCount < MAX_TARGET_FETCH_RETRIES) {
-                        retryQueue.add(pending.copy(retryCount = pending.retryCount + 1))
-                        Log.d(TAG, "Re-queuing ${current.type} ${pending.notificationId.take(8)} for retry (attempt ${pending.retryCount + 1})")
-                    } else {
-                        // Max retries exhausted. Keep the notification (it passed relay-side
-                        // p-tag filtering so it IS relevant) but without a target note preview.
-                        // Previously we deleted likes/reposts here, causing silent notification loss.
-                        targetFetchExhaustedIds.add(pending.notificationId)
-                        Log.d(TAG, "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview")
-                        // If this is a REPLY and user is cited in content, reclassify as MENTION
-                        // so it appears in the Mentions tab even without target note resolution.
-                        val rawCheck = current.rawContent ?: current.note?.content ?: ""
-                        if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT &&
-                            myPubkeyHex != null && rawCheck.isNotBlank() &&
-                            isUserCitedInContent(rawCheck, myPubkeyHex!!)) {
-                            val mentionUpdate = current.copy(
-                                type = NotificationType.MENTION,
-                                text = "${current.author?.displayName ?: "Someone"} mentioned you"
-                            )
-                            notificationsById[pending.notificationId] = mentionUpdate
-                            Log.d(TAG, "Reclassified ${pending.notificationId.take(8)} as MENTION (cited in content, target fetch exhausted)")
+            // ── Step 1b: Check Room DB before hitting relays ────────────────
+            // DeepHistoryFetcher and NotesRepository persist events to Room —
+            // many target notes are already stored locally from previous sessions.
+            if (remainingIds.isNotEmpty()) {
+                try {
+                    val roomContext = appContext
+                    if (roomContext != null) {
+                        val dao = social.mycelium.android.db.AppDatabase.getInstance(roomContext).eventDao()
+                        val roomEntities = dao.getByIds(remainingIds)
+                        for (entity in roomEntities) {
+                            try {
+                                val event = Event.fromJson(entity.eventJson)
+                                fetched[event.id] = eventToNote(event)
+                            } catch (_: Exception) {
+                            }
+                        }
+                        val roomHits = remainingIds.count { fetched.containsKey(it) }
+                        if (roomHits > 0) {
+                            remainingIds.removeAll(fetched.keys)
+                            Log.d(TAG, "Room cache hit $roomHits more, ${remainingIds.size} still need relay fetch")
                         }
                     }
-                    continue
+                } catch (e: Exception) {
+                    Log.w(TAG, "Room lookup failed: ${e.message}")
                 }
-                val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
-                val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
+            }
 
-                // Kind-7 (like): only show if target note author is the current user
-                if (current.type == NotificationType.LIKE && !isOurNote) {
-                    notificationsById.remove(pending.notificationId)
-                    removedCount++
-                    continue
-                }
-                // Kind-6/16 (repost): only show if the reposted note is authored by us
-                if (current.type == NotificationType.REPOST && !isOurNote) {
-                    notificationsById.remove(pending.notificationId)
-                    removedCount++
-                    continue
-                }
-                // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
-                if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
-                    // Use rawContent (original event content with nostr: URIs intact) for cite check.
-                    // note.content has nostr:npub→@displayName resolved, which breaks the regex.
-                    val contentToCheck = current.rawContent ?: current.note?.content ?: ""
-                    val isCitedInContent = myPubkeyHex != null && contentToCheck.isNotBlank() &&
-                        isUserCitedInContent(contentToCheck, myPubkeyHex!!)
-                    if (!isCitedInContent) {
+            // ── Step 2: Fetch remaining from relays (EOSE-driven, no blind delay) ──
+            if (remainingIds.isNotEmpty()) {
+                val filter = Filter(ids = remainingIds, limit = remainingIds.size)
+                RelayConnectionStateMachine.getInstance()
+                    .awaitOneShotSubscription(
+                        subscriptionRelayUrls, filter, priority = SubscriptionPriority.NORMAL,
+                        settleMs = 500L, maxWaitMs = timeoutMs
+                    ) { ev ->
+                        fetched[ev.id] = eventToNote(ev)
+                    }
+            }
+
+            // ── Step 3: Apply fetched notes; verify reactions are to our notes ─
+            var removedCount = 0
+            val retryQueue = mutableListOf<PendingTargetFetch>()
+            for ((noteId, pendingList) in batch) {
+                val note = fetched[noteId]
+                for (pending in pendingList) {
+                    val current = notificationsById[pending.notificationId] ?: continue
+                    if (note == null) {
+                        // Target note not fetched. Retry with longer timeout before giving up.
+                        if (pending.retryCount < MAX_TARGET_FETCH_RETRIES) {
+                            retryQueue.add(pending.copy(retryCount = pending.retryCount + 1))
+                            Log.d(
+                                TAG,
+                                "Re-queuing ${current.type} ${pending.notificationId.take(8)} for retry (attempt ${pending.retryCount + 1})"
+                            )
+                        } else {
+                            // Max retries exhausted. Keep the notification (it passed relay-side
+                            // p-tag filtering so it IS relevant) but without a target note preview.
+                            // Previously we deleted likes/reposts here, causing silent notification loss.
+                            targetFetchExhaustedIds.add(pending.notificationId)
+                            Log.d(
+                                TAG,
+                                "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview"
+                            )
+                            // If this is a REPLY and user is cited in content, reclassify as MENTION
+                            // so it appears in the Mentions tab even without target note resolution.
+                            val rawCheck = current.rawContent ?: current.note?.content ?: ""
+                            if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT &&
+                                myPubkeyHex != null && rawCheck.isNotBlank() &&
+                                isUserCitedInContent(rawCheck, myPubkeyHex!!)
+                            ) {
+                                val mentionUpdate = current.copy(
+                                    type = NotificationType.MENTION,
+                                    text = "${current.author?.displayName ?: "Someone"} mentioned you"
+                                )
+                                notificationsById[pending.notificationId] = mentionUpdate
+                                Log.d(
+                                    TAG,
+                                    "Reclassified ${pending.notificationId.take(8)} as MENTION (cited in content, target fetch exhausted)"
+                                )
+                            }
+                        }
+                        continue
+                    }
+                    val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
+                    val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
+
+                    // Kind-7 (like): only show if target note author is the current user
+                    if (current.type == NotificationType.LIKE && !isOurNote) {
                         notificationsById.remove(pending.notificationId)
                         removedCount++
                         continue
                     }
-                    // Parent isn't ours but we're cited → reclassify as MENTION (not a direct reply)
-                    val mentionUpdate = current.copy(
-                        type = NotificationType.MENTION,
-                        text = "${current.author?.displayName ?: "Someone"} mentioned you"
-                    )
-                    notificationsById[pending.notificationId] = mentionUpdate
-                    continue
-                }
-                var updated = pending.update(current)(note)
-                if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {
-                    val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
-                    if (rootAuthorHex == myPubkeyHex) {
-                        updated = updated.copy(replyKind = 11, text = "${current.author?.displayName ?: "Someone"} replied to your thread")
+                    // Kind-6/16 (repost): only show if the reposted note is authored by us
+                    if (current.type == NotificationType.REPOST && !isOurNote) {
+                        notificationsById.remove(pending.notificationId)
+                        removedCount++
+                        continue
                     }
+                    // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
+                    if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
+                        // Use rawContent (original event content with nostr: URIs intact) for cite check.
+                        // note.content has nostr:npub→@displayName resolved, which breaks the regex.
+                        val contentToCheck = current.rawContent ?: current.note?.content ?: ""
+                        val isCitedInContent = myPubkeyHex != null && contentToCheck.isNotBlank() &&
+                                isUserCitedInContent(contentToCheck, myPubkeyHex!!)
+                        if (!isCitedInContent) {
+                            notificationsById.remove(pending.notificationId)
+                            removedCount++
+                            continue
+                        }
+                        // Parent isn't ours but we're cited → reclassify as MENTION (not a direct reply)
+                        val mentionUpdate = current.copy(
+                            type = NotificationType.MENTION,
+                            text = "${current.author?.displayName ?: "Someone"} mentioned you"
+                        )
+                        notificationsById[pending.notificationId] = mentionUpdate
+                        continue
+                    }
+                    var updated = pending.update(current)(note)
+                    if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {
+                        val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
+                        if (rootAuthorHex == myPubkeyHex) {
+                            updated = updated.copy(
+                                replyKind = 11,
+                                text = "${current.author?.displayName ?: "Someone"} replied to your thread"
+                            )
+                        }
+                    }
+                    notificationsById[pending.notificationId] = updated
                 }
-                notificationsById[pending.notificationId] = updated
             }
-        }
-        if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
-        emitSorted()
-        // Re-queue unfetched reactions/reposts for a retry with longer timeout
-        if (retryQueue.isNotEmpty()) {
-            Log.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")
-            for (pending in retryQueue) {
-                pendingTargetFetches.getOrPut(pending.noteId) { mutableListOf() }.add(pending)
+            if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
+            emitSortedImmediate()
+            // Re-queue unfetched reactions/reposts for a retry with longer timeout
+            if (retryQueue.isNotEmpty()) {
+                Log.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")
+                for (pending in retryQueue) {
+                    pendingTargetFetches.getOrPut(pending.noteId) { mutableListOf() }.add(pending)
+                }
+                scheduleTargetFetchFlush()
             }
-            scheduleTargetFetchFlush()
-        }
         } // end mutex
     }
 
@@ -1785,10 +2381,12 @@ class NotificationsRepository(
     private fun reEnrichOrphanedNotifications() {
         val orphans = notificationsById.values.filter { data ->
             data.targetNoteId != null && data.targetNote == null &&
-            !targetFetchExhaustedIds.contains(data.id) && // Skip already-exhausted
-            !pendingTargetFetches.containsKey(data.targetNoteId) && // Skip already-pending
-            data.type in listOf(NotificationType.LIKE, NotificationType.REPOST, NotificationType.REPLY,
-                NotificationType.COMMENT, NotificationType.QUOTE, NotificationType.POLL_VOTE, NotificationType.ZAP)
+                    !targetFetchExhaustedIds.contains(data.id) && // Skip already-exhausted
+                    !pendingTargetFetches.containsKey(data.targetNoteId) && // Skip already-pending
+                    data.type in listOf(
+                NotificationType.LIKE, NotificationType.REPOST, NotificationType.REPLY,
+                NotificationType.COMMENT, NotificationType.QUOTE, NotificationType.POLL_VOTE, NotificationType.ZAP
+            )
         }
         if (orphans.isEmpty()) {
             // Even if no target note orphans, still sweep zap sender profiles
@@ -1815,8 +2413,8 @@ class NotificationsRepository(
         // Find zap notifications where the author looks like a placeholder (hex prefix ending with ...)
         val zapOrphans = notificationsById.values.filter { data ->
             data.type == NotificationType.ZAP &&
-            data.author?.displayName?.endsWith("...") == true &&
-            data.author?.id?.length == 64
+                    data.author?.displayName?.endsWith("...") == true &&
+                    data.author?.id?.length == 64
         }
         if (zapOrphans.isEmpty()) return
         val uniquePubkeys = zapOrphans.mapNotNull { it.author?.id?.lowercase() }.distinct()
@@ -1884,12 +2482,19 @@ class NotificationsRepository(
         // Resolve nostr:npub1... mentions to @displayName for cleaner notification previews
         val resolvedContent = resolveNpubMentions(event.content)
         val mediaUrls = social.mycelium.android.utils.UrlDetector.findUrls(event.content)
-            .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+            .filter {
+                social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(
+                    it
+                )
+            }
             .distinct()
         val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(event.content)
         val quotedEventIds = quotedRefs.map { it.eventId }
         quotedRefs.forEach { ref ->
-            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(
+                ref.eventId,
+                ref.relayHints
+            )
         }
         // Parse NIP-10 reply context so tapping notifications can open the full thread
         val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
@@ -1933,10 +2538,12 @@ class NotificationsRepository(
                 val hex = (parsed?.entity as? com.example.cybin.nip19.NProfile)?.hex
                 if (hex != null && hex.length == 64) {
                     val author = profileCache.resolveAuthor(hex)
-                    val name = author.displayName.takeIf { !it.endsWith("...") && it != author.username } ?: author.username
+                    val name =
+                        author.displayName.takeIf { !it.endsWith("...") && it != author.username } ?: author.username
                     result = result.replaceRange(match.range, "@$name")
                 }
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         // Resolve npub
         npubRegex.findAll(result).toList().reversed().forEach { match ->
@@ -1945,10 +2552,12 @@ class NotificationsRepository(
                 val hex = (parsed?.entity as? com.example.cybin.nip19.NPub)?.hex
                 if (hex != null && hex.length == 64) {
                     val author = profileCache.resolveAuthor(hex)
-                    val name = author.displayName.takeIf { !it.endsWith("...") && it != author.username } ?: author.username
+                    val name =
+                        author.displayName.takeIf { !it.endsWith("...") && it != author.username } ?: author.username
                     result = result.replaceRange(match.range, "@$name")
                 }
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+            }
         }
         return result
     }

@@ -65,6 +65,7 @@ fun ConversationsScreen(
     onSettingsClick: () -> Unit = {},
     onRelaysClick: () -> Unit = {},
     onLoginClick: (() -> Unit)? = null,
+    onConfigureDmRelays: () -> Unit = {},
     isScreenVisible: Boolean = true,
     modifier: Modifier = Modifier
 ) {
@@ -74,14 +75,22 @@ fun ConversationsScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
+    val dmRelayUrls by DirectMessageRepository.dmRelayUrls.collectAsState()
+
     // Trigger decryption when user visits this screen or when new gift wraps arrive.
     // isScreenVisible changes when the user navigates to/from this tab.
     // pendingCount changes when new encrypted events are buffered.
     // If the user declines Amber, decryptPending() stops. Navigating away and back
     // triggers a fresh attempt.
-    LaunchedEffect(isScreenVisible, pendingCount) {
-        if (isScreenVisible && pendingCount > 0) {
-            DirectMessageRepository.decryptPending()
+    LaunchedEffect(isScreenVisible, pendingCount, dmRelayUrls) {
+        if (isScreenVisible) {
+            if (dmRelayUrls.isEmpty()) {
+                onConfigureDmRelays()
+                return@LaunchedEffect
+            }
+            if (pendingCount > 0) {
+                DirectMessageRepository.decryptPending()
+            }
         }
     }
 

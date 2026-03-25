@@ -7,6 +7,7 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.PublishState
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.cache.ThreadReplyCache
+import social.mycelium.android.utils.EventRelayTracker
 import social.mycelium.android.utils.Nip10ReplyDetector
 import social.mycelium.android.utils.Nip19QuoteParser
 import social.mycelium.android.utils.UrlDetector
@@ -118,10 +119,12 @@ class NotesRepository private constructor() {
         }
         relayStateMachine.registerKind1Handler { event, relayUrl ->
             // Lock-free: just enqueue and schedule a batched flush
+            EventRelayTracker.addRelay(event.id, relayUrl)
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false))
             scheduleKind1Flush()
         }
         relayStateMachine.registerKind6Handler { event, relayUrl ->
+            EventRelayTracker.addRelay(event.id, relayUrl)
             scope.launch {
                 processEventMutex.withLock { handleKind6Repost(event, relayUrl) }
             }
@@ -132,6 +135,7 @@ class NotesRepository private constructor() {
         // so they should never be sent to the pending buffer.
         outboxFeedManager.onNoteReceived = { event, relayUrl ->
             Log.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
+            EventRelayTracker.addRelay(event.id, relayUrl)
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             scheduleKind1Flush()
         }
@@ -227,15 +231,28 @@ class NotesRepository private constructor() {
             // Track which note IDs came from outbox events so they bypass the cutoff gate
             val outboxNoteIds = HashSet<String>()
 
+            // Diagnostic: count duplicate event IDs in this batch (same event from different relays)
+            val batchEventIds = batch.filter { it.event.kind in listOf(1, 11, 1111, 1068, 6969, 30023) }
+            val uniqueEventIds = batchEventIds.map { it.event.id }.toSet()
+            val duplicateCount = batchEventIds.size - uniqueEventIds.size
+            val relayDistribution = batchEventIds.groupBy { it.relayUrl }.mapValues { it.value.size }
+            if (batchEventIds.isNotEmpty()) {
+                Log.d(TAG, "\uD83D\uDD35 BATCH: ${batchEventIds.size} events, ${uniqueEventIds.size} unique, $duplicateCount dupes, relays=${relayDistribution.entries.joinToString { "${it.key.takeLast(25)}=${it.value}" }}")
+            }
+
             for (pending in batch) {
                 val event = pending.event
                 val relayUrl = pending.relayUrl
                 val isPagination = pending.isPagination
                 val isOutbox = pending.isOutbox
                 if (event.kind != 1 && event.kind != 30023 && event.kind != 1068 && event.kind != 6969) continue
+                // Accumulate relay URL in tracker — builds up across duplicate deliveries
+                if (relayUrl.isNotBlank()) EventRelayTracker.addRelay(event.id, relayUrl)
 
                 // Age gate: drop ancient events from the live subscription
-                if (!isPagination && ageFloorMs > 0L) {
+                // Outbox events bypass the age gate — they represent followed-user notes
+                // discovered late via NIP-65 and should always enter the feed.
+                if (!isPagination && !isOutbox && ageFloorMs > 0L) {
                     val eventMs = event.createdAt * 1000L
                     if (eventMs < ageFloorMs) {
                         ageGateDropped++
@@ -243,7 +260,10 @@ class NotesRepository private constructor() {
                     }
                 }
 
-                if (isOutbox) outboxNoteIds.add(event.id)
+                if (isOutbox) {
+                    outboxNoteIds.add(event.id)
+                    outboxReceivedNoteIds.add(event.id)
+                }
                 if (BuildConfig.DEBUG) logIncomingEventSummary(event, relayUrl)
                 val note = convertEventToNote(event, relayUrl)
 
@@ -435,6 +455,19 @@ class NotesRepository private constructor() {
                     relayUpdates[note.id]?.let { urls -> note.copy(relayUrls = urls) } ?: note
                 }
                 _notes.value = updatedList
+                // Persist merged relay URLs to Room so cold-start restores all orbs.
+                // Must flush pending event INSERTs first — the debounced flushEventStore
+                // may not have run yet, so the row may not exist for UPDATE to match.
+                val dao = eventDao
+                if (dao != null) {
+                    scope.launch(Dispatchers.IO) {
+                        flushEventStore() // ensure rows exist before UPDATE
+                        for ((noteId, urls) in relayUpdates) {
+                            try { dao.updateRelayUrls(noteId, urls.joinToString(",")) }
+                            catch (e: Exception) { /* best-effort */ }
+                        }
+                    }
+                }
             }
 
             if (newNotes.isEmpty()) {
@@ -446,15 +479,12 @@ class NotesRepository private constructor() {
             val feedNotes = mutableListOf<Note>()
             val pendingNew = mutableListOf<Note>()
             val cutoff = feedCutoffTimestampMs
-            val now = System.currentTimeMillis()
-            val withinGracePeriod = firstNoteDisplayedAtMs == 0L ||
-                (now - firstNoteDisplayedAtMs) < INITIAL_FEED_GRACE_MS
 
             for (note in newNotes) {
                 val isOlderThanCutoff = cutoff <= 0L || note.timestamp <= cutoff
                 val isOwnEvent = note.author.id.lowercase() == currentUserPubkey
 
-                if (!initialLoadComplete || isOlderThanCutoff || isOwnEvent || withinGracePeriod || note.id in outboxNoteIds) {
+                if (!initialLoadComplete || isOlderThanCutoff || isOwnEvent) {
                     feedNotes.add(note)
                 } else {
                     pendingNew.add(note)
@@ -491,18 +521,49 @@ class NotesRepository private constructor() {
                 }
                 _notes.value = merged
                 advancePaginationCursor(feedNotes)
-                if (firstNoteDisplayedAtMs == 0L && merged.isNotEmpty()) {
-                    firstNoteDisplayedAtMs = now
-                }
                 if (!initialLoadComplete && merged.size % 50 == 0) {
                     Log.d(TAG, "Initial load: ${merged.size} notes so far")
                 }
+            }
+
+            // Fire counts enrichment immediately at ingestion time — don't wait for
+            // display filtering. The relay starts returning reactions/zaps/replies NOW,
+            // so by the time updateDisplayedNotes renders the card the data is already
+            // in NoteCountsRepository.countsByNoteId. Notes are newest-first (sorted at
+            // line 476), so top-of-feed notes appear first in the subscription filter.
+            if (feedNotes.isNotEmpty()) {
+                val batchRelayMap = LinkedHashMap<String, List<String>>(feedNotes.size)
+                for (note in feedNotes) {
+                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    val effectiveId = note.originalNoteId ?: note.id
+                    if (effectiveId !in batchRelayMap) {
+                        batchRelayMap[effectiveId] = relays
+                    }
+                    note.quotedEventIds.forEach { qid ->
+                        if (qid !in batchRelayMap) {
+                            batchRelayMap[qid] = relays
+                        }
+                    }
+                }
+                NoteCountsRepository.setNoteIdsOfInterest(batchRelayMap)
+                // Eagerly prefetch quoted notes so cards render with content already
+                // available instead of showing "loading quoted note" placeholders.
+                // Resolution: memory cache → RawEventCache → Room DB → relay fetch.
+                QuotedNoteCache.prefetchForNotes(feedNotes)
+                // Eagerly prefetch URL previews so cards render with link metadata
+                // already in UrlPreviewCache. Without this, previews only resolve
+                // when the viewport-aware enrichment triggers (scroll-driven), causing
+                // a loading spinner on every card with a link.
+                scheduleUrlPreviewPrefetch(feedNotes)
             }
 
             // Add pending notes
             if (pendingNew.isNotEmpty()) {
                 synchronized(pendingNotesLock) { _pendingNewNotes.addAll(pendingNew) }
                 updateDisplayedNewNotesCount()
+                // Prefetch URL previews for pending notes so they're ready when the
+                // user pulls to refresh and taps "show X new notes".
+                scheduleUrlPreviewPrefetch(pendingNew)
             }
 
             // Always debounce the display update
@@ -566,6 +627,65 @@ class NotesRepository private constructor() {
         }
     }
 
+    // ── Eager URL preview prefetch ──────────────────────────────────────────
+    /** Pending notes whose URLs haven't been prefetched yet. Debounced to batch across flush cycles. */
+    private val pendingUrlPrefetchNotes = java.util.concurrent.ConcurrentLinkedQueue<Note>()
+    private var urlPrefetchJob: Job? = null
+    private val URL_PREFETCH_DEBOUNCE_MS = 300L
+    /** Max notes to prefetch URL previews for per batch to cap network usage. */
+    private val URL_PREFETCH_LIMIT = 20
+
+    /**
+     * Schedule a debounced URL preview prefetch for newly ingested notes.
+     * Runs on IO dispatcher with bounded concurrency (3 concurrent fetches).
+     * Already-cached URLs are skipped. Results land in [UrlPreviewCache] so
+     * [UrlPreviewLoader] gets an instant cache hit when the card renders.
+     */
+    private fun scheduleUrlPreviewPrefetch(notes: List<Note>) {
+        pendingUrlPrefetchNotes.addAll(notes)
+        urlPrefetchJob?.cancel()
+        urlPrefetchJob = scope.launch {
+            delay(URL_PREFETCH_DEBOUNCE_MS)
+            val batch = mutableListOf<Note>()
+            while (batch.size < URL_PREFETCH_LIMIT) {
+                val note = pendingUrlPrefetchNotes.poll() ?: break
+                batch.add(note)
+            }
+            if (batch.isEmpty()) return@launch
+
+            val urlPreviewService = social.mycelium.android.services.UrlPreviewService()
+            val cache = social.mycelium.android.services.UrlPreviewCache
+            val detector = social.mycelium.android.utils.UrlDetector
+            val semaphore = kotlinx.coroutines.sync.Semaphore(3)
+            var prefetched = 0
+
+            kotlinx.coroutines.coroutineScope {
+                for (note in batch) {
+                    val urls = detector.findUrls(note.content)
+                        .filter { !detector.isImageUrl(it) && !detector.isVideoUrl(it) }
+                        .filter { cache.get(it) == null && !cache.isLoading(it) }
+                        .take(2)
+                    for (url in urls) {
+                        launch {
+                            semaphore.acquire()
+                            try {
+                                cache.setLoadingState(url, social.mycelium.android.data.UrlPreviewState.Loading)
+                                val result = urlPreviewService.fetchPreview(url)
+                                cache.setLoadingState(url, result)
+                                prefetched++
+                            } catch (_: Exception) { } finally {
+                                semaphore.release()
+                            }
+                        }
+                    }
+                }
+            }
+            if (prefetched > 0) {
+                Log.d(TAG, "URL preview prefetch: $prefetched URLs from ${batch.size} notes")
+            }
+        }
+    }
+
     /** Coalesce profileUpdated emissions and apply author updates in batches to avoid O(notes) work per profile. */
     private fun startProfileUpdateCoalescer() {
         scope.launch {
@@ -601,13 +721,22 @@ class NotesRepository private constructor() {
             while (true) {
                 val triple = pendingEventObjects.poll() ?: break
                 val (event, relayUrl, _) = triple
+                val normalizedUrl = relayUrl.ifBlank { null }
+                // Merge all known relay URLs from tracker into persisted relayUrls
+                val trackedUrls = EventRelayTracker.getRelays(event.id)
+                val allUrls = if (trackedUrls.isNotEmpty()) {
+                    (trackedUrls + listOfNotNull(normalizedUrl)).distinct().joinToString(",")
+                } else {
+                    normalizedUrl
+                }
                 entities.add(CachedEventEntity(
                     eventId = event.id,
                     kind = event.kind,
                     pubkey = event.pubKey.lowercase(),
                     createdAt = event.createdAt,
                     eventJson = event.toJson(), // O(1) for relay events via rawJson
-                    relayUrl = relayUrl.ifBlank { null }
+                    relayUrl = normalizedUrl,
+                    relayUrls = allUrls
                 ))
             }
             if (entities.isEmpty()) return@withContext
@@ -706,7 +835,7 @@ class NotesRepository private constructor() {
 
     /** Debounced display update: one run after event burst settles so UI stays smooth under high throughput. */
     private var displayUpdateJob: Job? = null
-    private var countsSubscriptionJob: Job? = null
+    
     /** Background job for initial note polling after subscription starts (non-blocking). */
     private var initialLoadJob: Job? = null
 
@@ -748,9 +877,6 @@ class NotesRepository private constructor() {
      *  as the user paginates so older pages can come through. Prevents relays that ignore
      *  the `since` filter from contaminating the feed with ancient notes. */
     @Volatile private var feedAgeFloorMs: Long = 0L
-    /** Timestamp when the first note was auto-displayed; notes keep auto-applying for a grace period after this. */
-    private var firstNoteDisplayedAtMs: Long = 0L
-    private val INITIAL_FEED_GRACE_MS = 5_000L
     private val _pendingNewNotes = mutableListOf<Note>()
     private val pendingNotesLock = Any()
     private val _newNotesCounts = MutableStateFlow(NewNotesCounts(0, 0))
@@ -760,6 +886,12 @@ class NotesRepository private constructor() {
      *  1. Skip the pending queue when the relay echo arrives (reconcile instead).
      *  2. Prevent the "X new notes" counter from counting our own events. */
     private val locallyPublishedIds = Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    /** Event IDs of notes received via outbox relays (NIP-65). Used to bypass the
+     *  relay display filter in updateDisplayedNotes — outbox relay URLs are not in
+     *  the user's subscription relay set, so without this bypass outbox notes would
+     *  be filtered out of the displayed feed despite being valid followed-user notes. */
+    private val outboxReceivedNoteIds = Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
 
     /** Feed session state for UI and to avoid redundant load on tab return (Idle -> Loading -> Live; Refreshing during applyPendingNotes/refresh). */
     private val _feedSessionState = MutableStateFlow(FeedSessionState.Idle)
@@ -824,6 +956,7 @@ class NotesRepository private constructor() {
         if (appContext != null) return
         appContext = context.applicationContext
         eventDao = AppDatabase.getInstance(context.applicationContext).eventDao()
+        QuotedNoteCache.roomEventDao = eventDao
         loadDeletedIdsFromDisk(context.applicationContext)
         scope.launch { loadFeedCacheFromRoom() }
         // Migration: clear legacy SharedPreferences feed cache (one-time)
@@ -857,8 +990,21 @@ class NotesRepository private constructor() {
                     if (entity.eventId in deletedEventIds) continue
                     try {
                         val event = Event.fromJson(entity.eventJson)
+                        // Skip kind-6 reposts: their content is raw JSON of the original
+                        // event. convertEventToNote would display it as-is (broken text).
+                        // Reposts are reconstructed from live relay data via handleKind6Repost.
+                        if (event.kind == 6) continue
                         val note = convertEventToNote(event, entity.relayUrl ?: "")
-                        if (!note.isReply) notes.add(note)
+                        // Restore merged relay URLs from the dedicated column (schema v3+)
+                        val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+                        // Seed EventRelayTracker from cached data so orbs survive cold starts
+                        if (allUrls.isNotEmpty()) {
+                            allUrls.forEach { url -> EventRelayTracker.addRelay(event.id, url) }
+                        } else {
+                            EventRelayTracker.addRelay(event.id, entity.relayUrl ?: "")
+                        }
+                        val restored = if (allUrls.isNotEmpty()) note.copy(relayUrls = allUrls) else note
+                        if (!restored.isReply) notes.add(restored)
                     } catch (e: Exception) {
                         Log.w(TAG, "Feed cache: skip bad event ${entity.eventId.take(8)}: ${e.message}")
                     }
@@ -868,11 +1014,12 @@ class NotesRepository private constructor() {
                     _displayedNotes.value = notes
                     initialLoadComplete = true
                     val now = System.currentTimeMillis()
-                    firstNoteDisplayedAtMs = now - INITIAL_FEED_GRACE_MS - 1
                     feedCutoffTimestampMs = now
                     latestNoteTimestampAtOpen = notes.maxOfOrNull { it.timestamp } ?: now
                     _feedSessionState.value = FeedSessionState.Live
                     Log.d(TAG, "Restored ${notes.size} notes from Room event store")
+                    // Prefetch quoted notes for restored feed so cards render without spinners
+                    QuotedNoteCache.prefetchForNotes(notes)
                     refreshAuthorsFromCache()
                 }
             } catch (e: Exception) {
@@ -1057,7 +1204,6 @@ class NotesRepository private constructor() {
             synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
             _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
             initialLoadComplete = false
-            firstNoteDisplayedAtMs = 0L
             paginationCursorMs = 0L
             paginationExtraCap = 0
             _paginationExhausted.value = false
@@ -1070,7 +1216,6 @@ class NotesRepository private constructor() {
             pendingKind1Events.clear()
             synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
             _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
-            firstNoteDisplayedAtMs = 0L
             // Restore from memory snapshot (instant) or fall back to disk cache (async)
             val snapshot = followingNotesSnapshot
             if (snapshot.isNotEmpty()) {
@@ -1078,7 +1223,6 @@ class NotesRepository private constructor() {
                 _displayedNotes.value = snapshot
                 initialLoadComplete = true
                 val now = System.currentTimeMillis()
-                firstNoteDisplayedAtMs = now - INITIAL_FEED_GRACE_MS - 1
                 feedCutoffTimestampMs = now
                 latestNoteTimestampAtOpen = snapshot.maxOfOrNull { it.timestamp } ?: now
                 _feedSessionState.value = FeedSessionState.Live
@@ -1153,7 +1297,9 @@ class NotesRepository private constructor() {
             var afterFollow = 0
             val filtered = ArrayList<Note>(minOf(allNotes.size, 500))
             for (note in allNotes) {
-                // 1. Relay match
+                // 1. Relay match — notes must come from a user-configured relay.
+                // Outbox-discovered notes pass only if their relay URLs include a
+                // configured relay (i.e. the same event also arrived from inbox).
                 if (hasRelayFilter) {
                     val isLocal = locallyPublishedIds.contains(note.id) ||
                         (note.originalNoteId != null && locallyPublishedIds.contains(note.originalNoteId))
@@ -1173,7 +1319,15 @@ class NotesRepository private constructor() {
                 if (note.isReply) continue
                 // 4. Boost dedup: skip original if a repost version exists
                 if (note.originalNoteId == null && note.id in repostedOriginals) continue
-                filtered.add(note)
+                // Enrich relay URLs from EventRelayTracker (accumulates across all deliveries)
+                val enrichedUrls = EventRelayTracker.enrichRelayUrls(
+                    note.id,
+                    note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                )
+                val enrichedNote = if (enrichedUrls.size > note.relayUrls.size || (note.relayUrls.isEmpty() && enrichedUrls.isNotEmpty())) {
+                    note.copy(relayUrls = enrichedUrls)
+                } else note
+                filtered.add(enrichedNote)
             }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
                 Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")
@@ -1189,6 +1343,8 @@ class NotesRepository private constructor() {
                 // only emit if any note object actually differs (referential check).
                 val dataChanged = newList.indices.any { i -> newList[i] !== currentIds[i] }
                 if (dataChanged) {
+                    val multiOrb = newList.count { it.relayUrls.size > 1 }
+                    Log.d(TAG, "\uD83D\uDD35 Display emit (data changed, IDs same): ${newList.size} notes, $multiOrb multi-orb")
                     _displayedNotes.value = newList
                 }
                 updateDisplayedNewNotesCount()
@@ -1196,34 +1352,34 @@ class NotesRepository private constructor() {
             }
             // Log relay orb stats for diagnostics
             val multiOrb = newList.count { it.relayUrls.size > 1 }
-            if (multiOrb > 0) Log.d(TAG, "\uD83D\uDD35 Display update: $multiOrb/${newList.size} notes have 2+ relay orbs")
+            val singleOrb = newList.count { it.relayUrls.size == 1 }
+            Log.d(TAG, "\uD83D\uDD35 Display emit (IDs changed): ${newList.size} notes, $multiOrb multi-orb, $singleOrb single-orb")
+            if (newList.isNotEmpty()) {
+                val sample = newList.first()
+                Log.d(TAG, "\uD83D\uDD35   sample[0] ${sample.id.take(8)}: relayUrls=${sample.relayUrls}, relayUrl=${sample.relayUrl}")
+            }
             _displayedNotes.value = newList
             updateDisplayedNewNotesCount()
-            // Debounce counts subscription so we don't re-subscribe on every note; cap at 150 note IDs
-            countsSubscriptionJob?.cancel()
-            countsSubscriptionJob = scope.launch {
-                delay(600)
-                val notes = _displayedNotes.value.take(150)
-                val noteRelayMap = mutableMapOf<String, List<String>>()
-                for (note in notes) {
-                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                    // For reposts, subscribe the original note ID (the real event ID relays know)
-                    // instead of the synthetic "repost:xyz" composite ID.
-                    val effectiveId = note.originalNoteId ?: note.id
-                    if (effectiveId !in noteRelayMap) {
-                        noteRelayMap[effectiveId] = relays
-                    }
-                    // Also subscribe quoted event IDs so their counts appear in the feed
-                    note.quotedEventIds.forEach { qid ->
-                        if (qid !in noteRelayMap) {
-                            val cached = QuotedNoteCache.getCached(qid)
-                            noteRelayMap[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { relays }
-                        }
+            // Fire counts subscription immediately — no debounce. Notes are already in
+            // feed-position order (newest first), so top-of-viewport notes appear first
+            // in the subscription filter and get enriched with reactions/zaps fastest.
+            // NoteCountsRepository has its own 200ms debounce to coalesce rapid updates.
+            val notes = newList.take(150)
+            val noteRelayMap = LinkedHashMap<String, List<String>>(notes.size)
+            for (note in notes) {
+                val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                val effectiveId = note.originalNoteId ?: note.id
+                if (effectiveId !in noteRelayMap) {
+                    noteRelayMap[effectiveId] = relays
+                }
+                note.quotedEventIds.forEach { qid ->
+                    if (qid !in noteRelayMap) {
+                        val cached = QuotedNoteCache.getCached(qid)
+                        noteRelayMap[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { relays }
                     }
                 }
-                NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap)
-                countsSubscriptionJob = null
             }
+            NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap, replace = true)
         } catch (e: Throwable) {
             Log.e(TAG, "updateDisplayedNotes failed: ${e.message}", e)
         } finally {
@@ -1292,7 +1448,6 @@ class NotesRepository private constructor() {
         feedCutoffTimestampMs = 0L
         latestNoteTimestampAtOpen = 0L
         initialLoadComplete = false
-        firstNoteDisplayedAtMs = 0L
     }
 
     /**
@@ -1363,7 +1518,6 @@ class NotesRepository private constructor() {
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         initialLoadComplete = false
-        firstNoteDisplayedAtMs = 0L
 
         // Cutoff set exactly when we start the subscription: only notes older than this moment are shown in the feed
         feedCutoffTimestampMs = System.currentTimeMillis()
@@ -1489,7 +1643,16 @@ class NotesRepository private constructor() {
                         for (entity in roomEvents) {
                             try {
                                 val event = Event.fromJson(entity.eventJson)
-                                pendingKind1Events.add(PendingKind1Event(event, entity.relayUrl ?: "", isPagination = true))
+                                // Seed tracker from cached relay URLs (may have multiple comma-separated)
+                                val cachedRelayUrl = entity.relayUrl ?: ""
+                                if (cachedRelayUrl.contains(",")) {
+                                    cachedRelayUrl.split(",").forEach { url ->
+                                        EventRelayTracker.addRelay(event.id, url.trim())
+                                    }
+                                } else {
+                                    EventRelayTracker.addRelay(event.id, cachedRelayUrl)
+                                }
+                                pendingKind1Events.add(PendingKind1Event(event, cachedRelayUrl, isPagination = true))
                             } catch (e: Exception) {
                                 // Skip malformed cached events
                             }
@@ -1618,7 +1781,6 @@ class NotesRepository private constructor() {
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         initialLoadComplete = false
-        firstNoteDisplayedAtMs = 0L
         feedCutoffTimestampMs = System.currentTimeMillis()
         latestNoteTimestampAtOpen = feedCutoffTimestampMs
 
@@ -1652,7 +1814,6 @@ class NotesRepository private constructor() {
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         initialLoadComplete = false
-        firstNoteDisplayedAtMs = 0L
         feedCutoffTimestampMs = System.currentTimeMillis()
         latestNoteTimestampAtOpen = feedCutoffTimestampMs
 
@@ -2232,6 +2393,14 @@ class NotesRepository private constructor() {
         _notes.value = updated
         scheduleDisplayUpdate()
         Log.d(TAG, "Merged publish relay $relayUrl into ${eventId.take(8)} (now ${updatedUrls.size} orbs)")
+        // Persist to Room
+        val dao = eventDao
+        if (dao != null) {
+            scope.launch(Dispatchers.IO) {
+                try { dao.updateRelayUrls(eventId, updatedUrls.joinToString(",")) }
+                catch (_: Exception) { /* best-effort */ }
+            }
+        }
     }
 
     /**
@@ -2290,9 +2459,9 @@ class NotesRepository private constructor() {
         Log.d(TAG, "Flushing repost batch: ${allNoteIds.size} notes across ${allRelayUrls.size} relays (was ${allNoteIds.size} individual subs)")
 
         val filter = Filter(ids = allNoteIds, kinds = listOf(1), limit = allNoteIds.size)
-        relayStateMachine.requestOneShotSubscription(allRelayUrls, filter, priority = SubscriptionPriority.LOW,
-            settleMs = 500L, maxWaitMs = 8_000L) { originalEvent ->
-            val pending = batch[originalEvent.id] ?: return@requestOneShotSubscription
+        relayStateMachine.requestOneShotSubscriptionWithRelay(allRelayUrls, filter, priority = SubscriptionPriority.LOW,
+            settleMs = 500L, maxWaitMs = 8_000L) { originalEvent, actualRelayUrl ->
+            val pending = batch[originalEvent.id] ?: return@requestOneShotSubscriptionWithRelay
             scope.launch {
                 try {
                     processEventMutex.withLock {
@@ -2323,6 +2492,10 @@ class NotesRepository private constructor() {
                         val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(originalEvent) else null
                         val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(originalEvent) else null
 
+                        // Use the relay that actually delivered the original note during fetch,
+                        // NOT the relay that delivered the kind-6 repost event (pending.relayUrl).
+                        // This ensures relay orbs accurately reflect where the note was fetched from.
+                        val fetchRelayUrl = actualRelayUrl.ifBlank { null }
                         val note = Note(
                             id = pending.compositeId,
                             author = noteAuthor,
@@ -2330,8 +2503,8 @@ class NotesRepository private constructor() {
                             timestamp = originalTimestampMs,
                             likes = 0, shares = 0, comments = 0, isLiked = false,
                             hashtags = hashtags, mediaUrls = mediaUrls, quotedEventIds = quotedEventIds,
-                            relayUrl = pending.relayUrl.ifEmpty { null },
-                            relayUrls = if (pending.relayUrl.isNotEmpty()) listOf(pending.relayUrl) else emptyList(),
+                            relayUrl = fetchRelayUrl,
+                            relayUrls = listOfNotNull(fetchRelayUrl),
                             isReply = isReply,
                             rootNoteId = rootNoteId,
                             replyToId = replyToId,
@@ -2527,13 +2700,14 @@ class NotesRepository private constructor() {
         feedCutoffTimestampMs = 0L
         latestNoteTimestampAtOpen = 0L
         initialLoadComplete = false
-        firstNoteDisplayedAtMs = 0L
         paginationCursorMs = 0L
         paginationExtraCap = 0
         _paginationExhausted.value = false
         _feedSessionState.value = FeedSessionState.Idle
         // Reset subscription guard so ensureSubscriptionToNotes re-applies after account switch
         lastEnsuredRelaySet = emptySet()
+        // Clear relay tracker so old account's relay data doesn't leak
+        EventRelayTracker.clear()
         // Clear Room event store so old account's notes don't leak on next cold start
         scope.launch {
             try { eventDao?.deleteAll() } catch (e: Exception) {

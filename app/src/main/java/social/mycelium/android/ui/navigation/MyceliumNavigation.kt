@@ -81,7 +81,7 @@ import social.mycelium.android.ui.screens.DebugSettingsScreen
 import social.mycelium.android.ui.screens.AnnouncementsFeedScreen
 import social.mycelium.android.ui.screens.DraftsScreen
 import social.mycelium.android.ui.screens.GeneralSettingsScreen
-import social.mycelium.android.ui.screens.AccountPreferencesScreen
+import social.mycelium.android.ui.screens.FeedPreferencesScreen
 import social.mycelium.android.ui.screens.AppearanceSettingsScreen
 import social.mycelium.android.ui.screens.MediaSettingsScreen
 import social.mycelium.android.ui.screens.NotificationSettingsScreen
@@ -1495,7 +1495,7 @@ fun MyceliumNavigation(
         // Await completion so follow list is ready before Phase 3 reads it.
         val followRelayUrls = (indexerUrls + outboxUrls).distinct()
         val phase1Deferred = social.mycelium.android.repository.StartupOrchestrator.runPhase1UserState(
-            pubkey, followRelayUrls, allUserRelayUrls, signer
+            pubkey, followRelayUrls, allUserRelayUrls, signer, context.applicationContext
         )
         phase1Deferred.await()
         val cachedFollowList = social.mycelium.android.repository.ContactListRepository.getCachedFollowList(pubkey)
@@ -3877,9 +3877,10 @@ fun MyceliumNavigation(
                 }
 
                 composable("settings/account_preferences") {
-                    AccountPreferencesScreen(
+                    val lists by social.mycelium.android.repository.PeopleListRepository.peopleLists.collectAsState()
+                    FeedPreferencesScreen(
                         onBackClick = { navController.popBackStack() },
-                        accountStateViewModel = accountStateViewModel
+                        peopleLists = remember(lists) { lists.map { it.dTag to it.title } }
                     )
                 }
 

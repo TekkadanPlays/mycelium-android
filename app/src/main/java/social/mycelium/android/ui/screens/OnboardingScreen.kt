@@ -58,8 +58,9 @@ import java.util.Locale
  * The user always has agency: they can confirm, edit, skip, or go fully manual.
  */
 private enum class OnboardingPhase {
-    LOADING_INDEXERS,      // Waiting for NIP-66 relay monitor data
-    SELECT_INDEXERS,       // User picks indexers from NIP-66 results
+    CHOOSE_MODE,           // Instant: user picks "Find my relays" or "Set up manually"
+    LOADING_INDEXERS,      // Waiting for NIP-66 relay monitor data (legacy / fallback)
+    SELECT_INDEXERS,       // User picks indexers from NIP-66 results (advanced)
     SEARCHING_NIP65,       // Querying indexers for kind-10002
     REVIEW_RELAYS,         // User reviews discovered relay config
     NIP65_NOT_FOUND,       // No relay list found — manual setup
@@ -101,14 +102,21 @@ fun OnboardingScreen(
         // to avoid visible phase jumping on re-entry.
         val restorable = setOf("SELECT_INDEXERS", "REVIEW_RELAYS", "NIP65_NOT_FOUND")
         val initial = savedPhase?.takeIf { it in restorable }?.let {
-            try { OnboardingPhase.valueOf(it) } catch (_: Exception) { null }
-        } ?: OnboardingPhase.LOADING_INDEXERS
+            try {
+                OnboardingPhase.valueOf(it)
+            } catch (_: Exception) {
+                null
+            }
+        } ?: OnboardingPhase.CHOOSE_MODE
         mutableStateOf(initial)
     }
     var statusText by remember {
         mutableStateOf(
-            if (phase == OnboardingPhase.SELECT_INDEXERS) "Choose which indexers to query for your relay list"
-            else "Preparing indexer relays\u2026"
+            when (phase) {
+                OnboardingPhase.SELECT_INDEXERS -> "Choose which indexers to query for your relay list"
+                OnboardingPhase.CHOOSE_MODE -> "Welcome to Mycelium"
+                else -> "Preparing indexer relays\u2026"
+            }
         )
     }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -159,7 +167,7 @@ fun OnboardingScreen(
     var customRelayUrl by remember { mutableStateOf("") }
     var addedCustomRelays by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    // ── Main initialization effect — wait for NIP-66 then show indexer selection ──
+    // ── Main initialization effect — restore state or show CHOOSE_MODE ──
     LaunchedEffect(hexPubkey) {
         Log.d("OnboardingScreen", "LaunchedEffect START for pubkey=${hexPubkey.take(8)}")
         if (hexPubkey.isBlank()) {
@@ -174,7 +182,10 @@ fun OnboardingScreen(
         val cachedPubkey = Nip65RelayListRepository.multiSourcePubkey
         val cachedDone = Nip65RelayListRepository.multiSourceDone.value
         if (cachedPubkey == hexPubkey && cachedDone && cachedResults.isNotEmpty()) {
-            Log.d("OnboardingScreen", "Restoring cached multi-source results for ${hexPubkey.take(8)} (${cachedResults.size} results)")
+            Log.d(
+                "OnboardingScreen",
+                "Restoring cached multi-source results for ${hexPubkey.take(8)} (${cachedResults.size} results)"
+            )
             val best = cachedResults.maxByOrNull { it.createdAt }!!
             chosenResult = best
             val statuses = Nip65RelayListRepository.multiSourceStatuses.value
@@ -202,18 +213,16 @@ fun OnboardingScreen(
 
         // If returning from discovery selection or resuming SELECT_INDEXERS,
         // just refresh the indexer list without overwriting user's selections.
-        // hasReturnedIndexers means user just came back from discovery — selection
-        // was already applied in the remember{} initializer above.
         val isReturning = hasReturnedIndexers ||
-            (savedPhase == "SELECT_INDEXERS" && savedIndexers.isNotEmpty())
+                (savedPhase == "SELECT_INDEXERS" && savedIndexers.isNotEmpty())
         if (isReturning) {
-            Log.d("OnboardingScreen", "Returning to SELECT_INDEXERS (fromDiscovery=$hasReturnedIndexers, selections=${selectedIndexerUrls.size})")
-            // Populate allIndexers from NIP-66 cache — ranked by trust + geo affinity
+            Log.d(
+                "OnboardingScreen",
+                "Returning to SELECT_INDEXERS (fromDiscovery=$hasReturnedIndexers, selections=${selectedIndexerUrls.size})"
+            )
             val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
             val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
             allIndexers = indexers
-            // Only merge relay manager URLs when NOT returning from discovery
-            // (discovery returns a complete replacement set; merging would undo deselections)
             if (!hasReturnedIndexers) {
                 val storedIndexerUrls = storageManager.loadIndexerRelays(hexPubkey)
                     .map { it.url.trim().removeSuffix("/") }.toSet()
@@ -227,78 +236,27 @@ fun OnboardingScreen(
             }
             phase = OnboardingPhase.SELECT_INDEXERS
             statusText = "Choose which indexers to query for your relay list"
-            Log.d("OnboardingScreen", "Refreshed indexer list: ${indexers.size} relays, ${selectedIndexerUrls.size} selected")
+            Log.d(
+                "OnboardingScreen",
+                "Refreshed indexer list: ${indexers.size} relays, ${selectedIndexerUrls.size} selected"
+            )
             return@LaunchedEffect
         }
 
-        // Reset transient state for fresh run
-        Log.d("OnboardingScreen", "Starting onboarding flow (savedPhase=$savedPhase, savedIndexers=${savedIndexers.size})")
-        phase = OnboardingPhase.LOADING_INDEXERS
-        statusText = "Preparing indexer relays\u2026"
+        // Fresh start — go to CHOOSE_MODE immediately (no spinner).
+        // NIP-66 is already fetching in the background (started in MainActivity).
+        Log.d("OnboardingScreen", "Fresh onboarding — showing CHOOSE_MODE (savedPhase=$savedPhase)")
+        phase = OnboardingPhase.CHOOSE_MODE
+        statusText = "Welcome to Mycelium"
         errorMessage = null
-        allIndexers = emptyList()
         chosenResult = null
         showCustomInput = false
         addedCustomRelays = emptyList()
-
-        // NIP-66 is initialized globally in MainActivity — wait for data but exit
-        // as soon as usable indexers arrive. Max 15s hard cap to cover WebSocket
-        // fallback (12s) when REST API is down; most REST fetches complete in <1s.
-        withContext(Dispatchers.IO) {
-            var waited = 0L
-            val maxWait = 15_000L
-            Log.d("OnboardingScreen", "Waiting for NIP-66 data (hasFetched=${Nip66RelayDiscoveryRepository.hasFetched.value}, isLoading=${Nip66RelayDiscoveryRepository.isLoading.value})")
-
-            while (waited < maxWait) {
-                // Early exit: if we already have search relays, don't wait for the full fetch
-                val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
-                val hasIndexers = discovered.values.any { it.isSearch }
-                if (hasIndexers) {
-                    Log.d("OnboardingScreen", "Early exit: found indexers after ${waited}ms")
-                    break
-                }
-                // Also exit if fetch completed (even with zero results)
-                if (Nip66RelayDiscoveryRepository.hasFetched.value && !Nip66RelayDiscoveryRepository.isLoading.value) {
-                    Log.d("OnboardingScreen", "Fetch done after ${waited}ms")
-                    break
-                }
-                delay(200)
-                waited += 200
-            }
-
-            val timedOut = waited >= maxWait
-            val allDiscovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
-            Log.d("OnboardingScreen", "NIP-66 wait complete: timedOut=$timedOut, discovered ${allDiscovered.size} total relays (${waited}ms)")
-
-            // Rank indexers by trust signals + geo affinity (NOT monitor RTT)
-            val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
-            val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
-
-            allIndexers = indexers
-            // Restore saved indexer selections, or pre-select top 5 by trust score
-            if (savedIndexers.isNotEmpty()) {
-                selectedIndexerUrls = savedIndexers
-            } else {
-                selectedIndexerUrls = indexers.take(5).map { it.url }.toSet()
-            }
-            Log.d("OnboardingScreen", "NIP-66: found ${indexers.size} indexer relays (from ${allDiscovered.size} total)")
-
-            if (indexers.isEmpty()) {
-                // No NIP-66 data — allow manual input
-                Log.w("OnboardingScreen", "No indexer relays found, offering manual setup")
-                phase = OnboardingPhase.NIP65_NOT_FOUND
-                statusText = if (timedOut) "Discovery timed out — add indexers manually"
-                            else "No indexer relays found — add manually"
-            } else {
-                phase = OnboardingPhase.SELECT_INDEXERS
-                statusText = "Choose which indexers to query for your relay list"
-            }
-        }
     }
 
     // ── Start NIP-65 search with selected indexers ──
     val searchScope = rememberCoroutineScope()
-    fun startNip65Search(indexerUrls: List<String>) {
+    fun startNip65Search(indexerUrls: List<String>, timeoutMs: Long = 3_000L) {
         if (indexerUrls.isEmpty()) {
             phase = OnboardingPhase.NIP65_NOT_FOUND
             statusText = "No indexers selected"
@@ -321,7 +279,7 @@ fun OnboardingScreen(
 
         searchScope.launch(Dispatchers.IO) {
             try {
-                Nip65RelayListRepository.fetchRelayListMultiSource(hexPubkey, indexerUrls)
+                Nip65RelayListRepository.fetchRelayListMultiSource(hexPubkey, indexerUrls, timeoutMs)
 
                 // Wait for multi-source search to complete. With early completion
                 // (3+ results → done) and 3s per-indexer timeout, this typically
@@ -335,8 +293,12 @@ fun OnboardingScreen(
                 val results = Nip65RelayListRepository.multiSourceResults.value
                 val statuses = Nip65RelayListRepository.multiSourceStatuses.value
                 val successCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
-                val failCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.FAILED || it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT }
-                Log.d("OnboardingScreen", "Multi-source: $successCount success, $failCount failed/timeout, ${results.size} with data")
+                val failCount =
+                    statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.FAILED || it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT }
+                Log.d(
+                    "OnboardingScreen",
+                    "Multi-source: $successCount success, $failCount failed/timeout, ${results.size} with data"
+                )
 
                 if (results.isNotEmpty()) {
                     val best = results.maxByOrNull { it.createdAt }!!
@@ -349,6 +311,82 @@ fun OnboardingScreen(
             } catch (e: Exception) {
                 Log.e("OnboardingScreen", "NIP-65 search failed: ${e.message}", e)
                 statusText = "Search failed — configure manually"
+            }
+        }
+    }
+
+    // Known-reliable indexer relays with wide event coverage.
+    // These are included as anchors alongside NIP-66 ranked results to ensure
+    // at least some proven relays are always queried during auto-search.
+    val anchorIndexers = listOf(
+        "wss://relay.nostr.band",
+        "wss://relay.damus.io",
+        "wss://nos.lol",
+        "wss://nostr.wine",
+        "wss://relay.ditto.pub",
+        "wss://purplepag.es",
+    )
+
+    // ── Auto-search: triggered when user picks "Find my relays" from CHOOSE_MODE ──
+    fun startAutoSearch() {
+        phase = OnboardingPhase.LOADING_INDEXERS
+        statusText = "Finding indexer relays\u2026"
+
+        searchScope.launch(Dispatchers.IO) {
+            // Wait for NIP-66 data — but only briefly. It's already fetching from
+            // MainActivity.onCreate(). Most fetches complete in <2s from disk cache.
+            var waited = 0L
+            val maxWait = 6_000L
+            while (waited < maxWait) {
+                val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
+                val hasIndexers = discovered.values.any { it.isSearch }
+                if (hasIndexers) {
+                    Log.d("OnboardingScreen", "Auto-search: NIP-66 indexers ready after ${waited}ms")
+                    break
+                }
+                if (Nip66RelayDiscoveryRepository.hasFetched.value && !Nip66RelayDiscoveryRepository.isLoading.value) {
+                    Log.d("OnboardingScreen", "Auto-search: NIP-66 fetch done after ${waited}ms")
+                    break
+                }
+                delay(200)
+                waited += 200
+            }
+
+            // Get ranked indexers (already filters auth-required, payment-required, stale)
+            val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
+            val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
+            allIndexers = indexers
+
+            // Merge anchor indexers with NIP-66 ranked results.
+            // Anchors go first (proven reliable), then NIP-66 ranked fills the rest.
+            // Deduplicate by normalized URL so anchors aren't doubled if they appear in NIP-66.
+            val anchorNormalized = anchorIndexers.map { it.trim().removeSuffix("/").lowercase() }.toSet()
+            val nip66Extras = indexers
+                .map { it.url }
+                .filter { it.trim().removeSuffix("/").lowercase() !in anchorNormalized }
+                .take(6) // Up to 6 NIP-66 relays on top of the anchors
+            val autoSelected = (anchorIndexers + nip66Extras).distinct()
+
+            if (autoSelected.isEmpty()) {
+                Log.w("OnboardingScreen", "Auto-search: no indexers found, falling back to manual")
+                withContext(Dispatchers.Main) {
+                    phase = OnboardingPhase.NIP65_NOT_FOUND
+                    statusText = "No monitored indexers found — configure manually"
+                }
+                return@launch
+            }
+
+            selectedIndexerUrls = autoSelected.toSet()
+            Log.d(
+                "OnboardingScreen",
+                "Auto-search: selected ${autoSelected.size} indexers (${anchorIndexers.size} anchors + ${nip66Extras.size} NIP-66)"
+            )
+
+            // Immediately start the NIP-65 multi-source search with 5s timeout
+            // (cold WebSocket connections to new relays need more than 3s for
+            // DNS + TCP + TLS + WS upgrade + REQ + response)
+            withContext(Dispatchers.Main) {
+                startNip65Search(autoSelected, timeoutMs = 5_000L)
             }
         }
     }
@@ -432,6 +470,20 @@ fun OnboardingScreen(
             storageManager.saveCategories(hexPubkey, updatedCategories)
             Log.d("OnboardingScreen", "Saved ${categoryRelays.size} relays to Home category")
 
+            // Clean up: remove outbox/inbox relay URLs from the Indexer list.
+            // These were seeded during auto-search as anchor indexers but if they
+            // overlap with the user's personal NIP-65 relays, they will create
+            // duplicate subscription channels and choke the relay pool.
+            val personalUrls = allNip65Urls.map { it.trim().removeSuffix("/").lowercase() }.toSet()
+            val existingIndexers = storageManager.loadIndexerRelays(hexPubkey)
+            val cleanedIndexers = existingIndexers.filter { indexer ->
+                indexer.url.trim().removeSuffix("/").lowercase() !in personalUrls
+            }
+            if (cleanedIndexers.size < existingIndexers.size) {
+                storageManager.saveIndexerRelays(hexPubkey, cleanedIndexers)
+                Log.d("OnboardingScreen", "Cleaned ${existingIndexers.size - cleanedIndexers.size} personal relays from indexer list (${cleanedIndexers.size} remaining)")
+            }
+
             withContext(Dispatchers.Main) {
                 phase = OnboardingPhase.READY
                 statusText = "You're all set"
@@ -458,6 +510,7 @@ fun OnboardingScreen(
         OnboardingPhase.SAVING
     )
     val phaseColor = when (phase) {
+        OnboardingPhase.CHOOSE_MODE -> MaterialTheme.colorScheme.primary
         OnboardingPhase.SELECT_INDEXERS -> MaterialTheme.colorScheme.primary
         OnboardingPhase.REVIEW_RELAYS -> MaterialTheme.colorScheme.primary
         OnboardingPhase.READY -> Color(0xFF4CAF50)
@@ -466,7 +519,8 @@ fun OnboardingScreen(
         OnboardingPhase.SAVING -> Color(0xFF4CAF50)
         else -> MaterialTheme.colorScheme.primary
     }
-    val scrollablePhases = phase == OnboardingPhase.REVIEW_RELAYS || phase == OnboardingPhase.SELECT_INDEXERS || phase == OnboardingPhase.SEARCHING_NIP65
+    val scrollablePhases =
+        phase == OnboardingPhase.REVIEW_RELAYS || phase == OnboardingPhase.SELECT_INDEXERS || phase == OnboardingPhase.SEARCHING_NIP65
 
     // ── UI ──
     Scaffold(
@@ -492,6 +546,7 @@ fun OnboardingScreen(
             ) {
                 // ═══ ICON — animated phase indicator ═══
                 val targetIcon = when (phase) {
+                    OnboardingPhase.CHOOSE_MODE -> Icons.Outlined.Hub
                     OnboardingPhase.LOADING_INDEXERS -> Icons.Outlined.Radar
                     OnboardingPhase.SELECT_INDEXERS -> Icons.Outlined.Checklist
                     OnboardingPhase.SEARCHING_NIP65 -> Icons.Outlined.Search
@@ -526,6 +581,7 @@ fun OnboardingScreen(
 
                 // ═══ TITLE + STATUS ═══
                 val title = when (phase) {
+                    OnboardingPhase.CHOOSE_MODE -> "Set Up Relays"
                     OnboardingPhase.LOADING_INDEXERS -> "Preparing"
                     OnboardingPhase.SELECT_INDEXERS -> "Select Indexers"
                     OnboardingPhase.SEARCHING_NIP65 -> "Searching Relays"
@@ -580,26 +636,193 @@ fun OnboardingScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         when (currentPhase) {
-                            OnboardingPhase.LOADING_INDEXERS -> {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(32.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                                )
-                                // Allow skipping to manual setup after 2 seconds
-                                var showSkip by remember { mutableStateOf(false) }
-                                LaunchedEffect(Unit) {
-                                    delay(2000)
-                                    showSkip = true
+                            OnboardingPhase.CHOOSE_MODE -> {
+                                // Two clean options — NIP-66 preloads silently in background
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "Mycelium can find your relay configuration automatically using monitored indexer relays, or you can set things up yourself.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+
+                                    // Option 1: Automatic
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                                        border = androidx.compose.foundation.BorderStroke(
+                                            1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+                                        ),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { startAutoSearch() }
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)
+                                        ) {
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                                modifier = Modifier.size(44.dp)
+                                            ) {
+                                                Box(
+                                                    contentAlignment = Alignment.Center,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Icon(
+                                                        Icons.Outlined.Radar,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(22.dp),
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+                                            Spacer(Modifier.width(16.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Find my relays",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Spacer(Modifier.height(2.dp))
+                                                Text(
+                                                    text = "Auto-discover from monitored indexers",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Icon(
+                                                Icons.Default.ChevronRight,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(20.dp),
+                                                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                            )
+                                        }
+                                    }
+
+                                    // Option 2: Manual
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                phase = OnboardingPhase.NIP65_NOT_FOUND
+                                                statusText = "Configure relays manually"
+                                            }
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)
+                                        ) {
+                                            Surface(
+                                                shape = CircleShape,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.1f),
+                                                modifier = Modifier.size(44.dp)
+                                            ) {
+                                                Box(
+                                                    contentAlignment = Alignment.Center,
+                                                    modifier = Modifier.fillMaxSize()
+                                                ) {
+                                                    Icon(
+                                                        Icons.Outlined.Tune,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(22.dp),
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            }
+                                            Spacer(Modifier.width(16.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Set up manually",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Spacer(Modifier.height(2.dp))
+                                                Text(
+                                                    text = "Add relays yourself or pick indexers",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            Icon(
+                                                Icons.Default.ChevronRight,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(20.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                            )
+                                        }
+                                    }
+
+                                    // NIP-66 loading indicator (subtle, below options)
+                                    val nip66Loading by Nip66RelayDiscoveryRepository.isLoading.collectAsState()
+                                    val nip66HasData by Nip66RelayDiscoveryRepository.hasFetched.collectAsState()
+                                    if (nip66Loading && !nip66HasData) {
+                                        Spacer(Modifier.height(4.dp))
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.Center,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(10.dp),
+                                                strokeWidth = 1.dp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                                            )
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = "Preloading relay index\u2026",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                                                fontSize = 10.sp
+                                            )
+                                        }
+                                    }
                                 }
-                                AnimatedVisibility(visible = showSkip) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Spacer(Modifier.height(16.dp))
-                                        TextButton(onClick = {
-                                            phase = OnboardingPhase.NIP65_NOT_FOUND
-                                            statusText = "Add indexers manually"
-                                        }) {
-                                            Text("Skip to manual setup", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+
+                            OnboardingPhase.LOADING_INDEXERS -> {
+                                // Brief loading state while auto-search resolves NIP-66
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(32.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                                    )
+                                    Spacer(Modifier.height(12.dp))
+                                    Text(
+                                        text = "Checking monitored relays\u2026",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center
+                                    )
+                                    // Allow bailing out after 3 seconds
+                                    var showSkip by remember { mutableStateOf(false) }
+                                    LaunchedEffect(Unit) {
+                                        delay(3000)
+                                        showSkip = true
+                                    }
+                                    AnimatedVisibility(visible = showSkip) {
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Spacer(Modifier.height(16.dp))
+                                            TextButton(onClick = {
+                                                phase = OnboardingPhase.NIP65_NOT_FOUND
+                                                statusText = "Configure relays manually"
+                                            }) {
+                                                Text(
+                                                    "Skip to manual setup",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -657,20 +880,47 @@ fun OnboardingScreen(
                                             onOpenRelayManager(selectedResult.writeRelays, selectedResult.readRelays)
                                         },
                                         onUpdateOutdated = { correctResult, outdatedUrls ->
-                                            Nip65RelayListRepository.publishToOutdatedRelays(correctResult, outdatedUrls)
+                                            Nip65RelayListRepository.publishToOutdatedRelays(
+                                                correctResult,
+                                                outdatedUrls
+                                            )
                                         }
                                     )
+
+                                    // "Try different indexers" — loops back to SELECT_INDEXERS
+                                    Spacer(Modifier.height(8.dp))
+                                    TextButton(
+                                        onClick = {
+                                            val userCountry =
+                                                java.util.Locale.getDefault().country.takeIf { it.length == 2 }
+                                            val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
+                                            allIndexers = indexers
+                                            if (selectedIndexerUrls.isEmpty()) {
+                                                selectedIndexerUrls = indexers.take(5).map { it.url }.toSet()
+                                            }
+                                            phase = OnboardingPhase.SELECT_INDEXERS
+                                            statusText = "Choose which indexers to query for your relay list"
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Outlined.Checklist, null, Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            "Try different indexers",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
 
                             OnboardingPhase.NIP65_NOT_FOUND -> {
-                                // During onboarding: navigate to relay manager to add indexers
+                                // Manual setup: multiple paths forward
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Text(
-                                        text = "No indexer relays found.\nAdd indexers to search for your relay configuration.",
+                                        text = "Add relays manually, or pick indexer relays to search for your existing configuration.",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         textAlign = TextAlign.Center,
@@ -686,6 +936,18 @@ fun OnboardingScreen(
                                         Icon(Icons.Outlined.Add, null, Modifier.size(18.dp))
                                         Spacer(Modifier.width(8.dp))
                                         Text("Add Indexer Relays")
+                                    }
+
+                                    Spacer(Modifier.height(8.dp))
+
+                                    // Let user try auto-search even from manual mode
+                                    OutlinedButton(
+                                        onClick = { startAutoSearch() },
+                                        modifier = Modifier.fillMaxWidth(0.8f)
+                                    ) {
+                                        Icon(Icons.Outlined.Radar, null, Modifier.size(18.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Try Automatic Search")
                                     }
 
                                     Spacer(Modifier.height(12.dp))
@@ -821,17 +1083,23 @@ private fun IndexerSelectionCard(
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                 // Header
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Radar, null, Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(
+                        Icons.Outlined.Radar, null, Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.width(8.dp))
-                    Text("${selectedUrls.size} indexer${if (selectedUrls.size != 1) "s" else ""} selected",
+                    Text(
+                        "${selectedUrls.size} indexer${if (selectedUrls.size != 1) "s" else ""} selected",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f))
+                        modifier = Modifier.weight(1f)
+                    )
                     if (!defaultsCleared) {
-                        Text("${allIndexers.size} available",
+                        Text(
+                            "${allIndexers.size} available",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
 
@@ -839,10 +1107,12 @@ private fun IndexerSelectionCard(
 
                 // ── Group 1: Recommended (trust + geo affinity) — hidden when defaults cleared ──
                 if (visibleTopGroup.isNotEmpty()) {
-                    Text("recommended",
+                    Text(
+                        "recommended",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 10.sp)
+                        fontSize = 10.sp
+                    )
                     Spacer(Modifier.height(4.dp))
 
                     visibleTopGroup.forEach { relay ->
@@ -864,10 +1134,12 @@ private fun IndexerSelectionCard(
                     }
                     Spacer(Modifier.height(8.dp))
 
-                    Text("your picks",
+                    Text(
+                        "your picks",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        fontSize = 10.sp)
+                        fontSize = 10.sp
+                    )
                     Spacer(Modifier.height(4.dp))
 
                     Column(
@@ -905,10 +1177,12 @@ private fun IndexerSelectionCard(
                     }
                     Spacer(Modifier.height(8.dp))
 
-                    Text("add relay",
+                    Text(
+                        "add relay",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        fontSize = 10.sp)
+                        fontSize = 10.sp
+                    )
                     Spacer(Modifier.height(4.dp))
 
                     Row(
@@ -922,9 +1196,11 @@ private fun IndexerSelectionCard(
                                 manualUrlError = null
                             },
                             placeholder = {
-                                Text("wss://relay.example.com",
+                                Text(
+                                    "wss://relay.example.com",
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                )
                             },
                             isError = manualUrlError != null,
                             supportingText = manualUrlError?.let { err -> { Text(err, fontSize = 10.sp) } },
@@ -951,7 +1227,10 @@ private fun IndexerSelectionCard(
                     // Auto-focus the text field when it appears
                     LaunchedEffect(Unit) {
                         delay(200)
-                        try { focusRequester.requestFocus() } catch (_: Exception) {}
+                        try {
+                            focusRequester.requestFocus()
+                        } catch (_: Exception) {
+                        }
                     }
                 }
             }
@@ -1010,8 +1289,10 @@ private fun IndexerSelectionCard(
             },
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("I'll add my own",
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "I'll add my own",
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         Spacer(Modifier.height(16.dp))
@@ -1120,7 +1401,7 @@ private fun IndexerRelayRow(
                 text = relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
                 style = MaterialTheme.typography.bodySmall,
                 color = if (isSelected) MaterialTheme.colorScheme.onSurface
-                       else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
                 maxLines = 1, overflow = TextOverflow.Ellipsis
             )
             val meta = buildList {
@@ -1144,8 +1425,10 @@ private fun IndexerRelayRow(
                 relay.monitorCount >= 3 -> MaterialTheme.colorScheme.tertiary
                 else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             }
-            Text("${relay.monitorCount}✕", style = MaterialTheme.typography.labelSmall,
-                color = trustColor, fontSize = 10.sp)
+            Text(
+                "${relay.monitorCount}✕", style = MaterialTheme.typography.labelSmall,
+                color = trustColor, fontSize = 10.sp
+            )
         }
     }
 }
@@ -1168,7 +1451,7 @@ private fun MultiSourceSearchCard(
     val successCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
     val failCount = statuses.count {
         it.status == Nip65RelayListRepository.IndexerQueryStatus.FAILED ||
-        it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT
+                it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT
     }
     val noDataCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.NO_DATA }
     val pendingCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.PENDING }
@@ -1188,7 +1471,7 @@ private fun MultiSourceSearchCard(
     val failedList = remember(statuses) {
         statuses.filter {
             it.status == Nip65RelayListRepository.IndexerQueryStatus.FAILED ||
-            it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT
+                    it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT
         }
     }
 
@@ -1216,11 +1499,11 @@ private fun MultiSourceSearchCard(
                     }
                     Text(
                         text = if (!done) "Querying $total relays\u2026 ($pendingCount pending)"
-                               else buildString {
-                                   append("$successCount of $total responded")
-                                   if (failCount > 0) append(" \u00b7 $failCount failed")
-                                   if (noDataCount > 0) append(" \u00b7 $noDataCount empty")
-                               },
+                        else buildString {
+                            append("$successCount of $total responded")
+                            if (failCount > 0) append(" \u00b7 $failCount failed")
+                            if (noDataCount > 0) append(" \u00b7 $noDataCount empty")
+                        },
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface
                     )
@@ -1306,7 +1589,9 @@ private fun MultiSourceSearchCard(
                                 IndexerStatusRow(
                                     state = state,
                                     onRelayLogClick = onRelayLogClick,
-                                    onRePing = if (done) {{ Nip65RelayListRepository.rePingIndexer(state.url) }} else null
+                                    onRePing = if (done) {
+                                        { Nip65RelayListRepository.rePingIndexer(state.url) }
+                                    } else null
                                 )
                             }
                         }
@@ -1327,7 +1612,9 @@ private fun MultiSourceSearchCard(
                                 IndexerStatusRow(
                                     state = state,
                                     onRelayLogClick = onRelayLogClick,
-                                    onRePing = if (done) {{ Nip65RelayListRepository.rePingIndexer(state.url) }} else null
+                                    onRePing = if (done) {
+                                        { Nip65RelayListRepository.rePingIndexer(state.url) }
+                                    } else null
                                 )
                             }
                         }
@@ -1346,8 +1633,10 @@ private fun MultiSourceSearchCard(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         ) {
-                            Icon(Icons.Outlined.Warning, null, Modifier.size(12.dp),
-                                tint = MaterialTheme.colorScheme.error)
+                            Icon(
+                                Icons.Outlined.Warning, null, Modifier.size(12.dp),
+                                tint = MaterialTheme.colorScheme.error
+                            )
                             Spacer(Modifier.width(6.dp))
                             Text(
                                 text = "${uniqueTimestamps.size} different event dates found across indexers",
@@ -1452,15 +1741,18 @@ private fun IndexerStatusRow(
             statusColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
             statusLabel = "pending"
         }
+
         Nip65RelayListRepository.IndexerQueryStatus.SUCCESS -> {
             statusColor = Color(0xFF4CAF50)
             val r = state.result
             statusLabel = if (r != null) "${r.rTagCount} relays" else "ok"
         }
+
         Nip65RelayListRepository.IndexerQueryStatus.NO_DATA -> {
             statusColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             statusLabel = "no data"
         }
+
         Nip65RelayListRepository.IndexerQueryStatus.FAILED -> {
             statusColor = MaterialTheme.colorScheme.error
             val err = state.errorMessage
@@ -1476,6 +1768,7 @@ private fun IndexerStatusRow(
                 else -> err.take(20)
             }
         }
+
         Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT -> {
             statusColor = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
             statusLabel = "timeout"
@@ -1613,15 +1906,19 @@ private fun RelayReviewCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text("${groupedByTimestamp.size} event versions found",
+                    Text(
+                        "${groupedByTimestamp.size} event versions found",
                         style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface)
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                     Spacer(Modifier.height(4.dp))
-                    Text("Indexers returned different versions of your relay list. " +
-                         "Tap a version to review it.",
+                    Text(
+                        "Indexers returned different versions of your relay list. " +
+                                "Tap a version to review it.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 10.sp)
+                        fontSize = 10.sp
+                    )
 
                     Spacer(Modifier.height(10.dp))
 
@@ -1645,7 +1942,7 @@ private fun RelayReviewCard(
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                                    else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f),
+                            else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f),
                             border = if (isSelected) androidx.compose.foundation.BorderStroke(
                                 1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                             ) else null,
@@ -1657,11 +1954,15 @@ private fun RelayReviewCard(
                             Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     if (isSelected) {
-                                        Icon(Icons.Filled.RadioButtonChecked, null, Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.primary)
+                                        Icon(
+                                            Icons.Filled.RadioButtonChecked, null, Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
                                     } else {
-                                        Icon(Icons.Filled.RadioButtonUnchecked, null, Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                                        Icon(
+                                            Icons.Filled.RadioButtonUnchecked, null, Modifier.size(14.dp),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                        )
                                     }
                                     Spacer(Modifier.width(8.dp))
                                     Column(modifier = Modifier.weight(1f)) {
@@ -1683,9 +1984,11 @@ private fun RelayReviewCard(
                                             shape = RoundedCornerShape(4.dp),
                                             color = Color(0xFF4CAF50).copy(alpha = 0.15f)
                                         ) {
-                                            Text("latest", style = MaterialTheme.typography.labelSmall,
+                                            Text(
+                                                "latest", style = MaterialTheme.typography.labelSmall,
                                                 color = Color(0xFF4CAF50), fontSize = 9.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
                                         }
                                     }
                                     if (isOutlier) {
@@ -1694,9 +1997,11 @@ private fun RelayReviewCard(
                                             shape = RoundedCornerShape(4.dp),
                                             color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
                                         ) {
-                                            Text("outlier", style = MaterialTheme.typography.labelSmall,
+                                            Text(
+                                                "outlier", style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.error, fontSize = 9.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                            )
                                         }
                                     }
                                 }
@@ -1706,19 +2011,23 @@ private fun RelayReviewCard(
                                     Spacer(Modifier.height(4.dp))
                                     Row {
                                         if (removed.isNotEmpty()) {
-                                            Text("−${removed.size} missing",
+                                            Text(
+                                                "−${removed.size} missing",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.error,
-                                                fontSize = 9.sp)
+                                                fontSize = 9.sp
+                                            )
                                         }
                                         if (removed.isNotEmpty() && added.isNotEmpty()) {
                                             Spacer(Modifier.width(8.dp))
                                         }
                                         if (added.isNotEmpty()) {
-                                            Text("+${added.size} extra",
+                                            Text(
+                                                "+${added.size} extra",
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = Color(0xFF4CAF50),
-                                                fontSize = 9.sp)
+                                                fontSize = 9.sp
+                                            )
                                         }
                                     }
                                 }
@@ -1729,10 +2038,16 @@ private fun RelayReviewCard(
                                     val status = updateResults[r.indexerUrl]
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         when (status) {
-                                            true -> Icon(Icons.Filled.CheckCircle, null, Modifier.size(10.dp),
-                                                tint = Color(0xFF4CAF50))
-                                            false -> Icon(Icons.Filled.Error, null, Modifier.size(10.dp),
-                                                tint = MaterialTheme.colorScheme.error)
+                                            true -> Icon(
+                                                Icons.Filled.CheckCircle, null, Modifier.size(10.dp),
+                                                tint = Color(0xFF4CAF50)
+                                            )
+
+                                            false -> Icon(
+                                                Icons.Filled.Error, null, Modifier.size(10.dp),
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+
                                             null -> Spacer(Modifier.width(10.dp))
                                         }
                                         Spacer(Modifier.width(4.dp))
@@ -1760,7 +2075,7 @@ private fun RelayReviewCard(
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = if (groupUpdatedFail > 0) MaterialTheme.colorScheme.error
-                                                else Color(0xFF4CAF50),
+                                        else Color(0xFF4CAF50),
                                         fontSize = 9.sp
                                     )
                                 }
@@ -1787,15 +2102,23 @@ private fun RelayReviewCard(
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                 // Summary row
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Hub, null, Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Icon(
+                        Icons.Outlined.Hub, null, Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                     Spacer(Modifier.width(8.dp))
-                    Text("${selectedRelays.size} relay${if (selectedRelays.size != 1) "s" else ""}",
+                    Text(
+                        "${selectedRelays.size} relay${if (selectedRelays.size != 1) "s" else ""}",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.weight(1f))
+                        modifier = Modifier.weight(1f)
+                    )
                     if (selectedResult.writeRelays.isNotEmpty()) {
-                        RelayBadge("${selectedResult.writeRelays.size}", Icons.Outlined.Upload, MaterialTheme.colorScheme.primary)
+                        RelayBadge(
+                            "${selectedResult.writeRelays.size}",
+                            Icons.Outlined.Upload,
+                            MaterialTheme.colorScheme.primary
+                        )
                         Spacer(Modifier.width(6.dp))
                     }
                     if (selectedResult.readRelays.isNotEmpty()) {
@@ -1841,7 +2164,8 @@ private fun RelayReviewCard(
                         }
                         Spacer(Modifier.width(6.dp))
                         val label = if (isWrite && isRead) "r/w" else if (isWrite) "write" else "read"
-                        val labelColor = if (isWrite && isRead) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        val labelColor =
+                            if (isWrite && isRead) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                             else if (isWrite) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
                             else Color(0xFF4CAF50).copy(alpha = 0.7f)
                         Text(label, style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = labelColor)
@@ -1855,9 +2179,11 @@ private fun RelayReviewCard(
                         onClick = { showAllRelays = true },
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Text("Show all ${selectedRelays.size} relays",
+                        Text(
+                            "Show all ${selectedRelays.size} relays",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary)
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
 
@@ -1869,19 +2195,25 @@ private fun RelayReviewCard(
                 val dateStr = if (selectedResult.createdAt > 0)
                     dateFormat.format(Date(selectedResult.createdAt * 1000)) else null
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Info, null, Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                    Icon(
+                        Icons.Outlined.Info, null, Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    )
                     Spacer(Modifier.width(6.dp))
                     Column {
                         if (dateStr != null) {
-                            Text("Published $dateStr",
+                            Text(
+                                "Published $dateStr",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                            )
                         }
                         val matchingIndexers = allResults.filter { it.createdAt == selectedTimestamp }
-                        Text("${matchingIndexers.size} indexer${if (matchingIndexers.size != 1) "s" else ""} returned this version",
+                        Text(
+                            "${matchingIndexers.size} indexer${if (matchingIndexers.size != 1) "s" else ""} returned this version",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f))
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
+                        )
                     }
                 }
             }
@@ -1951,15 +2283,19 @@ private fun RelayReviewCard(
                     if (updatedOk > 0) {
                         Icon(Icons.Filled.CheckCircle, null, Modifier.size(12.dp), tint = Color(0xFF4CAF50))
                         Spacer(Modifier.width(4.dp))
-                        Text("$updatedOk updated", style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF4CAF50), fontSize = 10.sp)
+                        Text(
+                            "$updatedOk updated", style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF4CAF50), fontSize = 10.sp
+                        )
                     }
                     if (updatedOk > 0 && updatedFail > 0) Spacer(Modifier.width(12.dp))
                     if (updatedFail > 0) {
                         Icon(Icons.Filled.Error, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error)
                         Spacer(Modifier.width(4.dp))
-                        Text("$updatedFail failed", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error, fontSize = 10.sp)
+                        Text(
+                            "$updatedFail failed", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error, fontSize = 10.sp
+                        )
                     }
                 }
             }
@@ -1987,8 +2323,10 @@ private fun RelayBadge(
         ) {
             Icon(icon, null, Modifier.size(10.dp), tint = color)
             Spacer(Modifier.width(3.dp))
-            Text(text, style = MaterialTheme.typography.labelSmall,
-                fontWeight = FontWeight.Bold, color = color, fontSize = 10.sp)
+            Text(
+                text, style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold, color = color, fontSize = 10.sp
+            )
         }
     }
 }

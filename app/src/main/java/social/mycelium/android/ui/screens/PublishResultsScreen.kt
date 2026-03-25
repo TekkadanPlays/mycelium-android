@@ -435,8 +435,32 @@ private fun TimelinePublishRow(report: RelayHealthTracker.PublishReport) {
                     )
                     // Sort: failures first, then successes
                     val sortedResults = report.results.sortedBy { it.success }
+                    val canRetry = RelayHealthTracker.hasPublishedEvent(report.eventId)
                     sortedResults.forEach { result ->
-                        RelayResultRow(result = result)
+                        RelayResultRow(
+                            result = result,
+                            onRetry = if (!result.success && canRetry) {{
+                                RelayHealthTracker.retryPublish(report.eventId, setOf(result.relayUrl))
+                            }} else null
+                        )
+                    }
+
+                    // "Retry all failed" button
+                    if (hasFailures && canRetry) {
+                        val failedUrls = report.results.filter { !it.success }.map { it.relayUrl }.toSet()
+                        TextButton(
+                            onClick = { RelayHealthTracker.retryPublish(report.eventId, failedUrls) },
+                            modifier = Modifier.align(Alignment.End),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Icon(Icons.Outlined.Refresh, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "Retry all failed (${failedUrls.size})",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
                     }
                 }
             }
@@ -681,6 +705,23 @@ private fun RelayPublishCard(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                            // Per-event retry for this relay
+                            if (!result.success && RelayHealthTracker.hasPublishedEvent(result.eventId)) {
+                                Spacer(Modifier.width(4.dp))
+                                IconButton(
+                                    onClick = {
+                                        RelayHealthTracker.retryPublish(result.eventId, setOf(stats.relayUrl))
+                                    },
+                                    modifier = Modifier.size(20.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.Refresh,
+                                        contentDescription = "Retry",
+                                        modifier = Modifier.size(12.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                         }
                     }
                     if (stats.results.size > 20) {
@@ -700,7 +741,10 @@ private fun RelayPublishCard(
 // ── Shared components ──
 
 @Composable
-private fun RelayResultRow(result: RelayHealthTracker.PublishRelayResult) {
+private fun RelayResultRow(
+    result: RelayHealthTracker.PublishRelayResult,
+    onRetry: (() -> Unit)? = null
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -732,6 +776,21 @@ private fun RelayResultRow(result: RelayHealthTracker.PublishRelayResult) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+        // Retry button for failed results
+        if (onRetry != null) {
+            Spacer(Modifier.width(4.dp))
+            IconButton(
+                onClick = onRetry,
+                modifier = Modifier.size(22.dp)
+            ) {
+                Icon(
+                    Icons.Outlined.Refresh,
+                    contentDescription = "Retry",
+                    modifier = Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
         }
     }
 }

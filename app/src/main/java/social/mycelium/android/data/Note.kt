@@ -169,7 +169,9 @@ data class PollData(
     /** Unix epoch seconds when poll closes; null = open-ended. */
     val endsAt: Long? = null,
     /** Relay URLs where responses should be collected. */
-    val relays: List<String> = emptyList()
+    val relays: List<String> = emptyList(),
+    /** When true, results are visible *before* the user votes (creator toggle). */
+    val showResults: Boolean = false
 ) {
     val isMultipleChoice: Boolean get() = pollType == "multiplechoice"
     val hasEnded: Boolean get() = endsAt != null && endsAt < System.currentTimeMillis() / 1000
@@ -181,6 +183,7 @@ data class PollData(
             var pollType = "singlechoice"
             var endsAt: Long? = null
             val relays = mutableListOf<String>()
+            var showResults = false
             for (tag in tags) {
                 if (tag.size < 2) continue
                 when (tag[0]) {
@@ -188,10 +191,11 @@ data class PollData(
                     "polltype" -> pollType = tag[1]
                     "endsAt" -> endsAt = tag[1].toLongOrNull()
                     "relay" -> relays.add(tag[1])
+                    "showResults" -> showResults = tag[1].lowercase() == "true"
                 }
             }
             if (options.isEmpty()) return null
-            return PollData(options, pollType, endsAt, relays)
+            return PollData(options, pollType, endsAt, relays, showResults)
         }
     }
 }
@@ -302,8 +306,10 @@ data class QuotedNoteMeta(
     val relayUrl: String? = null,
     /** NIP-10 root note id — set when this quoted event is a kind-1 reply, so navigation can open the full thread. */
     val rootNoteId: String? = null,
-    /** Event kind (1 = text note, 11 = topic, 1111 = thread reply). */
-    val kind: Int = 1
+    /** Event kind (1 = text note, 11 = topic, 1111 = thread reply, 1068 = poll, 6969 = zap poll). */
+    val kind: Int = 1,
+    /** Raw event tags — needed to parse poll data for kind-1068/6969 quoted events. */
+    val tags: List<List<String>> = emptyList()
 )
 
 enum class NoteAction {

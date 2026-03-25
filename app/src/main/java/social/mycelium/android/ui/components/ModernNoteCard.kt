@@ -69,11 +69,13 @@ private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault(
 private fun authorDisplayLabel(author: social.mycelium.android.data.Author): String {
     val d = author.displayName
     // Only treat as placeholder if it looks like a truncated hex pubkey (8 hex chars + "...")
-    val isPlaceholder = d.length == 11 && d.endsWith("...") && d.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
+    val isPlaceholder =
+        d.length == 11 && d.endsWith("...") && d.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
     if (!isPlaceholder) return d
     // displayName was a placeholder; try username instead
     val u = author.username
-    val uIsPlaceholder = u.length == 11 && u.endsWith("...") && u.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
+    val uIsPlaceholder =
+        u.length == 11 && u.endsWith("...") && u.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
     return if (!uIsPlaceholder) u else author.id.take(8) + "..."
 }
 
@@ -177,6 +179,7 @@ private fun NoteCardContent(
 ) {
     var isZapMenuExpanded by remember { mutableStateOf(false) }
     var showCustomZapDialog by remember { mutableStateOf(false) }
+    var showZapDrawer by remember { mutableStateOf(false) }
     ElevatedCard(
         modifier = modifier
             .fillMaxWidth()
@@ -309,7 +312,9 @@ private fun NoteCardContent(
                 add("$replyCountVal repl${if (replyCountVal == 1) "y" else "ies"}")
                 add("$reactionCount reaction${if (reactionCount == 1) "" else "s"}")
                 add("$zapCount zap${if (zapCount == 1) "" else "s"}")
-                if (isZapped && (myZappedAmount ?: 0L) > 0L) add("You zapped ${social.mycelium.android.utils.ZapUtils.formatZapAmount(myZappedAmount!!)}")
+                if (isZapped && (myZappedAmount
+                        ?: 0L) > 0L
+                ) add("You zapped ${social.mycelium.android.utils.ZapUtils.formatZapAmount(myZappedAmount!!)}")
             }
             Row(
                 modifier = Modifier
@@ -326,7 +331,10 @@ private fun NoteCardContent(
             }
 
             // Body zone: only when there is text or quoted notes; otherwise embed/media only (no highlight box)
-            val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+            val linkStyle = SpanStyle(
+                color = MaterialTheme.colorScheme.primary,
+                textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+            )
             val contentIsMarkdown = remember(note.content) { isMarkdown(note.content) }
             val mentionedPubkeys = remember(note.content) {
                 social.mycelium.android.utils.extractPubkeysFromContent(note.content)
@@ -368,433 +376,575 @@ private fun NoteCardContent(
                     }
                 }
             }
-            val contentBlocks = remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion, diskCacheReady) {
-                buildNoteContentWithInlinePreviews(
-                    note.content,
-                    note.mediaUrls.toSet(),
-                    note.urlPreviews,
-                    linkStyle,
-                    profileCache,
-                    emptySet(),
-                    extractEmojiUrls(note.tags)
-                )
-            }
+            val contentBlocks =
+                remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion, diskCacheReady) {
+                    buildNoteContentWithInlinePreviews(
+                        note.content,
+                        note.mediaUrls.toSet(),
+                        note.urlPreviews,
+                        linkStyle,
+                        profileCache,
+                        emptySet(),
+                        extractEmojiUrls(note.tags)
+                    )
+                }
             if (hasBodyText) {
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                shape = RectangleShape,
-                tonalElevation = 0.dp,
-                shadowElevation = 0.dp
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalAlignment = Alignment.Top
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                    shape = RectangleShape,
+                    tonalElevation = 0.dp,
+                    shadowElevation = 0.dp
                 ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    contentBlocks.forEach { block ->
-                        when (block) {
-                            is NoteContentBlock.Content -> {
-                                val annotated = block.annotated
-                                if (annotated.isNotEmpty()) {
-                                    if (contentIsMarkdown) {
-                                        MarkdownNoteContent(
-                                            content = annotated.text,
-                                            style = NoteBodyTextStyle.copy(
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            ),
-                                            onProfileClick = onProfileClick,
-                                            onNoteClick = { onNoteClick(note) },
-                                            onUrlClick = { url -> uriHandler.openUri(url) },
-                                            onHashtagClick = onHashtagClick
-                                        )
-                                    } else {
-                                        ClickableNoteContent(
-                                            text = annotated,
-                                            style = NoteBodyTextStyle.copy(
-                                                color = MaterialTheme.colorScheme.onSurface
-                                            ),
-                                            emojiUrls = block.emojiUrls,
-                                            onClick = { offset ->
-                                                val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                                val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                                val naddr = annotated.getStringAnnotations(tag = "NADDR", start = offset, end = offset).firstOrNull()
-                                                when {
-                                                    profile != null -> onProfileClick(profile.item)
-                                                    url != null -> uriHandler.openUri(url.item)
-                                                    naddr != null -> uriHandler.openUri(naddr.item)
-                                                    else -> onNoteClick(note)
-                                                }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            contentBlocks.forEach { block ->
+                                when (block) {
+                                    is NoteContentBlock.Content -> {
+                                        val annotated = block.annotated
+                                        if (annotated.isNotEmpty()) {
+                                            if (contentIsMarkdown) {
+                                                MarkdownNoteContent(
+                                                    content = annotated.text,
+                                                    style = NoteBodyTextStyle.copy(
+                                                        color = MaterialTheme.colorScheme.onSurface
+                                                    ),
+                                                    onProfileClick = onProfileClick,
+                                                    onNoteClick = { onNoteClick(note) },
+                                                    onUrlClick = { url -> uriHandler.openUri(url) },
+                                                    onHashtagClick = onHashtagClick
+                                                )
+                                            } else {
+                                                ClickableNoteContent(
+                                                    text = annotated,
+                                                    style = NoteBodyTextStyle.copy(
+                                                        color = MaterialTheme.colorScheme.onSurface
+                                                    ),
+                                                    emojiUrls = block.emojiUrls,
+                                                    onClick = { offset ->
+                                                        val profile = annotated.getStringAnnotations(
+                                                            tag = "PROFILE",
+                                                            start = offset,
+                                                            end = offset
+                                                        ).firstOrNull()
+                                                        val url = annotated.getStringAnnotations(
+                                                            tag = "URL",
+                                                            start = offset,
+                                                            end = offset
+                                                        ).firstOrNull()
+                                                        val naddr = annotated.getStringAnnotations(
+                                                            tag = "NADDR",
+                                                            start = offset,
+                                                            end = offset
+                                                        ).firstOrNull()
+                                                        when {
+                                                            profile != null -> onProfileClick(profile.item)
+                                                            url != null -> uriHandler.openUri(url.item)
+                                                            naddr != null -> uriHandler.openUri(naddr.item)
+                                                            else -> onNoteClick(note)
+                                                        }
+                                                    }
+                                                )
                                             }
+                                        }
+                                    }
+
+                                    is NoteContentBlock.Preview -> {
+                                        if (firstPreview == null) {
+                                            UrlPreviewCard(
+                                                previewInfo = block.previewInfo,
+                                                onUrlClick = { url -> uriHandler.openUri(url) },
+                                                onUrlLongClick = { _ -> }
+                                            )
+                                        }
+                                    }
+
+                                    is NoteContentBlock.MediaGroup -> {
+                                        // Media groups handled by the bottom carousel in thread view
+                                    }
+
+                                    is NoteContentBlock.QuotedNote -> {
+                                        // Inline quoted notes handled by standalone section below
+                                    }
+
+                                    is NoteContentBlock.LiveEventReference -> {
+                                        // Live event references handled like quoted notes
+                                    }
+
+                                    is NoteContentBlock.EmojiPack -> {
+                                        EmojiPackGrid(
+                                            author = block.author,
+                                            dTag = block.dTag,
+                                            relayHints = block.relayHints
+                                        )
+                                    }
+
+                                    is NoteContentBlock.Article -> {
+                                        EmbeddedArticlePreview(
+                                            author = block.author,
+                                            dTag = block.dTag,
+                                            relayHints = block.relayHints,
+                                            onNoteClick = onNoteClick
                                         )
                                     }
                                 }
                             }
-                            is NoteContentBlock.Preview -> {
-                                if (firstPreview == null) {
-                                    UrlPreviewCard(
-                                        previewInfo = block.previewInfo,
-                                        onUrlClick = { url -> uriHandler.openUri(url) },
-                                        onUrlLongClick = { _ -> }
+                            if (note.quotedEventIds.isNotEmpty()) {
+                                val profileCache = ProfileMetadataCache.getInstance()
+                                val linkStyle = SpanStyle(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+                                )
+                                val uriHandler = LocalUriHandler.current
+                                val feedListState = LocalFeedListState.current
+                                val toggleScope = rememberCoroutineScope()
+                                var quotedMetas by remember(note.id) {
+                                    mutableStateOf<Map<String, QuotedNoteMeta>>(
+                                        emptyMap()
                                     )
                                 }
-                            }
-                            is NoteContentBlock.MediaGroup -> {
-                                // Media groups handled by the bottom carousel in thread view
-                            }
-                            is NoteContentBlock.QuotedNote -> {
-                                // Inline quoted notes handled by standalone section below
-                            }
-                            is NoteContentBlock.LiveEventReference -> {
-                                // Live event references handled like quoted notes
-                            }
-                            is NoteContentBlock.EmojiPack -> {
-                                EmojiPackGrid(
-                                    author = block.author,
-                                    dTag = block.dTag,
-                                    relayHints = block.relayHints
-                                )
-                            }
-                            is NoteContentBlock.Article -> {
-                                EmbeddedArticlePreview(
-                                    author = block.author,
-                                    dTag = block.dTag,
-                                    relayHints = block.relayHints,
-                                    onNoteClick = onNoteClick
-                                )
-                            }
-                        }
-                    }
-                    if (note.quotedEventIds.isNotEmpty()) {
-                        val profileCache = ProfileMetadataCache.getInstance()
-                        val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
-                        val uriHandler = LocalUriHandler.current
-                        var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
-                        LaunchedEffect(note.quotedEventIds) {
-                            // Quick cache check first (no network)
-                            note.quotedEventIds.forEach { id ->
-                                if (id !in quotedMetas) {
-                                    val cached = QuotedNoteCache.getCached(id)
-                                    if (cached != null) quotedMetas = quotedMetas + (id to cached)
-                                }
-                            }
-                            val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
-                            if (uncachedIds.isNotEmpty()) {
-                                // Debounce: wait 250ms so rapidly scrolled-past cards don't waste slots
-                                delay(250)
-                                // Launch all fetches concurrently so they land in the same batch
-                                val results = kotlinx.coroutines.coroutineScope<List<Pair<String, QuotedNoteMeta?>>> {
-                                    uncachedIds.map { id ->
-                                        async { id to QuotedNoteCache.get(id) }
-                                    }.map { it.await() }
-                                }
-                                results.forEach { (id, meta) ->
-                                    if (meta != null) quotedMetas = quotedMetas + (id to meta)
-                                }
-                            }
-                        }
-                        if (quotedMetas.isNotEmpty()) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                quotedMetas.values.forEach { meta ->
-                                    val quotedAuthor = remember(meta.authorId) { profileCache.resolveAuthor(meta.authorId) }
-                                    val quotedExpanded = QuotedNoteExpandedState.isExpanded(note.id, meta.eventId)
-                                    val hasMore = meta.fullContent.length > meta.contentSnippet.length
-
-                                    // Rich content blocks
-                                    val quotedDisplayContent = if (quotedExpanded) meta.fullContent else meta.contentSnippet
-                                    val quotedMediaUrls = remember(meta.fullContent) {
-                                        social.mycelium.android.utils.UrlDetector.findUrls(meta.fullContent)
-                                            .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
-                                            .toSet()
-                                    }
-                                    val quotedIsMarkdown = remember(quotedDisplayContent) { isMarkdown(quotedDisplayContent) }
-
-                                    // Mention profile resolution for quoted note content
-                                    val quotedMentionedPubkeys = remember(meta.fullContent) {
-                                        social.mycelium.android.utils.extractPubkeysFromContent(meta.fullContent)
-                                    }
-                                    var quotedMentionVersion by remember { mutableIntStateOf(0) }
-                                    if (quotedMentionedPubkeys.isNotEmpty()) {
-                                        LaunchedEffect(quotedMentionedPubkeys) {
-                                            val pubkeySet = quotedMentionedPubkeys.toSet()
-                                            val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
-                                            if (uncached.isNotEmpty()) {
-                                                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-                                            }
-                                            val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
-                                            val initiallyResolved = pubkeySet.size - uncached.size
-                                            if (nowResolved > initiallyResolved) {
-                                                quotedMentionVersion++
-                                            }
-                                            profileCache.profileUpdated
-                                                .filter { it in pubkeySet }
-                                                .debounce(150)
-                                                .collect { quotedMentionVersion++ }
-                                        }
-                                        LaunchedEffect(quotedMentionedPubkeys, quotedMentionVersion) {
-                                            val pubkeySet = quotedMentionedPubkeys.toSet()
-                                            val hasPlaceholders = pubkeySet.any { pk ->
-                                                val author = profileCache.getAuthor(pk)
-                                                author == null || author.displayName == pk.take(8) + "..."
-                                            }
-                                            if (hasPlaceholders) {
-                                                delay(2000)
-                                                val stillPlaceholder = pubkeySet.any { pk ->
-                                                    val author = profileCache.getAuthor(pk)
-                                                    author == null || author.displayName == pk.take(8) + "..."
-                                                }
-                                                if (!stillPlaceholder) {
-                                                    quotedMentionVersion++
-                                                }
-                                            }
+                                LaunchedEffect(note.quotedEventIds) {
+                                    // Quick cache check first (no network)
+                                    note.quotedEventIds.forEach { id ->
+                                        if (id !in quotedMetas) {
+                                            val cached = QuotedNoteCache.getCached(id)
+                                            if (cached != null) quotedMetas = quotedMetas + (id to cached)
                                         }
                                     }
-
-                                    val quotedContentBlocks = remember(quotedDisplayContent, quotedMediaUrls, quotedMentionVersion) {
-                                        buildNoteContentWithInlinePreviews(
-                                            quotedDisplayContent,
-                                            quotedMediaUrls,
-                                            emptyList(),
-                                            linkStyle,
-                                            profileCache
-                                        )
+                                    val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
+                                    if (uncachedIds.isNotEmpty()) {
+                                        // Debounce: wait 250ms so rapidly scrolled-past cards don't waste slots
+                                        delay(250)
+                                        // Launch all fetches concurrently so they land in the same batch
+                                        val results =
+                                            kotlinx.coroutines.coroutineScope<List<Pair<String, QuotedNoteMeta?>>> {
+                                                uncachedIds.map { id ->
+                                                    async { id to QuotedNoteCache.get(id) }
+                                                }.map { it.await() }
+                                            }
+                                        results.forEach { (id, meta) ->
+                                            if (meta != null) quotedMetas = quotedMetas + (id to meta)
+                                        }
                                     }
+                                }
+                                if (quotedMetas.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        quotedMetas.values.forEach { meta ->
+                                            val quotedAuthor =
+                                                remember(meta.authorId) { profileCache.resolveAuthor(meta.authorId) }
+                                            val quotedExpanded =
+                                                QuotedNoteExpandedState.isExpanded(note.id, meta.eventId)
+                                            val hasMore = meta.fullContent.length > meta.contentSnippet.length
 
-                                    // Outer wrapper: matches body text background
-                                    Surface(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                                        shape = androidx.compose.ui.graphics.RectangleShape
-                                    ) {
-                                    // Inner quote surface
-                                    Surface(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                                            .clickable {
-                                                val quotedNote = Note(
-                                                    id = meta.eventId,
-                                                    author = quotedAuthor,
-                                                    content = meta.fullContent,
-                                                    timestamp = meta.createdAt,
-                                                    likes = 0, shares = 0, comments = 0,
-                                                    isLiked = false, hashtags = emptyList(),
-                                                    mediaUrls = quotedMediaUrls.toList(),
-                                                    isReply = meta.rootNoteId != null,
-                                                    rootNoteId = meta.rootNoteId,
-                                                    relayUrl = meta.relayUrl,
-                                                    relayUrls = listOfNotNull(meta.relayUrl),
-                                                    kind = meta.kind
-                                                )
-                                                onNoteClick(quotedNote)
-                                            },
-                                        color = MaterialTheme.colorScheme.surface,
-                                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                                        shape = MaterialTheme.shapes.small,
-                                        shadowElevation = 0.dp
-                                    ) {
-                                        Row(modifier = Modifier.fillMaxWidth()) {
-                                            // Left accent bar
-                                            Box(
-                                                modifier = Modifier
-                                                    .width(3.dp)
-                                                    .fillMaxHeight()
-                                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
-                                            )
-                                        Column(modifier = Modifier.padding(10.dp).weight(1f)) {
-                                            // ── Header: author (left) ──
-                                            Row(
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                modifier = Modifier.fillMaxWidth()
+                                            // Rich content blocks
+                                            val quotedDisplayContent =
+                                                if (quotedExpanded) meta.fullContent else meta.contentSnippet
+                                            val quotedMediaUrls = remember(meta.fullContent) {
+                                                social.mycelium.android.utils.UrlDetector.findUrls(meta.fullContent)
+                                                    .filter {
+                                                        social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(
+                                                            it
+                                                        )
+                                                    }
+                                                    .toSet()
+                                            }
+                                            val quotedIsMarkdown =
+                                                remember(quotedDisplayContent) { isMarkdown(quotedDisplayContent) }
+
+                                            // Mention profile resolution for quoted note content
+                                            val quotedMentionedPubkeys = remember(meta.fullContent) {
+                                                social.mycelium.android.utils.extractPubkeysFromContent(meta.fullContent)
+                                            }
+                                            var quotedMentionVersion by remember { mutableIntStateOf(0) }
+                                            if (quotedMentionedPubkeys.isNotEmpty()) {
+                                                LaunchedEffect(quotedMentionedPubkeys) {
+                                                    val pubkeySet = quotedMentionedPubkeys.toSet()
+                                                    val uncached =
+                                                        pubkeySet.filter { profileCache.getAuthor(it) == null }
+                                                    if (uncached.isNotEmpty()) {
+                                                        profileCache.requestProfiles(
+                                                            uncached,
+                                                            profileCache.getConfiguredRelayUrls()
+                                                        )
+                                                    }
+                                                    val nowResolved =
+                                                        pubkeySet.count { profileCache.getAuthor(it) != null }
+                                                    val initiallyResolved = pubkeySet.size - uncached.size
+                                                    if (nowResolved > initiallyResolved) {
+                                                        quotedMentionVersion++
+                                                    }
+                                                    profileCache.profileUpdated
+                                                        .filter { it in pubkeySet }
+                                                        .debounce(150)
+                                                        .collect { quotedMentionVersion++ }
+                                                }
+                                                LaunchedEffect(quotedMentionedPubkeys, quotedMentionVersion) {
+                                                    val pubkeySet = quotedMentionedPubkeys.toSet()
+                                                    val hasPlaceholders = pubkeySet.any { pk ->
+                                                        val author = profileCache.getAuthor(pk)
+                                                        author == null || author.displayName == pk.take(8) + "..."
+                                                    }
+                                                    if (hasPlaceholders) {
+                                                        delay(2000)
+                                                        val stillPlaceholder = pubkeySet.any { pk ->
+                                                            val author = profileCache.getAuthor(pk)
+                                                            author == null || author.displayName == pk.take(8) + "..."
+                                                        }
+                                                        if (!stillPlaceholder) {
+                                                            quotedMentionVersion++
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            val quotedContentBlocks =
+                                                remember(quotedDisplayContent, quotedMediaUrls, quotedMentionVersion) {
+                                                    buildNoteContentWithInlinePreviews(
+                                                        quotedDisplayContent,
+                                                        quotedMediaUrls,
+                                                        emptyList(),
+                                                        linkStyle,
+                                                        profileCache
+                                                    )
+                                                }
+
+                                            // Outer wrapper: matches body text background
+                                            Surface(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                                shape = androidx.compose.ui.graphics.RectangleShape
                                             ) {
-                                                ProfilePicture(author = quotedAuthor, size = 20.dp, onClick = { onProfileClick(meta.authorId) })
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = quotedAuthor.displayName,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = MaterialTheme.colorScheme.onSurface,
-                                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                                    modifier = Modifier.weight(1f)
-                                                )
-                                            }
-                                            Spacer(modifier = Modifier.height(4.dp))
-
-                                            // ── Rich content body ──
-                                            quotedContentBlocks.forEach { qBlock ->
-                                                when (qBlock) {
-                                                    is NoteContentBlock.Content -> {
-                                                        val qAnnotated = qBlock.annotated
-                                                        if (qAnnotated.isNotEmpty()) {
-                                                            if (quotedIsMarkdown) {
-                                                                MarkdownNoteContent(
-                                                                    content = qAnnotated.text,
-                                                                    style = MaterialTheme.typography.bodySmall.copy(
-                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                                    ),
-                                                                    onProfileClick = onProfileClick,
-                                                                    onNoteClick = { },
-                                                                    onUrlClick = { url -> uriHandler.openUri(url) }
+                                                // Inner quote surface
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                                                        .clickable {
+                                                            val quotedNote = Note(
+                                                                id = meta.eventId,
+                                                                author = quotedAuthor,
+                                                                content = meta.fullContent,
+                                                                timestamp = meta.createdAt,
+                                                                likes = 0, shares = 0, comments = 0,
+                                                                isLiked = false, hashtags = emptyList(),
+                                                                mediaUrls = quotedMediaUrls.toList(),
+                                                                quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(
+                                                                    meta.fullContent
+                                                                ),
+                                                                isReply = meta.rootNoteId != null,
+                                                                rootNoteId = meta.rootNoteId,
+                                                                relayUrl = meta.relayUrl,
+                                                                relayUrls = listOfNotNull(meta.relayUrl),
+                                                                kind = meta.kind,
+                                                                tags = meta.tags,
+                                                                pollData = if (meta.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(
+                                                                    meta.tags
+                                                                ) else null,
+                                                                zapPollData = if (meta.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(
+                                                                    meta.tags
+                                                                ) else null
+                                                            )
+                                                            onNoteClick(quotedNote)
+                                                        },
+                                                    color = MaterialTheme.colorScheme.surface,
+                                                    border = BorderStroke(
+                                                        0.5.dp,
+                                                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                                                    ),
+                                                    shape = MaterialTheme.shapes.small,
+                                                    shadowElevation = 0.dp
+                                                ) {
+                                                    Row(modifier = Modifier.fillMaxWidth()) {
+                                                        // Left accent bar
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .width(3.dp)
+                                                                .fillMaxHeight()
+                                                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.5f))
+                                                        )
+                                                        Column(modifier = Modifier.padding(10.dp).weight(1f)) {
+                                                            // ── Header: author (left) ──
+                                                            Row(
+                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                modifier = Modifier.fillMaxWidth()
+                                                            ) {
+                                                                ProfilePicture(
+                                                                    author = quotedAuthor,
+                                                                    size = 20.dp,
+                                                                    onClick = { onProfileClick(meta.authorId) })
+                                                                Spacer(modifier = Modifier.width(6.dp))
+                                                                Text(
+                                                                    text = quotedAuthor.displayName,
+                                                                    style = MaterialTheme.typography.labelSmall,
+                                                                    fontWeight = FontWeight.Bold,
+                                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                                                    modifier = Modifier.weight(1f)
                                                                 )
-                                                            } else {
-                                                                ClickableNoteContent(
-                                                                    text = qAnnotated,
-                                                                    style = MaterialTheme.typography.bodySmall.copy(
-                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                                                    ),
-                                                                    maxLines = if (quotedExpanded) Int.MAX_VALUE else 3,
-                                                                    emojiUrls = qBlock.emojiUrls,
-                                                                    onClick = { offset ->
-                                                                        val profile = qAnnotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                                                        val url = qAnnotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                                                        when {
-                                                                            profile != null -> onProfileClick(profile.item)
-                                                                            url != null -> uriHandler.openUri(url.item)
-                                                                            else -> {
-                                                                                val quotedNote = Note(
-                                                                                    id = meta.eventId,
-                                                                                    author = quotedAuthor,
-                                                                                    content = meta.fullContent,
-                                                                                    timestamp = meta.createdAt,
-                                                                                    likes = 0, shares = 0, comments = 0,
-                                                                                    isLiked = false, hashtags = emptyList(),
-                                                                                    mediaUrls = quotedMediaUrls.toList(),
-                                                                                    isReply = meta.rootNoteId != null,
-                                                                                    rootNoteId = meta.rootNoteId,
-                                                                                    relayUrl = meta.relayUrl,
-                                                                                    relayUrls = listOfNotNull(meta.relayUrl),
-                                                                                    kind = meta.kind
+                                                            }
+                                                            Spacer(modifier = Modifier.height(4.dp))
+
+                                                            // ── Rich content body ──
+                                                            quotedContentBlocks.forEach { qBlock ->
+                                                                when (qBlock) {
+                                                                    is NoteContentBlock.Content -> {
+                                                                        val qAnnotated = qBlock.annotated
+                                                                        if (qAnnotated.isNotEmpty()) {
+                                                                            if (quotedIsMarkdown) {
+                                                                                MarkdownNoteContent(
+                                                                                    content = qAnnotated.text,
+                                                                                    style = MaterialTheme.typography.bodySmall.copy(
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                                                    ),
+                                                                                    onProfileClick = onProfileClick,
+                                                                                    onNoteClick = { },
+                                                                                    onUrlClick = { url ->
+                                                                                        uriHandler.openUri(
+                                                                                            url
+                                                                                        )
+                                                                                    }
                                                                                 )
-                                                                                onNoteClick(quotedNote)
+                                                                            } else {
+                                                                                ClickableNoteContent(
+                                                                                    text = qAnnotated,
+                                                                                    style = MaterialTheme.typography.bodySmall.copy(
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                                                    ),
+                                                                                    maxLines = if (quotedExpanded) Int.MAX_VALUE else 3,
+                                                                                    emojiUrls = qBlock.emojiUrls,
+                                                                                    onClick = { offset ->
+                                                                                        val profile =
+                                                                                            qAnnotated.getStringAnnotations(
+                                                                                                tag = "PROFILE",
+                                                                                                start = offset,
+                                                                                                end = offset
+                                                                                            ).firstOrNull()
+                                                                                        val url =
+                                                                                            qAnnotated.getStringAnnotations(
+                                                                                                tag = "URL",
+                                                                                                start = offset,
+                                                                                                end = offset
+                                                                                            ).firstOrNull()
+                                                                                        when {
+                                                                                            profile != null -> onProfileClick(
+                                                                                                profile.item
+                                                                                            )
+
+                                                                                            url != null -> uriHandler.openUri(
+                                                                                                url.item
+                                                                                            )
+
+                                                                                            else -> {
+                                                                                                val quotedNote = Note(
+                                                                                                    id = meta.eventId,
+                                                                                                    author = quotedAuthor,
+                                                                                                    content = meta.fullContent,
+                                                                                                    timestamp = meta.createdAt,
+                                                                                                    likes = 0,
+                                                                                                    shares = 0,
+                                                                                                    comments = 0,
+                                                                                                    isLiked = false,
+                                                                                                    hashtags = emptyList(),
+                                                                                                    mediaUrls = quotedMediaUrls.toList(),
+                                                                                                    quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(
+                                                                                                        meta.fullContent
+                                                                                                    ),
+                                                                                                    isReply = meta.rootNoteId != null,
+                                                                                                    rootNoteId = meta.rootNoteId,
+                                                                                                    relayUrl = meta.relayUrl,
+                                                                                                    relayUrls = listOfNotNull(
+                                                                                                        meta.relayUrl
+                                                                                                    ),
+                                                                                                    kind = meta.kind,
+                                                                                                    tags = meta.tags,
+                                                                                                    pollData = if (meta.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(
+                                                                                                        meta.tags
+                                                                                                    ) else null,
+                                                                                                    zapPollData = if (meta.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(
+                                                                                                        meta.tags
+                                                                                                    ) else null
+                                                                                                )
+                                                                                                onNoteClick(quotedNote)
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                )
                                                                             }
                                                                         }
                                                                     }
-                                                                )
-                                                            }
-                                                        }
-                                                    }
-                                                    is NoteContentBlock.MediaGroup -> {
-                                                        val qMediaList = qBlock.urls.take(4)
-                                                        if (qMediaList.isNotEmpty()) {
-                                                            Spacer(modifier = Modifier.height(4.dp))
-                                                            qMediaList.forEach { url ->
-                                                                val isQVideo = social.mycelium.android.utils.UrlDetector.isVideoUrl(url)
-                                                                val qKnownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(url)
-                                                                if (isQVideo) {
-                                                                    // Videos: allow ONE reactive update from default→real
-                                                                    var qVideoRatio by remember(url) {
-                                                                        mutableFloatStateOf(qKnownRatio ?: (16f / 9f))
+
+                                                                    is NoteContentBlock.MediaGroup -> {
+                                                                        val qMediaList = qBlock.urls.take(4)
+                                                                        if (qMediaList.isNotEmpty()) {
+                                                                            Spacer(modifier = Modifier.height(4.dp))
+                                                                            qMediaList.forEach { url ->
+                                                                                val isQVideo =
+                                                                                    social.mycelium.android.utils.UrlDetector.isVideoUrl(
+                                                                                        url
+                                                                                    )
+                                                                                val qKnownRatio =
+                                                                                    social.mycelium.android.utils.MediaAspectRatioCache.get(
+                                                                                        url
+                                                                                    )
+                                                                                if (isQVideo) {
+                                                                                    // Videos: allow ONE reactive update from default→real
+                                                                                    var qVideoRatio by remember(url) {
+                                                                                        mutableFloatStateOf(
+                                                                                            qKnownRatio ?: (16f / 9f)
+                                                                                        )
+                                                                                    }
+                                                                                    if (qKnownRatio != null && qKnownRatio != qVideoRatio) {
+                                                                                        qVideoRatio = qKnownRatio
+                                                                                    }
+                                                                                    Box(
+                                                                                        modifier = Modifier
+                                                                                            .fillMaxWidth()
+                                                                                            .aspectRatio(
+                                                                                                qVideoRatio.coerceIn(
+                                                                                                    0.4f,
+                                                                                                    2.5f
+                                                                                                )
+                                                                                            )
+                                                                                            .clip(RoundedCornerShape(6.dp))
+                                                                                            .background(Color.Black)
+                                                                                    ) {
+                                                                                        InlineVideoPlayer(
+                                                                                            url = url,
+                                                                                            modifier = Modifier.fillMaxSize(),
+                                                                                            isVisible = true, // Thread view: card always visible
+                                                                                            onFullscreenClick = {
+                                                                                                onVideoClick(
+                                                                                                    qMediaList,
+                                                                                                    qMediaList.indexOf(
+                                                                                                        url
+                                                                                                    )
+                                                                                                )
+                                                                                            },
+                                                                                            onAspectRatioKnown = if (qKnownRatio == null) { ratio ->
+                                                                                                qVideoRatio = ratio
+                                                                                            } else null
+                                                                                        )
+                                                                                    }
+                                                                                } else {
+                                                                                    // Images: stable ratio from cache
+                                                                                    val qImgRatio = (qKnownRatio
+                                                                                        ?: (16f / 9f)).coerceIn(
+                                                                                        0.4f,
+                                                                                        2.5f
+                                                                                    )
+                                                                                    coil.compose.AsyncImage(
+                                                                                        model = url,
+                                                                                        contentDescription = null,
+                                                                                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                                                                                        modifier = Modifier
+                                                                                            .fillMaxWidth()
+                                                                                            .aspectRatio(qImgRatio)
+                                                                                            .clip(RoundedCornerShape(6.dp))
+                                                                                            .clickable {
+                                                                                                onOpenImageViewer(
+                                                                                                    qMediaList,
+                                                                                                    qMediaList.indexOf(
+                                                                                                        url
+                                                                                                    )
+                                                                                                )
+                                                                                            }
+                                                                                    )
+                                                                                }
+                                                                                Spacer(modifier = Modifier.height(4.dp))
+                                                                            }
+                                                                        }
                                                                     }
-                                                                    if (qKnownRatio != null && qKnownRatio != qVideoRatio) {
-                                                                        qVideoRatio = qKnownRatio
-                                                                    }
-                                                                    Box(
-                                                                        modifier = Modifier
-                                                                            .fillMaxWidth()
-                                                                            .aspectRatio(qVideoRatio.coerceIn(0.4f, 2.5f))
-                                                                            .clip(RoundedCornerShape(6.dp))
-                                                                            .background(Color.Black)
-                                                                    ) {
-                                                                        InlineVideoPlayer(
-                                                                            url = url,
-                                                                            modifier = Modifier.fillMaxSize(),
-                                                                            isVisible = true, // Thread view: card always visible
-                                                                            onFullscreenClick = { onVideoClick(qMediaList, qMediaList.indexOf(url)) },
-                                                                            onAspectRatioKnown = if (qKnownRatio == null) { ratio -> qVideoRatio = ratio } else null
+
+                                                                    is NoteContentBlock.Preview -> {
+                                                                        UrlPreviewCard(
+                                                                            previewInfo = qBlock.previewInfo,
+                                                                            onUrlClick = { url -> uriHandler.openUri(url) },
+                                                                            onUrlLongClick = { }
                                                                         )
                                                                     }
-                                                                } else {
-                                                                    // Images: stable ratio from cache
-                                                                    val qImgRatio = (qKnownRatio ?: (16f / 9f)).coerceIn(0.4f, 2.5f)
-                                                                    coil.compose.AsyncImage(
-                                                                        model = url,
-                                                                        contentDescription = null,
-                                                                        contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                                                                        modifier = Modifier
-                                                                            .fillMaxWidth()
-                                                                            .aspectRatio(qImgRatio)
-                                                                            .clip(RoundedCornerShape(6.dp))
-                                                                            .clickable { onOpenImageViewer(qMediaList, qMediaList.indexOf(url)) }
+
+                                                                    is NoteContentBlock.QuotedNote -> {
+                                                                        Text(
+                                                                            text = "Quoted note: ${qBlock.eventId.take(8)}…",
+                                                                            style = MaterialTheme.typography.labelSmall,
+                                                                            color = MaterialTheme.colorScheme.primary,
+                                                                            modifier = Modifier.padding(vertical = 2.dp)
+                                                                        )
+                                                                    }
+
+                                                                    is NoteContentBlock.LiveEventReference -> {
+                                                                        Text(
+                                                                            text = "Live event: ${qBlock.eventId.take(8)}…",
+                                                                            style = MaterialTheme.typography.labelSmall,
+                                                                            color = MaterialTheme.colorScheme.primary,
+                                                                            modifier = Modifier.padding(vertical = 2.dp)
+                                                                        )
+                                                                    }
+
+                                                                    is NoteContentBlock.EmojiPack -> {
+                                                                        EmojiPackGrid(
+                                                                            author = qBlock.author,
+                                                                            dTag = qBlock.dTag,
+                                                                            relayHints = qBlock.relayHints
+                                                                        )
+                                                                    }
+
+                                                                    is NoteContentBlock.Article -> {
+                                                                        EmbeddedArticlePreview(
+                                                                            author = qBlock.author,
+                                                                            dTag = qBlock.dTag,
+                                                                            relayHints = qBlock.relayHints,
+                                                                            onNoteClick = onNoteClick
+                                                                        )
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            if (hasMore) {
+                                                                Row(
+                                                                    modifier = Modifier
+                                                                        .fillMaxWidth()
+                                                                        .clickable {
+                                                                            val modernFeedListState = feedListState
+                                                                            val modernToggleScope = toggleScope
+                                                                            QuotedNoteExpandedState.toggle(
+                                                                                note.id,
+                                                                                meta.eventId,
+                                                                                modernFeedListState,
+                                                                                modernToggleScope
+                                                                            )
+                                                                        }
+                                                                        .padding(top = 4.dp, bottom = 4.dp),
+                                                                    horizontalArrangement = Arrangement.End
+                                                                ) {
+                                                                    Text(
+                                                                        text = if (quotedExpanded) "Show less" else "Read more",
+                                                                        style = MaterialTheme.typography.labelSmall,
+                                                                        color = MaterialTheme.colorScheme.primary,
                                                                     )
                                                                 }
-                                                                Spacer(modifier = Modifier.height(4.dp))
                                                             }
                                                         }
                                                     }
-                                                    is NoteContentBlock.Preview -> {
-                                                        UrlPreviewCard(
-                                                            previewInfo = qBlock.previewInfo,
-                                                            onUrlClick = { url -> uriHandler.openUri(url) },
-                                                            onUrlLongClick = { }
-                                                        )
-                                                    }
-                                                    is NoteContentBlock.QuotedNote -> {
-                                                        Text(
-                                                            text = "Quoted note: ${qBlock.eventId.take(8)}…",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier.padding(vertical = 2.dp)
-                                                        )
-                                                    }
-                                                    is NoteContentBlock.LiveEventReference -> {
-                                                        Text(
-                                                            text = "Live event: ${qBlock.eventId.take(8)}…",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier.padding(vertical = 2.dp)
-                                                        )
-                                                    }
-                                                    is NoteContentBlock.EmojiPack -> {
-                                                        EmojiPackGrid(
-                                                            author = qBlock.author,
-                                                            dTag = qBlock.dTag,
-                                                            relayHints = qBlock.relayHints
-                                                        )
-                                                    }
-                                                    is NoteContentBlock.Article -> {
-                                                        EmbeddedArticlePreview(
-                                                            author = qBlock.author,
-                                                            dTag = qBlock.dTag,
-                                                            relayHints = qBlock.relayHints,
-                                                            onNoteClick = onNoteClick
-                                                        )
-                                                    }
-                                                }
-                                            }
-
-                                            if (hasMore) {
-                                                Row(
-                                                    modifier = Modifier
-                                                        .fillMaxWidth()
-                                                        .clickable { QuotedNoteExpandedState.toggle(note.id, meta.eventId) }
-                                                        .padding(top = 4.dp, bottom = 4.dp),
-                                                    horizontalArrangement = Arrangement.End
-                                                ) {
-                                                    Text(
-                                                        text = if (quotedExpanded) "Show less" else "Read more",
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        color = MaterialTheme.colorScheme.primary,
-                                                    )
                                                 }
                                             }
                                         }
-                                        }
-                                    }
                                     }
                                 }
                             }
                         }
                     }
-                    }
                 }
-            }
             }
             if (note.mediaUrls.isNotEmpty()) {
                 // Media only (no body text): edge-to-edge
@@ -852,7 +1002,9 @@ private fun NoteCardContent(
                                     modifier = Modifier.fillMaxSize(),
                                     isVisible = isCurrentPage,
                                     onFullscreenClick = { onVideoClick(mediaList, page) },
-                                    onAspectRatioKnown = if (modernVideoKnown == null) { ratio -> mediaContainerRatio = ratio } else null
+                                    onAspectRatioKnown = if (modernVideoKnown == null) { ratio ->
+                                        mediaContainerRatio = ratio
+                                    } else null
                                 )
                             } else {
                                 val meta = note.mediaMeta[url]
@@ -872,7 +1024,8 @@ private fun NoteCardContent(
                                                 )
                                             } else {
                                                 Box(
-                                                    modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.15f)),
+                                                    modifier = Modifier.fillMaxSize()
+                                                        .background(Color.Black.copy(alpha = 0.15f)),
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     CircularProgressIndicator(
@@ -883,9 +1036,11 @@ private fun NoteCardContent(
                                                 }
                                             }
                                         }
+
                                         is coil.compose.AsyncImagePainter.State.Error -> {
                                             Box(
-                                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                                modifier = Modifier.fillMaxSize()
+                                                    .background(Color.Black.copy(alpha = 0.1f)),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 Icon(
@@ -896,19 +1051,31 @@ private fun NoteCardContent(
                                                 )
                                             }
                                         }
+
                                         is coil.compose.AsyncImagePainter.State.Success -> {
-                                            androidx.compose.foundation.Image(painter = painter, contentDescription = meta?.alt, contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                                            androidx.compose.foundation.Image(
+                                                painter = painter,
+                                                contentDescription = meta?.alt,
+                                                contentScale = ContentScale.Fit,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
                                             SideEffect {
-                                                val drawable = (painter.state as? coil.compose.AsyncImagePainter.State.Success)?.result?.drawable
+                                                val drawable =
+                                                    (painter.state as? coil.compose.AsyncImagePainter.State.Success)?.result?.drawable
                                                 if (drawable != null) {
                                                     val w = drawable.intrinsicWidth
                                                     val h = drawable.intrinsicHeight
                                                     if (w > 0 && h > 0) {
-                                                        social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
+                                                        social.mycelium.android.utils.MediaAspectRatioCache.add(
+                                                            url,
+                                                            w,
+                                                            h
+                                                        )
                                                     }
                                                 }
                                             }
                                         }
+
                                         else -> {}
                                     }
                                 }
@@ -1039,8 +1206,8 @@ private fun NoteCardContent(
                     modifier = Modifier
                         .size(40.dp)
                         .combinedClickable(
-                            onClick = { isZapMenuExpanded = !isZapMenuExpanded },
-                            onLongClick = { showCustomZapDialog = true }
+                            onClick = { showZapDrawer = true },
+                            onLongClick = { showZapDrawer = true }
                         ),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1049,6 +1216,7 @@ private fun NoteCardContent(
                             modifier = Modifier.size(20.dp),
                             strokeWidth = 2.dp
                         )
+
                         else -> Icon(
                             imageVector = Icons.Filled.Bolt,
                             contentDescription = "Zap",
@@ -1065,12 +1233,12 @@ private fun NoteCardContent(
                 )
             }
 
-            // Zap menu - Custom chip opens custom zap dialog
+            // Zap menu - kept for backwards compat but bolt now opens drawer
             ZapMenuRow(
                 isExpanded = isZapMenuExpanded,
                 onExpandedChange = { isZapMenuExpanded = it },
                 onZap = { amount -> onZap(note.id, amount) },
-                onCustomZap = { showCustomZapDialog = true; onCustomZap(note.id) },
+                onCustomZap = { showZapDrawer = true; onCustomZap(note.id) },
                 onSettingsClick = onZapSettings
             )
 
@@ -1083,6 +1251,36 @@ private fun NoteCardContent(
                     },
                     onZapSettings = onZapSettings
                 )
+            }
+
+            // Zap drawer — full-featured bottom-sheet zap UI
+            if (showZapDrawer) {
+                androidx.compose.ui.window.Dialog(
+                    onDismissRequest = { showZapDrawer = false },
+                    properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+                ) {
+                    androidx.compose.foundation.layout.Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                                ) { showZapDrawer = false }
+                        )
+                        ZapDrawer(
+                            onDismiss = { showZapDrawer = false },
+                            onZap = { amount -> onZap(note.id, amount) },
+                            onCustomZapSend = { amount, zapType, message ->
+                                onCustomZapSend?.invoke(note, amount, zapType, message)
+                            },
+                            onSettingsClick = onZapSettings
+                        )
+                    }
+                }
             }
         }
     }

@@ -30,7 +30,12 @@ data class SyncedSettings(
     val notifyReposts: Boolean = true,
     val notifyMentions: Boolean = true,
     val notifyReplies: Boolean = true,
-    val notifyDMs: Boolean = true
+    val notifyDMs: Boolean = true,
+
+    // Tier 4 — Feed preferences (cold-start defaults)
+    val defaultFeedView: String = "HOME",       // HOME or TOPICS
+    val defaultSortOrder: String = "LATEST",     // LATEST or POPULAR
+    val defaultListDTag: String? = null           // NIP-51 list d-tag for cold start, null = Following
 ) {
     fun toJson(): String {
         val obj = JSONObject()
@@ -49,6 +54,9 @@ data class SyncedSettings(
         obj.put("notifyMentions", notifyMentions)
         obj.put("notifyReplies", notifyReplies)
         obj.put("notifyDMs", notifyDMs)
+        obj.put("defaultFeedView", defaultFeedView)
+        obj.put("defaultSortOrder", defaultSortOrder)
+        if (defaultListDTag != null) obj.put("defaultListDTag", defaultListDTag)
         return obj.toString()
     }
 
@@ -76,7 +84,10 @@ data class SyncedSettings(
                     notifyReposts = obj.optBoolean("notifyReposts", true),
                     notifyMentions = obj.optBoolean("notifyMentions", true),
                     notifyReplies = obj.optBoolean("notifyReplies", true),
-                    notifyDMs = obj.optBoolean("notifyDMs", true)
+                    notifyDMs = obj.optBoolean("notifyDMs", true),
+                    defaultFeedView = obj.optString("defaultFeedView", "HOME"),
+                    defaultSortOrder = obj.optString("defaultSortOrder", "LATEST"),
+                    defaultListDTag = obj.optString("defaultListDTag", null)
                 )
             } catch (e: Exception) {
                 SyncedSettings() // Return defaults on parse failure
@@ -102,7 +113,10 @@ data class SyncedSettings(
                 notifyReposts = social.mycelium.android.ui.settings.NotificationPreferences.notifyReposts.value,
                 notifyMentions = social.mycelium.android.ui.settings.NotificationPreferences.notifyMentions.value,
                 notifyReplies = social.mycelium.android.ui.settings.NotificationPreferences.notifyReplies.value,
-                notifyDMs = social.mycelium.android.ui.settings.NotificationPreferences.notifyDMs.value
+                notifyDMs = social.mycelium.android.ui.settings.NotificationPreferences.notifyDMs.value,
+                defaultFeedView = social.mycelium.android.ui.settings.FeedPreferences.defaultFeedView.value,
+                defaultSortOrder = social.mycelium.android.ui.settings.FeedPreferences.defaultSortOrder.value,
+                defaultListDTag = social.mycelium.android.ui.settings.FeedPreferences.defaultListDTag.value
             )
         }
 
@@ -135,6 +149,11 @@ data class SyncedSettings(
             social.mycelium.android.ui.settings.NotificationPreferences.setNotifyMentions(settings.notifyMentions)
             social.mycelium.android.ui.settings.NotificationPreferences.setNotifyReplies(settings.notifyReplies)
             social.mycelium.android.ui.settings.NotificationPreferences.setNotifyDMs(settings.notifyDMs)
+
+            // Tier 4 — Feed defaults
+            social.mycelium.android.ui.settings.FeedPreferences.setDefaultFeedView(settings.defaultFeedView)
+            social.mycelium.android.ui.settings.FeedPreferences.setDefaultSortOrder(settings.defaultSortOrder)
+            social.mycelium.android.ui.settings.FeedPreferences.setDefaultListDTag(settings.defaultListDTag)
         }
     }
 }

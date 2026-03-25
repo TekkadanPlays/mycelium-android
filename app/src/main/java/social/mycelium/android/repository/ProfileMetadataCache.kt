@@ -48,10 +48,13 @@ class ProfileMetadataCache {
         private var instance: ProfileMetadataCache? = null
         fun getInstance(): ProfileMetadataCache =
             instance ?: synchronized(this) { instance ?: ProfileMetadataCache().also { instance = it } }
+
         internal const val TAG = "ProfileMetadataCache"
         internal const val KIND0_FETCH_TIMEOUT_MS = 5000L
+
         /** Longer timeout for bulk follow-list profile fetches so slow relays can respond. */
         private const val KIND0_BULK_FETCH_TIMEOUT_MS = 12_000L
+
         /** Above this many pubkeys we use the bulk timeout. */
         private const val BULK_THRESHOLD = 50
         private const val MAX_ENTRIES = 2000
@@ -67,36 +70,57 @@ class ProfileMetadataCache {
         private const val PROFILE_CREATED_AT_KEY = "profiles_created_at_json"
         private const val OUTBOX_RELAYS_KEY = "outbox_relays_json"
         private const val PROFILE_FETCHED_AT_KEY = "profiles_fetched_at_json"
+
         /** Max profiles saved to disk. */
         private const val DISK_CACHE_MAX = 1500
+
         /** Debounce delay before writing profile cache to disk after an update. */
         private const val DISK_SAVE_DEBOUNCE_MS = 2000L
+
         /** Profiles older than this are considered stale and will be re-fetched when encountered. */
         private const val PROFILE_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
+
         /** How long to wait before checking if any profiles arrived (early-out for disconnected relays).
          *  Increased from 2s — relays often need 1-2s just to connect, leaving no time for kind-0 to return. */
         private const val EARLY_PROBE_MS = 3500L
     }
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
+        Log.e(
+            TAG,
+            "Coroutine failed: ${t.message}",
+            t
+        )
+    })
 
     // ── Internal batching: accumulate pubkeys from all callers into one batch ──
     private val internalPendingPubkeys = Collections.synchronizedSet(HashSet<String>())
     private var internalPendingRelays = listOf<String>()
+
     /** Outbox / subscription relays used as fallback when indexers miss profiles. */
-    @Volatile private var fallbackRelayUrls = listOf<String>()
+    @Volatile
+    private var fallbackRelayUrls = listOf<String>()
 
     /** Set outbox/subscription relay URLs to use as fallback for profiles not found on indexers. */
-    fun setFallbackRelayUrls(urls: List<String>) { fallbackRelayUrls = urls }
+    fun setFallbackRelayUrls(urls: List<String>) {
+        fallbackRelayUrls = urls
+    }
 
     /** Returns the relay URLs currently configured for profile fetching. */
     fun getConfiguredRelayUrls(): List<String> = internalPendingRelays
     private var internalBatchScheduleJob: Job? = null
     private var internalBatchFetchJob: Job? = null
     private val INTERNAL_BATCH_DELAY_MS = 400L
+    private val INTERNAL_BATCH_DELAY_COLD_MS = 100L
     private val INTERNAL_BATCH_SIZE = 30
+
+    /** Tracks whether the first batch has been dispatched. Reset on clear(). */
+    @Volatile
+    private var firstBatchDispatched = false
+
     /** Shared counter for profiles received across all pool connections. */
     private val poolReceived = AtomicInteger(0)
+
     /** Consecutive early-out failures — drives exponential backoff to avoid retry spam. */
     private var consecutiveEarlyOuts = 0
 
@@ -110,14 +134,20 @@ class ProfileMetadataCache {
     }
 
     /** Application context for Room DB persistence. Set via [init]. */
-    @Volatile private var appContext: Context? = null
+    @Volatile
+    private var appContext: Context? = null
+
     /** Room database instance for profile + NIP-65 persistence. */
-    @Volatile private var db: social.mycelium.android.db.AppDatabase? = null
+    @Volatile
+    private var db: social.mycelium.android.db.AppDatabase? = null
+
     /** Debounced disk save job. */
     private var diskSaveJob: Job? = null
+
     /** Prevents concurrent disk saves; if a save is in progress, new requests just mark dirty. */
     private val diskSaveMutex = kotlinx.coroutines.sync.Mutex()
-    @Volatile private var diskDirtyAfterSave = false
+    @Volatile
+    private var diskDirtyAfterSave = false
 
     /** Pubkeys (lowercase) that should not be evicted by LRU when under HARD_CAP (e.g. follow list). */
     private val pinnedPubkeys = Collections.synchronizedSet(mutableSetOf<String>())
@@ -143,13 +173,17 @@ class ProfileMetadataCache {
             }
         }
     )
+
     /** Store createdAt per pubkey so we only keep the latest kind-0 when multiple relays send profiles. */
     private val profileCreatedAt = ConcurrentHashMap<String, Long>()
+
     /** Wall-clock time (System.currentTimeMillis) when each profile was last fetched from network.
      *  Used for TTL-based stale refresh: profiles older than PROFILE_TTL_MS are re-requested. */
     private val profileFetchedAt = ConcurrentHashMap<String, Long>()
+
     /** Per-user outbox relay URLs (NIP-65 write relays). Persisted alongside profiles. */
     private val outboxRelayCache = ConcurrentHashMap<String, List<String>>()
+
     /** Large buffer so bulk loads (e.g. debug "Fetch all") don't drop emissions before coalescer can apply to feed. */
     private val _profileUpdated = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 2048)
     val profileUpdated: SharedFlow<String> = _profileUpdated.asSharedFlow()
@@ -173,7 +207,11 @@ class ProfileMetadataCache {
      * Sanitize kind-0 string: trim, strip control/non-printable chars, collapse whitespace.
      * Returns null if result is blank or only "null" literal.
      */
-    private fun sanitizeKind0String(s: String?, maxLen: Int = Int.MAX_VALUE, preserveNewlines: Boolean = false): String? {
+    private fun sanitizeKind0String(
+        s: String?,
+        maxLen: Int = Int.MAX_VALUE,
+        preserveNewlines: Boolean = false
+    ): String? {
         if (s == null) return null
         val trimmed = s.trim()
         if (trimmed.isEmpty() || trimmed == "null") return null
@@ -279,7 +317,11 @@ class ProfileMetadataCache {
      * @param cacheRelayUrls Standard indexer/cache relay URLs.
      * @param hintRelayUrls Additional relay hints (e.g. note source relay, author's outbox relays).
      */
-    suspend fun requestProfileWithHints(pubkeys: List<String>, cacheRelayUrls: List<String>, hintRelayUrls: List<String>) {
+    suspend fun requestProfileWithHints(
+        pubkeys: List<String>,
+        cacheRelayUrls: List<String>,
+        hintRelayUrls: List<String>
+    ) {
         val mergedRelays = (hintRelayUrls + cacheRelayUrls).distinct()
         requestProfiles(pubkeys, mergedRelays)
     }
@@ -325,11 +367,16 @@ class ProfileMetadataCache {
         if (internalBatchFetchJob != null) return
         internalBatchScheduleJob?.cancel()
         internalBatchScheduleJob = scope.launch {
-            delay(INTERNAL_BATCH_DELAY_MS)
+            // First batch uses a shorter delay so profiles resolve faster on cold start.
+            // Subsequent batches use the normal 400ms debounce to avoid relay churn.
+            val delayMs = if (firstBatchDispatched) INTERNAL_BATCH_DELAY_MS else INTERNAL_BATCH_DELAY_COLD_MS
+            delay(delayMs)
+            firstBatchDispatched = true
             internalBatchFetchJob = scope.launch {
                 while (internalPendingPubkeys.isNotEmpty() && consecutiveEarlyOuts < 5) {
                     val batch = synchronized(internalPendingPubkeys) {
-                        internalPendingPubkeys.take(INTERNAL_BATCH_SIZE).also { internalPendingPubkeys.removeAll(it.toSet()) }
+                        internalPendingPubkeys.take(INTERNAL_BATCH_SIZE)
+                            .also { internalPendingPubkeys.removeAll(it.toSet()) }
                     }
                     if (batch.isEmpty()) break
                     val relays = internalPendingRelays
@@ -403,20 +450,29 @@ class ProfileMetadataCache {
             // Hard cap: after 5 consecutive failures, stop retrying entirely.
             // Pubkeys stay in the queue and will be picked up when new notes trigger a fresh batch.
             if (consecutiveEarlyOuts >= 5) {
-                Log.d(TAG, "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts) — giving up, relays appear offline")
+                Log.d(
+                    TAG,
+                    "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts) — giving up, relays appear offline"
+                )
                 return
             }
             // Backoff delay before the while-loop retries: 0s, 1s, 2s, 4s, 8s cap
             val backoffMs = if (consecutiveEarlyOuts <= 1) 0L
-                else (1000L * (1L shl (consecutiveEarlyOuts - 2).coerceAtMost(3))).coerceAtMost(8_000L)
-            Log.d(TAG, "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts, next backoff ${backoffMs}ms), re-queued")
+            else (1000L * (1L shl (consecutiveEarlyOuts - 2).coerceAtMost(3))).coerceAtMost(8_000L)
+            Log.d(
+                TAG,
+                "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts, next backoff ${backoffMs}ms), re-queued"
+            )
             if (backoffMs > 0) delay(backoffMs)
             return
         }
         consecutiveEarlyOuts = 0 // Reset on success
 
         // Relays are responding — wait for the full timeout
-        val remainingMs = ((if (uncached.size > BULK_THRESHOLD) KIND0_BULK_FETCH_TIMEOUT_MS else KIND0_FETCH_TIMEOUT_MS) - probeElapsed).coerceAtLeast(1000L)
+        val remainingMs =
+            ((if (uncached.size > BULK_THRESHOLD) KIND0_BULK_FETCH_TIMEOUT_MS else KIND0_FETCH_TIMEOUT_MS) - probeElapsed).coerceAtLeast(
+                1000L
+            )
         delay(remainingMs)
 
         handle.cancel()
@@ -430,8 +486,10 @@ class ProfileMetadataCache {
             val fbFilter = Filter(kinds = listOf(0), authors = stillMissing, limit = stillMissing.size)
             val fbReceived = AtomicInteger(0)
             RelayConnectionStateMachine.getInstance()
-                .requestOneShotSubscription(fallback, fbFilter, priority = SubscriptionPriority.LOW,
-                    settleMs = 300L, maxWaitMs = KIND0_FETCH_TIMEOUT_MS) { event: Event ->
+                .requestOneShotSubscription(
+                    fallback, fbFilter, priority = SubscriptionPriority.LOW,
+                    settleMs = 300L, maxWaitMs = KIND0_FETCH_TIMEOUT_MS
+                ) { event: Event ->
                     if (event.kind == 0) {
                         val pk = event.pubKey
                         val ct = event.content
@@ -445,7 +503,10 @@ class ProfileMetadataCache {
                     }
                 }
             delay(KIND0_FETCH_TIMEOUT_MS + 500L)
-            Log.d(TAG, "Kind-0 fallback done: ${fbReceived.get()}/${stillMissing.size} from ${fallback.size} outbox relays")
+            Log.d(
+                TAG,
+                "Kind-0 fallback done: ${fbReceived.get()}/${stillMissing.size} from ${fallback.size} outbox relays"
+            )
         }
     }
 
@@ -597,10 +658,18 @@ class ProfileMetadataCache {
 
                 val profiles: Map<String, Author> = json.decodeFromString(profilesJson)
                 val fetchedAts: Map<String, Long> = if (fetchedAtJson != null) {
-                    try { json.decodeFromString(fetchedAtJson) } catch (_: Exception) { emptyMap() }
+                    try {
+                        json.decodeFromString(fetchedAtJson)
+                    } catch (_: Exception) {
+                        emptyMap()
+                    }
                 } else emptyMap()
                 val outboxRelays: Map<String, List<String>> = if (outboxJson != null) {
-                    try { json.decodeFromString(outboxJson) } catch (_: Exception) { emptyMap() }
+                    try {
+                        json.decodeFromString(outboxJson)
+                    } catch (_: Exception) {
+                        emptyMap()
+                    }
                 } else emptyMap()
 
                 if (profiles.isEmpty()) return@withContext
@@ -615,19 +684,21 @@ class ProfileMetadataCache {
                             fetchedAts[normalized]?.let { profileFetchedAt[normalized] = it }
                             restoredKeys.add(normalized)
                         }
-                        roomEntities.add(social.mycelium.android.db.CachedProfileEntity(
-                            pubkey = normalized,
-                            displayName = author.displayName,
-                            username = author.username,
-                            avatarUrl = author.avatarUrl,
-                            about = author.about,
-                            nip05 = author.nip05,
-                            website = author.website,
-                            lud16 = author.lud16,
-                            banner = author.banner,
-                            pronouns = author.pronouns,
-                            updatedAt = fetchedAts[normalized] ?: System.currentTimeMillis()
-                        ))
+                        roomEntities.add(
+                            social.mycelium.android.db.CachedProfileEntity(
+                                pubkey = normalized,
+                                displayName = author.displayName,
+                                username = author.username,
+                                avatarUrl = author.avatarUrl,
+                                about = author.about,
+                                nip05 = author.nip05,
+                                website = author.website,
+                                lud16 = author.lud16,
+                                banner = author.banner,
+                                pronouns = author.pronouns,
+                                updatedAt = fetchedAts[normalized] ?: System.currentTimeMillis()
+                            )
+                        )
                     }
                 }
                 // Migrate outbox relays
@@ -637,18 +708,23 @@ class ProfileMetadataCache {
                     if (outboxRelayCache[normalized] == null) {
                         outboxRelayCache[normalized] = relays
                     }
-                    nip65Migrated.add(social.mycelium.android.db.CachedNip65Entity(
-                        pubkey = normalized,
-                        writeRelays = relays.joinToString(","),
-                        readRelays = ""
-                    ))
+                    nip65Migrated.add(
+                        social.mycelium.android.db.CachedNip65Entity(
+                            pubkey = normalized,
+                            writeRelays = relays.joinToString(","),
+                            readRelays = ""
+                        )
+                    )
                 }
                 // Persist migrated data to Room
                 if (roomEntities.isNotEmpty()) database.profileDao().upsertAll(roomEntities)
                 if (nip65Migrated.isNotEmpty()) database.nip65Dao().upsertAll(nip65Migrated)
                 // Clear SharedPreferences after successful migration
                 prefs.edit().clear().apply()
-                Log.d(TAG, "Migrated ${profiles.size} profiles from SharedPreferences to Room DB (${restoredKeys.size} new)")
+                Log.d(
+                    TAG,
+                    "Migrated ${profiles.size} profiles from SharedPreferences to Room DB (${restoredKeys.size} new)"
+                )
                 _diskCacheRestored.value = true
             } catch (e: Exception) {
                 Log.e(TAG, "Load profile cache from disk failed: ${e.message}", e)

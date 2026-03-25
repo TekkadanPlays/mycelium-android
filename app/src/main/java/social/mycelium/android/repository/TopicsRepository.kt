@@ -7,6 +7,7 @@ import android.util.LruCache
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.utils.EventRelayTracker
 import com.example.cybin.core.Filter
 import com.example.cybin.core.Event
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -375,6 +376,8 @@ class TopicsRepository private constructor(context: Context) {
                 }
 
                 val topic = convertEventToTopicNote(event, relayUrl)
+                // Track relay URL for orb accumulation
+                if (relayUrl.isNotBlank()) EventRelayTracker.addRelay(event.id, relayUrl)
 
                 if (isFollowFilterActive() && topic.author.id.lowercase() !in followFilter!!) return
 

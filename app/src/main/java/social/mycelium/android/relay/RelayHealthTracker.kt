@@ -5,6 +5,12 @@ import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.util.Log
+import com.example.cybin.core.Event
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -184,6 +190,14 @@ object RelayHealthTracker {
 
     private val pendingPublishes = mutableMapOf<String, PendingPublish>()
 
+    /** LRU cache of signed events for retry capability. Keyed by eventId, capped at 50. */
+    private val publishedEventCache = object : LinkedHashMap<String, Event>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Event>?) = size > 50
+    }
+
+    private val retryScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private const val RETRY_OK_TIMEOUT_MS = 10_000L
+
     /** Recent publish reports (last 50). Observable by UI. */
     private val _publishReports = MutableStateFlow<List<PublishReport>>(emptyList())
     val publishReports: StateFlow<List<PublishReport>> = _publishReports.asStateFlow()
@@ -207,6 +221,54 @@ object RelayHealthTracker {
             pendingPublishes[eventId] = PendingPublish(kind, relayUrls)
         }
         Log.d(TAG, "Registered pending publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
+    }
+
+    /**
+     * Store a signed event so it can be retried later if relays fail.
+     * Call immediately after signing (before send).
+     */
+    fun storePublishedEvent(eventId: String, event: Event) {
+        synchronized(lock) {
+            publishedEventCache[eventId] = event
+        }
+    }
+
+    /**
+     * Retry publishing a previously signed event to specific relay URLs.
+     * Returns true if the event was found in cache and re-sent, false otherwise.
+     */
+    fun retryPublish(eventId: String, relayUrls: Set<String>): Boolean {
+        val event: Event
+        val kind: Int
+        synchronized(lock) {
+            event = publishedEventCache[eventId] ?: return false
+            kind = event.kind
+        }
+        if (relayUrls.isEmpty()) return false
+
+        // Re-send to the specified relays
+        try {
+            val rcsm = RelayConnectionStateMachine.getInstance()
+            rcsm.send(event, relayUrls)
+            rcsm.nip42AuthHandler.trackPublishedEvent(event, relayUrls)
+            Log.d(TAG, "Retry publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
+
+            // Register fresh tracking for the retry
+            registerPendingPublish(eventId, kind, relayUrls)
+            retryScope.launch {
+                delay(RETRY_OK_TIMEOUT_MS)
+                finalizePendingPublish(eventId)
+            }
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Retry publish failed for ${eventId.take(8)}: ${e.message}", e)
+            return false
+        }
+    }
+
+    /** Check if a signed event is available for retry. */
+    fun hasPublishedEvent(eventId: String): Boolean {
+        return synchronized(lock) { eventId in publishedEventCache }
     }
 
     /**
@@ -269,9 +331,25 @@ object RelayHealthTracker {
     }
 
     private fun handleCompletedReport(report: PublishReport) {
-        // Add to recent reports (keep last 50)
+        // Add to recent reports (keep last 50).
+        // If a report with the same eventId already exists (retry), replace it
+        // instead of adding a duplicate — duplicate keys crash LazyColumn.
         val current = _publishReports.value.toMutableList()
-        current.add(0, report)
+        val existingIndex = current.indexOfFirst { it.eventId == report.eventId }
+        if (existingIndex >= 0) {
+            // Merge: combine old + new results, keeping the latest per relay
+            val oldReport = current[existingIndex]
+            val mergedResults = (report.results + oldReport.results)
+                .groupBy { it.relayUrl }
+                .map { (_, results) -> results.maxByOrNull { if (it.success) 1 else 0 } ?: results.first() }
+            val merged = report.copy(
+                targetRelayCount = mergedResults.size,
+                results = mergedResults
+            )
+            current[existingIndex] = merged
+        } else {
+            current.add(0, report)
+        }
         if (current.size > 50) current.subList(50, current.size).clear()
         _publishReports.value = current
 

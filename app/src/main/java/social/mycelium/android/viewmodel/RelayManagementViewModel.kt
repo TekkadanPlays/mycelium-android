@@ -48,6 +48,57 @@ class RelayManagementViewModel(
     // Current user's pubkey - set when loading data
     private var currentPubkey: String? = null
 
+    /** Signer cached from the active account — set via [setSigner]. */
+    private var cachedSigner: com.example.cybin.signer.NostrSigner? = null
+
+    /** Set the NostrSigner for publishing relay sets. Call whenever the account changes. */
+    fun setSigner(signer: com.example.cybin.signer.NostrSigner?) {
+        cachedSigner = signer
+    }
+
+    /**
+     * Publish a relay category as a kind-30002 event to the user's outbox relays.
+     * Fire-and-forget — errors are logged but don't affect UI.
+     */
+    private fun publishCategoryToRelays(category: social.mycelium.android.data.RelayCategory) {
+        val signer = cachedSigner ?: return
+        val outboxUrls = _uiState.value.outboxRelays.map {
+            social.mycelium.android.utils.normalizeRelayUrl(it.url)
+        }.toSet()
+        social.mycelium.android.repository.RelayCategorySyncRepository.publishCategory(
+            category, signer, outboxUrls
+        )
+    }
+
+    /**
+     * Publish a kind-5 + empty replacement to delete a category from relays.
+     */
+    private fun deleteCategoryFromRelays(categoryId: String) {
+        val signer = cachedSigner ?: return
+        val pubkey = currentPubkey ?: return
+        val outboxUrls = _uiState.value.outboxRelays.map {
+            social.mycelium.android.utils.normalizeRelayUrl(it.url)
+        }.toSet()
+        social.mycelium.android.repository.RelayCategorySyncRepository.deleteCategory(
+            categoryId, pubkey, signer, outboxUrls
+        )
+    }
+
+    /**
+     * Publish ALL relay categories to the user's outbox relays at once.
+     * Called from the FAB "Publish Categories" action.
+     */
+    fun publishAllCategoriesToRelays() {
+        val signer = cachedSigner ?: return
+        val categories = _uiState.value.relayCategories
+        val outboxUrls = _uiState.value.outboxRelays.map {
+            social.mycelium.android.utils.normalizeRelayUrl(it.url)
+        }.toSet()
+        social.mycelium.android.repository.RelayCategorySyncRepository.publishAllCategories(
+            categories, signer, outboxUrls
+        )
+    }
+
     // Expose categories separately for easy access from other screens
     val relayCategories: StateFlow<List<RelayCategory>> = _uiState
         .map { it.relayCategories }
@@ -288,6 +339,9 @@ class RelayManagementViewModel(
         // Update NotesRepository relay set so NoteCountsRepository (kind-30011 votes,
         // kind-1111 replies) picks up the new relay for existing subscriptions
         social.mycelium.android.repository.NotesRepository.getInstance().setSubscriptionRelays(relayUrls)
+        // Update NotificationsRepository so target-note fetches, badge resolution, and
+        // poll enrichment use the updated relay set (not just the sign-in set).
+        social.mycelium.android.repository.NotificationsRepository.updateSubscriptionRelayUrls(relayUrls)
         // Preload NIP-11 info for all relay URLs so relay orbs get icons immediately
         social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
             ?.preloadRelayInfo(relayUrls, viewModelScope)
@@ -380,6 +434,7 @@ class RelayManagementViewModel(
     fun addCategory(category: RelayCategory) {
         _uiState.update { it.copy(relayCategories = it.relayCategories + category) }
         saveToStorage()
+        publishCategoryToRelays(category)
     }
 
     fun updateCategory(categoryId: String, updatedCategory: RelayCategory) {
@@ -387,11 +442,13 @@ class RelayManagementViewModel(
             state.copy(relayCategories = state.relayCategories.map { if (it.id == categoryId) updatedCategory else it })
         }
         saveToStorage()
+        publishCategoryToRelays(updatedCategory)
     }
 
     fun deleteCategory(categoryId: String) {
         _uiState.update { it.copy(relayCategories = it.relayCategories.filter { cat -> cat.id != categoryId }) }
         saveToStorage()
+        deleteCategoryFromRelays(categoryId)
     }
 
     fun addRelayToCategory(categoryId: String, relay: UserRelay) {
@@ -400,8 +457,12 @@ class RelayManagementViewModel(
                 if (category.id == categoryId) category.copy(relays = category.relays + relay) else category
             })
         }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+            // Publish the updated category to relays
+            _uiState.value.relayCategories.find { it.id == categoryId }?.let { publishCategoryToRelays(it) }
+        }
         fetchAndApplyNip11(relay.url)
     }
 
@@ -411,16 +472,20 @@ class RelayManagementViewModel(
                 if (category.id == categoryId) category.copy(relays = category.relays.filter { it.url != relayUrl }) else category
             })
         }
-        saveToStorage()
-        // Re-apply subscription so the removed relay gets disconnected
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+            _uiState.value.relayCategories.find { it.id == categoryId }?.let { publishCategoryToRelays(it) }
+        }
     }
 
     // Personal relay management methods
     fun addOutboxRelay(relay: UserRelay) {
         _uiState.update { it.copy(outboxRelays = it.outboxRelays + relay) }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+        }
         fetchAndApplyNip11(relay.url)
     }
 
@@ -431,8 +496,10 @@ class RelayManagementViewModel(
 
     fun addInboxRelay(relay: UserRelay) {
         _uiState.update { it.copy(inboxRelays = it.inboxRelays + relay) }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+        }
         fetchAndApplyNip11(relay.url)
     }
 
@@ -443,8 +510,10 @@ class RelayManagementViewModel(
 
     fun addIndexerRelay(relay: UserRelay) {
         _uiState.update { it.copy(indexerRelays = it.indexerRelays + relay) }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+        }
         fetchAndApplyNip11(relay.url)
     }
 
@@ -515,8 +584,12 @@ class RelayManagementViewModel(
             }
             state.copy(relayCategories = updatedCategories, relayProfiles = updatedProfiles)
         }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+            // Publish updated subscription state for the toggled category
+            _uiState.value.relayCategories.find { it.id == categoryId }?.let { publishCategoryToRelays(it) }
+        }
     }
 
     /**
@@ -603,8 +676,10 @@ class RelayManagementViewModel(
                 } else profile
             })
         }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+        }
         fetchAndApplyNip11(relay.url)
     }
 
@@ -618,8 +693,10 @@ class RelayManagementViewModel(
                 } else profile
             })
         }
-        saveToStorage()
-        refreshActiveSubscription()
+        viewModelScope.launch(Dispatchers.IO) {
+            saveToStorage()
+            refreshActiveSubscription()
+        }
     }
 
     fun fetchUserRelaysFromNetwork(pubkey: String) {

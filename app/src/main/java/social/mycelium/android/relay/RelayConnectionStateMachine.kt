@@ -485,6 +485,8 @@ class RelayConnectionStateMachine {
                     val relayFilterMap = effectiveRelayUrls.associateWith { allFilters }
                     relayPool.openSubscription(subId, relayFilterMap) { event, relayUrl ->
                         markEventReceived()
+                        // Track every event+relay pair for relay orbs (like Amethyst's Note.addRelay)
+                        social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
                         // Only update state when it actually changes (Connecting → Connected).
                         // Avoids hundreds of redundant StateFlow emissions per second during event bursts.
                         val current = _perRelayState.value[relayUrl]
@@ -822,7 +824,13 @@ class RelayConnectionStateMachine {
     }
 
     fun requestReconnectOnResume() {
-        // Release any auto-blocks whose cooldown has expired before we decide what to do
+        // Always clear stale reconnect state on resume. An intentional disconnect
+        // (WHEN_ACTIVE mode) or a long background period can leave session blacklists
+        // and reconnect counters that would prevent relays from reconnecting.
+        relayPool.clearReconnectState()
+        // Grant amnesty: reset consecutive failure counts and release auto-blocks
+        // caused by the disconnect period. Manual blocks are preserved.
+        RelayHealthTracker.grantOfflineAmnesty()
         RelayHealthTracker.releaseExpiredAutoBlocks()
 
         val cur = _currentSubscription.value
@@ -841,7 +849,6 @@ class RelayConnectionStateMachine {
             val disconnected = relayPool.getDisconnectedSubscriptionRelays()
             if (disconnected.isNotEmpty()) {
                 Log.d(TAG, "App resumed: subscription unchanged, reconnecting ${disconnected.size} dead relays")
-                relayPool.clearReconnectState()
                 relayPool.connect()
             } else {
                 Log.d(TAG, "App resumed: subscription active, ${activeUrls.size} relays healthy — no-op")
@@ -993,6 +1000,23 @@ class RelayConnectionStateMachine {
         val usable = filterUsableRelays(relayUrls)
         if (usable.isEmpty() || filters.isEmpty()) return NoOpTemporaryHandle
         return mux.subscribeOneShotCallback(usable, filters, priority, settleMs, maxWaitMs, onEvent)
+    }
+
+    /**
+     * EOSE-based one-shot with relay URL passthrough.
+     * Callback receives (Event, relayUrl) so callers know which relay delivered each event.
+     */
+    fun requestOneShotSubscriptionWithRelay(
+        relayUrls: List<String>,
+        filter: Filter,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event, String) -> Unit,
+    ): TemporarySubscriptionHandle {
+        val usable = filterUsableRelays(relayUrls)
+        if (usable.isEmpty()) return NoOpTemporaryHandle
+        return mux.subscribeOneShotCallbackWithRelay(usable, listOf(filter), priority, settleMs, maxWaitMs, onEvent)
     }
 
     /**

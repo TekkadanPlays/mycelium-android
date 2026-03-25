@@ -68,11 +68,13 @@ class UrlPreviewManager(
      * Uses cache for already-fetched URLs so re-runs after cancellation are fast.
      * Only processes notes that have non-media URLs and don't already have previews.
      *
-     * Notes are processed **concurrently** (up to [limit] in parallel) so a feed page
-     * with 20 link-containing notes doesn't wait 20 × network-RTT sequentially.
+     * Notes are processed in **feed-position order** (top-of-viewport first) with bounded
+     * concurrency (up to 3 HTTP fetches in flight). This ensures the topmost cards get
+     * their link previews before cards further down the feed, creating an excellent
+     * progressive rendering experience.
      */
     suspend fun enrichTopNotes(notes: List<Note>, limit: Int = 20): Map<String, List<UrlPreviewInfo>> = withContext(Dispatchers.IO) {
-        // Identify notes that need enrichment (up to limit)
+        // Identify notes that need enrichment (up to limit), preserving feed order
         val candidates = notes.mapNotNull { note ->
             val urls = UrlDetector.findUrls(note.content)
             val embeddedMedia = note.mediaUrls.toSet()
@@ -82,29 +84,41 @@ class UrlPreviewManager(
 
         if (candidates.isEmpty()) return@withContext emptyMap()
 
-        // Fetch all notes' previews concurrently
+        // Bounded concurrency: up to 3 HTTP fetches in parallel, but results are
+        // collected in feed order so top-of-viewport notes resolve first.
+        val semaphore = kotlinx.coroutines.sync.Semaphore(3)
         coroutineScope {
             val deferreds = candidates.map { (note, linkUrls) ->
                 async {
-                    val previews = mutableListOf<UrlPreviewInfo>()
-                    for (url in linkUrls) {
-                        try {
-                            val cached = urlPreviewCache.get(url)
-                            if (cached != null) {
-                                previews.add(cached)
-                            } else {
-                                val state = urlPreviewService.fetchPreview(url)
-                                if (state is social.mycelium.android.data.UrlPreviewState.Loaded) {
-                                    urlPreviewCache.put(url, state.previewInfo)
-                                    previews.add(state.previewInfo)
+                    semaphore.acquire()
+                    try {
+                        val previews = mutableListOf<UrlPreviewInfo>()
+                        for (url in linkUrls) {
+                            try {
+                                val cached = urlPreviewCache.get(url)
+                                if (cached != null) {
+                                    previews.add(cached)
+                                } else {
+                                    val state = urlPreviewService.fetchPreview(url)
+                                    if (state is social.mycelium.android.data.UrlPreviewState.Loaded) {
+                                        urlPreviewCache.put(url, state.previewInfo)
+                                        previews.add(state.previewInfo)
+                                    }
                                 }
-                            }
-                        } catch (_: Exception) { }
+                            } catch (_: Exception) { }
+                        }
+                        if (previews.isNotEmpty()) note.id to previews else null
+                    } finally {
+                        semaphore.release()
                     }
-                    if (previews.isNotEmpty()) note.id to previews else null
                 }
             }
-            deferreds.mapNotNull { it.await() }.toMap()
+            // Await in order: position 0 resolves before position 1, etc.
+            val result = LinkedHashMap<String, List<UrlPreviewInfo>>()
+            for (deferred in deferreds) {
+                deferred.await()?.let { (id, previews) -> result[id] = previews }
+            }
+            result
         }
     }
     

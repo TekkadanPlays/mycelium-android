@@ -123,6 +123,7 @@ fun RelayManagementScreen(
 
     LaunchedEffect(currentAccount) {
         currentAccount?.toHexKey()?.let { viewModel.loadUserRelays(it) }
+        viewModel.setSigner(accountStateViewModel.getCurrentSigner())
     }
 
     // Prefill indexer relays when navigating with pre-selected URLs
@@ -245,6 +246,22 @@ fun RelayManagementScreen(
     var toastMessage by remember { mutableStateOf("") }
     var showPublishConfirmation by remember { mutableStateOf(false) }
 
+    // ── Relay overlap warning state ──
+    data class OverlapWarning(
+        val url: String,
+        val severity: Int, // 0=info, 1=warning, 2=critical
+        val title: String,
+        val message: String,
+        val existingLocations: List<String>,
+        val isVerifiedIndexer: Boolean = false,
+        val onConfirmAdd: () -> Unit,
+    )
+    var overlapWarning by remember { mutableStateOf<OverlapWarning?>(null) }
+
+    // NIP-66 discovered relays for indexer verification
+    val discoveredRelays by social.mycelium.android.repository.Nip66RelayDiscoveryRepository
+        .discoveredRelays.collectAsState()
+
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
     // NIP-65 source info
@@ -286,6 +303,91 @@ fun RelayManagementScreen(
         fabExpanded = false 
     }
 
+    /**
+     * Find all locations where a relay URL is currently configured.
+     */
+    fun findRelayLocations(normalizedUrl: String): List<String> {
+        val key = normalizedUrl.trim().removeSuffix("/").lowercase()
+        val locs = mutableListOf<String>()
+        val dmUrls = social.mycelium.android.repository.DirectMessageRepository.dmRelayUrls.value
+        if (dmUrls.any { it.trim().removeSuffix("/").lowercase() == key }) locs.add("DM Relays")
+        if (uiState.outboxRelays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Outbox")
+        if (uiState.inboxRelays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Inbox")
+        if (uiState.indexerRelays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Indexers")
+        for (cat in relayCategories) {
+            if (cat.relays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Category: ${cat.name}")
+        }
+        if (uiState.announcementRelays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Announcement")
+        return locs
+    }
+
+    /**
+     * Smart relay add with overlap detection and NIP-66 indexer validation.
+     */
+    fun addRelayWithOverlapCheck(
+        url: String, existing: List<UserRelay>, targetSection: String,
+        isDmSection: Boolean = false, isIndexerSection: Boolean = false,
+        onAdd: (UserRelay) -> Unit
+    ) {
+        if (url.isBlank()) return
+        val normalized = normalizeRelayUrl(url)
+        if (isDuplicateRelay(normalized, existing)) {
+            toastMessage = "$normalized already exists"; showToast = true
+            return
+        }
+        val locations = findRelayLocations(normalized).filter { it != targetSection }
+        val isVerifiedIdx = social.mycelium.android.repository.Nip66RelayDiscoveryRepository.isSearchRelay(normalized)
+        val doAdd = { onAdd(createRelayWithNip11Info(normalized, nip11Cache = nip11Cache)) }
+
+        // DM section: warn if relay also used elsewhere
+        if (isDmSection && locations.isNotEmpty()) {
+            overlapWarning = OverlapWarning(normalized, 1, "⚠\uFE0F DM Relay Overlap",
+                "This relay is also in: ${locations.joinToString(", ")}.\n\n" +
+                "DM relays handle private messages and should be dedicated relays not shared with other purposes.",
+                locations, onConfirmAdd = doAdd); return
+        }
+        // Any section: critical warning if relay is a DM relay
+        if (!isDmSection && locations.contains("DM Relays")) {
+            overlapWarning = OverlapWarning(normalized, 2, "\uD83D\uDD34 DM Relay Detected",
+                "This relay is configured as a DM relay.\n\n" +
+                "DM relays should be strictly isolated to protect your message privacy. " +
+                "Adding it to $targetSection is strongly discouraged.",
+                locations, onConfirmAdd = doAdd); return
+        }
+        // Indexer: warn about non-indexer relays + NIP-66 verification
+        if (isIndexerSection) {
+            val nonIdxLocs = locations.filter { it != "Indexers" }
+            if (nonIdxLocs.isNotEmpty() || !isVerifiedIdx) {
+                val parts = mutableListOf<String>()
+                if (nonIdxLocs.isNotEmpty()) {
+                    parts.add("This relay is already in: ${nonIdxLocs.joinToString(", ")}.")
+                    parts.add("Indexer relays should be dedicated search/lookup relays for optimal profile rendering.")
+                }
+                if (!isVerifiedIdx) parts.add("⚠\uFE0F NOT verified as a search/indexer relay by NIP-66 monitors. It may not support NIP-50 search queries.")
+                else parts.add("✅ Verified as a search/indexer relay by NIP-66 monitors.")
+                overlapWarning = OverlapWarning(normalized, if (!isVerifiedIdx) 1 else 0,
+                    if (!isVerifiedIdx) "⚠\uFE0F Indexer Relay Concern" else "ℹ\uFE0F Relay Overlap",
+                    parts.joinToString("\n\n"), nonIdxLocs, isVerifiedIdx, doAdd); return
+            }
+        }
+        // General overlap
+        if (locations.isNotEmpty()) {
+            overlapWarning = OverlapWarning(normalized, 0, "ℹ\uFE0F Relay Already Configured",
+                "This relay is also in: ${locations.joinToString(", ")}.\n\n" +
+                "Adding it to $targetSection will create a duplicate subscription.",
+                locations, onConfirmAdd = doAdd); return
+        }
+        // Indexer without overlap but unverified
+        if (isIndexerSection && !isVerifiedIdx) {
+            overlapWarning = OverlapWarning(normalized, 1, "⚠\uFE0F Unverified Indexer",
+                "This relay is NOT verified as a search/indexer relay by NIP-66 monitors.\n\n" +
+                "For optimal profile rendering, use relays that support NIP-50 search queries.",
+                emptyList(), false, doAdd); return
+        }
+        doAdd()
+    }
+
+    /** Simple add-relay helper (no overlap check — for system/announcement relays). */
     fun addRelayTo(
         url: String, existing: List<UserRelay>,
         onAdd: (UserRelay) -> Unit
@@ -336,6 +438,21 @@ fun RelayManagementScreen(
                         FabMenuItem(label = "Publish Indexer List", icon = Icons.Outlined.Publish) {
                             fabExpanded = false
                             accountStateViewModel.publishIndexerRelayList()
+                        }
+                    }
+
+                    // Secondary: Publish All Categories (Profile tabs)
+                    AnimatedVisibility(
+                        visible = fabExpanded && isProfileTab,
+                        enter = fadeIn() + slideInVertically { it / 2 },
+                        exit = fadeOut() + slideOutVertically { it / 2 }
+                    ) {
+                        FabMenuItem(label = "Publish All Categories", icon = Icons.Outlined.CloudUpload) {
+                            fabExpanded = false
+                            viewModel.publishAllCategoriesToRelays()
+                            scope.launch {
+                                snackbarHostState.showSnackbar("Publishing ${relayCategories.size} categories to outbox")
+                            }
                         }
                     }
 
@@ -560,7 +677,7 @@ fun RelayManagementScreen(
                         )
                         RelayTab.INDEXER -> RelayListTab(
                             relays = indexerRelays, perRelayState = perRelayState,
-                            onAddRelay = { url -> addRelayTo(url, indexerRelays) { viewModel.addIndexerRelay(it) } },
+                            onAddRelay = { url -> addRelayWithOverlapCheck(url, indexerRelays, "Indexers", isIndexerSection = true) { viewModel.addIndexerRelay(it) } },
                             onEditRelay = { url ->
                                 val relay = indexerRelays.find { it.url == url }
                                 if (relay != null) {
@@ -599,8 +716,26 @@ fun RelayManagementScreen(
                                     if (isDuplicateRelay(normalized, allMerged)) {
                                         toastMessage = "$normalized already exists"; showToast = true
                                     } else {
-                                        pendingRelayUrl = url
-                                        showDesignationPicker = true
+                                        // Check for DM relay conflict before proceeding
+                                        val locations = findRelayLocations(normalized).filter { it != "Outbox" && it != "Inbox" }
+                                        if (locations.contains("DM Relays")) {
+                                            overlapWarning = OverlapWarning(normalized, 2, "\uD83D\uDD34 DM Relay Detected",
+                                                "This relay is configured as a DM relay.\n\n" +
+                                                "DM relays should be strictly isolated to protect your message privacy. " +
+                                                "Adding it to Outbox/Inbox is strongly discouraged.",
+                                                locations, onConfirmAdd = {
+                                                    pendingRelayUrl = url; showDesignationPicker = true
+                                                })
+                                        } else if (locations.isNotEmpty()) {
+                                            overlapWarning = OverlapWarning(normalized, 0, "ℹ\uFE0F Relay Also Configured Elsewhere",
+                                                "This relay is also in: ${locations.joinToString(", ")}.\n\nIt will be added to your Outbox/Inbox selection.",
+                                                locations, onConfirmAdd = {
+                                                    pendingRelayUrl = url; showDesignationPicker = true
+                                                })
+                                        } else {
+                                            pendingRelayUrl = url
+                                            showDesignationPicker = true
+                                        }
                                     }
                                 },
                                 onEditRelay = { url ->
@@ -645,7 +780,10 @@ fun RelayManagementScreen(
                                 if (cat != null && isDuplicateRelay(normalized, cat.relays)) {
                                     toastMessage = "$normalized already in ${cat.name}"; showToast = true
                                 } else {
-                                    viewModel.addRelayToProfileCategory(profile.id, catId, createRelayWithNip11Info(normalized, nip11Cache = nip11Cache))
+                                    val catName = cat?.name ?: "Category"
+                                    addRelayWithOverlapCheck(url, cat?.relays ?: emptyList(), "Category: $catName") {
+                                        viewModel.addRelayToProfileCategory(profile.id, catId, it)
+                                    }
                                 }
                             },
                             onEditCategory = { cat ->
@@ -1137,6 +1275,107 @@ fun RelayManagementScreen(
                 showDeleteRelayConfirmation = false; editRelayTarget = null
             },
             onDismiss = { showDeleteRelayConfirmation = false }
+        )
+    }
+
+    // ── Relay Overlap Warning Dialog ──
+    val currentOverlap = overlapWarning
+    if (currentOverlap != null) {
+        AlertDialog(
+            onDismissRequest = { overlapWarning = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(16.dp),
+            icon = {
+                Icon(
+                    imageVector = when (currentOverlap.severity) {
+                        2 -> Icons.Default.Warning         // Critical
+                        1 -> Icons.Default.Warning         // Warning
+                        else -> Icons.Outlined.Info         // Info
+                    },
+                    contentDescription = null,
+                    modifier = Modifier.size(32.dp),
+                    tint = when (currentOverlap.severity) {
+                        2 -> Color(0xFFF44336)  // Red
+                        1 -> Color(0xFFFFA000)  // Amber
+                        else -> MaterialTheme.colorScheme.primary // Info blue
+                    }
+                )
+            },
+            title = {
+                Text(
+                    text = currentOverlap.title,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Relay URL
+                    Text(
+                        text = currentOverlap.url,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    )
+                    HorizontalDivider()
+                    // Warning message
+                    Text(
+                        text = currentOverlap.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    // NIP-66 verification badge for indexer relays
+                    if (currentOverlap.isVerifiedIndexer) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    Color(0xFF4CAF50).copy(alpha = 0.1f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Verified,
+                                contentDescription = "Verified Indexer",
+                                modifier = Modifier.size(20.dp),
+                                tint = Color(0xFF4CAF50)
+                            )
+                            Text(
+                                "NIP-66 Verified Indexer",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF4CAF50)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        currentOverlap.onConfirmAdd()
+                        overlapWarning = null
+                    },
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = when (currentOverlap.severity) {
+                            2 -> Color(0xFFF44336)
+                            1 -> Color(0xFFFFA000)
+                            else -> MaterialTheme.colorScheme.primary
+                        }
+                    )
+                ) {
+                    Text(if (currentOverlap.severity >= 2) "Add Anyway" else "Add", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { overlapWarning = null }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 

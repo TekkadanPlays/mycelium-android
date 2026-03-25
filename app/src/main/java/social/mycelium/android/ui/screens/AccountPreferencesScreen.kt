@@ -5,62 +5,38 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.cutoutPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.List
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.repository.NwcConfig
+import social.mycelium.android.ui.settings.FeedPreferences
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AccountPreferencesScreen(
+fun FeedPreferencesScreen(
     onBackClick: () -> Unit,
-    accountStateViewModel: social.mycelium.android.viewmodel.AccountStateViewModel,
+    /** NIP-51 people lists available: (dTag, title) */
+    peopleLists: List<Pair<String, String>> = emptyList(),
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
-    val currentAccount by accountStateViewModel.currentAccount.collectAsState()
-    
-    val initialConfig = remember { NwcConfigRepository.getConfig(context) }
-
-    var showWalletConnectDialog by remember { mutableStateOf(false) }
-    var walletConnectPubkey by remember {
-        mutableStateOf(initialConfig.pubkey)
-    }
-    var walletConnectRelay by remember {
-        mutableStateOf(initialConfig.relay)
-    }
-    var walletConnectSecret by remember {
-        mutableStateOf(initialConfig.secret)
-    }
-    var isWalletConnected by remember {
-        mutableStateOf(
-            initialConfig.pubkey.isNotEmpty() &&
-            initialConfig.relay.isNotEmpty() &&
-            initialConfig.secret.isNotEmpty()
-        )
-    }
+    val currentFeedView by FeedPreferences.defaultFeedView.collectAsState()
+    val currentSortOrder by FeedPreferences.defaultSortOrder.collectAsState()
+    val currentListDTag by FeedPreferences.defaultListDTag.collectAsState()
 
     Scaffold(
         topBar = {
             Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
                 TopAppBar(
-                    title = { Text("Account Preferences") },
+                    title = { Text("Feed Preferences") },
                     navigationIcon = {
                         IconButton(onClick = onBackClick) {
                             Icon(
@@ -86,275 +62,148 @@ fun AccountPreferencesScreen(
                 .padding(paddingValues)
                 .verticalScroll(rememberScrollState())
         ) {
-            // Wallet Connect Setting
-            AccountPreferencesItem(
-                icon = Icons.Default.AccountBalanceWallet,
-                title = "Wallet Connect",
-                subtitle = if (isWalletConnected) "Connected" else "Not connected",
-                onClick = { showWalletConnectDialog = true }
+            // ── Default Feed View ──
+            FeedSectionHeader("Default Feed View")
+            Text(
+                "Which feed opens when you launch the app.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+
+            FeedRadioItem(
+                icon = Icons.Outlined.Home,
+                label = "Home",
+                sublabel = "Short-form notes (kind 1)",
+                isSelected = currentFeedView == "HOME",
+                onClick = { FeedPreferences.setDefaultFeedView("HOME") }
+            )
+            FeedRadioItem(
+                icon = Icons.Outlined.Tag,
+                label = "Topics",
+                sublabel = "Topic-based notes (kind 1111)",
+                isSelected = currentFeedView == "TOPICS",
+                onClick = { FeedPreferences.setDefaultFeedView("TOPICS") }
             )
 
             HorizontalDivider(
-                thickness = 1.dp,
+                modifier = Modifier.padding(vertical = 8.dp),
                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
-        }
-    }
+            // ── Default Sort Order ──
+            FeedSectionHeader("Default Sort Order")
+            Text(
+                "How notes are ordered when you first open a feed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
 
-    // Wallet Connect Dialog
-    if (showWalletConnectDialog) {
-        WalletConnectDialog(
-            currentPubkey = walletConnectPubkey,
-            currentRelay = walletConnectRelay,
-            currentSecret = walletConnectSecret,
-            onDismiss = { showWalletConnectDialog = false },
-            onSave = { pubkey, relay, secret ->
-                walletConnectPubkey = pubkey
-                walletConnectRelay = relay
-                walletConnectSecret = secret
-                isWalletConnected = pubkey.isNotEmpty() && relay.isNotEmpty() && secret.isNotEmpty()
+            FeedRadioItem(
+                icon = Icons.Outlined.Schedule,
+                label = "Latest",
+                sublabel = "Newest notes first",
+                isSelected = currentSortOrder == "LATEST",
+                onClick = { FeedPreferences.setDefaultSortOrder("LATEST") }
+            )
+            FeedRadioItem(
+                icon = Icons.Outlined.TrendingUp,
+                label = "Popular",
+                sublabel = "Most engaged notes first",
+                isSelected = currentSortOrder == "POPULAR",
+                onClick = { FeedPreferences.setDefaultSortOrder("POPULAR") }
+            )
 
-                NwcConfigRepository.saveConfig(
-                    context,
-                    NwcConfig(pubkey = pubkey, relay = relay, secret = secret)
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 8.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+
+            // ── Default Feed Filter (Cold Start) ──
+            FeedSectionHeader("Cold Start Filter")
+            Text(
+                "Which filter is active when you launch the app. Lists are from your NIP-51 people lists.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
+
+            FeedRadioItem(
+                icon = Icons.Outlined.People,
+                label = "Following",
+                sublabel = "Notes from people you follow",
+                isSelected = currentListDTag == null,
+                onClick = { FeedPreferences.setDefaultListDTag(null) }
+            )
+
+            peopleLists.forEach { (dTag, title) ->
+                FeedRadioItem(
+                    icon = Icons.AutoMirrored.Outlined.List,
+                    label = title,
+                    sublabel = "People list",
+                    isSelected = currentListDTag == dTag,
+                    onClick = { FeedPreferences.setDefaultListDTag(dTag) }
                 )
-
-                showWalletConnectDialog = false
-            },
-            onDisconnect = {
-                walletConnectPubkey = ""
-                walletConnectRelay = ""
-                walletConnectSecret = ""
-                isWalletConnected = false
-
-                NwcConfigRepository.clearConfig(context)
-
-                showWalletConnectDialog = false
             }
-        )
+
+            Spacer(modifier = Modifier.height(32.dp))
+        }
     }
 }
 
 @Composable
-private fun AccountPreferencesItem(
+private fun FeedSectionHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 2.dp)
+    )
+}
+
+@Composable
+private fun FeedRadioItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit,
-    enabled: Boolean = true,
-    trailing: @Composable (() -> Unit)? = null
+    label: String,
+    sublabel: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(16.dp),
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
-            tint = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(24.dp)
         )
         Spacer(modifier = Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = title,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                )
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
             )
             Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                )
+                text = sublabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        if (trailing != null) {
-            trailing()
-        } else {
-            Icon(
-                imageVector = Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        RadioButton(
+            selected = isSelected,
+            onClick = onClick,
+            colors = RadioButtonDefaults.colors(
+                selectedColor = MaterialTheme.colorScheme.primary
             )
-        }
-    }
-}
-
-@Composable
-private fun WalletConnectDialog(
-    currentPubkey: String,
-    currentRelay: String,
-    currentSecret: String,
-    onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit,
-    onDisconnect: () -> Unit
-) {
-    var walletPubkey by remember { mutableStateOf(currentPubkey) }
-    var walletRelay by remember { mutableStateOf(currentRelay) }
-    var walletSecret by remember { mutableStateOf(currentSecret) }
-    var isSecretVisible by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-    val clipboardManager = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-
-    val isConnected = currentPubkey.isNotEmpty() || currentRelay.isNotEmpty() || currentSecret.isNotEmpty()
-
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .wrapContentHeight(),
-            shape = MaterialTheme.shapes.large,
-            color = MaterialTheme.colorScheme.surface,
-            shadowElevation = 8.dp
-        ) {
-            Column(
-                modifier = Modifier
-                    .padding(24.dp)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = "Wallet Connect",
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = "Enter your Nostr Wallet Connect (NWC) details to enable zap payments.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Paste NWC URI - right aligned clipboard icon
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    IconButton(
-                        onClick = {
-                            val clipData = clipboardManager.primaryClip
-                            if (clipData != null && clipData.itemCount > 0) {
-                                val text = clipData.getItemAt(0).text?.toString()
-                                if (text != null) {
-                                    val parsed = social.mycelium.android.utils.ZapUtils.parseNwcUri(text)
-                                    if (parsed != null) {
-                                        walletPubkey = parsed.pubkey
-                                        walletRelay = parsed.relay
-                                        walletSecret = parsed.secret
-                                    } else {
-                                        walletPubkey = text
-                                    }
-                                }
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.ContentPaste,
-                            contentDescription = "Paste NWC URI",
-                            tint = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Pubkey field
-                OutlinedTextField(
-                    value = walletPubkey,
-                    onValueChange = { walletPubkey = it },
-                    label = { Text("Wallet Service Pubkey") },
-                    placeholder = { Text("npub... or hex") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Relay field
-                OutlinedTextField(
-                    value = walletRelay,
-                    onValueChange = { walletRelay = it },
-                    label = { Text("Wallet Service Relay") },
-                    placeholder = { Text("wss://relay.server.com") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Secret field
-                OutlinedTextField(
-                    value = walletSecret,
-                    onValueChange = { walletSecret = it },
-                    label = { Text("Wallet Service Secret") },
-                    placeholder = { Text("Secret key") },
-                    modifier = Modifier.fillMaxWidth(),
-                    visualTransformation = if (isSecretVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        IconButton(onClick = { isSecretVisible = !isSecretVisible }) {
-                            Icon(
-                                imageVector = if (isSecretVisible) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                contentDescription = if (isSecretVisible) "Hide secret" else "Show secret",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    },
-                    singleLine = true
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    if (isConnected) {
-                        OutlinedButton(
-                            onClick = onDisconnect,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Disconnect")
-                        }
-                    }
-
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Cancel")
-                    }
-
-                    Button(
-                        onClick = { onSave(walletPubkey, walletRelay, walletSecret) },
-                        modifier = Modifier.weight(1f),
-                        enabled = walletPubkey.isNotEmpty() && walletRelay.isNotEmpty() && walletSecret.isNotEmpty()
-                    ) {
-                        Text("Save")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Preview(showBackground = true)
-@Composable
-fun AccountPreferencesScreenPreview() {
-    MaterialTheme {
-        // Note: Preview doesn't need real AccountStateViewModel
-        AccountPreferencesScreen(
-            onBackClick = {},
-            accountStateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
         )
     }
 }

@@ -262,11 +262,9 @@ fun ChatScreen(
                         FilledIconButton(
                             onClick = {
                                 if (messageText.isNotBlank() && signer != null) {
-                                    DirectMessageRepository.sendMessage(
+                                    DirectMessageRepository.sendDirectMessage(
                                         content = messageText.trim(),
                                         recipientPubkey = peerPubkey,
-                                        signer = signer,
-                                        relayUrls = relayUrls,
                                         replyToId = replyToMessage?.id
                                     )
                                     messageText = ""

@@ -5,6 +5,7 @@ import social.mycelium.android.cache.ThreadReplyCache
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.utils.EventRelayTracker
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.extractPubkeysFromContent
 import com.example.cybin.core.Event
@@ -396,6 +397,9 @@ class Kind1RepliesRepository {
                 return
             }
 
+            // Track relay URL in EventRelayTracker for orb accumulation across duplicate deliveries
+            if (relayUrl.isNotBlank()) EventRelayTracker.addRelay(event.id, relayUrl)
+
             val reply = convertEventToNote(event, relayUrl)
             // Log nested replies (replyToId != root) for threading diagnostics
             if (reply.replyToId != null && reply.replyToId != reply.rootNoteId) {
@@ -483,13 +487,25 @@ class Kind1RepliesRepository {
                 }
             }
             if (added > 0 || relayMerged) {
-                val sorted = currentReplies.sortedBy { it.timestamp }
+                // Enrich relay URLs from EventRelayTracker (accumulates across duplicate deliveries)
+                val enriched = currentReplies.map { note ->
+                    val tracked = EventRelayTracker.enrichRelayUrls(
+                        note.id, note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    )
+                    if (tracked.size > note.relayUrls.size) note.copy(relayUrls = tracked) else note
+                }
+                val sorted = enriched.sortedBy { it.timestamp }
                 _replies.value = _replies.value + (noteId to sorted)
                 updateThreadReplyCache(noteId, sorted)
                 totalAdded += added
                 if (added > 0) {
                     // Fetch missing parents once per batch (not per event)
                     scheduleFetchMissingParents(noteId)
+                    // Prefetch quoted notes so embedded quotes render without spinners
+                    val newNotes = newReplies.filter { it.id in existingIds || it.quotedEventIds.isNotEmpty() }
+                    if (newNotes.isNotEmpty()) {
+                        QuotedNoteCache.prefetchForNotes(newReplies.filter { it.quotedEventIds.isNotEmpty() })
+                    }
                 }
             }
         }

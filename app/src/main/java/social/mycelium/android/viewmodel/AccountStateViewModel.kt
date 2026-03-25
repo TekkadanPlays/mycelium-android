@@ -1175,7 +1175,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         options: List<Pair<String, String>>,
         isMultipleChoice: Boolean,
         endsAtEpochSeconds: Long?,
-        relayUrls: Set<String>
+        relayUrls: Set<String>,
+        showResults: Boolean = false
     ): String? {
         if (question.isBlank()) return "Poll question is empty"
         if (options.size < 2) return "Add at least 2 options"
@@ -1191,6 +1192,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 if (endsAtEpochSeconds != null) {
                     add(arrayOf("endsAt", endsAtEpochSeconds.toString()))
                 }
+                if (showResults) {
+                    add(arrayOf("showResults", "true"))
+                }
                 // Include publish relays so voters know where to send responses
                 for (url in relayUrls) {
                     add(arrayOf("relay", url))
@@ -1204,7 +1208,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         options = options.map { social.mycelium.android.data.PollOption(it.first, it.second) },
                         pollType = if (isMultipleChoice) "multiplechoice" else "singlechoice",
                         endsAt = endsAtEpochSeconds,
-                        relays = relayUrls.toList()
+                        relays = relayUrls.toList(),
+                        showResults = showResults
                     )
                     val note = social.mycelium.android.data.Note(
                         id = result.event.id,

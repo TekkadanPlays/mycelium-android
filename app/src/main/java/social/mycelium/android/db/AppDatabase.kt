@@ -8,8 +8,8 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
-    entities = [CachedProfileEntity::class, CachedNip65Entity::class, CachedFollowListEntity::class, CachedEventEntity::class, CachedNip11Entity::class, CachedEmojiPackEntity::class],
-    version = 7,
+    entities = [CachedProfileEntity::class, CachedNip65Entity::class, CachedFollowListEntity::class, CachedEventEntity::class, CachedNip11Entity::class, CachedEmojiPackEntity::class, CachedNotificationEntity::class],
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -19,6 +19,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun eventDao(): EventDao
     abstract fun nip11Dao(): Nip11Dao
     abstract fun emojiPackDao(): EmojiPackDao
+    abstract fun notificationDao(): NotificationDao
 
     companion object {
         private val MIGRATION_5_6 = object : Migration(5, 6) {
@@ -35,6 +36,49 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS cached_notifications (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        ownerPubkey TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        sortTimestamp INTEGER NOT NULL,
+                        authorId TEXT,
+                        authorDisplayName TEXT,
+                        authorUsername TEXT,
+                        authorAvatarUrl TEXT,
+                        targetNoteId TEXT,
+                        rootNoteId TEXT,
+                        replyNoteId TEXT,
+                        replyKind INTEGER,
+                        reactionEmoji TEXT,
+                        reactionEmojisJson TEXT,
+                        zapAmountSats INTEGER NOT NULL DEFAULT 0,
+                        actorPubkeysJson TEXT,
+                        customEmojiUrlsJson TEXT,
+                        customEmojiUrl TEXT,
+                        badgeName TEXT,
+                        badgeImageUrl TEXT,
+                        pollId TEXT,
+                        pollQuestion TEXT,
+                        pollOptionCodesJson TEXT,
+                        pollOptionLabelsJson TEXT,
+                        pollAllOptionsJson TEXT,
+                        pollIsMultipleChoice INTEGER NOT NULL DEFAULT 0,
+                        rawContent TEXT,
+                        noteContent TEXT,
+                        targetNoteContent TEXT,
+                        cachedAt INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_notifications_ownerPubkey ON cached_notifications(ownerPubkey)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_notifications_sortTimestamp ON cached_notifications(sortTimestamp)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_notifications_type ON cached_notifications(type)")
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -45,7 +89,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mycelium_cache.db"
                 )
-                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .fallbackToDestructiveMigration(true)
                     .build()
                     .also { INSTANCE = it }

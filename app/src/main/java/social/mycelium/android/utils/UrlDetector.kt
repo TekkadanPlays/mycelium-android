@@ -7,9 +7,11 @@ import java.util.regex.Pattern
  */
 object UrlDetector {
     
-    // Regex pattern for detecting URLs
+    // Regex pattern for detecting URLs.
+    // Matches both protocol-prefixed (https://...) and www-prefixed (www.…) URLs
+    // so that bare "www.youtube.com/watch?v=..." links are detected and rendered.
     private val URL_PATTERN = Pattern.compile(
-        "(?:(?:https?|ftp)://)" +  // Protocol
+        "(?:(?:https?|ftp)://|www\\.)" +  // Protocol OR www. prefix
         "(?:\\S+(?::\\S*)?@)?" +   // User info
         "(?:" +
         "(?!(?:10|127)(?:\\.\\d{1,3}){3})" +  // Exclude private IP ranges
@@ -32,6 +34,18 @@ object UrlDetector {
     )
     
     /**
+     * Ensure a URL has a scheme. If it starts with "www." but lacks a protocol,
+     * prepend "https://" so downstream consumers (UrlPreviewService, browser intents) work.
+     */
+    private fun normalizeUrl(url: String): String {
+        return if (!url.startsWith("http://", ignoreCase = true) &&
+                   !url.startsWith("https://", ignoreCase = true) &&
+                   !url.startsWith("ftp://", ignoreCase = true)) {
+            "https://$url"
+        } else url
+    }
+    
+    /**
      * Find all URLs in the given text
      */
     fun findUrls(text: String): List<String> {
@@ -39,7 +53,7 @@ object UrlDetector {
         val urls = mutableListOf<String>()
         
         while (matcher.find()) {
-            val url = cleanTrailingParens(matcher.group())
+            val url = normalizeUrl(cleanTrailingParens(matcher.group()))
             if (isValidUrl(url)) {
                 urls.add(url)
             }
@@ -58,10 +72,10 @@ object UrlDetector {
         val result = mutableListOf<Pair<IntRange, String>>()
         while (matcher.find()) {
             val raw = matcher.group()
-            val url = cleanTrailingParens(raw)
+            val url = normalizeUrl(cleanTrailingParens(raw))
             if (isValidUrl(url)) {
                 // Adjust end position if trailing chars were stripped
-                val stripped = raw.length - url.length
+                val stripped = raw.length - cleanTrailingParens(raw).length
                 result.add(IntRange(matcher.start(), matcher.end() - 1 - stripped) to url)
             }
         }

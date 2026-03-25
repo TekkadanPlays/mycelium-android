@@ -510,14 +510,28 @@ class ProfileFeedRepository(
             }
         }
 
+        // Sort by original timestamp — NO boost hoisting on profile feed
+        // (unlike home feed where repostTimestamp floats boosted notes to the top)
         val merged = deduped
-            .sortedByDescending { it.repostTimestamp ?: it.timestamp }
+            .sortedByDescending { it.timestamp }
 
         _notes.value = merged
         advancePaginationCursor(merged)
 
         // Detect temporal gap
         _timeGapIndex.value = social.mycelium.android.ui.screens.detectTimeGapIndex(merged)
+
+        // Eagerly prefetch quoted notes so cards render with content immediately (parity with home feed)
+        val notesWithQuotes = newNotes.filter { it.quotedEventIds.isNotEmpty() }
+        if (notesWithQuotes.isNotEmpty()) {
+            QuotedNoteCache.prefetchForNotes(notesWithQuotes)
+        }
+
+        // Feed note IDs + relay URLs to NoteCountsRepository for reaction/zap/repost counts
+        val noteRelayMap = newNotes.associate { it.id to it.relayUrls.ifEmpty { listOfNotNull(it.relayUrl) } }
+        if (noteRelayMap.isNotEmpty()) {
+            NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap, replace = false)
+        }
 
         // Schedule profile batch fetch for any uncached mentioned pubkeys
         if (pendingProfilePubkeys.isNotEmpty()) {
@@ -581,6 +595,8 @@ class ProfileFeedRepository(
      * Extracts mentioned pubkeys, parses NIP-92 imeta, sets kind, etc.
      */
     private fun convertEventToNote(event: Event, sourceRelayUrl: String = ""): Note {
+        // Cache raw signed event JSON — enables RawEventCache lookups for quoted notes and NIP-18 reposts
+        social.mycelium.android.utils.RawEventCache.put(event.id, event.toJson())
         val pubkeyHex = event.pubKey
         val author = profileCache.resolveAuthor(pubkeyHex)
         queueProfileIfMissing(pubkeyHex)
@@ -610,6 +626,12 @@ class ProfileFeedRepository(
         val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(event) else null
         val tags = event.tags.map { it.toList() }
         val storedRelayUrl = sourceRelayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+        // Seed EventRelayTracker so relay orbs populate on profile cards
+        if (!storedRelayUrl.isNullOrBlank()) social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, storedRelayUrl)
+        // NIP-65 relay hints from e-tags/p-tags for relay orb enrichment
+        if (storedRelayUrl != null && Nip65RelayListRepository.getCachedOutboxRelays(event.pubKey) == null) {
+            Nip65RelayListRepository.addRelayHintsForAuthor(event.pubKey, listOf(storedRelayUrl))
+        }
 
         // NIP-88 poll data (kind 1068)
         val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
@@ -680,6 +702,8 @@ class ProfileFeedRepository(
             } ?: return null
 
             val originalNoteId = (jsonObj["id"] as? JsonPrimitive)?.content ?: return null
+            // Cache the original signed event JSON for RawEventCache lookups (quoted notes, NIP-18 re-reposts)
+            social.mycelium.android.utils.RawEventCache.put(originalNoteId, content)
             val notePubkey = (jsonObj["pubkey"] as? JsonPrimitive)?.content ?: return null
             val noteCreatedAt = (jsonObj["created_at"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 0L
             val noteContent = (jsonObj["content"] as? JsonPrimitive)?.content ?: ""

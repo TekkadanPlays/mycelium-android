@@ -92,7 +92,8 @@ object EventPublisher {
             Log.d(TAG, "Kind-$kind published: ${signed.id.take(8)} → ${normalized.size} relays")
             _publishedEvents.tryEmit(signed)
 
-            // Track publish results per relay
+            // Track publish results per relay — store signed event for retry capability
+            RelayHealthTracker.storePublishedEvent(signed.id, signed)
             RelayHealthTracker.registerPendingPublish(signed.id, kind, normalized)
             scope.launch {
                 delay(PUBLISH_OK_TIMEOUT_MS)
@@ -138,7 +139,8 @@ object EventPublisher {
             Log.d(TAG, "Kind-${template.kind} published: ${signed.id.take(8)} → ${normalized.size} relays")
             _publishedEvents.tryEmit(signed)
 
-            // Track publish results per relay
+            // Track publish results per relay — store signed event for retry capability
+            RelayHealthTracker.storePublishedEvent(signed.id, signed)
             RelayHealthTracker.registerPendingPublish(signed.id, template.kind, normalized)
             scope.launch {
                 delay(PUBLISH_OK_TIMEOUT_MS)

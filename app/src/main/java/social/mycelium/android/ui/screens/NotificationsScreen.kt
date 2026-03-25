@@ -52,6 +52,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.platform.LocalUriHandler
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.collect
 import java.util.Calendar
@@ -207,7 +208,7 @@ fun NotificationsScreen(
     }
     // Sync: pager swipe -> external tab selection (use settledPage to avoid firing every animation frame)
     LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage }.collect { page ->
+        snapshotFlow { pagerState.settledPage }.distinctUntilChanged().collect { page ->
             if (page != selectedTabIndex) onTabSelected(page)
         }
     }
@@ -244,7 +245,11 @@ fun NotificationsScreen(
                         }
                     },
                     actions = {
-                        val unseenInTab = tabUnseenCounts.getOrElse(selectedTabIndex) { 0 }
+                        // Use pagerState.currentPage directly so the button always
+                        // reflects the tab the user is currently viewing, even during
+                        // animation when selectedTabIndex may lag behind.
+                        val activeTab = pagerState.currentPage
+                        val unseenInTab = tabUnseenCounts.getOrElse(activeTab) { 0 }
                         IconButton(onClick = onNavigateToSettings) {
                             Icon(
                                 Icons.Outlined.Settings,
@@ -255,10 +260,10 @@ fun NotificationsScreen(
                         IconButton(
                             onClick = {
                                 if (unseenInTab > 0) {
-                                    if (selectedTabIndex == 0) {
+                                    if (activeTab == 0) {
                                         NotificationsRepository.markAllAsSeen()
                                     } else {
-                                        val tabFilter = tabs[selectedTabIndex].filter
+                                        val tabFilter = tabs[activeTab].filter
                                         allNotifications.filter(tabFilter).forEach { NotificationsRepository.markAsSeen(it.id) }
                                     }
                                 }
@@ -661,115 +666,223 @@ private fun CompactNotificationRow(
     }
 
     NotificationCardShell(isSeen = isSeen, onClick = onClick) {
-        // Single row: avatar + name + action icon/emoji + action text + zap badge + timestamp
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            ProfilePicture(
-                author = displayAuthor,
-                size = 32.dp,
-                onClick = { notification.author?.id?.let { onProfileClick(it) } }
-            )
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                // Name + action
-                Row(verticalAlignment = Alignment.CenterVertically) {
+        val isConsolidated = notification.actorPubkeys.size > 1
+        if (isConsolidated) {
+            // ── Consolidated view: avatar row + consolidated text ──
+            // Resolve actor authors from profile cache for avatar display
+            val actorAuthors = remember(notification.actorPubkeys) {
+                notification.actorPubkeys.take(6).map { pk ->
+                    profileCache.getAuthor(normalizeAuthorIdForCache(pk))
+                        ?: Author(
+                            id = pk,
+                            username = pk.take(8) + "…",
+                            displayName = pk.take(8) + "…",
+                            avatarUrl = null,
+                            isVerified = false
+                        )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Type icon
+                if (isCustomEmoji && emoji != null) {
+                    val emojiUrls = remember(notification.customEmojiUrls, notification.customEmojiUrl, emoji) {
+                        val urls = notification.customEmojiUrls.toMutableMap()
+                        if (notification.customEmojiUrl != null) urls[emoji] = notification.customEmojiUrl
+                        urls.toMap()
+                    }
+                    social.mycelium.android.ui.components.ReactionEmoji(
+                        emoji = emoji,
+                        customEmojiUrls = emojiUrls,
+                        fontSize = 16.sp,
+                        imageSize = 18.dp,
+                        modifier = Modifier.widthIn(min = 18.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = typeIcon,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = typeColor
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    // Avatar row
+                    AvatarRow(
+                        authors = actorAuthors,
+                        totalCount = notification.actorPubkeys.size,
+                        onProfileClick = onProfileClick,
+                        avatarSize = 24
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    // Consolidated text (e.g. "Alice, Bob, and 3 others liked your post")
                     Text(
-                        text = displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" },
+                        text = notification.text,
                         style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(Modifier.width(4.dp))
-                    // Type icon or emoji
-                    if (isCustomEmoji && emoji != null) {
-                        val emojiUrls = remember(notification.customEmojiUrls, notification.customEmojiUrl, emoji) {
-                            val urls = notification.customEmojiUrls.toMutableMap()
-                            if (notification.customEmojiUrl != null) urls[emoji] = notification.customEmojiUrl
-                            urls.toMap()
-                        }
-                        social.mycelium.android.ui.components.ReactionEmoji(
-                            emoji = emoji,
-                            customEmojiUrls = emojiUrls,
-                            fontSize = 14.sp,
-                            imageSize = 16.dp,
-                            modifier = Modifier.widthIn(min = 16.dp)
-                        )
-                    } else {
-                        Icon(
-                            imageVector = typeIcon,
-                            contentDescription = null,
-                            modifier = Modifier.size(14.dp),
-                            tint = typeColor
-                        )
+                    // Note preview snippet
+                    val rawPreview = notification.targetNote?.content ?: notification.note?.content
+                    val previewText = remember(rawPreview) {
+                        rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
+                            ?.replace(Regex("\\s+"), " ")?.trim()
                     }
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        text = actionText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1
-                    )
-                }
-                // Note preview snippet
-                val rawPreview = notification.targetNote?.content ?: notification.note?.content
-                val previewText = remember(rawPreview) {
-                    rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
-                        ?.replace(Regex("\\s+"), " ")?.trim()
-                }
-                if (!previewText.isNullOrBlank()) {
-                    Text(
-                        text = previewText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        lineHeight = 16.sp
-                    )
-                }
-            }
-            Spacer(Modifier.width(6.dp))
-            // Zap amount badge
-            if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {
-                Surface(
-                    shape = RoundedCornerShape(4.dp),
-                    color = Color(0xFFF59E0B).copy(alpha = 0.15f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Bolt, null, Modifier.size(12.dp), tint = Color(0xFFF59E0B))
-                        Spacer(Modifier.width(2.dp))
+                    if (!previewText.isNullOrBlank()) {
                         Text(
-                            text = formatSatsCompact(notification.zapAmountSats),
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFF59E0B)
+                            text = previewText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            lineHeight = 16.sp
                         )
                     }
                 }
                 Spacer(Modifier.width(6.dp))
-            }
-            // Badge thumbnail
-            if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
-                coil.compose.AsyncImage(
-                    model = notification.badgeImageUrl,
-                    contentDescription = notification.badgeName ?: "Badge",
-                    modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp)),
-                    contentScale = ContentScale.Crop
+                // Zap amount badge
+                if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFFF59E0B).copy(alpha = 0.15f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Bolt, null, Modifier.size(12.dp), tint = Color(0xFFF59E0B))
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                text = formatSatsCompact(notification.zapAmountSats),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFF59E0B)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    text = timeAgo,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline
                 )
-                Spacer(Modifier.width(6.dp))
             }
-            Text(
-                text = timeAgo,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.outline
-            )
+        } else {
+            // ── Single-actor view (unchanged original layout) ──
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ProfilePicture(
+                    author = displayAuthor,
+                    size = 32.dp,
+                    onClick = { notification.author?.id?.let { onProfileClick(it) } }
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    // Name + action
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = displayAuthor.displayName.ifBlank { displayAuthor.id.take(8) + "…" },
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        // Type icon or emoji
+                        if (isCustomEmoji && emoji != null) {
+                            val emojiUrls = remember(notification.customEmojiUrls, notification.customEmojiUrl, emoji) {
+                                val urls = notification.customEmojiUrls.toMutableMap()
+                                if (notification.customEmojiUrl != null) urls[emoji] = notification.customEmojiUrl
+                                urls.toMap()
+                            }
+                            social.mycelium.android.ui.components.ReactionEmoji(
+                                emoji = emoji,
+                                customEmojiUrls = emojiUrls,
+                                fontSize = 14.sp,
+                                imageSize = 16.dp,
+                                modifier = Modifier.widthIn(min = 16.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = typeIcon,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = typeColor
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = actionText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1
+                        )
+                    }
+                    // Note preview snippet
+                    val rawPreview = notification.targetNote?.content ?: notification.note?.content
+                    val previewText = remember(rawPreview) {
+                        rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
+                            ?.replace(Regex("\\s+"), " ")?.trim()
+                    }
+                    if (!previewText.isNullOrBlank()) {
+                        Text(
+                            text = previewText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+                Spacer(Modifier.width(6.dp))
+                // Zap amount badge
+                if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = Color(0xFFF59E0B).copy(alpha = 0.15f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Bolt, null, Modifier.size(12.dp), tint = Color(0xFFF59E0B))
+                            Spacer(Modifier.width(2.dp))
+                            Text(
+                                text = formatSatsCompact(notification.zapAmountSats),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFF59E0B)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
+                // Badge thumbnail
+                if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
+                    coil.compose.AsyncImage(
+                        model = notification.badgeImageUrl,
+                        contentDescription = notification.badgeName ?: "Badge",
+                        modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp)),
+                        contentScale = ContentScale.Crop
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    text = timeAgo,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
         }
     }
 }

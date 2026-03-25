@@ -111,6 +111,14 @@ import java.util.*
 import java.util.concurrent.TimeUnit
 
 /**
+ * Composition local that provides the feed [LazyListState] to nested composables.
+ * Used by [QuotedNoteExpandedState] to restore exact scroll offset when collapsing
+ * embedded events ("Show less") so the viewport doesn't jump.
+ */
+val LocalFeedListState =
+    androidx.compose.runtime.compositionLocalOf<androidx.compose.foundation.lazy.LazyListState?> { null }
+
+/**
  * Persistent expanded state for quoted notes — survives LazyColumn recycling and
  * fullscreen navigation (e.g. video player back gesture).
  * Keyed by rootParentNoteId so that all nested quotes in a tree expand/collapse
@@ -124,9 +132,33 @@ object QuotedNoteExpandedState {
     fun isExpanded(rootParentNoteId: String, @Suppress("UNUSED_PARAMETER") eventId: String): Boolean =
         map[rootParentNoteId] ?: false
 
-    /** Toggle the entire quote tree under [rootParentNoteId]. */
-    fun toggle(rootParentNoteId: String, @Suppress("UNUSED_PARAMETER") eventId: String) {
-        map[rootParentNoteId] = !(map[rootParentNoteId] ?: false)
+    /**
+     * Toggle the entire quote tree under [rootParentNoteId].
+     * When collapsing, captures the current scroll position from [listState]
+     * and schedules a restore after recomposition so the viewport doesn't jump.
+     */
+    fun toggle(
+        rootParentNoteId: String,
+        @Suppress("UNUSED_PARAMETER") eventId: String,
+        listState: androidx.compose.foundation.lazy.LazyListState? = null,
+        coroutineScope: kotlinx.coroutines.CoroutineScope? = null
+    ) {
+        val wasExpanded = map[rootParentNoteId] ?: false
+        // Snapshot scroll position BEFORE toggling (only on collapse)
+        val savedIndex = listState?.firstVisibleItemIndex
+        val savedOffset = listState?.firstVisibleItemScrollOffset
+
+        map[rootParentNoteId] = !wasExpanded
+
+        // On collapse, restore scroll offset so viewport stays anchored
+        if (wasExpanded && savedIndex != null && savedOffset != null && coroutineScope != null && listState != null) {
+            coroutineScope.launch {
+                // Wait one frame for recomposition to settle
+                kotlinx.coroutines.delay(50)
+                listState.scrollToItem(savedIndex, savedOffset)
+            }
+        }
+
         if (map.size > MAX_ENTRIES) {
             val keysToRemove = map.keys.take(map.size - MAX_ENTRIES)
             keysToRemove.forEach { map.remove(it) }
@@ -145,10 +177,13 @@ object QuotedNoteExpandedState {
 enum class ActionRowSchema {
     /** Kind-1 home feed (no reply button). */
     KIND1_FEED,
+
     /** Kind-1 thread root note (shows reply button). */
     KIND1_REPLY,
+
     /** Kind-11 topics feed, kind-11 thread root. */
     KIND11_FEED,
+
     /** Kind-1111 replies to kind-11 threads. */
     KIND1111_REPLY,
 }
@@ -180,8 +215,19 @@ internal fun QuotedNoteBody(
     countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     depth: Int = 0,
     rootParentNoteId: String = "",
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
     val uriHandler = LocalUriHandler.current
+    // Track which media URLs are rendered by content blocks (from the snippet).
+    // Any full-content media not in this set gets a collapsed preview below.
+    val renderedMediaUrls = remember(contentBlocks) {
+        contentBlocks.filterIsInstance<NoteContentBlock.MediaGroup>()
+            .flatMap { it.urls }.toSet()
+    }
+    // Coroutine scope for scroll-after-collapse
+    val collapseScope = rememberCoroutineScope()
+
     contentBlocks.forEach { qBlock ->
         when (qBlock) {
             is NoteContentBlock.Content -> {
@@ -206,9 +252,13 @@ internal fun QuotedNoteBody(
                             maxLines = if (isExpanded) Int.MAX_VALUE else 6,
                             emojiUrls = qBlock.emojiUrls,
                             onClick = { offset ->
-                                val profile = qAnnotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                val url = qAnnotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                val relay = qAnnotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
+                                val profile =
+                                    qAnnotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset)
+                                        .firstOrNull()
+                                val url = qAnnotated.getStringAnnotations(tag = "URL", start = offset, end = offset)
+                                    .firstOrNull()
+                                val relay = qAnnotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset)
+                                    .firstOrNull()
                                 when {
                                     profile != null -> onProfileClick(profile.item)
                                     relay != null -> onRelayClick(relay.item)
@@ -222,12 +272,21 @@ internal fun QuotedNoteBody(
                                             likes = 0, shares = 0, comments = 0,
                                             isLiked = false, hashtags = emptyList(),
                                             mediaUrls = quotedMediaUrls.toList(),
-                                            quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(meta.fullContent),
+                                            quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(
+                                                meta.fullContent
+                                            ),
                                             isReply = meta.rootNoteId != null,
                                             rootNoteId = meta.rootNoteId,
                                             relayUrl = meta.relayUrl,
                                             relayUrls = listOfNotNull(meta.relayUrl),
-                                            kind = meta.kind
+                                            kind = meta.kind,
+                                            tags = meta.tags,
+                                            pollData = if (meta.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(
+                                                meta.tags
+                                            ) else null,
+                                            zapPollData = if (meta.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(
+                                                meta.tags
+                                            ) else null
                                         )
                                         onNoteClick(quotedNote)
                                     }
@@ -237,6 +296,7 @@ internal fun QuotedNoteBody(
                     }
                 }
             }
+
             is NoteContentBlock.MediaGroup -> {
                 val qMediaList = qBlock.urls.take(6)
                 if (qMediaList.isNotEmpty()) {
@@ -251,7 +311,8 @@ internal fun QuotedNoteBody(
                         val currentImgUrl = qImageUrls.getOrNull(qPagerState.currentPage)
                         // Lock ratio at first composition — never resize mid-view
                         val imgRatio by remember(qImageUrls) {
-                            val initial = currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
+                            val initial =
+                                currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
                             mutableFloatStateOf((initial ?: (16f / 9f)).coerceIn(0.4f, 2.5f))
                         }
                         Box(
@@ -282,7 +343,8 @@ internal fun QuotedNoteBody(
                                     when (painter.state) {
                                         is coil.compose.AsyncImagePainter.State.Loading -> {
                                             Box(
-                                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
+                                                modifier = Modifier.fillMaxSize()
+                                                    .background(Color.Black.copy(alpha = 0.1f)),
                                                 contentAlignment = Alignment.Center
                                             ) {
                                                 CircularProgressIndicator(
@@ -292,14 +354,22 @@ internal fun QuotedNoteBody(
                                                 )
                                             }
                                         }
+
                                         is coil.compose.AsyncImagePainter.State.Error -> {
                                             Box(
-                                                modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.08f)),
+                                                modifier = Modifier.fillMaxSize()
+                                                    .background(Color.Black.copy(alpha = 0.08f)),
                                                 contentAlignment = Alignment.Center
                                             ) {
-                                                Icon(Icons.Outlined.BrokenImage, null, Modifier.size(24.dp), tint = Color.Gray)
+                                                Icon(
+                                                    Icons.Outlined.BrokenImage,
+                                                    null,
+                                                    Modifier.size(24.dp),
+                                                    tint = Color.Gray
+                                                )
                                             }
                                         }
+
                                         is coil.compose.AsyncImagePainter.State.Success -> {
                                             androidx.compose.foundation.Image(
                                                 painter = painter,
@@ -308,17 +378,23 @@ internal fun QuotedNoteBody(
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             SideEffect {
-                                                val success = painter.state as? coil.compose.AsyncImagePainter.State.Success
+                                                val success =
+                                                    painter.state as? coil.compose.AsyncImagePainter.State.Success
                                                 val drawable = success?.result?.drawable
                                                 if (drawable != null) {
                                                     val w = drawable.intrinsicWidth
                                                     val h = drawable.intrinsicHeight
                                                     if (w > 0 && h > 0) {
-                                                        social.mycelium.android.utils.MediaAspectRatioCache.add(imgUrl, w, h)
+                                                        social.mycelium.android.utils.MediaAspectRatioCache.add(
+                                                            imgUrl,
+                                                            w,
+                                                            h
+                                                        )
                                                     }
                                                 }
                                             }
                                         }
+
                                         else -> {}
                                     }
                                 }
@@ -403,6 +479,7 @@ internal fun QuotedNoteBody(
                     }
                 }
             }
+
             is NoteContentBlock.Preview -> {
                 UrlPreviewCard(
                     previewInfo = qBlock.previewInfo,
@@ -410,12 +487,16 @@ internal fun QuotedNoteBody(
                     onUrlLongClick = { }
                 )
             }
+
             is NoteContentBlock.QuotedNote -> {
                 if (depth < 2) {
                     // Recursive rendering: fetch and display the nested quoted note
                     val nestedEventId = qBlock.eventId
                     val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
-                    val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+                    val linkStyle = SpanStyle(
+                        color = MaterialTheme.colorScheme.primary,
+                        textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+                    )
                     var nestedMeta by remember(nestedEventId) { mutableStateOf(QuotedNoteCache.getCached(nestedEventId)) }
                     if (nestedMeta == null) {
                         LaunchedEffect(nestedEventId) {
@@ -442,6 +523,8 @@ internal fun QuotedNoteBody(
                             countsByNoteId = countsByNoteId,
                             depth = depth + 1,
                             rootParentNoteId = rootParentNoteId,
+                            myPubkey = myPubkey,
+                            onPollVote = onPollVote,
                         )
                     } else {
                         // Loading or failed — show placeholder
@@ -450,28 +533,81 @@ internal fun QuotedNoteBody(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
-                            Text("Loading quoted note\u2026", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(12.dp),
+                                strokeWidth = 1.5.dp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            )
+                            Text(
+                                "Loading quoted note\u2026",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            )
                         }
                     }
                 } else {
-                    // Max depth reached — show clickable link
+                    // Max depth reached — show clickable link; look up QuotedNoteCache for full data
                     Row(
                         modifier = Modifier
                             .padding(vertical = 2.dp)
                             .clip(RoundedCornerShape(4.dp))
                             .clickable {
+                                val cached =
+                                    social.mycelium.android.repository.QuotedNoteCache.getCached(qBlock.eventId)
                                 val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
-                                val qAuthor = profileCache.resolveAuthor(qBlock.eventId)
-                                onNoteClick(Note(
-                                    id = qBlock.eventId,
-                                    author = qAuthor,
-                                    content = "",
-                                    timestamp = 0L,
-                                    likes = 0, shares = 0, comments = 0,
-                                    isLiked = false, hashtags = emptyList(),
-                                    mediaUrls = emptyList(), isReply = false,
-                                ))
+                                if (cached != null) {
+                                    val qAuthor = profileCache.resolveAuthor(cached.authorId)
+                                    val qMediaUrls =
+                                        social.mycelium.android.utils.UrlDetector.findUrls(cached.fullContent)
+                                            .filter {
+                                                social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(
+                                                    it
+                                                )
+                                            }
+                                    onNoteClick(
+                                        Note(
+                                            id = cached.eventId,
+                                            author = qAuthor,
+                                            content = cached.fullContent,
+                                            timestamp = cached.createdAt,
+                                            likes = 0, shares = 0, comments = 0,
+                                            isLiked = false, hashtags = emptyList(),
+                                            mediaUrls = qMediaUrls,
+                                            quotedEventIds = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(
+                                                cached.fullContent
+                                            ),
+                                            isReply = cached.rootNoteId != null,
+                                            rootNoteId = cached.rootNoteId,
+                                            relayUrl = cached.relayUrl,
+                                            relayUrls = listOfNotNull(cached.relayUrl),
+                                            kind = cached.kind,
+                                            tags = cached.tags,
+                                            pollData = if (cached.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(
+                                                cached.tags
+                                            ) else null,
+                                            zapPollData = if (cached.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(
+                                                cached.tags
+                                            ) else null
+                                        )
+                                    )
+                                } else {
+                                    // Fallback: no cached data, navigate with minimal Note (thread view will re-fetch)
+                                    onNoteClick(
+                                        Note(
+                                            id = qBlock.eventId,
+                                            author = social.mycelium.android.data.Author(
+                                                id = qBlock.eventId,
+                                                username = qBlock.eventId.take(8) + "…",
+                                                displayName = qBlock.eventId.take(8) + "…"
+                                            ),
+                                            content = "",
+                                            timestamp = 0L,
+                                            likes = 0, shares = 0, comments = 0,
+                                            isLiked = false, hashtags = emptyList(),
+                                            mediaUrls = emptyList(), isReply = false,
+                                        )
+                                    )
+                                }
                             }
                             .padding(horizontal = 4.dp, vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -491,6 +627,7 @@ internal fun QuotedNoteBody(
                     }
                 }
             }
+
             is NoteContentBlock.LiveEventReference -> {
                 Row(
                     modifier = Modifier.padding(vertical = 2.dp),
@@ -510,6 +647,7 @@ internal fun QuotedNoteBody(
                     )
                 }
             }
+
             is NoteContentBlock.EmojiPack -> {
                 EmojiPackGrid(
                     author = qBlock.author,
@@ -517,12 +655,39 @@ internal fun QuotedNoteBody(
                     relayHints = qBlock.relayHints
                 )
             }
+
             is NoteContentBlock.Article -> {
                 EmbeddedArticlePreview(
                     author = qBlock.author,
                     dTag = qBlock.dTag,
                     relayHints = qBlock.relayHints,
                     onNoteClick = onNoteClick
+                )
+            }
+        }
+    }
+
+    // ── Collapsed media preview: show first image from full content if not in snippet ──
+    if (!isExpanded && quotedMediaUrls.isNotEmpty()) {
+        val unrenderedMedia = remember(quotedMediaUrls, renderedMediaUrls) {
+            quotedMediaUrls.filter { it !in renderedMediaUrls }
+                .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) }
+                .take(1) // Show just the first unrendered image as a teaser
+        }
+        if (unrenderedMedia.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            unrenderedMedia.forEach { imgUrl ->
+                val knownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
+                val ratio = (knownRatio ?: (16f / 9f)).coerceIn(1.2f, 2.5f) // Wider ratio for collapsed preview
+                coil.compose.AsyncImage(
+                    model = imgUrl,
+                    contentDescription = null,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(ratio)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onOpenImageViewer(unrenderedMedia, 0) }
                 )
             }
         }
@@ -566,8 +731,12 @@ internal fun QuotedNoteContent(
     countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
     depth: Int = 0,
     rootParentNoteId: String = parentNoteId,
+    myPubkey: String? = null,
+    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
     val uriHandler = LocalUriHandler.current
+    val feedListState = LocalFeedListState.current
+    val toggleScope = rememberCoroutineScope()
     // All nesting levels share the root parent's expand state so they toggle together
     val quotedExpanded = QuotedNoteExpandedState.isExpanded(rootParentNoteId, meta.eventId)
     val hasMore = meta.fullContent.length > meta.contentSnippet.length
@@ -575,7 +744,11 @@ internal fun QuotedNoteContent(
     val quotedDisplayContent = if (quotedExpanded) meta.fullContent else meta.contentSnippet
     val quotedMediaUrls = remember(meta.fullContent) {
         social.mycelium.android.utils.UrlDetector.findUrls(meta.fullContent)
-            .filter { social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(it) }
+            .filter {
+                social.mycelium.android.utils.UrlDetector.isImageUrl(it) || social.mycelium.android.utils.UrlDetector.isVideoUrl(
+                    it
+                )
+            }
             .toSet()
     }
     val quotedIsMarkdown = remember(quotedDisplayContent) { isMarkdown(quotedDisplayContent) }
@@ -622,7 +795,11 @@ internal fun QuotedNoteContent(
     }
 
     val quotedCacheKey = remember(quotedDisplayContent, quotedMediaUrls, quotedMentionVersion) {
-        social.mycelium.android.utils.ContentBlockCache.key(quotedDisplayContent, quotedMediaUrls, mentionVersion = quotedMentionVersion)
+        social.mycelium.android.utils.ContentBlockCache.key(
+            quotedDisplayContent,
+            quotedMediaUrls,
+            mentionVersion = quotedMentionVersion
+        )
     }
     val quotedContentBlocks by produceState(
         initialValue = social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey) ?: emptyList(),
@@ -660,7 +837,10 @@ internal fun QuotedNoteContent(
             rootNoteId = meta.rootNoteId,
             relayUrl = meta.relayUrl,
             relayUrls = listOfNotNull(meta.relayUrl),
-            kind = meta.kind
+            kind = meta.kind,
+            tags = meta.tags,
+            pollData = if (meta.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(meta.tags) else null,
+            zapPollData = if (meta.kind == 6969) social.mycelium.android.data.ZapPollData.parseFromTags(meta.tags) else null
         )
         onNoteClick(quotedNote)
     }
@@ -681,18 +861,24 @@ internal fun QuotedNoteContent(
             )
             .clickable(onClick = navigateToQuotedNote)
     ) {
-        Column(modifier = Modifier
-            .padding(start = 10.dp, top = 2.dp, bottom = 2.dp)
-            .fillMaxWidth()
-            .drawBehind {
-                drawRoundRect(
-                    color = accentColor,
-                    topLeft = Offset(-10.dp.toPx(), -2.dp.toPx()),
-                    size = androidx.compose.ui.geometry.Size(accentWidthPx, size.height + 4.dp.toPx()),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(accentCornerPx, accentCornerPx)
+        Column(
+            modifier = Modifier
+                .padding(start = 10.dp, top = 2.dp, bottom = 2.dp)
+                .fillMaxWidth()
+                .drawBehind {
+                    drawRoundRect(
+                        color = accentColor,
+                        topLeft = Offset(-10.dp.toPx(), -2.dp.toPx()),
+                        size = androidx.compose.ui.geometry.Size(accentWidthPx, size.height + 4.dp.toPx()),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(accentCornerPx, accentCornerPx)
+                    )
+                }
+                .animateContentSize(
+                    animationSpec = androidx.compose.animation.core.tween(
+                        durationMillis = 300,
+                        easing = FastOutSlowInEasing
+                    )
                 )
-            }
-            .animateContentSize(animationSpec = androidx.compose.animation.core.tween(durationMillis = 300, easing = FastOutSlowInEasing))
         ) {
             // ── Header row: author (left) + counters & emojis (right) ──
             Row(
@@ -724,7 +910,12 @@ internal fun QuotedNoteContent(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (qReactionCount > 0) {
                                 qReactionsList.distinct().take(3).forEach { emoji ->
-                                    ReactionEmoji(emoji = emoji, customEmojiUrls = qEmojiUrls, fontSize = 11.sp, imageSize = 12.dp)
+                                    ReactionEmoji(
+                                        emoji = emoji,
+                                        customEmojiUrls = qEmojiUrls,
+                                        fontSize = 11.sp,
+                                        imageSize = 12.dp
+                                    )
                                 }
                                 if (qReactionCount > 1) {
                                     Text(" $qReactionCount", style = cStyle, color = reactColor)
@@ -734,7 +925,12 @@ internal fun QuotedNoteContent(
                                 Text(" · ", style = cStyle, color = mutedColor)
                             }
                             if (qReplyCount > 0) {
-                                Icon(Icons.Outlined.ChatBubbleOutline, null, modifier = Modifier.size(12.dp), tint = replyColor)
+                                Icon(
+                                    Icons.Outlined.ChatBubbleOutline,
+                                    null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = replyColor
+                                )
                                 Text(" $qReplyCount", style = cStyle, color = replyColor)
                             }
                             if (qReplyCount > 0 && qZapSats > 0) {
@@ -760,7 +956,7 @@ internal fun QuotedNoteContent(
                 quotedAuthor = quotedAuthor,
                 quotedMediaUrls = quotedMediaUrls,
                 isVisible = isVisible,
-                onExpandToggle = { QuotedNoteExpandedState.toggle(rootParentNoteId, meta.eventId) },
+                onExpandToggle = { QuotedNoteExpandedState.toggle(rootParentNoteId, meta.eventId, feedListState, toggleScope) },
                 onProfileClick = onProfileClick,
                 onNoteClick = onNoteClick,
                 onVideoClick = onVideoClick,
@@ -770,7 +966,42 @@ internal fun QuotedNoteContent(
                 countsByNoteId = countsByNoteId,
                 depth = depth,
                 rootParentNoteId = rootParentNoteId,
+                myPubkey = myPubkey,
+                onPollVote = onPollVote,
             )
+
+            // ── Embedded poll for quoted kind-1068/6969 events (recursive polling) ──
+            if (meta.kind == 1068 && meta.tags.isNotEmpty()) {
+                val embeddedPollData = remember(meta.tags) {
+                    social.mycelium.android.data.PollData.parseFromTags(meta.tags)
+                }
+                if (embeddedPollData != null) {
+                    PollBlock(
+                        pollData = embeddedPollData,
+                        noteId = meta.eventId,
+                        noteAuthorPubkey = meta.authorId,
+                        relayUrls = listOfNotNull(meta.relayUrl),
+                        myPubkey = myPubkey,
+                        onVote = { nId, authorPk, selections, relayHint ->
+                            onPollVote?.invoke(nId, authorPk, selections, relayHint)
+                        },
+                    )
+                }
+            }
+            if (meta.kind == 6969 && meta.tags.isNotEmpty()) {
+                val embeddedZapPollData = remember(meta.tags) {
+                    social.mycelium.android.data.ZapPollData.parseFromTags(meta.tags)
+                }
+                if (embeddedZapPollData != null) {
+                    ZapPollBlock(
+                        zapPollData = embeddedZapPollData,
+                        noteId = meta.eventId,
+                        noteAuthorPubkey = meta.authorId,
+                        relayUrls = listOfNotNull(meta.relayUrl),
+                        myPubkey = myPubkey,
+                    )
+                }
+            }
         }
     }
 }
@@ -831,6 +1062,7 @@ internal fun NoteMediaCarousel(
                 // Let the parent consume all vertical scroll — pager only gets horizontal
                 return if (abs(available.y) > abs(available.x)) available.copy(x = 0f) else Offset.Zero
             }
+
             override suspend fun onPreFling(available: Velocity): Velocity {
                 return if (abs(available.y) > abs(available.x)) available.copy(x = 0f) else Velocity.Zero
             }
@@ -944,7 +1176,11 @@ internal fun NoteMediaCarousel(
                         }
                         // Error overlay
                         if (painterState is AsyncImagePainter.State.Error) {
-                            android.util.Log.e("NoteMediaCarousel", "Image load failed: url=$url error=${painterState.result.throwable.message}", painterState.result.throwable)
+                            android.util.Log.e(
+                                "NoteMediaCarousel",
+                                "Image load failed: url=$url error=${painterState.result.throwable.message}",
+                                painterState.result.throwable
+                            )
                             Box(
                                 modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.1f)),
                                 contentAlignment = Alignment.Center
@@ -1069,335 +1305,390 @@ private fun NoteDetailsPanel(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                    // Boosts summary row (tappable)
-                    if (hasBoosts) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { boostsExpanded = !boostsExpanded }
-                                .padding(vertical = 2.dp)
+                // Boosts summary row (tappable)
+                if (hasBoosts) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { boostsExpanded = !boostsExpanded }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Repeat,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        val boostAvatars = boostAuthors.take(5)
+                        Box(modifier = Modifier.width((20 + (boostAvatars.size - 1).coerceAtLeast(0) * 12).dp)) {
+                            boostAvatars.forEachIndexed { i, author ->
+                                Box(modifier = Modifier.offset(x = (i * 12).dp)) {
+                                    ProfilePicture(
+                                        author = author,
+                                        size = 20.dp,
+                                        onClick = { onProfileClick(author.id) })
+                                }
+                            }
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "${boostAuthors.size} boost${if (boostAuthors.size != 1) "s" else ""}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Icon(
+                            imageVector = if (boostsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                    // Expanded: 3 latest boosters
+                    AnimatedVisibility(
+                        visible = boostsExpanded,
+                        enter = expandVertically(),
+                        exit = shrinkVertically()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(start = 22.dp, top = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.Repeat,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            val boostAvatars = boostAuthors.take(5)
-                            Box(modifier = Modifier.width((20 + (boostAvatars.size - 1).coerceAtLeast(0) * 12).dp)) {
-                                boostAvatars.forEachIndexed { i, author ->
-                                    Box(modifier = Modifier.offset(x = (i * 12).dp)) {
-                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
+                            boostAuthors.take(3).forEach { author ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp)
+                                ) {
+                                    ProfilePicture(
+                                        author = author,
+                                        size = 20.dp,
+                                        onClick = { onProfileClick(author.id) })
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        text = authorDisplayLabel(author),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.clickable { onProfileClick(author.id) }
+                                    )
+                                }
+                            }
+                            if (boostAuthors.size > 3 && onSeeAllReactions != null) {
+                                Text(
+                                    text = "see all ${boostAuthors.size} boosts",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clickable { onSeeAllReactions() }
+                                        .padding(vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Reactions summary row (tappable)
+                if (hasReactions) {
+                    val detailReactionAuthors = overrideReactionAuthors ?: emptyMap()
+                    // Sort emojis by actual popularity (number of authors), not just presence
+                    val grouped = remember(detailReactions, detailReactionAuthors) {
+                        detailReactions.map { emoji ->
+                            emoji to (detailReactionAuthors[emoji]?.size ?: 1)
+                        }.sortedByDescending { it.second }
+                    }
+                    val totalReactionCount = if (detailReactionAuthors.isNotEmpty()) {
+                        detailReactionAuthors.values.sumOf { it.size }
+                    } else detailReactions.size
+                    val detailEmojiUrls = overrideCustomEmojiUrls ?: emptyMap()
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { reactionsExpanded = !reactionsExpanded }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Favorite,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = Color(0xFFE91E63)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Reactions",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        // Show top 5 emoji chips inline sorted by popularity
+                        val showcased = grouped.take(5)
+                        showcased.forEach { (emoji, count) ->
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    ReactionEmoji(
+                                        emoji = emoji,
+                                        customEmojiUrls = detailEmojiUrls,
+                                        fontSize = 13.sp,
+                                        imageSize = 14.dp
+                                    )
+                                    if (count > 1) {
+                                        Spacer(Modifier.width(2.dp))
+                                        Text(
+                                            text = "$count",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     }
                                 }
                             }
-                            Spacer(Modifier.width(8.dp))
+                        }
+                        Spacer(Modifier.weight(1f))
+                        if (totalReactionCount > 0) {
                             Text(
-                                text = "${boostAuthors.size} boost${if (boostAuthors.size != 1) "s" else ""}",
+                                text = "$totalReactionCount",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFE57373)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        Icon(
+                            imageVector = if (reactionsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                    // Expanded: 3 latest individual reactions across all emojis
+                    AnimatedVisibility(
+                        visible = reactionsExpanded,
+                        enter = expandVertically(),
+                        exit = shrinkVertically()
+                    ) {
+                        val rxProfileCache = remember { ProfileMetadataCache.getInstance() }
+                        // Build flat list of (emoji, pubkey) pairs — latest 3
+                        val latestReactions = remember(overrideReactionAuthors) {
+                            val flat = mutableListOf<Pair<String, String>>()
+                            overrideReactionAuthors?.forEach { (emoji, authors) ->
+                                authors.forEach { pubkey -> flat.add(emoji to pubkey) }
+                            }
+                            flat.takeLast(3).reversed() // latest first
+                        }
+                        val rxPubkeys = remember(latestReactions) { latestReactions.map { it.second }.distinct() }
+                        var rxProfileRevision by remember { mutableIntStateOf(0) }
+                        LaunchedEffect(rxPubkeys) {
+                            val uncached = rxPubkeys.filter { rxProfileCache.getAuthor(it) == null }
+                            if (uncached.isNotEmpty()) rxProfileCache.requestProfiles(
+                                uncached,
+                                rxProfileCache.getConfiguredRelayUrls()
+                            )
+                        }
+                        LaunchedEffect(Unit) { rxProfileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) rxProfileRevision++ } }
+                        @Suppress("UNUSED_EXPRESSION") rxProfileRevision
+                        Column(
+                            modifier = Modifier.padding(start = 22.dp, top = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            latestReactions.forEach { (emoji, pubkey) ->
+                                val author = rxProfileCache.resolveAuthor(pubkey)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp)
+                                ) {
+                                    ReactionEmoji(
+                                        emoji = emoji,
+                                        customEmojiUrls = detailEmojiUrls,
+                                        fontSize = 14.sp,
+                                        imageSize = 16.dp
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    ProfilePicture(
+                                        author = author,
+                                        size = 20.dp,
+                                        onClick = { onProfileClick(author.id) })
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        text = authorDisplayLabel(author),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.clickable { onProfileClick(author.id) }
+                                    )
+                                }
+                            }
+                            if (totalReactionCount > 3 && onSeeAllReactions != null) {
+                                Text(
+                                    text = "see all $totalReactionCount reactions",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .clickable { onSeeAllReactions() }
+                                        .padding(vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Zaps summary row (tappable)
+                if (hasZaps) {
+                    val detailZapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { zapsExpanded = !zapsExpanded }
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Bolt,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = Color(0xFFF59E0B)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        if (detailZapTotalSats > 0) {
+                            Text(
+                                text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(detailZapTotalSats)} sats",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFF59E0B)
+                            )
+                            Text(
+                                text = " ($detailZapCount zap${if (detailZapCount != 1) "s" else ""})",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.weight(1f)
                             )
-                            Icon(
-                                imageVector = if (boostsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                            )
-                        }
-                        // Expanded: 3 latest boosters
-                        AnimatedVisibility(visible = boostsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                boostAuthors.take(3).forEach { author ->
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 2.dp)
-                                    ) {
-                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                        Spacer(Modifier.width(8.dp))
-                                        Text(
-                                            text = authorDisplayLabel(author),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.clickable { onProfileClick(author.id) }
-                                        )
-                                    }
-                                }
-                                if (boostAuthors.size > 3 && onSeeAllReactions != null) {
-                                    Text(
-                                        text = "see all ${boostAuthors.size} boosts",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier
-                                            .clickable { onSeeAllReactions() }
-                                            .padding(vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Reactions summary row (tappable)
-                    if (hasReactions) {
-                        val detailReactionAuthors = overrideReactionAuthors ?: emptyMap()
-                        // Sort emojis by actual popularity (number of authors), not just presence
-                        val grouped = remember(detailReactions, detailReactionAuthors) {
-                            detailReactions.map { emoji ->
-                                emoji to (detailReactionAuthors[emoji]?.size ?: 1)
-                            }.sortedByDescending { it.second }
-                        }
-                        val totalReactionCount = if (detailReactionAuthors.isNotEmpty()) {
-                            detailReactionAuthors.values.sumOf { it.size }
-                        } else detailReactions.size
-                        val detailEmojiUrls = overrideCustomEmojiUrls ?: emptyMap()
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { reactionsExpanded = !reactionsExpanded }
-                                .padding(vertical = 2.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Favorite,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = Color(0xFFE91E63)
-                            )
-                            Spacer(Modifier.width(8.dp))
+                        } else {
                             Text(
-                                text = "Reactions",
+                                text = "$detailZapCount zap${if (detailZapCount != 1) "s" else ""}",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            // Show top 5 emoji chips inline sorted by popularity
-                            val showcased = grouped.take(5)
-                            showcased.forEach { (emoji, count) ->
-                                Surface(
-                                    shape = RoundedCornerShape(12.dp),
-                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                    modifier = Modifier.padding(end = 4.dp)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 13.sp, imageSize = 14.dp)
-                                        if (count > 1) {
-                                            Spacer(Modifier.width(2.dp))
-                                            Text(text = "$count", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        }
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.weight(1f))
-                            if (totalReactionCount > 0) {
-                                Text(
-                                    text = "$totalReactionCount",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color(0xFFE57373)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                            }
-                            Icon(
-                                imageVector = if (reactionsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
                             )
                         }
-                        // Expanded: 3 latest individual reactions across all emojis
-                        AnimatedVisibility(visible = reactionsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                            val rxProfileCache = remember { ProfileMetadataCache.getInstance() }
-                            // Build flat list of (emoji, pubkey) pairs — latest 3
-                            val latestReactions = remember(overrideReactionAuthors) {
-                                val flat = mutableListOf<Pair<String, String>>()
-                                overrideReactionAuthors?.forEach { (emoji, authors) ->
-                                    authors.forEach { pubkey -> flat.add(emoji to pubkey) }
-                                }
-                                flat.takeLast(3).reversed() // latest first
-                            }
-                            val rxPubkeys = remember(latestReactions) { latestReactions.map { it.second }.distinct() }
-                            var rxProfileRevision by remember { mutableIntStateOf(0) }
-                            LaunchedEffect(rxPubkeys) {
-                                val uncached = rxPubkeys.filter { rxProfileCache.getAuthor(it) == null }
-                                if (uncached.isNotEmpty()) rxProfileCache.requestProfiles(uncached, rxProfileCache.getConfiguredRelayUrls())
-                            }
-                            LaunchedEffect(Unit) { rxProfileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) rxProfileRevision++ } }
-                            @Suppress("UNUSED_EXPRESSION") rxProfileRevision
-                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                latestReactions.forEach { (emoji, pubkey) ->
-                                    val author = rxProfileCache.resolveAuthor(pubkey)
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 2.dp)
-                                    ) {
-                                        ReactionEmoji(emoji = emoji, customEmojiUrls = detailEmojiUrls, fontSize = 14.sp, imageSize = 16.dp)
-                                        Spacer(Modifier.width(6.dp))
-                                        ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(
-                                            text = authorDisplayLabel(author),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.clickable { onProfileClick(author.id) }
-                                        )
-                                    }
-                                }
-                                if (totalReactionCount > 3 && onSeeAllReactions != null) {
-                                    Text(
-                                        text = "see all $totalReactionCount reactions",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier
-                                            .clickable { onSeeAllReactions() }
-                                            .padding(vertical = 2.dp)
-                                    )
-                                }
-                            }
-                        }
+                        Icon(
+                            imageVector = if (zapsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
                     }
-
-                    // Zaps summary row (tappable)
-                    if (hasZaps) {
-                        val detailZapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { zapsExpanded = !zapsExpanded }
-                                .padding(vertical = 2.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Bolt,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                                tint = Color(0xFFF59E0B)
+                    // Expanded: 3 latest zappers
+                    AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
+                        val zapProfileCache = remember { ProfileMetadataCache.getInstance() }
+                        val allZapPubkeys =
+                            remember(overrideZapAuthors) { overrideZapAuthors?.distinct() ?: emptyList() }
+                        var zapProfileRevision by remember { mutableIntStateOf(0) }
+                        LaunchedEffect(allZapPubkeys) {
+                            val uncached = allZapPubkeys.filter { zapProfileCache.getAuthor(it) == null }
+                            if (uncached.isNotEmpty()) zapProfileCache.requestProfiles(
+                                uncached,
+                                zapProfileCache.getConfiguredRelayUrls()
                             )
-                            Spacer(Modifier.width(8.dp))
-                            if (detailZapTotalSats > 0) {
+                        }
+                        LaunchedEffect(Unit) { zapProfileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
+                        @Suppress("UNUSED_EXPRESSION") zapProfileRevision
+                        Column(
+                            modifier = Modifier.padding(start = 22.dp, top = 2.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            if (isZapped && myZappedAmount != null && myZappedAmount > 0) {
                                 Text(
-                                    text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(detailZapTotalSats)} sats",
+                                    text = "You zapped $myZappedAmount sats",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Color(0xFFF59E0B)
                                 )
-                                Text(
-                                    text = " ($detailZapCount zap${if (detailZapCount != 1) "s" else ""})",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f)
-                                )
-                            } else {
-                                Text(
-                                    text = "$detailZapCount zap${if (detailZapCount != 1) "s" else ""}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.weight(1f)
-                                )
                             }
-                            Icon(
-                                imageVector = if (zapsExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                            )
-                        }
-                        // Expanded: 3 latest zappers
-                        AnimatedVisibility(visible = zapsExpanded, enter = expandVertically(), exit = shrinkVertically()) {
-                            val zapProfileCache = remember { ProfileMetadataCache.getInstance() }
-                            val allZapPubkeys = remember(overrideZapAuthors) { overrideZapAuthors?.distinct() ?: emptyList() }
-                            var zapProfileRevision by remember { mutableIntStateOf(0) }
-                            LaunchedEffect(allZapPubkeys) {
-                                val uncached = allZapPubkeys.filter { zapProfileCache.getAuthor(it) == null }
-                                if (uncached.isNotEmpty()) zapProfileCache.requestProfiles(uncached, zapProfileCache.getConfiguredRelayUrls())
-                            }
-                            LaunchedEffect(Unit) { zapProfileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
-                            @Suppress("UNUSED_EXPRESSION") zapProfileRevision
-                            Column(modifier = Modifier.padding(start = 22.dp, top = 2.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                if (isZapped && myZappedAmount != null && myZappedAmount > 0) {
-                                    Text(
-                                        text = "You zapped $myZappedAmount sats",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = Color(0xFFF59E0B)
-                                    )
+                            if (!overrideZapAuthors.isNullOrEmpty()) {
+                                val sortedZapAuthors = remember(overrideZapAuthors, overrideZapAmountByAuthor) {
+                                    overrideZapAuthors.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
                                 }
-                                if (!overrideZapAuthors.isNullOrEmpty()) {
-                                    val sortedZapAuthors = remember(overrideZapAuthors, overrideZapAmountByAuthor) {
-                                        overrideZapAuthors.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
-                                    }
-                                    sortedZapAuthors.take(3).forEach { pubkey ->
-                                        val author = zapProfileCache.resolveAuthor(pubkey)
-                                        val zapSats = overrideZapAmountByAuthor?.get(pubkey) ?: 0L
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(vertical = 2.dp)
-                                        ) {
-                                            ProfilePicture(author = author, size = 20.dp, onClick = { onProfileClick(author.id) })
-                                            Spacer(Modifier.width(6.dp))
+                                sortedZapAuthors.take(3).forEach { pubkey ->
+                                    val author = zapProfileCache.resolveAuthor(pubkey)
+                                    val zapSats = overrideZapAmountByAuthor?.get(pubkey) ?: 0L
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        ProfilePicture(
+                                            author = author,
+                                            size = 20.dp,
+                                            onClick = { onProfileClick(author.id) })
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = authorDisplayLabel(author),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
+                                                .clickable { onProfileClick(author.id) }
+                                        )
+                                        if (zapSats > 0) {
                                             Text(
-                                                text = authorDisplayLabel(author),
+                                                text = " ⚡ ${
+                                                    social.mycelium.android.utils.ZapUtils.formatZapAmount(
+                                                        zapSats
+                                                    )
+                                                } sats",
                                                 style = MaterialTheme.typography.bodySmall,
-                                                color = MaterialTheme.colorScheme.primary,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                                modifier = Modifier.weight(1f, fill = false).clickable { onProfileClick(author.id) }
+                                                color = Color(0xFFF59E0B)
                                             )
-                                            if (zapSats > 0) {
-                                                Text(
-                                                    text = " ⚡ ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapSats)} sats",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = Color(0xFFF59E0B)
-                                                )
-                                            }
                                         }
                                     }
-                                    if (allZapPubkeys.size > 3 && onSeeAllReactions != null) {
-                                        Text(
-                                            text = "see all ${allZapPubkeys.size} zaps",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier
-                                                .clickable { onSeeAllReactions() }
-                                                .padding(vertical = 2.dp)
-                                        )
-                                    }
-                                } else {
+                                }
+                                if (allZapPubkeys.size > 3 && onSeeAllReactions != null) {
                                     Text(
-                                        text = "$detailZapCount total zap${if (detailZapCount != 1) "s" else ""}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        text = "see all ${allZapPubkeys.size} zaps",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier
+                                            .clickable { onSeeAllReactions() }
+                                            .padding(vertical = 2.dp)
                                     )
                                 }
+                            } else {
+                                Text(
+                                    text = "$detailZapCount total zap${if (detailZapCount != 1) "s" else ""}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
                     }
-
-                    // "see all" link to open full ReactionsScreen
-                    if (onSeeAllReactions != null) {
-                        Text(
-                            text = "see all",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSeeAllReactions() }
-                                .padding(vertical = 4.dp),
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                    }
                 }
+
+                // "see all" link to open full ReactionsScreen
+                if (onSeeAllReactions != null) {
+                    Text(
+                        text = "see all",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSeeAllReactions() }
+                            .padding(vertical = 4.dp),
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            }
         } else {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
@@ -1451,6 +1742,14 @@ internal fun NoteActionMenus(
     val authorLabel = remember(note.author) { authorDisplayLabel(note.author) }
     val closeMenu = { onDismissHeaderMenu(); menuLevel = 0 }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showShareRelayPicker by remember { mutableStateOf(false) }
+
+    if (showShareRelayPicker) {
+        ShareToRelayDialog(
+            note = note,
+            onDismiss = { showShareRelayPicker = false; closeMenu() }
+        )
+    }
 
     // ── Delete confirmation dialog ──
     if (showDeleteConfirm && onDelete != null) {
@@ -1484,17 +1783,35 @@ internal fun NoteActionMenus(
                     Column {
                         DropdownMenuItem(
                             text = { Text("Boost") },
-                            leadingIcon = { Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Outlined.Repeat,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
                             onClick = { onDismissRepostMenu(); onBoost?.invoke(note) }
                         )
                         DropdownMenuItem(
                             text = { Text("Quote") },
-                            leadingIcon = { Icon(Icons.Outlined.FormatQuote, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Outlined.FormatQuote,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
                             onClick = { onDismissRepostMenu(); onQuote?.invoke(note) }
                         )
                         DropdownMenuItem(
                             text = { Text("Fork") },
-                            leadingIcon = { Icon(Icons.Outlined.ForkRight, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Outlined.ForkRight,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
                             onClick = { onDismissRepostMenu(); onFork?.invoke(note) }
                         )
                     }
@@ -1522,7 +1839,13 @@ internal fun NoteActionMenus(
                                     onUnfollowAuthor?.let { unfollow ->
                                         DropdownMenuItem(
                                             text = { Text("Unfollow $authorLabel") },
-                                            leadingIcon = { Icon(Icons.Default.PersonRemove, null, modifier = Modifier.size(18.dp)) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.PersonRemove,
+                                                    null,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            },
                                             onClick = { closeMenu(); unfollow(note.author.id) }
                                         )
                                     }
@@ -1530,7 +1853,13 @@ internal fun NoteActionMenus(
                                     onFollowAuthor?.let { follow ->
                                         DropdownMenuItem(
                                             text = { Text("Follow $authorLabel") },
-                                            leadingIcon = { Icon(Icons.Default.PersonAdd, null, modifier = Modifier.size(18.dp)) },
+                                            leadingIcon = {
+                                                Icon(
+                                                    Icons.Default.PersonAdd,
+                                                    null,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            },
                                             onClick = { closeMenu(); follow(note.author.id) }
                                         )
                                     }
@@ -1539,48 +1868,78 @@ internal fun NoteActionMenus(
                                 onMessageAuthor?.let { msg ->
                                     DropdownMenuItem(
                                         text = { Text("Message $authorLabel") },
-                                        leadingIcon = { Icon(Icons.Default.Send, null, modifier = Modifier.size(18.dp)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Default.Send,
+                                                null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
                                         onClick = { closeMenu(); msg(note.author.id) }
                                     )
                                 }
                                 // Copy → sub-menu
                                 DropdownMenuItem(
                                     text = { Text("Copy\u2026") },
-                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
-                                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.ContentCopy,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        Icon(
+                                            Icons.Default.KeyboardArrowRight,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
                                     onClick = { menuLevel = 1 }
                                 )
                                 // Bookmarks → sub-menu
                                 DropdownMenuItem(
                                     text = { Text("Bookmarks") },
-                                    leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null, modifier = Modifier.size(18.dp)) },
-                                    trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.BookmarkBorder,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    trailingIcon = {
+                                        Icon(
+                                            Icons.Default.KeyboardArrowRight,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
                                     onClick = { menuLevel = 2 }
                                 )
-                                // Share (direct action)
+                                // Share → sub-menu
                                 DropdownMenuItem(
-                                    text = { Text("Share") },
+                                    text = { Text("Share\u2026") },
                                     leadingIcon = { Icon(Icons.Default.Share, null, modifier = Modifier.size(18.dp)) },
-                                    onClick = {
-                                        closeMenu()
-                                        val nevent = com.example.cybin.nip19.encodeNevent(
-                                            eventIdHex = note.id,
-                                            relays = note.relayUrls.take(2),
-                                            authorHex = note.author.id
+                                    trailingIcon = {
+                                        Icon(
+                                            Icons.Default.KeyboardArrowRight,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
                                         )
-                                        val sendIntent = android.content.Intent().apply {
-                                            action = android.content.Intent.ACTION_SEND
-                                            putExtra(android.content.Intent.EXTRA_TEXT, "https://njump.me/$nevent")
-                                            type = "text/plain"
-                                        }
-                                        context.startActivity(android.content.Intent.createChooser(sendIntent, "Share note"))
-                                    }
+                                    },
+                                    onClick = { menuLevel = 4 }
                                 )
                                 // Translate / Show Original
                                 if (translationResult != null && !showOriginal) {
                                     DropdownMenuItem(
                                         text = { Text("Show original") },
-                                        leadingIcon = { Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Outlined.Translate,
+                                                null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
                                         onClick = { onShowOriginal(); closeMenu() }
                                     )
                                 } else {
@@ -1591,7 +1950,10 @@ internal fun NoteActionMenus(
                                             else Text("Translate")
                                         },
                                         leadingIcon = {
-                                            if (isTranslating) CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 1.5.dp)
+                                            if (isTranslating) CircularProgressIndicator(
+                                                modifier = Modifier.size(18.dp),
+                                                strokeWidth = 1.5.dp
+                                            )
                                             else Icon(Icons.Outlined.Translate, null, modifier = Modifier.size(18.dp))
                                         },
                                         onClick = {
@@ -1608,8 +1970,20 @@ internal fun NoteActionMenus(
                                 if (onBlockAuthor != null || onMuteAuthor != null) {
                                     DropdownMenuItem(
                                         text = { Text("Filters & Blocks") },
-                                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
-                                        trailingIcon = { Icon(Icons.Default.KeyboardArrowRight, null, modifier = Modifier.size(18.dp)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Outlined.Block,
+                                                null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
+                                        trailingIcon = {
+                                            Icon(
+                                                Icons.Default.KeyboardArrowRight,
+                                                null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
                                         onClick = { menuLevel = 3 }
                                     )
                                 }
@@ -1617,7 +1991,14 @@ internal fun NoteActionMenus(
                                 if (onDelete != null) {
                                     DropdownMenuItem(
                                         text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
-                                        leadingIcon = { Icon(Icons.Outlined.DeleteForever, null, modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Outlined.DeleteForever,
+                                                null,
+                                                modifier = Modifier.size(18.dp),
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        },
                                         onClick = { closeMenu(); showDeleteConfirm = true }
                                     )
                                 }
@@ -1639,20 +2020,39 @@ internal fun NoteActionMenus(
                             1 -> {
                                 DropdownMenuItem(
                                     text = { Text("Copy text") },
-                                    leadingIcon = { Icon(Icons.Outlined.ContentCopy, null, modifier = Modifier.size(18.dp)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.ContentCopy,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
                                     onClick = {
                                         closeMenu()
-                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Note text", note.content))
+                                        val clipboard =
+                                            context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        clipboard.setPrimaryClip(
+                                            android.content.ClipData.newPlainText(
+                                                "Note text",
+                                                note.content
+                                            )
+                                        )
                                     }
                                 )
                                 DropdownMenuItem(
                                     text = { Text("Copy author npub") },
-                                    leadingIcon = { Icon(Icons.Outlined.Person, null, modifier = Modifier.size(18.dp)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Outlined.Person,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
                                     onClick = {
                                         closeMenu()
                                         val npub = note.author.id.toNpub()
-                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        val clipboard =
+                                            context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
                                         clipboard.setPrimaryClip(android.content.ClipData.newPlainText("npub", npub))
                                     }
                                 )
@@ -1666,13 +2066,25 @@ internal fun NoteActionMenus(
                                             relays = note.relayUrls.take(2),
                                             authorHex = note.author.id
                                         )
-                                        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("nevent", nevent))
+                                        val clipboard =
+                                            context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                        clipboard.setPrimaryClip(
+                                            android.content.ClipData.newPlainText(
+                                                "nevent",
+                                                nevent
+                                            )
+                                        )
                                     }
                                 )
                                 DropdownMenuItem(
                                     text = { Text("← Back") },
-                                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.KeyboardArrowLeft,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
                                     onClick = { menuLevel = 0 }
                                 )
                             }
@@ -1696,7 +2108,13 @@ internal fun NoteActionMenus(
                                 )
                                 DropdownMenuItem(
                                     text = { Text("← Back") },
-                                    leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.KeyboardArrowLeft,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
                                     onClick = { menuLevel = 0 }
                                 )
                             }
@@ -1705,17 +2123,68 @@ internal fun NoteActionMenus(
                                 onBlockAuthor?.let { block ->
                                     DropdownMenuItem(
                                         text = { Text("Block ${authorDisplayLabel(note.author)}") },
-                                        leadingIcon = { Icon(Icons.Outlined.Block, null, modifier = Modifier.size(18.dp)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Outlined.Block,
+                                                null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
                                         onClick = { closeMenu(); block(note.author.id) }
                                     )
                                 }
                                 onMuteAuthor?.let { mute ->
                                     DropdownMenuItem(
                                         text = { Text("Mute ${authorDisplayLabel(note.author)}") },
-                                        leadingIcon = { Icon(Icons.Outlined.VolumeOff, null, modifier = Modifier.size(18.dp)) },
+                                        leadingIcon = {
+                                            Icon(
+                                                Icons.Outlined.VolumeOff,
+                                                null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        },
                                         onClick = { closeMenu(); mute(note.author.id) }
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text("← Back") },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.KeyboardArrowLeft,
+                                            null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    },
+                                    onClick = { menuLevel = 0 }
+                                )
+                            }
+                            // ═══ SHARE SUB-MENU ═══
+                            4 -> {
+                                DropdownMenuItem(
+                                    text = { Text("Share with njump") },
+                                    leadingIcon = { Icon(Icons.Outlined.Link, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = {
+                                        closeMenu()
+                                        val nevent = com.example.cybin.nip19.encodeNevent(
+                                            eventIdHex = note.id,
+                                            relays = note.relayUrls.take(2),
+                                            authorHex = note.author.id
+                                        )
+                                        val sendIntent = android.content.Intent().apply {
+                                            action = android.content.Intent.ACTION_SEND
+                                            putExtra(android.content.Intent.EXTRA_TEXT, "https://njump.me/$nevent")
+                                            type = "text/plain"
+                                        }
+                                        context.startActivity(
+                                            android.content.Intent.createChooser(sendIntent, "Share note")
+                                        )
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Share to relay") },
+                                    leadingIcon = { Icon(Icons.Outlined.Router, null, modifier = Modifier.size(18.dp)) },
+                                    onClick = { closeMenu(); showShareRelayPicker = true }
+                                )
                                 DropdownMenuItem(
                                     text = { Text("← Back") },
                                     leadingIcon = { Icon(Icons.Default.KeyboardArrowLeft, null, modifier = Modifier.size(18.dp)) },
@@ -1729,6 +2198,58 @@ internal fun NoteActionMenus(
         }
     }
 }
+
+// ── Shared Relay Picker Drawer for Sharing ──
+@Composable
+private fun ShareToRelayDialog(
+    note: Note,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var sections by remember { mutableStateOf<List<social.mycelium.android.ui.screens.RelaySection>?>(null) }
+    
+    LaunchedEffect(note.relayUrls) {
+        sections = social.mycelium.android.ui.screens.buildRelaySections(
+            noteRelayUrls = note.relayUrls
+        )
+    }
+
+    if (sections != null) {
+        androidx.compose.ui.window.Dialog(
+            onDismissRequest = onDismiss,
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            val scope = rememberCoroutineScope()
+            social.mycelium.android.ui.screens.RelaySelectionScreen(
+                title = "Share to relays",
+                sections = sections!!,
+                onConfirm = { selectedRelays ->
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        val rawEventEntities = social.mycelium.android.db.AppDatabase.getInstance(context).eventDao().getByIds(listOf(note.id))
+                        val rawEventEntity = rawEventEntities.firstOrNull()
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            if (rawEventEntity != null) {
+                                try {
+                                    val rawEvent = kotlinx.serialization.json.Json.decodeFromString<com.example.cybin.core.Event>(rawEventEntity.eventJson)
+                                    social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().send(rawEvent, selectedRelays)
+                                    android.widget.Toast.makeText(context, "Shared to ${selectedRelays.size} relays", android.widget.Toast.LENGTH_SHORT).show()
+                                } catch (e: Exception) {
+                                    android.util.Log.e("ShareToRelay", "Failed to decode event", e)
+                                    android.widget.Toast.makeText(context, "Failed to send event", android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                android.widget.Toast.makeText(context, "Original event not found in cache", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                            onDismiss()
+                        }
+                    }
+                },
+                onBack = onDismiss
+            )
+        }
+    }
+}
+
 
 /**
  * Action row buttons only — menus extracted to [NoteActionMenus] to reduce JIT compilation
@@ -1757,6 +2278,10 @@ internal fun NoteActionRow(
     accountNpub: String? = null,
     onReactWithCustomEmoji: (shortcode: String, url: String) -> Unit,
     onSaveDefaultEmoji: (String) -> Unit,
+    /** Own reactions on this note: list of (reactionEventId, emoji). For removal UI. */
+    ownReactions: List<Pair<String, String>> = emptyList(),
+    /** Called when user confirms removal of a reaction: (reactionEventId, emoji). */
+    onRemoveReaction: ((reactionEventId: String, emoji: String) -> Unit)? = null,
     onComment: (String) -> Unit,
     onBoost: ((Note) -> Unit)?,
     onQuote: ((Note) -> Unit)?,
@@ -1794,7 +2319,8 @@ internal fun NoteActionRow(
     ) {
         val showVoting = actionRowSchema != ActionRowSchema.KIND1_FEED && actionRowSchema != ActionRowSchema.KIND1_REPLY
         val showBoost = actionRowSchema != ActionRowSchema.KIND1111_REPLY
-        val showReply = actionRowSchema == ActionRowSchema.KIND1111_REPLY || actionRowSchema == ActionRowSchema.KIND1_REPLY
+        val showReply =
+            actionRowSchema == ActionRowSchema.KIND1111_REPLY || actionRowSchema == ActionRowSchema.KIND1_REPLY
 
         // Upvote / Downvote — kind-11 feed + kind-1111 replies
         if (showVoting) {
@@ -1859,6 +2385,7 @@ internal fun NoteActionRow(
                     modifier = Modifier.size(20.dp),
                     strokeWidth = 2.dp
                 )
+
                 else -> Icon(
                     imageVector = Icons.Filled.Bolt,
                     contentDescription = "Zap",
@@ -1900,7 +2427,13 @@ internal fun NoteActionRow(
                         onOpenFullPicker = {
                             showReactionPicker = false
                             showFullPicker = true
-                        }
+                        },
+                        ownReactions = ownReactions,
+                        customEmojiUrls = customEmojiUrls,
+                        onRemoveReaction = if (onRemoveReaction != null) { eventId, emoji ->
+                            showReactionPicker = false
+                            onRemoveReaction(eventId, emoji)
+                        } else null
                     )
                 }
             }
@@ -1991,11 +2524,13 @@ internal fun NoteActionRow(
 private fun authorDisplayLabel(author: social.mycelium.android.data.Author): String {
     val d = author.displayName
     // Only treat as placeholder if it looks like a truncated hex pubkey (8 hex chars + "...")
-    val isPlaceholder = d.length == 11 && d.endsWith("...") && d.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
+    val isPlaceholder =
+        d.length == 11 && d.endsWith("...") && d.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
     if (!isPlaceholder) return d
     // displayName was a placeholder; try username instead
     val u = author.username
-    val uIsPlaceholder = u.length == 11 && u.endsWith("...") && u.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
+    val uIsPlaceholder =
+        u.length == 11 && u.endsWith("...") && u.substring(0, 8).all { it in '0'..'9' || it in 'a'..'f' }
     return if (!uIsPlaceholder) u else author.id.take(8) + "..."
 }
 
@@ -2039,6 +2574,7 @@ private fun PublishProgressLine(state: PublishState) {
                     )
             )
         }
+
         PublishState.Confirmed -> {
             // Green line expands from center to edges, then fades
             val expandFraction by animateFloatAsState(
@@ -2060,6 +2596,7 @@ private fun PublishProgressLine(state: PublishState) {
                 )
             }
         }
+
         PublishState.Failed -> {
             Box(
                 modifier = Modifier
@@ -2293,10 +2830,13 @@ fun NoteCard(
     onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
     /** Current user hex pubkey for detecting own poll votes. */
     myPubkeyHex: String? = null,
+    /** Delete a reaction (kind-5 deletion): (noteId, reactionEventId, emoji). */
+    onDeleteReaction: ((noteId: String, reactionEventId: String, emoji: String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var isZapMenuExpanded by remember { mutableStateOf(false) }
     var showCustomZapDialog by remember { mutableStateOf(false) }
+    var showZapDrawer by remember { mutableStateOf(false) }
     var isDetailsExpanded by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val effectiveReactionNoteId = note.originalNoteId ?: note.id
@@ -2313,7 +2853,14 @@ fun NoteCard(
             ?: ReactionsRepository.getLastReaction(note.id)
         if (fromRepo != null) reactionEmoji = fromRepo
     }
-    var recentEmojis by remember(accountNpub) { mutableStateOf(ReactionsRepository.getRecentEmojis(context, accountNpub)) }
+    var recentEmojis by remember(accountNpub) {
+        mutableStateOf(
+            ReactionsRepository.getRecentEmojis(
+                context,
+                accountNpub
+            )
+        )
+    }
 
     // ── Note animation state (reaction / boost / zap) ─────────────────
     // Only collect when card is visible to avoid N coroutines filtering the same SharedFlow
@@ -2338,7 +2885,13 @@ fun NoteCard(
     }
 
     // On-demand translation state
-    var translationResult by remember(note.id) { mutableStateOf(social.mycelium.android.repository.TranslationService.getCached(note.id)) }
+    var translationResult by remember(note.id) {
+        mutableStateOf(
+            social.mycelium.android.repository.TranslationService.getCached(
+                note.id
+            )
+        )
+    }
     var isTranslating by remember(note.id) { mutableStateOf(false) }
     var showOriginal by remember(note.id) { mutableStateOf(false) }
     val translationScope = rememberCoroutineScope()
@@ -2373,623 +2926,663 @@ fun NoteCard(
             .background(MaterialTheme.colorScheme.surface)
             .clickable { onNoteClick(note) }
     ) {
-            // ── Publish progress line ──────────────────────────────────────
-            if (note.publishState != null) {
-                PublishProgressLine(state = note.publishState)
+        // ── Publish progress line ──────────────────────────────────────
+        if (note.publishState != null) {
+            PublishProgressLine(state = note.publishState)
+        }
+        // ── Note animation line (reaction / boost / zap) ─────────────────
+        val animEvent = noteAnimState
+        if (animEvent != null) {
+            if (!animEvent.success) {
+                ReactionFailureLine()
+            } else when (animEvent.type) {
+                ReactionsRepository.AnimationType.REACTION -> ReactionSuccessLine()
+                ReactionsRepository.AnimationType.BOOST -> BoostSuccessLine()
+                ReactionsRepository.AnimationType.ZAP -> ZapSuccessLine()
             }
-            // ── Note animation line (reaction / boost / zap) ─────────────────
-            val animEvent = noteAnimState
-            if (animEvent != null) {
-                if (!animEvent.success) {
-                    ReactionFailureLine()
-                } else when (animEvent.type) {
-                    ReactionsRepository.AnimationType.REACTION -> ReactionSuccessLine()
-                    ReactionsRepository.AnimationType.BOOST -> BoostSuccessLine()
-                    ReactionsRepository.AnimationType.ZAP -> ZapSuccessLine()
-                }
-            }
-            // Repost label (kind-6) — at the top of the card
-            if (note.repostedByAuthors.isNotEmpty()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 0.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Repeat,
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    // Stacked avatars (up to 3)
-                    val displayBoostAuthors = note.repostedByAuthors.take(3)
-                    Box(modifier = Modifier.width(if (displayBoostAuthors.size > 1) (16 + (displayBoostAuthors.size - 1) * 10).dp else 16.dp)) {
-                        displayBoostAuthors.forEachIndexed { i, author ->
-                            Box(modifier = Modifier.offset(x = (i * 10).dp)) {
-                                ProfilePicture(
-                                    author = author,
-                                    size = 16.dp,
-                                    onClick = { onProfileClick(author.id) }
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.width(4.dp))
-                    val repostTimeText = note.repostTimestamp?.let { " \u2022 ${formatTimestamp(it)}" } ?: ""
-                    val boosterCount = note.repostedByAuthors.size
-                    val firstName = authorDisplayLabel(note.repostedByAuthors.first())
-                    val boostText = when {
-                        boosterCount == 1 -> "$firstName boosted"
-                        boosterCount == 2 -> "$firstName & ${authorDisplayLabel(note.repostedByAuthors[1])} boosted"
-                        else -> "$firstName & ${boosterCount - 1} others boosted"
-                    }
-                    Text(
-                        text = "$boostText$repostTimeText",
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-            // Author info
+        }
+        // Repost label (kind-6) — at the top of the card
+        if (note.repostedByAuthors.isNotEmpty()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 0.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Avatar with shared element support
-                ProfilePicture(
-                    author = displayAuthor,
-                    size = 40.dp,
-                    onClick = { onProfileClick(note.author.id) }
+                Icon(
+                    imageVector = Icons.Default.Repeat,
+                    contentDescription = null,
+                    modifier = Modifier.size(12.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                 )
-
-                Spacer(modifier = Modifier.width(12.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
-                            val isOp = rootAuthorId != null && normalizeAuthorIdForCache(note.author.id) == normalizeAuthorIdForCache(rootAuthorId)
-                            if (isOp) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Surface(
-                                        color = Color(0xFF8E30EB),
-                                        shape = RoundedCornerShape(4.dp)
-                                    ) {
-                                        Text(
-                                            text = authorDisplayLabel(displayAuthor),
-                                            style = MaterialTheme.typography.titleSmall.copy(
-                                                fontWeight = FontWeight.Bold
-                                            ),
-                                            color = Color.White,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                        )
-                                    }
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "OP",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            } else {
-                                Text(
-                                    text = authorDisplayLabel(displayAuthor),
-                                    style = MaterialTheme.typography.titleSmall.copy(
-                                        fontWeight = FontWeight.Bold
-                                    ),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                if (displayAuthor.isVerified) {
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-                                    Icon(
-                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
-                                        contentDescription = "Verified",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = Color.Unspecified
-                                    )
-                                }
-                            }
+                Spacer(Modifier.width(4.dp))
+                // Stacked avatars (up to 3)
+                val displayBoostAuthors = note.repostedByAuthors.take(3)
+                Box(modifier = Modifier.width(if (displayBoostAuthors.size > 1) (16 + (displayBoostAuthors.size - 1) * 10).dp else 16.dp)) {
+                    displayBoostAuthors.forEachIndexed { i, author ->
+                        Box(modifier = Modifier.offset(x = (i * 10).dp)) {
+                            ProfilePicture(
+                                author = author,
+                                size = 16.dp,
+                                onClick = { onProfileClick(author.id) }
+                            )
                         }
-                        if (rootAuthorId != null) {
-                            val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
-                            val score = note.likes
-                            Text(
-                                text = "$score • $formattedTime",
-                                style = MaterialTheme.typography.bodySmall.copy(
+                    }
+                }
+                Spacer(Modifier.width(4.dp))
+                val repostTimeText = note.repostTimestamp?.let { " \u2022 ${formatTimestamp(it)}" } ?: ""
+                val boosterCount = note.repostedByAuthors.size
+                val firstName = authorDisplayLabel(note.repostedByAuthors.first())
+                val boostText = when {
+                    boosterCount == 1 -> "$firstName boosted"
+                    boosterCount == 2 -> "$firstName & ${authorDisplayLabel(note.repostedByAuthors[1])} boosted"
+                    else -> "$firstName & ${boosterCount - 1} others boosted"
+                }
+                Text(
+                    text = "$boostText$repostTimeText",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        // Author info
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // Avatar with shared element support
+            ProfilePicture(
+                author = displayAuthor,
+                size = 40.dp,
+                onClick = { onProfileClick(note.author.id) }
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
+                        val isOp =
+                            rootAuthorId != null && normalizeAuthorIdForCache(note.author.id) == normalizeAuthorIdForCache(
+                                rootAuthorId
+                            )
+                        if (isOp) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    color = Color(0xFF8E30EB),
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        text = authorDisplayLabel(displayAuthor),
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontWeight = FontWeight.Bold
+                                        ),
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "OP",
+                                    style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                            )
-                        }
-                    }
-                }
-                val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
-                RelayOrbs(relayUrls = relayUrlsForOrbs, onRelayClick = onRelayClick, onNavigateToRelayList = onNavigateToRelayList)
-                // NIP-22: Moderation flag badge (shown when note has flags but is below hide threshold)
-                if (moderationFlagCount > 0) {
-                    Spacer(modifier = Modifier.width(4.dp))
-                    androidx.compose.material3.Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Flag,
-                                contentDescription = "Moderation flags",
-                                modifier = Modifier.size(10.dp),
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                            Spacer(Modifier.width(2.dp))
+                            }
+                        } else {
                             Text(
-                                text = "$moderationFlagCount",
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                                color = MaterialTheme.colorScheme.error
+                                text = authorDisplayLabel(displayAuthor),
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (displayAuthor.isVerified) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                Icon(
+                                    imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                    contentDescription = "Verified",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = Color.Unspecified
+                                )
+                            }
+                        }
+                    }
+                    if (rootAuthorId != null) {
+                        val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
+                        val score = note.likes
+                        Text(
+                            text = "$score • $formattedTime",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        )
+                    }
+                }
+            }
+            val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
+            RelayOrbs(
+                relayUrls = relayUrlsForOrbs,
+                onRelayClick = onRelayClick,
+                onNavigateToRelayList = onNavigateToRelayList
+            )
+            // NIP-22: Moderation flag badge (shown when note has flags but is below hide threshold)
+            if (moderationFlagCount > 0) {
+                Spacer(modifier = Modifier.width(4.dp))
+                androidx.compose.material3.Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(4.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Flag,
+                            contentDescription = "Moderation flags",
+                            modifier = Modifier.size(10.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Text(
+                            text = "$moderationFlagCount",
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+        }
+
+        val uriHandler = LocalUriHandler.current
+        val hasBodyText = note.content.isNotBlank() || note.quotedEventIds.isNotEmpty()
+
+        // Optional SUBJECT/TOPIC row (kind-11 / kind-1111)
+        val topicTitle = note.topicTitle
+        if (!topicTitle.isNullOrEmpty()) {
+            Text(
+                text = topicTitle,
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+
+        // Resolve URL previews: prefer note's own previews, but fall back to global cache
+        // so previews fetched by any screen (dashboard, profile, thread) propagate everywhere.
+        val cacheRevision by UrlPreviewCache.revision.collectAsState()
+        val resolvedPreviews = remember(note.urlPreviews, note.content, cacheRevision) {
+            if (note.urlPreviews.isNotEmpty()) {
+                note.urlPreviews
+            } else {
+                val urls = UrlDetector.findUrls(note.content)
+                val embedded = note.mediaUrls.toSet()
+                urls.filter { it !in embedded && !UrlDetector.isImageUrl(it) && !UrlDetector.isVideoUrl(it) }
+                    .take(2)
+                    .mapNotNull { UrlPreviewCache.get(it) }
+            }
+        }
+        val firstPreview = resolvedPreviews.firstOrNull()
+
+        // Counts row: above embed and body (when action row is shown)
+        if (showActionRow) {
+            val replyCountVal = (overrideReplyCount ?: note.comments).coerceAtLeast(0)
+            val zapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
+            val zapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
+            val reactionsList = overrideReactions ?: note.reactions
+            val reactionAuthorsMap = overrideReactionAuthors ?: emptyMap()
+            val reactionCount = if (reactionAuthorsMap.isNotEmpty()) {
+                reactionAuthorsMap.values.sumOf { it.size }
+            } else {
+                reactionsList.size
+            }.coerceAtLeast(0)
+            val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
+            // Colors for count numbers
+            val MyceliumGreen = Color(0xFF8FBC8F)
+            val pastelRed = Color(0xFFE57373)
+            val zapYellow = Color(0xFFFFD700)
+            val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
+            val countStyle = MaterialTheme.typography.bodySmall
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Left side: [vote score •] timestamp • replies
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // Vote score — left of timestamp for kind-11 / kind-1111
+                    if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
+                        val reactiveScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+                        val score = reactiveScores[note.id] ?: 0
+                        if (score != 0) {
+                            val scoreColor = if (score > 0) MyceliumGreen else pastelRed
+                            Text(
+                                text = "$score",
+                                style = countStyle,
+                                color = scoreColor
+                            )
+                            Text(text = " • ", style = countStyle, color = mutedText)
+                        }
+                    }
+                    Text(text = formattedTime, style = countStyle, color = mutedText)
+                    if (replyCountVal > 0) {
+                        Text(text = " • ", style = countStyle, color = mutedText)
+                        Text(text = "$replyCountVal", style = countStyle, color = MyceliumGreen)
+                        Text(
+                            text = " repl${if (replyCountVal == 1) "y" else "ies"}",
+                            style = countStyle,
+                            color = mutedText
+                        )
+                    }
+                }
+                // Right side: reaction emojis • zaps
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (reactionCount > 0) {
+                        // Show actual emoji characters (up to 5 unique), then count
+                        val uniqueEmojis = reactionsList.distinct().take(5)
+                        val emojiUrls = overrideCustomEmojiUrls ?: emptyMap()
+                        uniqueEmojis.forEach { emoji ->
+                            ReactionEmoji(
+                                emoji = emoji,
+                                customEmojiUrls = emojiUrls,
+                                fontSize = 13.sp,
+                                imageSize = 14.dp
                             )
                         }
+                        if (reactionCount > 1) {
+                            Text(text = " $reactionCount", style = countStyle, color = pastelRed)
+                        }
+                    }
+                    if (reactionCount > 0 && (zapTotalSats > 0 || zapCount > 0)) {
+                        Text(text = " • ", style = countStyle, color = mutedText)
+                    }
+                    if (zapTotalSats > 0) {
+                        Text(
+                            text = social.mycelium.android.utils.ZapUtils.formatZapAmount(zapTotalSats),
+                            style = countStyle,
+                            color = zapYellow
+                        )
+                        Text(text = " sats", style = countStyle, color = mutedText)
+                    } else if (zapCount > 0) {
+                        Text(text = "$zapCount", style = countStyle, color = zapYellow)
+                        Text(text = " zap${if (zapCount == 1) "" else "s"}", style = countStyle, color = mutedText)
                     }
                 }
             }
 
-            val uriHandler = LocalUriHandler.current
-            val hasBodyText = note.content.isNotBlank() || note.quotedEventIds.isNotEmpty()
-
-            // Optional SUBJECT/TOPIC row (kind-11 / kind-1111)
-            val topicTitle = note.topicTitle
-            if (!topicTitle.isNullOrEmpty()) {
-                Text(
-                    text = topicTitle,
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                Spacer(modifier = Modifier.height(4.dp))
+            // ── Zapraiser progress bar (NIP-TBD) ──
+            val zapraiserGoal = remember(note.tags) {
+                note.tags.firstOrNull { it.firstOrNull() == "zapraiser" }
+                    ?.getOrNull(1)?.toLongOrNull()
             }
-
-            // Resolve URL previews: prefer note's own previews, but fall back to global cache
-            // so previews fetched by any screen (dashboard, profile, thread) propagate everywhere.
-            val cacheRevision by UrlPreviewCache.revision.collectAsState()
-            val resolvedPreviews = remember(note.urlPreviews, note.content, cacheRevision) {
-                if (note.urlPreviews.isNotEmpty()) {
-                    note.urlPreviews
-                } else {
-                    val urls = UrlDetector.findUrls(note.content)
-                    val embedded = note.mediaUrls.toSet()
-                    urls.filter { it !in embedded && !UrlDetector.isImageUrl(it) && !UrlDetector.isVideoUrl(it) }
-                        .take(2)
-                        .mapNotNull { UrlPreviewCache.get(it) }
-                }
-            }
-            val firstPreview = resolvedPreviews.firstOrNull()
-
-            // Counts row: above embed and body (when action row is shown)
-            if (showActionRow) {
-                val replyCountVal = (overrideReplyCount ?: note.comments).coerceAtLeast(0)
-                val zapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
-                val zapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
-                val reactionsList = overrideReactions ?: note.reactions
-                val reactionAuthorsMap = overrideReactionAuthors ?: emptyMap()
-                val reactionCount = if (reactionAuthorsMap.isNotEmpty()) {
-                    reactionAuthorsMap.values.sumOf { it.size }
-                } else {
-                    reactionsList.size
-                }.coerceAtLeast(0)
-                val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
-                // Colors for count numbers
-                val MyceliumGreen = Color(0xFF8FBC8F)
-                val pastelRed = Color(0xFFE57373)
-                val zapYellow = Color(0xFFFFD700)
-                val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
-                val countStyle = MaterialTheme.typography.bodySmall
-                Row(
+            if (zapraiserGoal != null && zapraiserGoal > 0) {
+                val raised = zapTotalSats
+                val progress = (raised.toFloat() / zapraiserGoal).coerceIn(0f, 1f)
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
                 ) {
-                    // Left side: [vote score •] timestamp • replies
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Vote score — left of timestamp for kind-11 / kind-1111
-                        if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
-                            val reactiveScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
-                            val score = reactiveScores[note.id] ?: 0
-                            if (score != 0) {
-                                val scoreColor = if (score > 0) MyceliumGreen else pastelRed
-                                Text(
-                                    text = "$score",
-                                    style = countStyle,
-                                    color = scoreColor
-                                )
-                                Text(text = " • ", style = countStyle, color = mutedText)
-                            }
-                        }
-                        Text(text = formattedTime, style = countStyle, color = mutedText)
-                        if (replyCountVal > 0) {
-                            Text(text = " • ", style = countStyle, color = mutedText)
-                            Text(text = "$replyCountVal", style = countStyle, color = MyceliumGreen)
-                            Text(text = " repl${if (replyCountVal == 1) "y" else "ies"}", style = countStyle, color = mutedText)
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(raised)} raised",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFF59E0B)
+                        )
+                        Text(
+                            text = "Goal: ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapraiserGoal)} sats",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = mutedText.copy(alpha = 0.6f)
+                        )
                     }
-                    // Right side: reaction emojis • zaps
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (reactionCount > 0) {
-                            // Show actual emoji characters (up to 5 unique), then count
-                            val uniqueEmojis = reactionsList.distinct().take(5)
-                            val emojiUrls = overrideCustomEmojiUrls ?: emptyMap()
-                            uniqueEmojis.forEach { emoji ->
-                                ReactionEmoji(
-                                    emoji = emoji,
-                                    customEmojiUrls = emojiUrls,
-                                    fontSize = 13.sp,
-                                    imageSize = 14.dp
-                                )
-                            }
-                            if (reactionCount > 1) {
-                                Text(text = " $reactionCount", style = countStyle, color = pastelRed)
-                            }
-                        }
-                        if (reactionCount > 0 && (zapTotalSats > 0 || zapCount > 0)) {
-                            Text(text = " • ", style = countStyle, color = mutedText)
-                        }
-                        if (zapTotalSats > 0) {
-                            Text(text = social.mycelium.android.utils.ZapUtils.formatZapAmount(zapTotalSats), style = countStyle, color = zapYellow)
-                            Text(text = " sats", style = countStyle, color = mutedText)
-                        } else if (zapCount > 0) {
-                            Text(text = "$zapCount", style = countStyle, color = zapYellow)
-                            Text(text = " zap${if (zapCount == 1) "" else "s"}", style = countStyle, color = mutedText)
-                        }
-                    }
-                }
-
-                // ── Zapraiser progress bar (NIP-TBD) ──
-                val zapraiserGoal = remember(note.tags) {
-                    note.tags.firstOrNull { it.firstOrNull() == "zapraiser" }
-                        ?.getOrNull(1)?.toLongOrNull()
-                }
-                if (zapraiserGoal != null && zapraiserGoal > 0) {
-                    val raised = zapTotalSats
-                    val progress = (raised.toFloat() / zapraiserGoal).coerceIn(0f, 1f)
-                    Column(
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { progress },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(raised)} raised",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFFF59E0B)
-                            )
-                            Text(
-                                text = "Goal: ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapraiserGoal)} sats",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = mutedText.copy(alpha = 0.6f)
-                            )
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        LinearProgressIndicator(
-                            progress = { progress },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(6.dp)
-                                .clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp)),
-                            color = Color(0xFFF59E0B),
-                            trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            .height(6.dp)
+                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp)),
+                        color = Color(0xFFF59E0B),
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    )
+                    if (raised >= zapraiserGoal) {
+                        Text(
+                            text = "Goal reached!",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF66DDAA),
+                            modifier = Modifier.padding(top = 2.dp)
                         )
-                        if (raised >= zapraiserGoal) {
-                            Text(
-                                text = "Goal reached!",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF66DDAA),
-                                modifier = Modifier.padding(top = 2.dp)
-                            )
-                        }
                     }
                 }
             }
+        }
 
-            // HTML embed: below counts, above body text
-            if (firstPreview != null) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Kind1LinkEmbedBlock(
-                    previewInfo = firstPreview,
-                    expandDescriptionInThread = expandLinkPreviewInThread,
-                    inThreadView = expandLinkPreviewInThread,
-                    onUrlClick = { url -> uriHandler.openUri(url) },
-                    onNoteClick = { onNoteClick(note) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-            }
+        // HTML embed: below counts, above body text
+        if (firstPreview != null) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Kind1LinkEmbedBlock(
+                previewInfo = firstPreview,
+                expandDescriptionInThread = expandLinkPreviewInThread,
+                inThreadView = expandLinkPreviewInThread,
+                onUrlClick = { url -> uriHandler.openUri(url) },
+                onNoteClick = { onNoteClick(note) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+        }
 
-            // Body zone: only when there is text or quoted notes; otherwise embed/media only
-            val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.onSurfaceVariant, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
-            // When firstPreview is shown as the top-level embed, pass its URL as "consumed"
-            // so the text builder hides it from body text but does NOT add it to media groups
-            // (the preview URL is a webpage, not an image — adding it to mediaUrls creates blank album entries)
-            val consumedUrls = remember(firstPreview) {
-                if (firstPreview != null) setOf(firstPreview.url) else emptySet()
-            }
-            // Track mentioned pubkeys so content rebuilds when their profiles load (npub→@displayName)
-            val mentionedPubkeys = remember(note.content) {
-                social.mycelium.android.utils.extractPubkeysFromContent(note.content)
-            }
-            var mentionProfileVersion by remember { mutableIntStateOf(0) }
-            if (mentionedPubkeys.isNotEmpty()) {
-                LaunchedEffect(mentionedPubkeys) {
-                    val pubkeySet = mentionedPubkeys.toSet()
-                    // Request profiles for any mentioned pubkeys not yet cached
-                    val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
-                    if (uncached.isNotEmpty()) {
-                        profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-                    }
-                    // Catch-up check: profiles may have loaded between initial composition
-                    // and this LaunchedEffect starting (SharedFlow replay=0 means we'd miss them).
-                    // If any mentioned profile is now resolved that wasn't in the initial render, bump.
-                    val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
-                    val initiallyResolved = pubkeySet.size - uncached.size
-                    if (nowResolved > initiallyResolved) {
-                        mentionProfileVersion++
-                    }
-                    // Collect profile updates; use short debounce so mentions refresh quickly
-                    profileCache.profileUpdated
-                        .filter { it in pubkeySet }
-                        .debounce(150)
-                        .collect { mentionProfileVersion++ }
+        // Body zone: only when there is text or quoted notes; otherwise embed/media only
+        val linkStyle = SpanStyle(
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
+        )
+        // When firstPreview is shown as the top-level embed, pass its URL as "consumed"
+        // so the text builder hides it from body text but does NOT add it to media groups
+        // (the preview URL is a webpage, not an image — adding it to mediaUrls creates blank album entries)
+        val consumedUrls = remember(firstPreview) {
+            if (firstPreview != null) setOf(firstPreview.url) else emptySet()
+        }
+        // Track mentioned pubkeys so content rebuilds when their profiles load (npub→@displayName)
+        val mentionedPubkeys = remember(note.content) {
+            social.mycelium.android.utils.extractPubkeysFromContent(note.content)
+        }
+        var mentionProfileVersion by remember { mutableIntStateOf(0) }
+        if (mentionedPubkeys.isNotEmpty()) {
+            LaunchedEffect(mentionedPubkeys) {
+                val pubkeySet = mentionedPubkeys.toSet()
+                // Request profiles for any mentioned pubkeys not yet cached
+                val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
+                if (uncached.isNotEmpty()) {
+                    profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
                 }
-                // Safety net: if any mentions are still placeholders after profiles should have loaded,
-                // do a periodic re-check to catch any missed SharedFlow emissions.
-                LaunchedEffect(mentionedPubkeys, mentionProfileVersion) {
-                    val pubkeySet = mentionedPubkeys.toSet()
-                    val hasPlaceholders = pubkeySet.any { pk ->
+                // Catch-up check: profiles may have loaded between initial composition
+                // and this LaunchedEffect starting (SharedFlow replay=0 means we'd miss them).
+                // If any mentioned profile is now resolved that wasn't in the initial render, bump.
+                val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
+                val initiallyResolved = pubkeySet.size - uncached.size
+                if (nowResolved > initiallyResolved) {
+                    mentionProfileVersion++
+                }
+                // Collect profile updates; use short debounce so mentions refresh quickly
+                profileCache.profileUpdated
+                    .filter { it in pubkeySet }
+                    .debounce(150)
+                    .collect { mentionProfileVersion++ }
+            }
+            // Safety net: if any mentions are still placeholders after profiles should have loaded,
+            // do a periodic re-check to catch any missed SharedFlow emissions.
+            LaunchedEffect(mentionedPubkeys, mentionProfileVersion) {
+                val pubkeySet = mentionedPubkeys.toSet()
+                val hasPlaceholders = pubkeySet.any { pk ->
+                    val author = profileCache.getAuthor(pk)
+                    author == null || author.displayName == pk.take(8) + "..."
+                }
+                if (hasPlaceholders) {
+                    delay(2000)
+                    // Re-check: if any placeholder resolved since last version, bump
+                    val stillPlaceholder = pubkeySet.any { pk ->
                         val author = profileCache.getAuthor(pk)
                         author == null || author.displayName == pk.take(8) + "..."
                     }
-                    if (hasPlaceholders) {
-                        delay(2000)
-                        // Re-check: if any placeholder resolved since last version, bump
-                        val stillPlaceholder = pubkeySet.any { pk ->
-                            val author = profileCache.getAuthor(pk)
-                            author == null || author.displayName == pk.take(8) + "..."
-                        }
-                        if (!stillPlaceholder) {
-                            mentionProfileVersion++
-                        }
+                    if (!stillPlaceholder) {
+                        mentionProfileVersion++
                     }
                 }
             }
-            // Quoted note fetch state (hoisted so inline QuotedNote blocks can access it)
-            var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
-            var quotedFailedIds by remember(note.id) { mutableStateOf<Set<String>>(emptySet()) }
-            var quotedLoading by remember(note.id) { mutableStateOf(note.quotedEventIds.isNotEmpty()) }
-            var quotedProfileRevision by remember(note.id) { mutableIntStateOf(0) }
-            if (note.quotedEventIds.isNotEmpty()) {
-                LaunchedEffect(note.quotedEventIds) {
-                    quotedLoading = true
-                    // Quick cache check first (no network)
-                    val cached = note.quotedEventIds.mapNotNull { id ->
-                        if (id in quotedMetas) null
-                        else QuotedNoteCache.getCached(id)?.let { id to it }
-                    }
-                    if (cached.isNotEmpty()) quotedMetas = quotedMetas + cached.toMap()
-                    val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
-                    if (uncachedIds.isNotEmpty()) {
-                        // Debounce: wait 250ms before network fetch so rapidly scrolled-past
-                        // cards don't waste subscription slots
-                        delay(250)
-                        // Launch all fetches concurrently so they land in the same batch
-                        val results = kotlinx.coroutines.coroutineScope {
-                            uncachedIds.map { id ->
-                                async { id to QuotedNoteCache.get(id) }
-                            }.map { it.await() }
-                        }
-                        val newFailed = mutableSetOf<String>()
-                        val fetched = results.mapNotNull { (id, meta) ->
-                            if (meta != null) id to meta
-                            else { newFailed.add(id); null }
-                        }
-                        if (fetched.isNotEmpty()) quotedMetas = quotedMetas + fetched.toMap()
-                        if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
-                    }
-                    quotedLoading = false
+        }
+        // Quoted note fetch state (hoisted so inline QuotedNote blocks can access it)
+        var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
+        var quotedFailedIds by remember(note.id) { mutableStateOf<Set<String>>(emptySet()) }
+        var quotedLoading by remember(note.id) { mutableStateOf(note.quotedEventIds.isNotEmpty()) }
+        var quotedProfileRevision by remember(note.id) { mutableIntStateOf(0) }
+        if (note.quotedEventIds.isNotEmpty()) {
+            LaunchedEffect(note.quotedEventIds) {
+                quotedLoading = true
+                // Quick cache check first (no network)
+                val cached = note.quotedEventIds.mapNotNull { id ->
+                    if (id in quotedMetas) null
+                    else QuotedNoteCache.getCached(id)?.let { id to it }
                 }
-                // Observe profile updates for quoted note authors
-                val quotedAuthorPubkeys = remember(quotedMetas) {
-                    quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
-                }
-                if (quotedProfileRevision == 0) {
-                    LaunchedEffect(quotedAuthorPubkeys) {
-                        if (quotedAuthorPubkeys.isNotEmpty()) {
-                            profileCache.profileUpdated
-                                .filter { it in quotedAuthorPubkeys }
-                                .debounce(1500)
-                                .collect { quotedProfileRevision = 1 }
+                if (cached.isNotEmpty()) quotedMetas = quotedMetas + cached.toMap()
+                val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
+                if (uncachedIds.isNotEmpty()) {
+                    // Debounce: wait 250ms before network fetch so rapidly scrolled-past
+                    // cards don't waste subscription slots
+                    delay(250)
+                    // Launch all fetches concurrently so they land in the same batch
+                    val results = kotlinx.coroutines.coroutineScope {
+                        uncachedIds.map { id ->
+                            async { id to QuotedNoteCache.get(id) }
+                        }.map { it.await() }
+                    }
+                    val newFailed = mutableSetOf<String>()
+                    val fetched = results.mapNotNull { (id, meta) ->
+                        if (meta != null) id to meta
+                        else {
+                            newFailed.add(id); null
                         }
+                    }
+                    if (fetched.isNotEmpty()) quotedMetas = quotedMetas + fetched.toMap()
+                    if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
+                }
+                quotedLoading = false
+            }
+            // Observe profile updates for quoted note authors
+            val quotedAuthorPubkeys = remember(quotedMetas) {
+                quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
+            }
+            if (quotedProfileRevision == 0) {
+                LaunchedEffect(quotedAuthorPubkeys) {
+                    if (quotedAuthorPubkeys.isNotEmpty()) {
+                        profileCache.profileUpdated
+                            .filter { it in quotedAuthorPubkeys }
+                            .debounce(1500)
+                            .collect { quotedProfileRevision = 1 }
                     }
                 }
             }
+        }
 
-            // Use translated text when available and user hasn't toggled to original
-            val displayContent = if (translationResult != null && !showOriginal) translationResult!!.translatedText else note.content
-            val contentIsMarkdown = remember(displayContent) { isMarkdown(displayContent) }
-            val contentCacheKey = remember(displayContent, note.mediaUrls, consumedUrls, mentionProfileVersion) {
-                social.mycelium.android.utils.ContentBlockCache.key(displayContent, note.mediaUrls.toSet(), consumedUrls, mentionProfileVersion)
+        // Use translated text when available and user hasn't toggled to original
+        val displayContent =
+            if (translationResult != null && !showOriginal) translationResult!!.translatedText else note.content
+        val contentIsMarkdown = remember(displayContent) { isMarkdown(displayContent) }
+        val contentCacheKey = remember(displayContent, note.mediaUrls, consumedUrls, mentionProfileVersion) {
+            social.mycelium.android.utils.ContentBlockCache.key(
+                displayContent,
+                note.mediaUrls.toSet(),
+                consumedUrls,
+                mentionProfileVersion
+            )
+        }
+        val contentBlocks by produceState(
+            initialValue = social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey) ?: emptyList(),
+            contentCacheKey, resolvedPreviews, diskCacheReady
+        ) {
+            // Check cache first (may already be populated from a previous composition)
+            social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey)?.let { cached ->
+                value = cached
+                return@produceState
             }
-            val contentBlocks by produceState(
-                initialValue = social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey) ?: emptyList(),
-                contentCacheKey, resolvedPreviews, diskCacheReady
+            val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                buildNoteContentWithInlinePreviews(
+                    displayContent,
+                    note.mediaUrls.toSet(),
+                    resolvedPreviews,
+                    linkStyle,
+                    profileCache,
+                    consumedUrls,
+                    extractEmojiUrls(note.tags)
+                )
+            }
+            social.mycelium.android.utils.ContentBlockCache.put(contentCacheKey, result)
+            value = result
+        }
+        // Collect all media URLs across all MediaGroup blocks for fullscreen viewer
+        val allMediaUrls = remember(contentBlocks) {
+            contentBlocks.filterIsInstance<NoteContentBlock.MediaGroup>().flatMap { it.urls }
+                .ifEmpty { note.mediaUrls }
+        }
+
+        // ═══ Sensitive content detection (NIP-36 content-warning tag or #nsfw hashtag) ═══
+        val contentWarningReason = remember(note.tags) {
+            note.tags.firstOrNull { it.firstOrNull() == "content-warning" }?.getOrNull(1)
+        }
+        val isSensitive = remember(note.tags, note.hashtags) {
+            contentWarningReason != null || note.hashtags.any { it.equals("nsfw", ignoreCase = true) }
+        }
+        var sensitiveRevealed by remember(note.id) { mutableStateOf(false) }
+        val shouldBlur = isSensitive && !showSensitiveContent && !sensitiveRevealed
+
+        if (shouldBlur) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 80.dp)
+                    .clickable { sensitiveRevealed = true }
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f))
+                    .padding(horizontal = 16.dp, vertical = 24.dp),
+                contentAlignment = Alignment.Center
             ) {
-                // Check cache first (may already be populated from a previous composition)
-                social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey)?.let { cached ->
-                    value = cached
-                    return@produceState
-                }
-                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
-                    buildNoteContentWithInlinePreviews(
-                        displayContent,
-                        note.mediaUrls.toSet(),
-                        resolvedPreviews,
-                        linkStyle,
-                        profileCache,
-                        consumedUrls,
-                        extractEmojiUrls(note.tags)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Outlined.VisibilityOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = contentWarningReason?.let { "Sensitive: $it" } ?: "Sensitive content",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "Tap to reveal",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
                     )
                 }
-                social.mycelium.android.utils.ContentBlockCache.put(contentCacheKey, result)
-                value = result
             }
-            // Collect all media URLs across all MediaGroup blocks for fullscreen viewer
-            val allMediaUrls = remember(contentBlocks) {
-                contentBlocks.filterIsInstance<NoteContentBlock.MediaGroup>().flatMap { it.urls }
-                    .ifEmpty { note.mediaUrls }
-            }
+        }
 
-            // ═══ Sensitive content detection (NIP-36 content-warning tag or #nsfw hashtag) ═══
-            val contentWarningReason = remember(note.tags) {
-                note.tags.firstOrNull { it.firstOrNull() == "content-warning" }?.getOrNull(1)
-            }
-            val isSensitive = remember(note.tags, note.hashtags) {
-                contentWarningReason != null || note.hashtags.any { it.equals("nsfw", ignoreCase = true) }
-            }
-            var sensitiveRevealed by remember(note.id) { mutableStateOf(false) }
-            val shouldBlur = isSensitive && !showSensitiveContent && !sensitiveRevealed
-
-            if (shouldBlur) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(min = 80.dp)
-                        .clickable { sensitiveRevealed = true }
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f))
-                        .padding(horizontal = 16.dp, vertical = 24.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(
-                            Icons.Outlined.VisibilityOff,
-                            contentDescription = null,
-                            modifier = Modifier.size(28.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Text(
-                            text = contentWarningReason?.let { "Sensitive: $it" } ?: "Sensitive content",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = "Tap to reveal",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
-                        )
-                    }
-                }
-            }
-
-            // Render interleaved content blocks: text surfaces, inline media carousels, and previews
-            if (!shouldBlur) contentBlocks.forEach { block ->
-                when (block) {
-                    is NoteContentBlock.Content -> {
-                        val annotated = block.annotated
-                        if (annotated.isNotEmpty()) {
-                            if (contentIsMarkdown) {
-                                MarkdownNoteContent(
-                                    content = annotated.text,
-                                    style = NoteBodyTextStyle.copy(
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                    onProfileClick = onProfileClick,
-                                    onNoteClick = { onNoteClick(note) },
-                                    onUrlClick = { _ -> onNoteClick(note) },
-                                    onHashtagClick = { /* TODO: hashtag navigation */ }
-                                )
-                            } else {
-                                ClickableNoteContent(
-                                    text = annotated,
-                                    style = NoteBodyTextStyle.copy(
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    ),
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                    emojiUrls = block.emojiUrls,
-                                    onClick = { offset ->
-                                        val profile = annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
-                                        val relay = annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset).firstOrNull()
-                                        val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
-                                        when {
-                                            profile != null -> onProfileClick(profile.item)
-                                            relay != null -> onRelayClick(relay.item)
-                                            url != null -> uriHandler.openUri(url.item)
-                                            else -> onNoteClick(note)
-                                        }
+        // Render interleaved content blocks: text surfaces, inline media carousels, and previews
+        if (!shouldBlur) contentBlocks.forEach { block ->
+            when (block) {
+                is NoteContentBlock.Content -> {
+                    val annotated = block.annotated
+                    if (annotated.isNotEmpty()) {
+                        if (contentIsMarkdown) {
+                            MarkdownNoteContent(
+                                content = annotated.text,
+                                style = NoteBodyTextStyle.copy(
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                onProfileClick = onProfileClick,
+                                onNoteClick = { onNoteClick(note) },
+                                onUrlClick = { _ -> onNoteClick(note) },
+                                onHashtagClick = { /* TODO: hashtag navigation */ }
+                            )
+                        } else {
+                            ClickableNoteContent(
+                                text = annotated,
+                                style = NoteBodyTextStyle.copy(
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                emojiUrls = block.emojiUrls,
+                                onClick = { offset ->
+                                    val profile =
+                                        annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset)
+                                            .firstOrNull()
+                                    val relay =
+                                        annotated.getStringAnnotations(tag = "RELAY", start = offset, end = offset)
+                                            .firstOrNull()
+                                    val url = annotated.getStringAnnotations(tag = "URL", start = offset, end = offset)
+                                        .firstOrNull()
+                                    when {
+                                        profile != null -> onProfileClick(profile.item)
+                                        relay != null -> onRelayClick(relay.item)
+                                        url != null -> uriHandler.openUri(url.item)
+                                        else -> onNoteClick(note)
                                     }
-                                )
-                            }
-                        }
-                    }
-                    is NoteContentBlock.MediaGroup -> {
-                        val mediaList = block.urls.take(10)
-                        val groupStartIndex = remember(allMediaUrls, mediaList) {
-                            allMediaUrls.indexOf(mediaList.first()).coerceAtLeast(0)
-                        }
-                        NoteMediaCarousel(
-                            mediaList = mediaList,
-                            allMediaUrls = allMediaUrls,
-                            groupStartIndex = groupStartIndex,
-                            initialMediaPage = (initialMediaPage - groupStartIndex).coerceAtLeast(0),
-                            isVisible = isVisible,
-                            mediaMeta = note.mediaMeta,
-                            compactMedia = compactMedia,
-                            onMediaPageChanged = { localPage -> onMediaPageChanged(localPage + groupStartIndex) },
-                            onImageTap = { urls, index -> onImageTap(note, urls, index) },
-                            onOpenImageViewer = onOpenImageViewer,
-                            onVideoClick = onVideoClick,
-                        )
-                    }
-                    is NoteContentBlock.Preview -> {
-                        // Inline preview block skipped when we show top-right thumbnail
-                        if (firstPreview == null) {
-                            UrlPreviewCard(
-                                previewInfo = block.previewInfo,
-                                onUrlClick = { url -> uriHandler.openUri(url) },
-                                onUrlLongClick = { _ -> }
+                                }
                             )
                         }
                     }
-                    is NoteContentBlock.LiveEventReference -> {
-                        // NIP-53 live event referenced via nevent (kind=30311)
-                        // Snapshot read — avoids per-card StateFlow subscription that recomposes all cards on any activity update
-                        val liveRepo = remember { social.mycelium.android.repository.LiveActivityRepository.getInstance() }
-                        val activity = remember(block.eventId) { liveRepo.allActivities.value.firstOrNull { it.id == block.eventId } }
-                        Surface(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 4.dp)
-                                .clickable {
-                                    onNoteClick(Note(
+                }
+
+                is NoteContentBlock.MediaGroup -> {
+                    val mediaList = block.urls.take(10)
+                    val groupStartIndex = remember(allMediaUrls, mediaList) {
+                        allMediaUrls.indexOf(mediaList.first()).coerceAtLeast(0)
+                    }
+                    NoteMediaCarousel(
+                        mediaList = mediaList,
+                        allMediaUrls = allMediaUrls,
+                        groupStartIndex = groupStartIndex,
+                        initialMediaPage = (initialMediaPage - groupStartIndex).coerceAtLeast(0),
+                        isVisible = isVisible,
+                        mediaMeta = note.mediaMeta,
+                        compactMedia = compactMedia,
+                        onMediaPageChanged = { localPage -> onMediaPageChanged(localPage + groupStartIndex) },
+                        onImageTap = { urls, index -> onImageTap(note, urls, index) },
+                        onOpenImageViewer = onOpenImageViewer,
+                        onVideoClick = onVideoClick,
+                    )
+                }
+
+                is NoteContentBlock.Preview -> {
+                    // Inline preview block skipped when we show top-right thumbnail
+                    if (firstPreview == null) {
+                        UrlPreviewCard(
+                            previewInfo = block.previewInfo,
+                            onUrlClick = { url -> uriHandler.openUri(url) },
+                            onUrlLongClick = { _ -> }
+                        )
+                    }
+                }
+
+                is NoteContentBlock.LiveEventReference -> {
+                    // NIP-53 live event referenced via nevent (kind=30311)
+                    // Snapshot read — avoids per-card StateFlow subscription that recomposes all cards on any activity update
+                    val liveRepo = remember { social.mycelium.android.repository.LiveActivityRepository.getInstance() }
+                    val activity =
+                        remember(block.eventId) { liveRepo.allActivities.value.firstOrNull { it.id == block.eventId } }
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .clickable {
+                                onNoteClick(
+                                    Note(
                                         id = block.eventId,
-                                        author = social.mycelium.android.data.Author(id = block.author ?: "", username = "", displayName = "Live Event"),
+                                        author = social.mycelium.android.data.Author(
+                                            id = block.author ?: "",
+                                            username = "",
+                                            displayName = "Live Event"
+                                        ),
                                         content = "",
                                         timestamp = 0L,
                                         likes = 0, shares = 0, comments = 0,
@@ -2997,97 +3590,107 @@ fun NoteCard(
                                         mediaUrls = emptyList(), isReply = false,
                                         relayUrl = block.relays.firstOrNull(),
                                         relayUrls = block.relays
-                                    ))
-                                },
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
-                            shape = MaterialTheme.shapes.small
+                                    )
+                                )
+                            },
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)),
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth().padding(12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                // Red live dot or generic icon
-                                if (activity?.status == social.mycelium.android.data.LiveActivityStatus.LIVE) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(10.dp)
-                                            .background(androidx.compose.ui.graphics.Color(0xFFEF4444), androidx.compose.foundation.shape.CircleShape)
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Outlined.PlayCircle,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp),
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = activity?.title ?: "Live Event",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-                                    )
-                                    val subtitle = when (activity?.status) {
-                                        social.mycelium.android.data.LiveActivityStatus.LIVE -> "LIVE" + (activity.currentParticipants?.let { " • $it viewers" } ?: "")
-                                        social.mycelium.android.data.LiveActivityStatus.PLANNED -> "Planned"
-                                        social.mycelium.android.data.LiveActivityStatus.ENDED -> "Ended"
-                                        null -> "Live Event"
-                                    }
-                                    Text(
-                                        text = subtitle,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (activity?.status == social.mycelium.android.data.LiveActivityStatus.LIVE)
-                                            androidx.compose.ui.graphics.Color(0xFFEF4444)
-                                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                                    )
-                                }
+                            // Red live dot or generic icon
+                            if (activity?.status == social.mycelium.android.data.LiveActivityStatus.LIVE) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .background(
+                                            androidx.compose.ui.graphics.Color(0xFFEF4444),
+                                            androidx.compose.foundation.shape.CircleShape
+                                        )
+                                )
+                            } else {
                                 Icon(
-                                    imageVector = Icons.Default.ChevronRight,
+                                    imageVector = Icons.Outlined.PlayCircle,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                    tint = MaterialTheme.colorScheme.primary
                                 )
                             }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = activity?.title ?: "Live Event",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                )
+                                val subtitle = when (activity?.status) {
+                                    social.mycelium.android.data.LiveActivityStatus.LIVE -> "LIVE" + (activity.currentParticipants?.let { " • $it viewers" }
+                                        ?: "")
+
+                                    social.mycelium.android.data.LiveActivityStatus.PLANNED -> "Planned"
+                                    social.mycelium.android.data.LiveActivityStatus.ENDED -> "Ended"
+                                    null -> "Live Event"
+                                }
+                                Text(
+                                    text = subtitle,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (activity?.status == social.mycelium.android.data.LiveActivityStatus.LIVE)
+                                        androidx.compose.ui.graphics.Color(0xFFEF4444)
+                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                            )
                         }
                     }
-                    is NoteContentBlock.EmojiPack -> {
-                        EmojiPackGrid(
-                            author = block.author,
-                            dTag = block.dTag,
-                            relayHints = block.relayHints
-                        )
-                    }
-                    is NoteContentBlock.Article -> {
-                        EmbeddedArticlePreview(
-                            author = block.author,
-                            dTag = block.dTag,
-                            relayHints = block.relayHints,
-                            onNoteClick = onNoteClick
-                        )
-                    }
-                    is NoteContentBlock.QuotedNote -> {
-                        val eventId = block.eventId
-                        val density = LocalDensity.current
-                        // Seed from cache so scroll-back reserves the right height immediately.
-                        // Once measured, clear the min so animateContentSize can shrink freely.
-                        val cachedHeightPx = remember(note.id, eventId) { QuotedNoteHeightCache.get(note.id, eventId) }
-                        var measured by remember(note.id, eventId) { mutableStateOf(false) }
-                        val minHeightDp = if (!measured && cachedHeightPx != null) with(density) { cachedHeightPx.toDp() } else 0.dp
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .defaultMinSize(minHeight = minHeightDp)
-                                .onSizeChanged { size ->
-                                    if (size.height > 0) {
-                                        measured = true
-                                        QuotedNoteHeightCache.put(note.id, eventId, size.height)
-                                    }
+                }
+
+                is NoteContentBlock.EmojiPack -> {
+                    EmojiPackGrid(
+                        author = block.author,
+                        dTag = block.dTag,
+                        relayHints = block.relayHints
+                    )
+                }
+
+                is NoteContentBlock.Article -> {
+                    EmbeddedArticlePreview(
+                        author = block.author,
+                        dTag = block.dTag,
+                        relayHints = block.relayHints,
+                        onNoteClick = onNoteClick
+                    )
+                }
+
+                is NoteContentBlock.QuotedNote -> {
+                    val eventId = block.eventId
+                    val density = LocalDensity.current
+                    // Seed from cache so scroll-back reserves the right height immediately.
+                    // Once measured, clear the min so animateContentSize can shrink freely.
+                    val cachedHeightPx = remember(note.id, eventId) { QuotedNoteHeightCache.get(note.id, eventId) }
+                    var measured by remember(note.id, eventId) { mutableStateOf(false) }
+                    val minHeightDp =
+                        if (!measured && cachedHeightPx != null) with(density) { cachedHeightPx.toDp() } else 0.dp
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = minHeightDp)
+                            .onSizeChanged { size ->
+                                if (size.height > 0) {
+                                    measured = true
+                                    QuotedNoteHeightCache.put(note.id, eventId, size.height)
                                 }
-                        ) {
+                            }
+                    ) {
                         val meta = quotedMetas[eventId]
                         if (meta != null) {
                             val quotedAuthor = remember(meta.authorId, quotedProfileRevision) {
@@ -3107,6 +3710,8 @@ fun NoteCard(
                                 onOpenImageViewer = onOpenImageViewer,
                                 onRelayClick = onRelayClick,
                                 countsByNoteId = countsByNoteId,
+                                myPubkey = myPubkeyHex,
+                                onPollVote = onPollVote,
                             )
                         } else if (eventId in quotedFailedIds) {
                             Row(
@@ -3126,9 +3731,18 @@ fun NoteCard(
                                         )
                                 )
                                 Spacer(Modifier.width(10.dp))
-                                Icon(Icons.Outlined.Info, null, modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                Icon(
+                                    Icons.Outlined.Info,
+                                    null,
+                                    modifier = Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
                                 Spacer(Modifier.width(6.dp))
-                                Text("Quoted event not found", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                Text(
+                                    "Quoted event not found",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
                             }
                         } else if (quotedLoading) {
                             Row(
@@ -3148,76 +3762,84 @@ fun NoteCard(
                                         )
                                 )
                                 Spacer(Modifier.width(10.dp))
-                                CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 1.5.dp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                                )
                                 Spacer(Modifier.width(6.dp))
-                                Text("Loading quoted note\u2026", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                                Text(
+                                    "Loading quoted note\u2026",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                )
                             }
                         }
-                        } // end height-stable Box
-                    }
+                    } // end height-stable Box
                 }
             }
+        }
 
-            // NIP-88 Poll block (kind-1068) — rendered after body text so question appears above options
-            if (note.pollData != null) {
-                PollBlock(
-                    pollData = note.pollData,
-                    noteId = note.id,
-                    noteAuthorPubkey = note.author.id,
-                    relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
-                    myPubkey = myPubkeyHex,
-                    onVote = { nId, authorPk, selections, relayHint ->
-                        onPollVote?.invoke(nId, authorPk, selections, relayHint)
-                    }
-                )
-            }
-
-            // Kind-6969 Zap Poll block — rendered after body text so question appears above options
-            if (note.zapPollData != null) {
-                ZapPollBlock(
-                    zapPollData = note.zapPollData,
-                    noteId = note.id,
-                    noteAuthorPubkey = note.author.id,
-                    relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
-                    myPubkey = myPubkeyHex,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-
-            // Translation label (subtle, below content)
-            if (translationResult != null && !showOriginal) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Translate,
-                        contentDescription = null,
-                        modifier = Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    )
-                    Text(
-                        text = "Translated from ${java.util.Locale(translationResult!!.sourceLang).displayLanguage}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    )
+        // NIP-88 Poll block (kind-1068) — rendered after body text so question appears above options
+        if (note.pollData != null) {
+            PollBlock(
+                pollData = note.pollData,
+                noteId = note.id,
+                noteAuthorPubkey = note.author.id,
+                relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
+                myPubkey = myPubkeyHex,
+                onVote = { nId, authorPk, selections, relayHint ->
+                    onPollVote?.invoke(nId, authorPk, selections, relayHint)
                 }
-            }
+            )
+        }
 
-            // Hashtags
-            if (showHashtagsSection && note.hashtags.isNotEmpty()) {
-                Spacer(modifier = Modifier.height(8.dp))
+        // Kind-6969 Zap Poll block — rendered after body text so question appears above options
+        if (note.zapPollData != null) {
+            ZapPollBlock(
+                zapPollData = note.zapPollData,
+                noteId = note.id,
+                noteAuthorPubkey = note.author.id,
+                relayUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) },
+                myPubkey = myPubkeyHex,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+
+        // Translation label (subtle, below content)
+        if (translationResult != null && !showOriginal) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Translate,
+                    contentDescription = null,
+                    modifier = Modifier.size(12.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                )
                 Text(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    text = note.hashtags.joinToString(" ") { "#$it" },
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    text = "Translated from ${java.util.Locale(translationResult!!.sourceLang).displayLanguage}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                 )
             }
+        }
 
-            if (showActionRow) {
+        // Hashtags
+        if (showHashtagsSection && note.hashtags.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                text = note.hashtags.joinToString(" ") { "#$it" },
+                style = MaterialTheme.typography.bodySmall.copy(
+                    color = MaterialTheme.colorScheme.primary
+                )
+            )
+        }
+
+        if (showActionRow) {
             NoteActionRow(
                 note = note,
                 actionRowSchema = actionRowSchema,
@@ -3232,8 +3854,8 @@ fun NoteCard(
                 isDetailsExpanded = isDetailsExpanded,
                 onDetailsToggle = { isDetailsExpanded = !isDetailsExpanded },
                 isZapMenuExpanded = isZapMenuExpanded,
-                onZapMenuToggle = { isZapMenuExpanded = !isZapMenuExpanded },
-                onShowCustomZapDialog = { showCustomZapDialog = true },
+                onZapMenuToggle = { showZapDrawer = true },
+                onShowCustomZapDialog = { showZapDrawer = true },
                 recentEmojis = recentEmojis,
                 accountNpub = accountNpub,
                 onReactWithEmoji = { emoji ->
@@ -3253,6 +3875,12 @@ fun NoteCard(
                     ReactionsRepository.recordEmoji(context, accountNpub, emoji)
                     recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
                 },
+                ownReactions = remember(effectiveReactionNoteId, overrideReactions) {
+                    social.mycelium.android.repository.NoteCountsRepository.getOwnReactions(effectiveReactionNoteId)
+                },
+                onRemoveReaction = if (onDeleteReaction != null) { eventId, emoji ->
+                    onDeleteReaction(effectiveReactionNoteId, eventId, emoji)
+                } else null,
                 onComment = onComment,
                 onBoost = onBoost,
                 onQuote = onQuote,
@@ -3277,7 +3905,8 @@ fun NoteCard(
                     if (!isTranslating) {
                         isTranslating = true
                         translationScope.launch {
-                            val result = social.mycelium.android.repository.TranslationService.translate(note.id, note.content)
+                            val result =
+                                social.mycelium.android.repository.TranslationService.translate(note.id, note.content)
                             translationResult = result
                             isTranslating = false
                             if (result != null) showOriginal = false
@@ -3304,21 +3933,85 @@ fun NoteCard(
                 onProfileClick = onProfileClick,
                 onSeeAllReactions = onSeeAllReactions,
             )
-            }
-
-            if (showCustomZapDialog) {
-                ZapCustomDialog(
-                    onDismiss = { showCustomZapDialog = false },
-                    onSendZap = { amount, zapType, message ->
-                        showCustomZapDialog = false
-                        onCustomZapSend?.invoke(note, amount, zapType, message)
-                    },
-                    onZapSettings = onZapSettings
-                )
-            }
-
         }
+
+        if (showCustomZapDialog) {
+            ZapCustomDialog(
+                onDismiss = { showCustomZapDialog = false },
+                onSendZap = { amount, zapType, message ->
+                    showCustomZapDialog = false
+                    onCustomZapSend?.invoke(note, amount, zapType, message)
+                },
+                onZapSettings = onZapSettings
+            )
+        }
+
+        // Zap drawer — full-screen Popup so it escapes the card's Column bounds
+        if (showZapDrawer) {
+            androidx.compose.ui.window.Popup(
+                alignment = Alignment.BottomCenter,
+                onDismissRequest = { showZapDrawer = false },
+                properties = androidx.compose.ui.window.PopupProperties(focusable = true)
+            ) {
+                // AnimatedVisibility inside the Popup for smooth slide/fade
+                val drawerVisible = remember { mutableStateOf(false) }
+                LaunchedEffect(Unit) { drawerVisible.value = true }
+
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    // Dismiss scrim — covers entire screen
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = drawerVisible.value,
+                        enter = androidx.compose.animation.fadeIn(
+                            animationSpec = androidx.compose.animation.core.tween(200)
+                        ),
+                        exit = androidx.compose.animation.fadeOut(
+                            animationSpec = androidx.compose.animation.core.tween(150)
+                        )
+                    ) {
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.4f))
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                                ) { showZapDrawer = false }
+                        )
+                    }
+                    // Drawer slides up from bottom
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = drawerVisible.value,
+                        enter = androidx.compose.animation.slideInVertically(
+                            initialOffsetY = { it },
+                            animationSpec = androidx.compose.animation.core.tween(300)
+                        ) + androidx.compose.animation.fadeIn(
+                            animationSpec = androidx.compose.animation.core.tween(200)
+                        ),
+                        exit = androidx.compose.animation.slideOutVertically(
+                            targetOffsetY = { it },
+                            animationSpec = androidx.compose.animation.core.tween(250)
+                        ) + androidx.compose.animation.fadeOut(
+                            animationSpec = androidx.compose.animation.core.tween(150)
+                        )
+                    ) {
+                        ZapDrawer(
+                            onDismiss = { showZapDrawer = false },
+                            onZap = { amount -> onZap(note.id, amount) },
+                            onCustomZapSend = { amount, zapType, message ->
+                                onCustomZapSend?.invoke(note, amount, zapType, message)
+                            },
+                            onSettingsClick = onZapSettings
+                        )
+                    }
+                }
+            }
+        }
+
     }
+}
 
 @Composable
 private fun ActionButton(
@@ -3466,7 +4159,8 @@ internal fun EmbeddedArticlePreview(
     }
     val coverImage = note.imageUrl
     val displayAuthor = remember(note.author.id) { profileCache.resolveAuthor(note.author.id) }
-    val authorLabel = displayAuthor.displayName.ifBlank { displayAuthor.username }.ifBlank { note.author.id.take(8) + "\u2026" }
+    val authorLabel =
+        displayAuthor.displayName.ifBlank { displayAuthor.username }.ifBlank { note.author.id.take(8) + "\u2026" }
     val wordCount = note.content.split(Regex("\\s+")).size
     val readMinutes = (wordCount / 200).coerceAtLeast(1)
 
@@ -3560,7 +4254,8 @@ internal fun EmbeddedArticlePreview(
 
         // Counts row: reactions, zaps, replies
         if (counts != null) {
-            val hasAnyCounts = counts.reactions.isNotEmpty() || counts.zapCount > 0 || counts.replyCount > 0 || counts.repostCount > 0
+            val hasAnyCounts =
+                counts.reactions.isNotEmpty() || counts.zapCount > 0 || counts.replyCount > 0 || counts.repostCount > 0
             if (hasAnyCounts) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Row(
@@ -3570,28 +4265,56 @@ internal fun EmbeddedArticlePreview(
                     val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                     val countStyle = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, color = mutedColor)
                     if (counts.reactions.isNotEmpty()) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
                             Text(text = counts.reactions.first(), fontSize = 10.sp)
                             val totalReactions = counts.reactionAuthors.values.sumOf { it.size }
                             if (totalReactions > 1) Text(text = "$totalReactions", style = countStyle)
                         }
                     }
                     if (counts.zapCount > 0) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Icon(Icons.Outlined.Bolt, contentDescription = null, modifier = Modifier.size(11.dp), tint = androidx.compose.ui.graphics.Color(0xFFFFA500))
-                            val satsLabel = if (counts.zapTotalSats >= 1000) "${counts.zapTotalSats / 1000}k" else "${counts.zapTotalSats}"
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.Bolt,
+                                contentDescription = null,
+                                modifier = Modifier.size(11.dp),
+                                tint = androidx.compose.ui.graphics.Color(0xFFFFA500)
+                            )
+                            val satsLabel =
+                                if (counts.zapTotalSats >= 1000) "${counts.zapTotalSats / 1000}k" else "${counts.zapTotalSats}"
                             Text(text = satsLabel, style = countStyle)
                         }
                     }
                     if (counts.replyCount > 0) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(11.dp), tint = mutedColor)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.ChatBubbleOutline,
+                                contentDescription = null,
+                                modifier = Modifier.size(11.dp),
+                                tint = mutedColor
+                            )
                             Text(text = "${counts.replyCount}", style = countStyle)
                         }
                     }
                     if (counts.repostCount > 0) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                            Icon(Icons.Outlined.Repeat, contentDescription = null, modifier = Modifier.size(11.dp), tint = mutedColor)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Icon(
+                                Icons.Outlined.Repeat,
+                                contentDescription = null,
+                                modifier = Modifier.size(11.dp),
+                                tint = mutedColor
+                            )
                             Text(text = "${counts.repostCount}", style = countStyle)
                         }
                     }

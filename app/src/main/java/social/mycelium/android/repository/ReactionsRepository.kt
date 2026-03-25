@@ -134,6 +134,11 @@ object ReactionsRepository {
 
     fun getLastReaction(noteId: String): String? = lastReactionByNoteId[noteId]
 
+    /** Clear last reaction for a note (called when all own reactions are removed via kind-5 deletion). */
+    fun clearLastReaction(noteId: String) {
+        lastReactionByNoteId.remove(noteId)
+    }
+
     /**
      * Populate our own reaction from an incoming kind-7 event if [authorPubkey] matches ours.
      * Called by NoteCountsRepository when processing kind-7 events so our emoji button

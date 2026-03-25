@@ -113,6 +113,7 @@ fun ComposeNoteScreen(
     var isPollMode by remember { mutableStateOf(false) }
     var pollOptions by remember { mutableStateOf(listOf("", "")) }
     var isMultipleChoice by remember { mutableStateOf(false) }
+    var showResultsBeforeVoting by remember { mutableStateOf(false) }
     var isZapPoll by remember { mutableStateOf(false) }
     var zapPollMinSats by remember { mutableStateOf("") }
     var zapPollMaxSats by remember { mutableStateOf("") }
@@ -186,7 +187,8 @@ fun ComposeNoteScreen(
                             options = optionPairs,
                             isMultipleChoice = isMultipleChoice,
                             endsAtEpochSeconds = null,
-                            relayUrls = selectedUrls
+                            relayUrls = selectedUrls,
+                            showResults = showResultsBeforeVoting
                         )
                     }
                 } else {
@@ -341,6 +343,18 @@ fun ComposeNoteScreen(
                                 )
                                 Text(
                                     text = "Allow multiple selections",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = showResultsBeforeVoting,
+                                    onCheckedChange = { showResultsBeforeVoting = it }
+                                )
+                                Text(
+                                    text = "Show results before voting",
                                     style = MaterialTheme.typography.bodyMedium
                                 )
                             }

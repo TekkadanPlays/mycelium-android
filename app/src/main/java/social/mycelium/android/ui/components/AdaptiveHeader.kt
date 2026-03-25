@@ -381,58 +381,8 @@ fun AdaptiveHeader(
                                             },
                                             leadingIcon = { Icon(Icons.Outlined.People, contentDescription = null, tint = if (isFollowingActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant) }
                                         )
-                                        // NIP-51 people lists as feed filters
-                                        if (peopleLists.isNotEmpty() && onPeopleListSelected != null) {
-                                            HorizontalDivider()
-                                            peopleLists.forEach { (dTag, title) ->
-                                                val isActive = activeListDTag == dTag && activeHashtagFilter == null
-                                                DropdownMenuItem(
-                                                    text = {
-                                                        Text(title, color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                                                    },
-                                                    onClick = {
-                                                        logoMenuExpanded = false
-                                                        onHashtagFilterSelected?.invoke(null)
-                                                        onPeopleListSelected(dTag, title)
-                                                    },
-                                                    leadingIcon = {
-                                                        Icon(
-                                                            Icons.AutoMirrored.Outlined.List,
-                                                            contentDescription = null,
-                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                )
-                                            }
-                                        }
-                                        // Subscribed hashtags as feed content filters
-                                        if (subscribedHashtags.isNotEmpty() && onHashtagFilterSelected != null) {
-                                            HorizontalDivider()
-                                            subscribedHashtags.sorted().forEach { hashtag ->
-                                                val isActive = activeHashtagFilter == hashtag
-                                                DropdownMenuItem(
-                                                    text = {
-                                                        Text("#$hashtag", color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                                                    },
-                                                    onClick = {
-                                                        logoMenuExpanded = false
-                                                        if (isActive) {
-                                                            onHashtagFilterSelected(null)
-                                                        } else {
-                                                            onPeopleListSelected?.invoke(null, null)
-                                                            onHashtagFilterSelected(hashtag)
-                                                        }
-                                                    },
-                                                    leadingIcon = {
-                                                        Icon(
-                                                            Icons.Outlined.Tag,
-                                                            contentDescription = null,
-                                                            tint = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                                                        )
-                                                    }
-                                                )
-                                            }
-                                        }
+                                        // People lists and hashtags removed from logo menu —
+                                        // controlled via Lists page (profile dropdown) instead
                                     }
                                 }
                             }

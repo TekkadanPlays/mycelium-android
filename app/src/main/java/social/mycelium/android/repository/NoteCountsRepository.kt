@@ -56,16 +56,38 @@ data class NoteCounts(
 object NoteCountsRepository {
 
     private const val TAG = "NoteCountsRepository"
-    private const val DEBOUNCE_MS = 1200L
+    private const val DEBOUNCE_MS = 200L
 
     /** Current user's hex pubkey. Set on login/account switch so own reactions can be detected. */
     @Volatile
     var currentUserPubkey: String? = null
 
+    /**
+     * Active engagement filter from the feed UI: null, "replies", "likes", or "zaps".
+     * When set, the counts subscription boosts the limit for the corresponding kind
+     * and places it first in the filter list so relays return relevant data faster.
+     */
+    @Volatile
+    var activeEngagementFilter: String? = null
+        set(value) {
+            if (field != value) {
+                field = value
+                Log.d(TAG, "Engagement filter changed to: ${value ?: "none"} — retriggering counts")
+                retrigger()
+            }
+        }
+
     /** Note IDs the current user has boosted (detected from incoming kind-6 events). */
     private val _ownBoostedNoteIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
     /** Note IDs the current user has zapped (detected from incoming kind-9735 events). */
     private val _ownZappedNoteIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+
+    /**
+     * Own reaction event IDs: noteId → list of (reactionEventId, emoji).
+     * Populated from incoming kind-7 events where author matches [currentUserPubkey],
+     * AND from optimistic injection after publishing. Needed for kind-5 deletion.
+     */
+    private val ownReactionEvents = java.util.concurrent.ConcurrentHashMap<String, MutableList<Pair<String, String>>>()
 
     /** Check if the current user has boosted a note (from relay data). */
     fun isOwnBoost(noteId: String): Boolean = _ownBoostedNoteIds.contains(noteId)
@@ -73,6 +95,50 @@ object NoteCountsRepository {
     fun trackOwnBoost(noteId: String) { _ownBoostedNoteIds.add(noteId) }
     /** Check if the current user has zapped a note (from relay data). */
     fun isOwnZap(noteId: String): Boolean = _ownZappedNoteIds.contains(noteId)
+
+    /** Get all own reactions for a note: list of (reactionEventId, emoji). */
+    fun getOwnReactions(noteId: String): List<Pair<String, String>> =
+        ownReactionEvents[noteId]?.toList() ?: emptyList()
+
+    /** Track an own reaction event (from relay kind-7 or optimistic injection). */
+    fun trackOwnReactionEvent(noteId: String, reactionEventId: String, emoji: String) {
+        val list = ownReactionEvents.getOrPut(noteId) { java.util.Collections.synchronizedList(mutableListOf()) }
+        if (list.none { it.first == reactionEventId }) {
+            list.add(reactionEventId to emoji)
+        }
+    }
+
+    /**
+     * Remove an own reaction from counts (optimistic removal after kind-5 deletion).
+     * Removes the reaction event from tracking and decrements the reaction author count.
+     */
+    fun removeOwnReaction(noteId: String, reactionEventId: String, emoji: String) {
+        // Remove from own tracking
+        ownReactionEvents[noteId]?.removeAll { it.first == reactionEventId }
+        // Remove from ReactionsRepository last-reaction
+        val remaining = ownReactionEvents[noteId]
+        if (remaining.isNullOrEmpty()) {
+            ReactionsRepository.clearLastReaction(noteId)
+        } else {
+            // Set last reaction to most recent remaining
+            ReactionsRepository.setLastReaction(noteId, remaining.last().second)
+        }
+        // Remove from counts
+        val snapshot = _countsByNoteId.value.toMutableMap()
+        val counts = snapshot[noteId] ?: return
+        val authors = counts.reactionAuthors.toMutableMap()
+        val emojiAuthors = (authors[emoji] ?: emptyList()).toMutableList()
+        currentUserPubkey?.let { emojiAuthors.remove(it) }
+        if (emojiAuthors.isEmpty()) {
+            authors.remove(emoji)
+        } else {
+            authors[emoji] = emojiAuthors
+        }
+        val updatedReactions = authors.keys.toList()
+        snapshot[noteId] = counts.copy(reactions = updatedReactions, reactionAuthors = authors)
+        _countsByNoteId.value = snapshot
+        Log.d(TAG, "Removed own reaction $emoji on ${noteId.take(8)} (event ${reactionEventId.take(8)})")
+    }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
 
@@ -100,10 +166,6 @@ object NoteCountsRepository {
 
     /** Debounce job so rapid note-ID changes don't thrash subscriptions. */
     private var debounceJob: Job? = null
-    /** Phase 2 job: delayed kind-7 + kind-9735 subscription after kind-1 replies. */
-    private var phase2Job: Job? = null
-    /** Hash of the last snapshot sent to Phase 2, to skip redundant re-subscriptions. */
-    @Volatile private var lastPhase2SnapshotHash: Int = 0
 
     /** Dedup: event IDs we've already processed so relay overlap doesn't double-count. */
     private val processedEventIds = java.util.Collections.newSetFromMap(
@@ -122,14 +184,28 @@ object NoteCountsRepository {
     @Volatile private var firstPendingEventTs = 0L
 
     /**
-     * Set note IDs + their relay URLs from the feed.
+     * Merge note IDs + their relay URLs into the feed interest set.
+     * Called both at ingestion time (per-batch, accumulates) and at display time
+     * (full set, acts as authoritative snapshot). Capped at 200 entries.
      * @param noteRelays map of noteId → list of relay URLs where that note was seen
+     * @param replace if true, replaces the entire feed set (used by display-time call)
      */
-    fun setNoteIdsOfInterest(noteRelays: Map<String, List<String>>) {
-        // Skip if the note ID set is unchanged (avoids redundant debounce cycles on recomposition)
-        if (noteRelays.size == feedNoteRelays.size && noteRelays.keys == feedNoteRelays.keys) return
-        Log.d(TAG, "setNoteIdsOfInterest: ${noteRelays.size} feed notes")
-        feedNoteRelays = noteRelays
+    fun setNoteIdsOfInterest(noteRelays: Map<String, List<String>>, replace: Boolean = false) {
+        val merged = if (replace) noteRelays else {
+            val m = LinkedHashMap<String, List<String>>(feedNoteRelays)
+            m.putAll(noteRelays)
+            // Cap to 200 — evict oldest (first-inserted) entries
+            if (m.size > 200) {
+                val excess = m.size - 200
+                val iter = m.iterator()
+                repeat(excess) { iter.next(); iter.remove() }
+            }
+            m
+        }
+        // Skip if the note ID set is unchanged
+        if (merged.size == feedNoteRelays.size && merged.keys == feedNoteRelays.keys) return
+        Log.d(TAG, "setNoteIdsOfInterest: ${merged.size} feed notes (${if (replace) "replace" else "+${noteRelays.size} merged"})")
+        feedNoteRelays = merged
         scheduleSubscriptionUpdate()
     }
 
@@ -155,35 +231,17 @@ object NoteCountsRepository {
         debounceJob?.cancel()
         debounceJob = scope.launch {
             delay(DEBOUNCE_MS)
-            // Cancel any pending phase 2 from a previous cycle before starting a new one
-            phase2Job?.cancel()
-            // Snapshot the merged note relay map for both phases
             val snapshot = feedNoteRelays + topicNoteRelays + threadNoteRelays
             if (snapshot.isEmpty()) {
                 cancelCountsSubscription()
                 lastSubscribedNoteIds = emptySet()
                 return@launch
             }
-            updateCountsSubscription(phase = 1, overrideMerged = snapshot)
-            // Phase 2: reactions + zaps after replies have had time to arrive
-            val snapshotHash = snapshot.keys.hashCode()
-            phase2Job = launch {
-                delay(PHASE2_DELAY_MS)
-                // Skip Phase 2 if the snapshot hasn't changed since the last one
-                if (snapshotHash == lastPhase2SnapshotHash) {
-                    Log.d(TAG, "Phase 2: skipped — snapshot unchanged")
-                    return@launch
-                }
-                lastPhase2SnapshotHash = snapshotHash
-                Log.d(TAG, "Phase 2: sending kind-7 + kind-9735 enrichment")
-                updateCountsSubscription(phase = 2, overrideMerged = snapshot)
-            }
+            // Single all-kinds subscription: replies, reactions, zaps, reposts, votes
+            // all in one shot — no Phase 1/Phase 2 split, no extra delays.
+            updateCountsSubscription(overrideMerged = snapshot)
         }
     }
-
-    /** Delay before sending kind-7/kind-9735 filters (let kind-1 replies arrive first).
-     *  Increased from 600ms to reduce churn — Phase 2 was firing 8+ times in 20s. */
-    private const val PHASE2_DELAY_MS = 2500L
 
     /**
      * Force re-trigger the counts subscription even if note IDs haven't changed.
@@ -203,10 +261,9 @@ object NoteCountsRepository {
     /**
      * Update counts subscription via CybinRelayPool (through RelayConnectionStateMachine).
      * Cancels any previous subscription and creates a new one with per-relay filters.
-     *
-     * @param phase 1 = kind-1 replies only, 2 = kind-7 reactions + kind-9735 zaps, 0 = all (legacy)
+     * All event kinds (replies, reactions, zaps, reposts, votes) in a single subscription.
      */
-    private fun updateCountsSubscription(phase: Int = 0, overrideMerged: Map<String, List<String>>? = null) {
+    private fun updateCountsSubscription(overrideMerged: Map<String, List<String>>? = null) {
         val merged = overrideMerged ?: (feedNoteRelays + topicNoteRelays + threadNoteRelays)
         if (merged.isEmpty()) {
             cancelCountsSubscription()
@@ -214,13 +271,10 @@ object NoteCountsRepository {
             return
         }
         val mergedIds = merged.keys
-        // Phase 2 reuses the same note IDs with different kinds — skip the idempotency guard
-        if (phase != 2) {
-            if (mergedIds == lastSubscribedNoteIds) return
-            val newIds = mergedIds - lastSubscribedNoteIds
-            if (newIds.size < RESUB_THRESHOLD && lastSubscribedNoteIds.isNotEmpty() && countsSubscriptionHandle != null) return
-            lastSubscribedNoteIds = mergedIds
-        }
+        if (mergedIds == lastSubscribedNoteIds) return
+        val newIds = mergedIds - lastSubscribedNoteIds
+        if (newIds.size < RESUB_THRESHOLD && lastSubscribedNoteIds.isNotEmpty() && countsSubscriptionHandle != null) return
+        lastSubscribedNoteIds = mergedIds
 
         // Validate note IDs: must be exactly 64 hex chars (Nostr event ID)
         val validMerged = merged.filterKeys { HEX_ID_REGEX.matches(it) }
@@ -246,18 +300,48 @@ object NoteCountsRepository {
                 .associate { it.key to it.value }
         } else perRelayNoteIds
 
-        Log.d(TAG, "Updating counts sub (phase=$phase): ${mergedIds.size} notes across ${cappedPerRelay.size} relays (${perRelayNoteIds.size} total)")
+        Log.d(TAG, "Updating counts sub: ${mergedIds.size} notes across ${cappedPerRelay.size} relays (${perRelayNoteIds.size} total)")
 
-        // Build per-relay Cybin Filter maps
+        // Build per-relay Cybin Filter maps.
+        // When an engagement filter is active, boost the limit for the relevant kind
+        // and place it first so relays prioritize returning that data.
+        val engFilter = activeEngagementFilter
         val relayFilters = mutableMapOf<String, List<Filter>>()
         for ((relayUrl, noteIds) in cappedPerRelay) {
             val noteIdList = noteIds.take(200).toList()
             if (noteIdList.isEmpty()) continue
-            relayFilters[relayUrl] = when (phase) {
-                1 -> buildPhase1Filters(noteIdList)
-                2 -> buildPhase2Filters(noteIdList)
-                else -> buildAllKindsFilters(noteIdList)
+            val eTags = mapOf("e" to noteIdList)
+            val filters = when (engFilter) {
+                "replies" -> listOf(
+                    Filter(kinds = listOf(1), tags = eTags, limit = 800),   // boosted
+                    Filter(kinds = listOf(7), tags = eTags, limit = 300),
+                    Filter(kinds = listOf(9735), tags = eTags, limit = 150),
+                    Filter(kinds = listOf(6), tags = eTags, limit = 150),
+                    Filter(kinds = listOf(30011), tags = eTags, limit = 300)
+                )
+                "likes" -> listOf(
+                    Filter(kinds = listOf(7), tags = eTags, limit = 800),   // boosted
+                    Filter(kinds = listOf(1), tags = eTags, limit = 300),
+                    Filter(kinds = listOf(9735), tags = eTags, limit = 150),
+                    Filter(kinds = listOf(6), tags = eTags, limit = 150),
+                    Filter(kinds = listOf(30011), tags = eTags, limit = 300)
+                )
+                "zaps" -> listOf(
+                    Filter(kinds = listOf(9735), tags = eTags, limit = 500), // boosted
+                    Filter(kinds = listOf(1), tags = eTags, limit = 300),
+                    Filter(kinds = listOf(7), tags = eTags, limit = 300),
+                    Filter(kinds = listOf(6), tags = eTags, limit = 150),
+                    Filter(kinds = listOf(30011), tags = eTags, limit = 300)
+                )
+                else -> listOf(
+                    Filter(kinds = listOf(1), tags = eTags, limit = 500),
+                    Filter(kinds = listOf(6), tags = eTags, limit = 200),
+                    Filter(kinds = listOf(7), tags = eTags, limit = 500),
+                    Filter(kinds = listOf(9735), tags = eTags, limit = 200),
+                    Filter(kinds = listOf(30011), tags = eTags, limit = 500)
+                )
             }
+            relayFilters[relayUrl] = filters
         }
 
         // Cancel previous subscription, then create a new one via CybinRelayPool
@@ -275,39 +359,6 @@ object NoteCountsRepository {
                 }
             },
             priority = SubscriptionPriority.LOW,
-        )
-    }
-
-    /** Phase 1 filters: kind-1 replies + kind-30011 votes (fast counts).
-     *  Votes are lightweight (one per voter) and the primary engagement metric
-     *  for kind-11 topics, so they load alongside replies instead of waiting for Phase 2. */
-    private fun buildPhase1Filters(noteIds: List<String>): List<Filter> {
-        return listOf(
-            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(30011), tags = mapOf("e" to noteIds), limit = 500)
-        )
-    }
-
-    /** Phase 2 filters: all kinds — replaces Phase 1, so must carry forward kind-1 + kind-30011
-     *  alongside the enrichment kinds (kind-6 reposts, kind-7 reactions, kind-9735 zaps). */
-    private fun buildPhase2Filters(noteIds: List<String>): List<Filter> {
-        return listOf(
-            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
-            Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200),
-            Filter(kinds = listOf(30011), tags = mapOf("e" to noteIds), limit = 500)
-        )
-    }
-
-    /** All-kinds filters: kind-1 + kind-6 + kind-7 + kind-9735 + kind-30011 in one subscription. */
-    private fun buildAllKindsFilters(noteIds: List<String>): List<Filter> {
-        return listOf(
-            Filter(kinds = listOf(1), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(6), tags = mapOf("e" to noteIds), limit = 200),
-            Filter(kinds = listOf(7), tags = mapOf("e" to noteIds), limit = 500),
-            Filter(kinds = listOf(9735), tags = mapOf("e" to noteIds), limit = 200),
-            Filter(kinds = listOf(30011), tags = mapOf("e" to noteIds), limit = 500)
         )
     }
 
@@ -474,6 +525,10 @@ object NoteCountsRepository {
         val authorPubkey = event.pubKey
         // If this is our own reaction, populate the emoji button so it persists across cache clears
         ReactionsRepository.populateOwnReaction(noteId, emoji, authorPubkey, currentUserPubkey)
+        // Track own reaction event ID for kind-5 deletion support
+        if (authorPubkey == currentUserPubkey && noteId.isNotBlank()) {
+            trackOwnReactionEvent(noteId, event.id, emoji)
+        }
         val counts = snapshot[noteId] ?: NoteCounts()
         val existing = counts.reactions.toMutableSet()
         existing.add(emoji)
@@ -597,8 +652,12 @@ object NoteCountsRepository {
      * Optimistically inject our own reaction into the counts so the UI updates
      * immediately after publishing, without waiting for relay echo of kind-7.
      */
-    fun injectOwnReaction(noteId: String, emoji: String, authorPubkey: String, customEmojiUrl: String? = null) {
+    fun injectOwnReaction(noteId: String, emoji: String, authorPubkey: String, customEmojiUrl: String? = null, reactionEventId: String? = null) {
         if (noteId.isBlank() || emoji.isBlank()) return
+        // Track event ID for kind-5 deletion support
+        if (reactionEventId != null && reactionEventId.isNotBlank()) {
+            trackOwnReactionEvent(noteId, reactionEventId, emoji)
+        }
         val snapshot = _countsByNoteId.value.toMutableMap()
         val counts = snapshot[noteId] ?: NoteCounts()
         val existing = counts.reactions.toMutableSet()

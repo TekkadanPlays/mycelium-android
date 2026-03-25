@@ -19,6 +19,30 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.10",
+      "versionCode": 42,
+      "releaseDate": "2026-03-25",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.10-beta/Mycelium-v0.5.10-beta.apk",
+      "changelog": "NIP-51 relay set synchronization, indexer list cold-start restore, cross-category relay overlap warnings with NIP-66 verification, zap drawer escape-from-card fix.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "NIP-51 kind 30002 relay set sync — auto-publish categories to outbox on mutation, restore on cold start",
+        "Kind 10086 indexer relay list cold-start fetch and merge (like Amethyst)",
+        "FAB menu: Publish All Categories and Publish Indexer List actions",
+        "Cross-category relay overlap detection with severity-based warning dialogs",
+        "DM relay isolation enforcement — critical warning when DM relays detected in other sections",
+        "NIP-66 indexer verification badge — validated against relay monitor data",
+        "Unverified indexer relay warning with NIP-50 search support check",
+        "Fix: Zap drawer no longer trapped inside NoteCard — uses full-screen Popup with scrim"
+      ]
+    },
+    {
       "version": "0.5.03",
       "versionCode": 41,
       "releaseDate": "2026-03-24",

@@ -19,6 +19,30 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.11",
+      "versionCode": 43,
+      "releaseDate": "2026-03-25",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.11-beta/Mycelium-v0.5.11-beta.apk",
+      "changelog": "Auto-save drafts system, ARTICLE draft type, media gallery flickering fix, FAB menu reorder, DM deduplication fix, NIP-42 auth improvements.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Auto-save drafts: timer-based (10s interval) auto-save across all 5 compose screens (Note, Article, Topic, Reply, Topic Reply)",
+        "New ARTICLE draft type for NIP-23 long-form content (articles no longer incorrectly saved as TOPIC)",
+        "Auto-save drafts toggle in Feed Preferences (default: ON)",
+        "FAB menu reorder: Top → Drafts → Article → Post (most frequent action closest to thumb)",
+        "Media gallery flickering fix: content-based key for aspect ratio state prevents layout resets on Note re-emissions",
+        "Carousel page-change ratio updates: swiping between images updates container ratio from cache",
+        "DM deduplication fix: duplicate sent messages no longer render in conversations",
+        "NIP-42 auth handler improvements for relay connection stability"
+      ]
+    },
+    {
       "version": "0.5.10",
       "versionCode": 42,
       "releaseDate": "2026-03-25",

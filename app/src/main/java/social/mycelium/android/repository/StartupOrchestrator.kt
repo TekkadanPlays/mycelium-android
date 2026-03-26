@@ -22,14 +22,15 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
  *
  * ## Phases
  *
- * **Phase 0 — Settings** (CRITICAL priority, blocks everything)
- *   Kind-30078 settings sync. Must complete (or timeout) before any other
- *   subscriptions. On fresh install the user's compact-media / theme / accent
- *   preferences come from this event. Failure here = broken UI.
+ * **Phase 0 — Settings** (CRITICAL priority, runs concurrently with Phase 1)
+ *   Kind-30078 settings sync. Cosmetic settings (compact-media, theme, accent)
+ *   that apply retroactively via SharedPreferences → Compose recomposition.
+ *   Does **not** block Phase 1 or the feed — see [runPhase0Settings].
  *
- * **Phase 1 — User State** (HIGH priority, starts after Phase 0)
- *   Kind-3 follow list + Kind-10000 mute list. Needed so the feed filter
- *   and content filter are ready before notes arrive.
+ * **Phase 1 — User State** (HIGH priority, runs concurrently with Phase 0)
+ *   Kind-3 follow list + Kind-10000 mute list. Feed waits for [userStateReady].
+ *   Also launches fire-and-forget fetches for people lists, hashtag interests,
+ *   relay sets (kind-30002), and indexer list (kind-10086).
  *
  * **Phase 2 — Feed** (HIGH priority, starts after Phase 1)
  *   Main kind-1 subscription + self NIP-65 (kind-10002).
@@ -41,6 +42,9 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
  *
  * **Phase 4 — Background** (LOW priority, starts after Phase 3 or 15s)
  *   DMs (kind-1059), background account notification subs.
+ *
+ * **Phase 5 — Deep History** (starts 5s after Phase 4)
+ *   Historical note fetching via [DeepHistoryFetcher].
  *
  * Each phase emits a [StartupPhase] via [currentPhase]. Consumers gate their
  * work on the phase being >= their required phase.

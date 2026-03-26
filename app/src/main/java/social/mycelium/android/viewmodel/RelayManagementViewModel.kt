@@ -48,6 +48,11 @@ class RelayManagementViewModel(
     // Current user's pubkey - set when loading data
     private var currentPubkey: String? = null
 
+    /** True once [loadUserRelays] has populated UI state from disk for the current pubkey.
+     *  Guards [fetchUserRelaysFromNetwork] against racing with the storage load. */
+    @Volatile
+    private var storageLoaded = false
+
     /** Signer cached from the active account — set via [setSigner]. */
     private var cachedSigner: com.example.cybin.signer.NostrSigner? = null
 
@@ -134,6 +139,7 @@ class RelayManagementViewModel(
         // If switching to a different user, clear stale state immediately so downstream
         // consumers (DashboardScreen, TopicsScreen) don't see the old account's relays.
         if (isSwitching) {
+            storageLoaded = false
             _uiState.update {
                 it.copy(
                     relayCategories = emptyList(),
@@ -180,9 +186,13 @@ class RelayManagementViewModel(
                 current.draftsRelays == drafts &&
                 current.blossomServers == blossom &&
                 current.nip96Servers == nip96
-            ) return@launch
+            ) {
+                storageLoaded = true
+                return@launch
+            }
 
             _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, blossomServers = blossom, nip96Servers = nip96) }
+            storageLoaded = true
 
             // Mark outbox relays as priority for connection (connect first, no jitter/cooldown)
             val outboxUrls = outbox.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
@@ -515,6 +525,7 @@ class RelayManagementViewModel(
         _uiState.update { it.copy(indexerRelays = it.indexerRelays + relay) }
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()
+            currentPubkey?.let { storageManager.setIndexersConfirmed(it, true) }
             refreshActiveSubscription()
         }
         fetchAndApplyNip11(relay.url)
@@ -523,6 +534,7 @@ class RelayManagementViewModel(
     fun removeIndexerRelay(url: String) {
         _uiState.update { it.copy(indexerRelays = it.indexerRelays.filter { r -> r.url != url }) }
         saveToStorage()
+        currentPubkey?.let { storageManager.setIndexersConfirmed(it, true) }
     }
 
     // System relay management methods
@@ -704,6 +716,14 @@ class RelayManagementViewModel(
 
     fun fetchUserRelaysFromNetwork(pubkey: String) {
         viewModelScope.launch {
+            // Wait for loadUserRelays to finish populating state from disk so we
+            // don't mistake an in-flight disk read for "empty outbox/inbox".
+            var waited = 0
+            while (!storageLoaded && waited < 3_000) {
+                kotlinx.coroutines.delay(50)
+                waited += 50
+            }
+
             _uiState.update { it.copy(isLoading = true) }
 
                 relayRepository.fetchUserRelayList(pubkey)

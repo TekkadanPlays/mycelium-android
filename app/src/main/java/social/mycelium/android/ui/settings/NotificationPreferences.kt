@@ -49,6 +49,7 @@ object NotificationPreferences {
     private const val KEY_NOTIFY_POLLS = "notify_polls"
     private const val KEY_NOTIFY_QUOTES = "notify_quotes"
     private const val KEY_MUTE_STRANGERS = "mute_strangers"
+    private const val KEY_SHOW_DM_CONTENT = "show_dm_content"
 
     /** Active account hex pubkey (lowercase). Null = guest / no account. */
     @Volatile private var activeAccountHex: String? = null
@@ -64,7 +65,7 @@ object NotificationPreferences {
 
     private lateinit var prefs: SharedPreferences
 
-    private val _pushEnabled = MutableStateFlow(false)
+    private val _pushEnabled = MutableStateFlow(true)
     val pushEnabled: StateFlow<Boolean> = _pushEnabled.asStateFlow()
 
     private val _connectionMode = MutableStateFlow(ConnectionMode.ADAPTIVE)
@@ -104,10 +105,15 @@ object NotificationPreferences {
     private val _muteStrangers = MutableStateFlow(false)
     val muteStrangers: StateFlow<Boolean> = _muteStrangers.asStateFlow()
 
+    /** When true, DM notifications show sender name and message preview (requires decryption).
+     *  When false (default), DM notifications show "New private message" — no content revealed. */
+    private val _showDmContent = MutableStateFlow(false)
+    val showDmContent: StateFlow<Boolean> = _showDmContent.asStateFlow()
+
     fun init(context: Context) {
         prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         // ── Global (device-level) settings ──
-        _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, false)
+        _pushEnabled.value = prefs.getBoolean(KEY_PUSH_ENABLED, true)
 
         // Migration: old boolean toggle → new ConnectionMode enum
         if (prefs.contains(KEY_CONNECTION_MODE)) {
@@ -157,6 +163,7 @@ object NotificationPreferences {
         _notifyPolls.value = getAccountBool(KEY_NOTIFY_POLLS, true)
         _notifyQuotes.value = getAccountBool(KEY_NOTIFY_QUOTES, true)
         _muteStrangers.value = getAccountBool(KEY_MUTE_STRANGERS, false)
+        _showDmContent.value = getAccountBool(KEY_SHOW_DM_CONTENT, false)
     }
 
     fun setPushEnabled(enabled: Boolean) {
@@ -225,6 +232,12 @@ object NotificationPreferences {
     fun setMuteStrangers(enabled: Boolean) {
         _muteStrangers.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_MUTE_STRANGERS), enabled).apply()
+        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+    }
+
+    fun setShowDmContent(enabled: Boolean) {
+        _showDmContent.value = enabled
+        prefs.edit().putBoolean(acctKey(KEY_SHOW_DM_CONTENT), enabled).apply()
         social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
     }
 

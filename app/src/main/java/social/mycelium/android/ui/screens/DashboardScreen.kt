@@ -331,6 +331,61 @@ private fun RelayConnectionLoadingIndicator(
 }
 
 /**
+ * Non-blocking banner shown when a fetched kind-10086 indexer list differs from the
+ * user's confirmed local list. Lets the user accept or dismiss without interrupting feed.
+ */
+@Composable
+private fun IndexerDiffBanner(
+    diff: social.mycelium.android.repository.RelayCategorySyncRepository.PendingIndexerDiff,
+    onAccept: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+        ),
+        shape = MaterialTheme.shapes.medium,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Text(
+                text = "Your published indexer list has changed",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            Spacer(Modifier.height(4.dp))
+            val summary = buildString {
+                if (diff.added.isNotEmpty()) append("+${diff.added.size} added")
+                if (diff.added.isNotEmpty() && diff.removed.isNotEmpty()) append(", ")
+                if (diff.removed.isNotEmpty()) append("-${diff.removed.size} removed")
+            }
+            Text(
+                text = summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.End,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss", fontSize = 12.sp)
+                }
+                Spacer(Modifier.width(8.dp))
+                Button(
+                    onClick = onAccept,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    Text("Update", fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+/**
  * Extracted overlay: loading indicator + onboarding prompt.
  * Reduces the PullToRefreshBox content lambda JIT from 9.2MB by splitting ~265 lines
  * into a separate compilation unit.
@@ -2067,6 +2122,30 @@ fun DashboardScreen(
                 }
             }
         ) { paddingValues ->
+            // Non-blocking banner when a remote indexer list (kind 10086) differs
+            // from the user's confirmed local indexers.
+            val pendingIndexerDiff by social.mycelium.android.repository.RelayCategorySyncRepository.pendingIndexerDiff.collectAsState()
+            val diffToShow = pendingIndexerDiff
+            if (diffToShow != null) {
+                val pubkey = currentAccount?.toHexKey()
+                if (pubkey != null) {
+                    IndexerDiffBanner(
+                        diff = diffToShow,
+                        onAccept = {
+                            social.mycelium.android.repository.RelayCategorySyncRepository.acceptPendingIndexerDiff(pubkey, context)
+                            relayViewModel?.loadUserRelays(pubkey)
+                        },
+                        onDismiss = {
+                            social.mycelium.android.repository.RelayCategorySyncRepository.dismissPendingIndexerDiff()
+                        },
+                        modifier = Modifier.padding(
+                            top = paddingValues.calculateTopPadding() + 4.dp,
+                            start = 12.dp, end = 12.dp
+                        )
+                    )
+                }
+            }
+
             DashboardFeedContent(
                 paddingValues = paddingValues,
                 isRefreshing = isRefreshing,

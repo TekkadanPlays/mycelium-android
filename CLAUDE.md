@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **See also:** [`AGENTS.md`](AGENTS.md) for comprehensive agent workflow rules, coding standards, versioning/release process, and project goals. [`CONTRIBUTING.md`](CONTRIBUTING.md) for contributor guidelines. [`docs/`](docs/README.md) for full architecture documentation.
+
 ## Project Overview
 
 Mycelium is a Nostr protocol client for Android built with Jetpack Compose and Material Design 3. It handles relay WebSocket connections, event parsing (kinds 0, 1, 3, 6, 7, 11, 1011, 1068, 1111, 6969, 9734, 9735, 10000, 10002, 10003, 14/13/1059, 22242, 24242, 30000, 30023, 30073, 30078, 30166, 30311), thread navigation, profile metadata, push notifications, polls, DMs, live streams, and an embedded Lightning wallet.
@@ -64,7 +66,7 @@ Thread navigation uses `AppViewModel.notesById: Map<String, Note>` to support st
 - **Profiles:** `ProfileMetadataCache` emits pubkey on `profileUpdated: SharedFlow`. NoteCard observes this directly via `LaunchedEffect` and increments `profileRevision` to trigger recomposition. Profiles cached in both SharedPreferences and Room.
 - **Reply Threading:** `Kind1RepliesRepository` uses direct OkHttp WebSocket connections (bypasses relay pool) + ThreadReplyCache for instant display. `ThreadRepliesRepository` handles kind-1111 via relay pool with CRITICAL priority.
 - **Outbox Relays (NIP-65):** `Nip65RelayListRepository` preloads kind-10002 write relays for quoted note authors when thread opens. `OutboxFeedManager` uses Thompson Sampling for Bayesian relay ranking.
-- **Startup:** `StartupOrchestrator` coordinates 5 phases: Settings (CRITICAL) → User State (HIGH) → Feed (HIGH) → Enrichment (NORMAL) → Background (LOW). Each phase gates on the previous one.
+- **Startup:** `StartupOrchestrator` coordinates 6 phases: Settings (CRITICAL, concurrent) + User State (HIGH, concurrent) → Feed (HIGH) → Enrichment (NORMAL) → Background (LOW) → Deep History. Phase 0 (settings) runs concurrently with Phase 1 (follow+mute) and does NOT block the feed. The feed waits only on `userStateReady` (Phase 1).
 
 ### Important Timing Pitfall
 

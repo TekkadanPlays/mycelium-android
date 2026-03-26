@@ -290,7 +290,10 @@ class NotificationsRepository(
 
     /** Buffer of pending target note fetches waiting to be flushed as one subscription.
      *  Keyed by parent noteId → list of notifications that need that parent verified. */
-    private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, MutableList<PendingTargetFetch>>()
+    private val pendingTargetFetches = java.util.concurrent.ConcurrentHashMap<String, CopyOnWriteArrayList<PendingTargetFetch>>()
+
+    /** Tick counter for continuous validation loop to periodically retry exhausted fetches. */
+    private var targetFetchValidationTick = 0
 
     /** Debounce job for batched target note flush. */
     private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
@@ -315,10 +318,48 @@ class NotificationsRepository(
     /** Allow Android notifications for events created after this moment.
      *  Called once the initial relay replay window has settled. */
     fun enableAndroidNotifications() {
-        // Events created before this timestamp are historical replay — suppress them.
-        // Events created after this timestamp are genuinely new — show push.
         sessionStartEpochSec = System.currentTimeMillis() / 1000
         Log.d(TAG, "Push notifications enabled for events after epoch=$sessionStartEpochSec")
+        startDmNotificationObserver()
+    }
+
+    private var dmNotifObserverJob: Job? = null
+
+    /** Observe DirectMessageRepository for new gift wraps and fire obfuscated DM notifications. */
+    private fun startDmNotificationObserver() {
+        dmNotifObserverJob?.cancel()
+        dmNotifObserverJob = scope.launch {
+            DirectMessageRepository.newDmSignal.collect { giftWrapId ->
+                fireDmNotification(giftWrapId)
+            }
+        }
+        if (social.mycelium.android.ui.settings.NotificationPreferences.notifyDMs.value) {
+            DirectMessageRepository.ensureSubscriptionForNotifications()
+        }
+    }
+
+    /** Fire an obfuscated (or optionally decrypted) DM notification. */
+    private fun fireDmNotification(giftWrapId: String) {
+        val ctx = appContext ?: return
+        val prefs = social.mycelium.android.ui.settings.NotificationPreferences
+        if (!prefs.pushEnabled.value) return
+        if (!prefs.isNotificationAllowedForAccount(ownerPubkeyHex, NotificationType.DM)) return
+
+        val title = "Mycelium"
+        val body = "New private message"
+        val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE +
+                (giftWrapId.hashCode() and 0x7FFFFFFF) % 10000
+
+        Log.d(TAG, "fireDmNotification: giftWrap=${giftWrapId.take(8)} account=${ownerPubkeyHex.take(8)}")
+        social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
+            ctx,
+            social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS,
+            notifId,
+            title,
+            body,
+            notifType = NotificationType.DM.name,
+            accountPubkey = ownerPubkeyHex
+        )
     }
 
     /**
@@ -806,12 +847,24 @@ class NotificationsRepository(
             }
         }
 
-        // ── Safety-net re-enrichment ──
-        // EOSE-driven callbacks above handle the normal case. This is a fallback
-        // for edge cases where EOSE never fires (relay disconnect, slow relay, etc).
+        // ── Continuous Validation Loop ──
+        // Periodically sweep for incomplete notifications (missing target notes or unresolved
+        // profiles) so that we consistently populate data even if initial fetches fail.
         scope.launch {
-            delay(60_000L)
-            reEnrichOrphanedNotifications()
+            while (true) {
+                delay(30_000L) // Verify every 30s
+                targetFetchValidationTick++
+                // Every 5 minutes (10 sweeps), clear the exhausted list so that permanently
+                // failed fetches get another chance to resolve as new relays connect.
+                if (targetFetchValidationTick >= 10) {
+                    targetFetchValidationTick = 0
+                    if (targetFetchExhaustedIds.isNotEmpty()) {
+                        Log.d(TAG, "Continuous validation: clearing ${targetFetchExhaustedIds.size} exhausted fetches for retry")
+                        targetFetchExhaustedIds.clear()
+                    }
+                }
+                reEnrichOrphanedNotifications()
+            }
         }
     }
 
@@ -1971,7 +2024,6 @@ class NotificationsRepository(
     /** Longer debounce during startup replay — hundreds of events arrive in bursts,
      *  no point writing to Room every 3s when the next event will arrive momentarily. */
     private val NOTIF_SAVE_REPLAY_DEBOUNCE_MS = 10_000L
-    private val MAX_PERSISTED_NOTIFICATIONS = 3000
     private val saveLock = Any()
 
     /** Debounced save of notifications to Room. Called after any notification state change.
@@ -1996,7 +2048,7 @@ class NotificationsRepository(
             val notifications = notificationsById.values.toList()
             val entities = notifications.map { it.toEntity(pubkey) }
             dao.upsertAll(entities)
-            dao.trimToNewest(pubkey, MAX_PERSISTED_NOTIFICATIONS)
+            // Removed trimToNewest to allow unlimited depth of historical events
             Log.d(TAG, "Saved ${entities.size} notifications to Room")
         } catch (e: Exception) {
             Log.e(TAG, "saveNotificationsToRoom failed: ${e.message}", e)
@@ -2206,7 +2258,7 @@ class NotificationsRepository(
                 }
                 // Room miss — fall through to batched relay fetch
                 if (subscriptionRelayUrls.isEmpty()) return@launch
-                pendingTargetFetches.getOrPut(noteId) { mutableListOf() }
+                pendingTargetFetches.getOrPut(noteId) { CopyOnWriteArrayList() }
                     .add(PendingTargetFetch(noteId, notificationId, update))
                 scheduleTargetFetchFlush()
             }
@@ -2214,7 +2266,7 @@ class NotificationsRepository(
         }
         if (subscriptionRelayUrls.isEmpty()) return
         // Slow path: buffer for batched relay fetch
-        pendingTargetFetches.getOrPut(noteId) { mutableListOf() }
+        pendingTargetFetches.getOrPut(noteId) { CopyOnWriteArrayList() }
             .add(PendingTargetFetch(noteId, notificationId, update))
         scheduleTargetFetchFlush()
     }
@@ -2406,7 +2458,7 @@ class NotificationsRepository(
             if (retryQueue.isNotEmpty()) {
                 Log.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")
                 for (pending in retryQueue) {
-                    pendingTargetFetches.getOrPut(pending.noteId) { mutableListOf() }.add(pending)
+                    pendingTargetFetches.getOrPut(pending.noteId) { CopyOnWriteArrayList() }.add(pending)
                 }
                 scheduleTargetFetchFlush()
             }

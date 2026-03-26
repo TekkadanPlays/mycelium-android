@@ -43,6 +43,7 @@ class RelayStorageManager(val context: Context) {
         private const val KEY_MEDIA_NIP96 = "media_nip96_servers"
         private const val KEY_ONBOARDING_PHASE = "onboarding_phase"
         private const val KEY_ONBOARDING_INDEXERS = "onboarding_indexers"
+        private const val KEY_INDEXERS_CONFIRMED = "indexers_confirmed"
 
         /** Normalize relay URL using the shared utility (lowercase, trim, strip slash/ports, ensure wss://). */
         fun normalizeRelayUrl(url: String): String = social.mycelium.android.utils.normalizeRelayUrl(url)
@@ -212,6 +213,22 @@ class RelayStorageManager(val context: Context) {
         }
     }
 
+    /**
+     * Mark the indexer relay list as explicitly confirmed by the user.
+     * When true, background kind-10086 fetches will not silently replace the list.
+     */
+    fun setIndexersConfirmed(pubkey: String, confirmed: Boolean) {
+        prefs.edit().putBoolean("${KEY_INDEXERS_CONFIRMED}_${pubkey}", confirmed).apply()
+    }
+
+    /**
+     * Check whether the user has explicitly confirmed their indexer relay list
+     * (e.g. during onboarding SELECT_INDEXERS or via Relay Management).
+     */
+    fun areIndexersConfirmed(pubkey: String): Boolean {
+        return prefs.getBoolean("${KEY_INDEXERS_CONFIRMED}_${pubkey}", false)
+    }
+
     // ====== System Tab - Announcement Relays ======
 
     fun saveAnnouncementRelays(pubkey: String, relays: List<UserRelay>) {
@@ -335,6 +352,7 @@ class RelayStorageManager(val context: Context) {
             .remove("${KEY_SYSTEM_DRAFTS}_${pubkey}")
             .remove("${KEY_MEDIA_BLOSSOM}_${pubkey}")
             .remove("${KEY_MEDIA_NIP96}_${pubkey}")
+            .remove("${KEY_INDEXERS_CONFIRMED}_${pubkey}")
             .apply()
     }
 

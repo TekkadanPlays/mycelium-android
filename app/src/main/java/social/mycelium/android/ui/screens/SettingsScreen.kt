@@ -77,7 +77,7 @@ fun SettingsScreen(
             SettingsSectionHeader("Your Experience")
             SettingsItem(icon = Icons.Outlined.Palette, title = "Appearance", onClick = { onNavigateTo("appearance") })
             SettingsItem(icon = Icons.Outlined.PlayCircleOutline, title = "Media", onClick = { onNavigateTo("media") })
-            SettingsItem(icon = Icons.Outlined.Notifications, title = "Notifications", onClick = { onNavigateTo("notifications") })
+            SettingsItem(icon = Icons.Outlined.Notifications, title = "Notifications & Power", onClick = { onNavigateTo("notifications") })
 
             // ── Account ──
             SettingsSectionHeader("Account")
@@ -87,7 +87,6 @@ fun SettingsScreen(
 
             // ── Device ──
             SettingsSectionHeader("Device")
-            SettingsItem(icon = Icons.Outlined.BatteryChargingFull, title = "Power", onClick = { onNavigateTo("power") })
             SettingsItem(icon = Icons.Outlined.Storage, title = "Data and Storage", onClick = { onNavigateTo("data_storage") })
 
             HorizontalDivider(

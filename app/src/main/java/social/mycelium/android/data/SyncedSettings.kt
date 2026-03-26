@@ -38,7 +38,8 @@ data class SyncedSettings(
     val defaultListDTag: String? = null,           // NIP-51 list d-tag for cold start, null = Following
 
     // Tier 5 — DM preferences
-    val autoDecryptDMs: Boolean = false             // Auto-decrypt without user confirmation (off by default)
+    val autoDecryptDMs: Boolean = false,            // Auto-decrypt without user confirmation (off by default)
+    val showDmContent: Boolean = false              // Show decrypted sender/content in DM notifications (off by default)
 ) {
     fun toJson(): String {
         val obj = JSONObject()
@@ -61,6 +62,7 @@ data class SyncedSettings(
         obj.put("defaultSortOrder", defaultSortOrder)
         if (defaultListDTag != null) obj.put("defaultListDTag", defaultListDTag)
         obj.put("autoDecryptDMs", autoDecryptDMs)
+        obj.put("showDmContent", showDmContent)
         return obj.toString()
     }
 
@@ -92,7 +94,8 @@ data class SyncedSettings(
                     defaultFeedView = obj.optString("defaultFeedView", "HOME"),
                     defaultSortOrder = obj.optString("defaultSortOrder", "LATEST"),
                     defaultListDTag = obj.optString("defaultListDTag", null),
-                    autoDecryptDMs = obj.optBoolean("autoDecryptDMs", false)
+                    autoDecryptDMs = obj.optBoolean("autoDecryptDMs", false),
+                    showDmContent = obj.optBoolean("showDmContent", false)
                 )
             } catch (e: Exception) {
                 SyncedSettings() // Return defaults on parse failure
@@ -122,7 +125,8 @@ data class SyncedSettings(
                 defaultFeedView = social.mycelium.android.ui.settings.FeedPreferences.defaultFeedView.value,
                 defaultSortOrder = social.mycelium.android.ui.settings.FeedPreferences.defaultSortOrder.value,
                 defaultListDTag = social.mycelium.android.ui.settings.FeedPreferences.defaultListDTag.value,
-                autoDecryptDMs = social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.value
+                autoDecryptDMs = social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.value,
+                showDmContent = social.mycelium.android.ui.settings.NotificationPreferences.showDmContent.value
             )
         }
 
@@ -163,6 +167,7 @@ data class SyncedSettings(
 
             // Tier 5 — DM preferences
             social.mycelium.android.ui.settings.DmPreferences.applyAutoDecryptDMs(settings.autoDecryptDMs)
+            social.mycelium.android.ui.settings.NotificationPreferences.setShowDmContent(settings.showDmContent)
         }
     }
 }

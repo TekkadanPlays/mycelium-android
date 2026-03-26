@@ -1,4 +1,4 @@
-package social.mycelium.android.ui.components
+﻿package social.mycelium.android.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -313,7 +313,7 @@ internal fun QuotedNoteBody(
                         val imgRatio by remember(qImageUrls) {
                             val initial =
                                 currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
-                            mutableFloatStateOf((initial ?: (16f / 9f)).coerceIn(0.4f, 2.5f))
+                            mutableFloatStateOf((initial ?: 1.0f).coerceIn(0.4f, 2.5f))
                         }
                         Box(
                             modifier = Modifier
@@ -335,7 +335,7 @@ internal fun QuotedNoteBody(
                                         .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                                         .build(),
                                     contentDescription = null,
-                                    contentScale = ContentScale.Fit,
+                                    contentScale = if (social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl) == null) ContentScale.Crop else ContentScale.Fit,
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .clickable { navigateToQuotedNote() }
@@ -374,7 +374,7 @@ internal fun QuotedNoteBody(
                                             androidx.compose.foundation.Image(
                                                 painter = painter,
                                                 contentDescription = null,
-                                                contentScale = ContentScale.Fit,
+                                                contentScale = if (social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl) == null) ContentScale.Crop else ContentScale.Fit,
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             SideEffect {
@@ -1056,7 +1056,7 @@ internal fun NoteMediaCarousel(
         } else null
     }
     var containerRatio by remember(mediaListKey) {
-        mutableFloatStateOf(knownRatio ?: (16f / 9f))
+        mutableFloatStateOf(knownRatio ?: 1.0f)
     }
     // Update container ratio when user swipes to a page with a known ratio
     LaunchedEffect(pagerState.currentPage, mediaListKey) {
@@ -1085,7 +1085,7 @@ internal fun NoteMediaCarousel(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (compactMedia) Modifier.padding(horizontal = 16.dp) else Modifier)
-            .aspectRatio((containerRatio ?: (16f / 9f)).coerceIn(0.3f, 3.0f))
+            .aspectRatio((containerRatio ?: 1.0f).coerceIn(0.3f, 3.0f))
             .clip(if (compactMedia) RoundedCornerShape(8.dp) else RectangleShape)
             .clipToBounds()
             .nestedScroll(verticalPassthrough)
@@ -1149,12 +1149,12 @@ internal fun NoteMediaCarousel(
                             val w = drawable.intrinsicWidth
                             val h = drawable.intrinsicHeight
                             if (w > 0 && h > 0) {
-                                val realRatio = w.toFloat() / h.toFloat()
                                 MediaAspectRatioCache.add(url, w, h)
-                                // Update container to real ratio if we were using a default
-                                if (!ratioWasKnown) {
-                                    containerRatio = realRatio
-                                }
+                                // We intentionally DO NOT update containerRatio here.
+                                // Dynamically resizing the container when Coil finishes loading
+                                // causes LazyColumn to shift scroll positions (recomposition teleport).
+                                // Images without imeta dimensions will remain at the default ratio (1.0f)
+                                // and be cropped (ContentScale.Crop), preventing feed layout jumps.
                             }
                         }
                     }
@@ -1163,7 +1163,7 @@ internal fun NoteMediaCarousel(
                         androidx.compose.foundation.Image(
                             painter = imagePainter,
                             contentDescription = meta?.alt,
-                            contentScale = ContentScale.Fit,
+                            contentScale = if (!ratioWasKnown) ContentScale.Crop else ContentScale.Fit,
                             modifier = Modifier.fillMaxSize()
                         )
                         // Loading overlay

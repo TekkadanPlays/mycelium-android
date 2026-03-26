@@ -40,6 +40,9 @@ import kotlinx.serialization.json.Json
 import java.util.Collections
 import java.util.HashSet
 import java.util.concurrent.ConcurrentLinkedQueue
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
 
 /** Separate counts of pending new notes for All vs Following. Nonce ensures StateFlow always emits on update. */
 data class NewNotesCounts(val all: Int, val following: Int, val nonce: Long = 0L)
@@ -470,7 +473,7 @@ class NotesRepository private constructor() {
                         .forEach { staleIds.add(it.id) }
                 }
                 if (staleIds.isNotEmpty()) {
-                    _notes.value = _notes.value.filter { it.id !in staleIds }
+                    _notes.value = _notes.value.filter { it.id !in staleIds }.toImmutableList()
                     Log.d(TAG, "Removed ${staleIds.size} stale article versions replaced by newer events")
                 }
             }
@@ -481,7 +484,7 @@ class NotesRepository private constructor() {
                 val updatedList = currentNotes.map { note ->
                     relayUpdates[note.id]?.let { urls -> note.copy(relayUrls = urls) } ?: note
                 }
-                _notes.value = updatedList
+                _notes.value = updatedList.toImmutableList()
                 // Persist merged relay URLs to Room so cold-start restores all orbs.
                 // Must flush pending event INSERTs first — the debounced flushEventStore
                 // may not have run yet, so the row may not exist for UPDATE to match.
@@ -546,7 +549,7 @@ class NotesRepository private constructor() {
                         }
                     }
                 }
-                _notes.value = merged
+                _notes.value = merged.toImmutableList()
                 advancePaginationCursor(feedNotes)
                 if (!initialLoadComplete && merged.size % 50 == 0) {
                     Log.d(TAG, "Initial load: ${merged.size} notes so far")
@@ -823,14 +826,14 @@ class NotesRepository private constructor() {
     }
 
     // All notes (with relayUrl set when received); filtered by connectedRelays for display
-    private val _notes = MutableStateFlow<List<Note>>(emptyList())
-    private val _displayedNotes = MutableStateFlow<List<Note>>(emptyList())
+    private val _notes = MutableStateFlow<ImmutableList<Note>>(persistentListOf())
+    private val _displayedNotes = MutableStateFlow<ImmutableList<Note>>(persistentListOf())
     /** Displayed notes (filtered by relay + follow filter, debounced). Primary feed source for UI. */
-    val notes: StateFlow<List<Note>> = _displayedNotes.asStateFlow()
+    val notes: StateFlow<ImmutableList<Note>> = _displayedNotes.asStateFlow()
     /** Alias for clarity when distinguishing from allNotes. */
-    val displayedNotes: StateFlow<List<Note>> = _displayedNotes.asStateFlow()
+    val displayedNotes: StateFlow<ImmutableList<Note>> = _displayedNotes.asStateFlow()
     /** Raw unfiltered notes list — emits on every event batch + profile update. Use for fast UI; use displayedNotes for enrichment. */
-    val allNotes: StateFlow<List<Note>> = _notes.asStateFlow()
+    val allNotes: StateFlow<ImmutableList<Note>> = _notes.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -873,7 +876,7 @@ class NotesRepository private constructor() {
     private var isGlobalMode: Boolean = false
 
     /** In-memory snapshot of following notes saved before entering Global mode; restored instantly on return. */
-    private var followingNotesSnapshot: List<Note> = emptyList()
+    private var followingNotesSnapshot: ImmutableList<Note> = persistentListOf()
 
     /** Last applied kind-1 filter (authors) when Following was active; used on resume when follow list is temporarily empty so All notes do not bleed into Following. */
     @Volatile
@@ -1062,8 +1065,8 @@ class NotesRepository private constructor() {
                     }
                 }
                 if (notes.isNotEmpty() && _notes.value.isEmpty()) {
-                    _notes.value = notes
-                    _displayedNotes.value = notes
+                    _notes.value = notes.toImmutableList()
+                    _displayedNotes.value = notes.toImmutableList()
                     initialLoadComplete = true
                     val now = System.currentTimeMillis()
                     feedCutoffTimestampMs = now
@@ -1251,8 +1254,8 @@ class NotesRepository private constructor() {
             isGlobalMode = true
             kind1FlushJob?.cancel()
             pendingKind1Events.clear()
-            _notes.value = emptyList()
-            _displayedNotes.value = emptyList()
+            _notes.value = persistentListOf()
+            _displayedNotes.value = persistentListOf()
             synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
             _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
             initialLoadComplete = false
@@ -1286,8 +1289,8 @@ class NotesRepository private constructor() {
                 _feedSessionState.value = FeedSessionState.Live
                 Log.d(TAG, "Leaving Global mode — restored ${snapshot.size} following notes from memory")
             } else {
-                _notes.value = emptyList()
-                _displayedNotes.value = emptyList()
+                _notes.value = persistentListOf()
+                _displayedNotes.value = persistentListOf()
                 initialLoadComplete = false
                 paginationCursorMs = 0L
                 paginationExtraCap = 0
@@ -1338,14 +1341,14 @@ class NotesRepository private constructor() {
                 if (currentFollowFilter == null || currentFollowFilter.isEmpty()) {
                     if (customListActive) {
                         // Intentional: user selected a people list with 0 members → blank feed
-                        _displayedNotes.value = emptyList()
+                        _displayedNotes.value = persistentListOf()
                         return
                     }
                     if (_displayedNotes.value.isNotEmpty()) {
                         Log.w(TAG, "Follow filter temporarily empty, keeping ${_displayedNotes.value.size} displayed notes")
                         return
                     } else {
-                        _displayedNotes.value = emptyList()
+                        _displayedNotes.value = persistentListOf()
                         return
                     }
                 }
@@ -1405,7 +1408,7 @@ class NotesRepository private constructor() {
                 if (dataChanged) {
                     val multiOrb = newList.count { it.relayUrls.size > 1 }
                     Log.d(TAG, "\uD83D\uDD35 Display emit (data changed, IDs same): ${newList.size} notes, $multiOrb multi-orb")
-                    _displayedNotes.value = newList
+                    _displayedNotes.value = newList.toImmutableList()
                 }
                 updateDisplayedNewNotesCount()
                 return
@@ -1418,7 +1421,7 @@ class NotesRepository private constructor() {
                 val sample = newList.first()
                 Log.d(TAG, "\uD83D\uDD35   sample[0] ${sample.id.take(8)}: relayUrls=${sample.relayUrls}, relayUrl=${sample.relayUrl}")
             }
-            _displayedNotes.value = newList
+            _displayedNotes.value = newList.toImmutableList()
             updateDisplayedNewNotesCount()
             // Fire counts subscription immediately — no debounce. Notes are already in
             // feed-position order (newest first), so top-of-viewport notes appear first
@@ -1498,11 +1501,11 @@ class NotesRepository private constructor() {
         followFilter = null
         followFilterEnabled = false
         isGlobalMode = false
-        followingNotesSnapshot = emptyList()
+        followingNotesSnapshot = persistentListOf()
         lastAppliedKind1Filter = null
         _feedSessionState.value = FeedSessionState.Idle
-        _notes.value = emptyList()
-        _displayedNotes.value = emptyList()
+        _notes.value = persistentListOf()
+        _displayedNotes.value = persistentListOf()
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         feedCutoffTimestampMs = 0L
@@ -1573,8 +1576,8 @@ class NotesRepository private constructor() {
         _isLoading.value = true
         _feedSessionState.value = FeedSessionState.Loading
         _error.value = null
-        _notes.value = emptyList()
-        _displayedNotes.value = emptyList()
+        _notes.value = persistentListOf()
+        _displayedNotes.value = persistentListOf()
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         initialLoadComplete = false
@@ -1837,7 +1840,7 @@ class NotesRepository private constructor() {
     suspend fun subscribeToRelayNotes(relayUrl: String, limit: Int = 100) {
         _isLoading.value = true
         _error.value = null
-        _notes.value = emptyList()
+        _notes.value = persistentListOf()
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         initialLoadComplete = false
@@ -1870,7 +1873,7 @@ class NotesRepository private constructor() {
 
         _isLoading.value = true
         _error.value = null
-        _notes.value = emptyList()
+        _notes.value = persistentListOf()
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         initialLoadComplete = false
@@ -2163,7 +2166,7 @@ class NotesRepository private constructor() {
             )
             val updatedNotes = currentNotes.toMutableList()
             updatedNotes[existingIndex] = merged
-            _notes.value = updatedNotes.sortedByDescending { it.repostTimestamp ?: it.timestamp }
+            _notes.value = updatedNotes.sortedByDescending { it.repostTimestamp ?: it.timestamp }.toImmutableList()
             scheduleDisplayUpdate()
             return
         }
@@ -2205,7 +2208,7 @@ class NotesRepository private constructor() {
                 val noteWithMergedRelays = note.copy(relayUrls = mergedUrls)
                 val updatedNotes = currentNotes.toMutableList().apply { removeAt(origIndex) }
                 val newNotes = trimNotesToCap((updatedNotes + noteWithMergedRelays).sortedByDescending { it.repostTimestamp ?: it.timestamp })
-                _notes.value = newNotes
+                _notes.value = newNotes.toImmutableList()
                 scheduleDisplayUpdate()
                 // Also clean up any pending duplicate
                 synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == origId } }
@@ -2230,7 +2233,7 @@ class NotesRepository private constructor() {
 
         if (!initialLoadComplete || isOlderThanCutoff) {
             val newNotes = trimNotesToCap((currentNotes + note).sortedByDescending { it.repostTimestamp ?: it.timestamp })
-            _notes.value = newNotes
+            _notes.value = newNotes.toImmutableList()
             scheduleDisplayUpdate()
         } else {
             synchronized(pendingNotesLock) { _pendingNewNotes.add(note) }
@@ -2257,7 +2260,7 @@ class NotesRepository private constructor() {
         // which would cause the note to be filtered out. The relay will echo it back with
         // proper URLs once it's accepted.
         val withState = note.copy(publishState = PublishState.Sending, relayUrls = emptyList(), relayUrl = null)
-        _notes.value = (listOf(withState) + currentNotes).take(MAX_NOTES_IN_MEMORY)
+        _notes.value = (listOf(withState) + currentNotes.toImmutableList()).take(MAX_NOTES_IN_MEMORY).toImmutableList()
         scheduleDisplayUpdate()
         Log.d(TAG, "Injected own note ${note.id.take(8)} (publishState=Sending)")
         return true
@@ -2292,7 +2295,7 @@ class NotesRepository private constructor() {
                     repostTimestamp = repostTimestampMs,
                     publishState = PublishState.Sending
                 )
-                _notes.value = updated.sortedByDescending { it.repostTimestamp ?: it.timestamp }
+                _notes.value = updated.sortedByDescending { it.repostTimestamp ?: it.timestamp }.toImmutableList()
                 scheduleDisplayUpdate()
                 Log.d(TAG, "Merged own repost into existing ${compositeId.take(16)} (now ${mergedAuthors.size} boosters)")
                 return
@@ -2302,7 +2305,7 @@ class NotesRepository private constructor() {
             var notesAfterRemoval = currentNotes
             val origIndex = currentNotes.indexOfFirst { it.id == realOrigId }
             if (origIndex >= 0) {
-                notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }
+                notesAfterRemoval = currentNotes.toMutableList().apply { removeAt(origIndex) }.toImmutableList()
             }
             synchronized(pendingNotesLock) { _pendingNewNotes.removeAll { it.id == realOrigId } }
 
@@ -2317,7 +2320,7 @@ class NotesRepository private constructor() {
                 repostTimestamp = repostTimestampMs,
                 publishState = PublishState.Sending
             )
-            _notes.value = (listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY)
+            _notes.value = (listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY).toImmutableList()
             scheduleDisplayUpdate()
             Log.d(TAG, "Injected own repost ${compositeId.take(16)} (${mergedAuthors.size} boosters, publishState=Sending)")
         } catch (e: Throwable) {
@@ -2337,7 +2340,7 @@ class NotesRepository private constructor() {
                 note.originalNoteId != eventId
         }
         if (filtered.size < currentNotes.size) {
-            _notes.value = filtered
+            _notes.value = filtered.toImmutableList()
             synchronized(pendingNotesLock) {
                 _pendingNewNotes.removeAll { it.id == eventId || it.originalNoteId == eventId }
             }
@@ -2393,14 +2396,14 @@ class NotesRepository private constructor() {
             if (repostIndex >= 0) {
                 val updated = currentNotes.toMutableList()
                 updated[repostIndex] = updated[repostIndex].copy(publishState = state)
-                _notes.value = updated
+                _notes.value = updated.toImmutableList()
                 scheduleDisplayUpdate()
             }
             return
         }
         val updated = currentNotes.toMutableList()
         updated[index] = updated[index].copy(publishState = state)
-        _notes.value = updated
+        _notes.value = updated.toImmutableList()
         scheduleDisplayUpdate()
         Log.d(TAG, "Updated publishState for ${eventId.take(8)} → $state")
 
@@ -2420,7 +2423,7 @@ class NotesRepository private constructor() {
         if (index >= 0 && currentNotes[index].publishState != null) {
             val updated = currentNotes.toMutableList()
             updated[index] = updated[index].copy(publishState = null)
-            _notes.value = updated
+            _notes.value = updated.toImmutableList()
             scheduleDisplayUpdate()
         }
     }
@@ -2450,7 +2453,7 @@ class NotesRepository private constructor() {
         val updatedUrls = (existingUrls + normalized).distinct().filter { it.isNotBlank() }
         val updated = currentNotes.toMutableList()
         updated[index] = note.copy(relayUrls = updatedUrls)
-        _notes.value = updated
+        _notes.value = updated.toImmutableList()
         scheduleDisplayUpdate()
         Log.d(TAG, "Merged publish relay $relayUrl into ${eventId.take(8)} (now ${updatedUrls.size} orbs)")
         // Persist to Room
@@ -2766,8 +2769,8 @@ class NotesRepository private constructor() {
     fun clearNotes() {
         kind1FlushJob?.cancel()
         pendingKind1Events.clear()
-        _notes.value = emptyList()
-        _displayedNotes.value = emptyList()
+        _notes.value = persistentListOf()
+        _displayedNotes.value = persistentListOf()
         synchronized(pendingNotesLock) { _pendingNewNotes.clear() }
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         feedCutoffTimestampMs = 0L
@@ -2806,7 +2809,7 @@ class NotesRepository private constructor() {
         _feedSessionState.value = FeedSessionState.Refreshing
         val pendingCount = toMerge.size
         val merged = trimNotesToCap((_notes.value + toMerge).distinctBy { it.id }.sortedByDescending { it.repostTimestamp ?: it.timestamp })
-        _notes.value = merged
+        _notes.value = merged.toImmutableList()
         updateDisplayedNotes()
         latestNoteTimestampAtOpen = merged.maxOfOrNull { it.timestamp } ?: 0L
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
@@ -2981,7 +2984,7 @@ class NotesRepository private constructor() {
                         _pendingNewNotes.addAll(updated)
                     }
                     if (updatedCount > 0) {
-                        _notes.value = newNotes
+                        _notes.value = newNotes.toImmutableList()
                         Log.d(TAG, "Profile batch: updated $updatedCount notes from ${authorMap.size} profiles")
                         scheduleDisplayUpdate()
                     }
@@ -3032,7 +3035,7 @@ class NotesRepository private constructor() {
                         Log.d(TAG, "refreshAuthorsFromCache: no author changes detected, skipping")
                         return@launch
                     }
-                    _notes.value = updatedNotes
+                    _notes.value = updatedNotes.toImmutableList()
                     synchronized(pendingNotesLock) {
                         val updated = _pendingNewNotes.map { note ->
                             val key = normalizeAuthorIdForCache(note.author.id)

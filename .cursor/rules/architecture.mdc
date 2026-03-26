@@ -1,0 +1,44 @@
+---
+description: Core architecture rules for Mycelium Android. Apply when making structural changes, adding features, or working across layers.
+globs:
+  - "app/src/main/java/**/*.kt"
+  - "cybin/**/*.kt"
+alwaysApply: false
+---
+
+# Mycelium Architecture Rules
+
+## Layer Boundaries
+
+- UI → ViewModel → Repository → Relay/DB. Never reverse the dependency direction.
+- Cybin library (`cybin/`) must not depend on Android Context, Compose, Room, or any app-layer code.
+- ViewModels never import from `ui/` packages. Repositories never import from `viewmodel/`.
+
+## Module Boundary
+
+- `cybin/` = Nostr protocol: events, filters, crypto, NIPs, relay transport (Ktor WebSocket)
+- `app/` = Android application: UI, ViewModels, repositories, services, Room database
+- Changes are picked up immediately via Gradle composite build — no publish step needed
+
+## State Management
+
+- Use `StateFlow` / `SharedFlow` for reactive state in repositories and ViewModels
+- Use `MutableState` / `remember` only inside `@Composable` functions
+- Activity-scoped VMs: `AppViewModel`, `AccountStateViewModel`, `FeedStateViewModel`
+- Screen-scoped VMs: everything else in `viewmodel/`
+
+## Critical File Awareness
+
+Files over 1,000 lines require extra care. Always read before editing:
+- `MyceliumNavigation.kt` (~5,230 lines) — all routes
+- `NoteCard.kt` (~3,800 lines) — universal note display
+- `NotesRepository.kt` (~2,900 lines) — feed pipeline
+- `AccountStateViewModel.kt` (~2,400 lines) — account state
+- `CybinRelayPool.kt` (~1,230 lines) — relay transport
+
+## Relay Sovereignty
+
+- Never hardcode relay URLs
+- Never override user relay preferences
+- Relay failures are expected — degrade gracefully
+- Use `RelayHealthTracker` scoring for relay selection

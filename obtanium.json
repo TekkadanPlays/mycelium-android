@@ -19,6 +19,33 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.12",
+      "versionCode": 44,
+      "releaseDate": "2026-03-26",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.12-beta/Mycelium-v0.5.12-beta.apk",
+      "changelog": "Onboarding overhaul, notification setup walkthrough, ImmutableList feed optimization, background DM checks, indexer diff banner, documentation framework.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Onboarding overhaul: new phase flow — CHOOSE_MODE, REVIEW_OUTBOXES (diff UI), SELECT_INDEXERS (post-outbox), PREFETCHING_LISTS (follows/mutes/bookmarks), NOTIFICATION_SETUP",
+        "Interactive notification setup during onboarding: permission request, battery optimization walkthrough, connection mode selection",
+        "ImmutableList feed optimization: NotesRepository emits ImmutableList<Note> for improved Compose recomposition skip rates",
+        "Background DM relay checks: RelayCheckWorker queries NIP-17 DM relays (kind 1059) alongside inbox relays",
+        "Indexer diff banner: non-blocking DashboardScreen banner when remote kind-10086 list differs from confirmed local indexers",
+        "RelayCategorySyncRepository: PendingIndexerDiff model with accept/dismiss flow for indexer list sync",
+        "Notification settings screen redesign with permission checks and DM content preview toggle",
+        "AGENTS.md: universal AI agent guidance framework for efficient codebase iteration",
+        "CONTRIBUTING.md: fork and contribution guidelines",
+        "Cursor rules: context-aware .cursor/rules/ for relay, architecture, UI, build, and efficiency",
+        "README refresh, .gitignore cleanup, orphaned submodule removal (nostr-watch, lightning-kmp, phoenix, better-antigravity)"
+      ]
+    },
+    {
       "version": "0.5.11",
       "versionCode": 43,
       "releaseDate": "2026-03-25",

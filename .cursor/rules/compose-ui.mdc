@@ -1,0 +1,49 @@
+---
+description: Rules for Compose UI development — screens, components, navigation, and theming.
+globs:
+  - "app/src/main/java/social/mycelium/android/ui/**"
+alwaysApply: false
+---
+
+# Compose UI Rules
+
+## Theming
+
+- Material Design 3 exclusively. Use `MaterialTheme.colorScheme` and `MaterialTheme.typography`.
+- Custom theme defined in `ui/theme/`. Don't create parallel theming systems.
+
+## Components
+
+- `NoteCard.kt` is the universal note display. Changes affect all feeds. Read it before editing.
+- Reusable components live in `ui/components/`. Screen-specific code stays in `ui/screens/`.
+- Use `@Stable` / `@Immutable` annotations where it improves skip rates. Strong skipping mode is enabled.
+
+## Navigation
+
+Three patterns coexist — use the correct one:
+1. **Overlay:** Feed → Thread via `AnimatedVisibility` (shares NavBackStackEntry)
+2. **Nav-based:** Thread → Thread via `navController.navigate("thread/{noteId}")`
+3. **Bottom Nav:** Home, DMs, Wallet, News, Alerts via `BottomNavDestinations`
+
+`MyceliumNavigation.kt` (~5,230 lines) defines everything. Read it before adding routes.
+
+## Image Loading
+
+- Coil 2.x with `AsyncImage`. Follow existing patterns.
+- Cache aspect ratios globally to prevent layout shift on scroll.
+
+## Video Playback
+
+- Media3 / ExoPlayer. See existing `VideoPlayer` component.
+- Use TextureView (not SurfaceView) to prevent HDR night mode issues.
+
+## Lists
+
+- Always provide stable keys in `LazyColumn` items.
+- Feed items use `Note.id` as key.
+
+## Performance
+
+- Never do network calls in `@Composable` — use `LaunchedEffect` → ViewModel/Repository
+- Avoid creating new objects in composition — use `remember` / `derivedStateOf`
+- Guard `LaunchedEffect` against empty relay URLs (timing pitfall with `currentAccount`)

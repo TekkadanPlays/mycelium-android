@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.5.12-beta (2026-03-26)
+- **Onboarding overhaul** — Redesigned phase flow: CHOOSE_MODE → REVIEW_OUTBOXES (diff UI) → SELECT_INDEXERS (post-outbox) → PREFETCHING_LISTS (follows/mutes/bookmarks) → NOTIFICATION_SETUP with interactive permission and battery optimization walkthrough
+- **ImmutableList feed optimization** — `NotesRepository` now emits `ImmutableList<Note>` for improved Compose recomposition skip rates across all feed surfaces
+- **Background DM relay checks** — `RelayCheckWorker` queries NIP-17 DM relays (kind 1059) alongside inbox relays for background notification detection
+- **Indexer diff banner** — Non-blocking banner on DashboardScreen when a fetched kind-10086 indexer list differs from the user's confirmed local list, with accept/dismiss actions
+- **Notification settings redesign** — Permission checks, DM content preview toggle, streamlined UI
+- **Documentation framework** — `AGENTS.md` (universal AI agent guidance), `CONTRIBUTING.md` (fork/contribution guidelines), `.cursor/rules/` (context-aware agent rules), README refresh, `.gitignore` cleanup, orphaned submodule removal
+
 ## v0.4.89-beta (2026-03-08)
 - **Reaction emoji on feed** — NIP-25 reactions made in thread view now display the correct emoji on the feed card (was showing heart instead of submitted emoji)
 - **Repost counts fix** — Reactions, zaps, and vote counts now display correctly on reposted notes (was using synthetic repost ID instead of real event ID)

@@ -19,7 +19,9 @@
 | File | Description |
 |------|-------------|
 | [README.md](../README.md) | Project overview, features, build instructions, dependency table |
-| [CLAUDE.md](../CLAUDE.md) | AI assistant context file — architecture summary and build commands |
+| [AGENTS.md](../AGENTS.md) | Universal AI agent guidance — architecture, workflow, coding standards, project goals |
+| [CLAUDE.md](../CLAUDE.md) | Compressed architecture summary and build commands (read first) |
+| [CONTRIBUTING.md](../CONTRIBUTING.md) | Fork/contribution guidelines for external contributors |
 | [CHANGELOG.md](../CHANGELOG.md) | Release history |
 | [CHANGELOG_NEXT.md](../CHANGELOG_NEXT.md) | Unreleased changes staged for next version |
 | [RELEASE_NOTES.md](../RELEASE_NOTES.md) | Detailed release notes for major versions |

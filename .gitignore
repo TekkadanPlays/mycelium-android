@@ -117,7 +117,10 @@ dev_notes/
 
 # AI tool configs
 .claude/
-.cursor/
+
+# Cursor — ignore all except rules (shared with forks)
+.cursor/*
+!.cursor/rules/
 
 # Benchmark module (unused)
 benchmark/
@@ -131,3 +134,12 @@ primal-android-app/
 PureLink-Android/
 Prism/
 flightless2/
+
+# External reference repos (submodule artifacts — not used by build)
+nostr-watch/
+lightning-kmp/
+phoenix/
+better-antigravity/
+
+# Kotlin compiler sessions / temp
+.kotlin/

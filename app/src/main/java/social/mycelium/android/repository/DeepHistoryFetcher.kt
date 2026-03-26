@@ -55,17 +55,14 @@ object DeepHistoryFetcher {
     private const val HISTORY_FLOOR_YEARS = 5
     /** Time window per batch (30 days in seconds). */
     private const val WINDOW_SECONDS = 30L * 86_400L
-    /** Max events per batch request. */
-    private const val BATCH_LIMIT = 500
+    /** Max events per batch request. Raised to 1000 for efficiency. */
+    private const val BATCH_LIMIT = 1000
     /** Pause between batches to yield CPU/network to the live feed. */
     private const val INTER_BATCH_DELAY_MS = 2_000L
     /** Max time to wait for a single batch to complete. */
     private const val BATCH_TIMEOUT_MS = 15_000L
     /** Settle time: if no new events arrive for this long, close the batch. */
     private const val BATCH_SETTLE_MS = 2_000L
-    /** Max batches per session to prevent runaway fetching. Resume next launch.
-     *  With 12 kind groups per window, 100 batches ≈ 8 windows ≈ 8 months per session. */
-    private const val MAX_BATCHES_PER_SESSION = 100
 
     /** Event kinds that should be replayed to NotificationsRepository after deep fetch.
      *  Only applies to events from p-tag groups (useUserAsPTag=true).
@@ -252,15 +249,15 @@ object DeepHistoryFetcher {
         var batchCount = 0
         var consecutiveEmptyWindows = 0
 
-        while (cursorSec > floorSec && batchCount < MAX_BATCHES_PER_SESSION) {
+        while (cursorSec > floorSec) {
             val windowStart = maxOf(cursorSec - WINDOW_SECONDS, floorSec)
             var windowTotalEvents = 0
+            var oldestEventInBatch = cursorSec
 
             Log.d(TAG, "Window ${formatSec(windowStart)} → ${formatSec(cursorSec)} — fetching ${KIND_GROUPS.size} kind groups")
 
             // Fetch each kind group for this time window
             for (group in KIND_GROUPS) {
-                if (batchCount >= MAX_BATCHES_PER_SESSION) break
 
                 val filter = when {
                     group.useUserAsPTag -> Filter(
@@ -346,7 +343,14 @@ object DeepHistoryFetcher {
 
                     windowTotalEvents += events.size
                     _totalEventsPersisted.value += events.size
-                    Log.d(TAG, "  ${group.label}: ${events.size} events")
+                    
+                    if (events.size >= BATCH_LIMIT) {
+                        val oldestInGroup = events.minOfOrNull { it.first.createdAt } ?: oldestEventInBatch
+                        oldestEventInBatch = minOf(oldestEventInBatch, oldestInGroup)
+                        Log.d(TAG, "  ${group.label}: hit limit ${events.size}, oldest seen is ${formatSec(oldestInGroup)}")
+                    } else {
+                        Log.d(TAG, "  ${group.label}: ${events.size} events")
+                    }
                 }
 
                 batchCount++
@@ -358,7 +362,6 @@ object DeepHistoryFetcher {
 
             Log.d(TAG, "Window complete: ${windowTotalEvents} events persisted (total: ${_totalEventsPersisted.value})")
 
-            // Track consecutive empty windows for exhaustion detection
             if (windowTotalEvents == 0) {
                 consecutiveEmptyWindows++
                 if (cursorSec - WINDOW_SECONDS <= floorSec) {
@@ -366,8 +369,8 @@ object DeepHistoryFetcher {
                     markExhausted(prefs, shortKey)
                     break
                 }
-                if (consecutiveEmptyWindows >= 3 && _totalEventsPersisted.value == 0) {
-                    Log.d(TAG, "3 consecutive empty windows with 0 total events — exhausted")
+                if (consecutiveEmptyWindows >= 6) {
+                    Log.d(TAG, "6 consecutive empty windows (6 months) with 0 events — exhausted")
                     markExhausted(prefs, shortKey)
                     break
                 }
@@ -375,8 +378,15 @@ object DeepHistoryFetcher {
                 consecutiveEmptyWindows = 0
             }
 
-            // Advance cursor to the start of this window
-            cursorSec = windowStart
+            // Advance cursor
+            // If we hit the overflow limit in any group, oldestEventInBatch will be < cursorSec but > windowStart.
+            // We step the cursor precisely to the oldest event retrieved to ensure perfectly continuous coverage
+            // without dropping events in dense periods.
+            cursorSec = if (oldestEventInBatch < cursorSec && oldestEventInBatch > windowStart) {
+                oldestEventInBatch
+            } else {
+                windowStart
+            }
             saveCursor(prefs, shortKey, cursorSec)
 
             if (cursorSec <= floorSec) {
@@ -387,10 +397,6 @@ object DeepHistoryFetcher {
 
             // Longer yield between windows to keep the app responsive
             delay(INTER_BATCH_DELAY_MS)
-        }
-
-        if (batchCount >= MAX_BATCHES_PER_SESSION) {
-            Log.d(TAG, "Hit session limit ($MAX_BATCHES_PER_SESSION batches). Will resume next launch at ${formatSec(cursorSec)}")
         }
     }
 

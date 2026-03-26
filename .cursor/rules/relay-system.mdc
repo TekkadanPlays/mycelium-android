@@ -1,0 +1,52 @@
+---
+description: Rules for working with the relay layer — subscriptions, connections, health tracking, and NIP-65 outbox model.
+globs:
+  - "app/src/main/java/social/mycelium/android/relay/**"
+  - "cybin/cybin/src/main/java/com/example/cybin/relay/**"
+  - "app/src/main/java/social/mycelium/android/repository/*Relay*"
+  - "app/src/main/java/social/mycelium/android/repository/*Outbox*"
+  - "app/src/main/java/social/mycelium/android/repository/*Nip65*"
+alwaysApply: false
+---
+
+# Relay System Rules
+
+Read `docs/RELAY_SYSTEM.md` before making relay changes.
+
+## Stack
+
+```
+CybinRelayPool (transport) → RelayConnectionStateMachine (lifecycle)
+  → SubscriptionMultiplexer (dedup/merge) → Repositories (consumers)
+```
+
+## Subscription Rules
+
+- Always go through `SubscriptionMultiplexer` — never create raw WebSocket subscriptions from repositories
+- Multiplexer uses filter merging + ref-counting. CLOSE only fires when last consumer unsubscribes.
+- 5 priority tiers: CRITICAL(4) > HIGH(3) > NORMAL(2) > LOW(1) > BACKGROUND(0)
+- Higher priority can preempt lowest-priority EOSE'd subscription
+- MAX_SUBS_PER_RELAY = 40
+
+## Connection Management
+
+- `RelayConnectionStateMachine` uses TinderStateMachine: Disconnected → Connecting → Connected → Subscribed → ConnectFailed
+- Reconnect: exponential backoff 2s→30s, 6 attempts, 8/wave with 600ms stagger
+- Circuit breaker: 5min blacklist after exhausting reconnect attempts
+- Keepalive: 2min check, 5min stale threshold
+
+## Health Tracking
+
+- `RelayHealthTracker` scores per-relay performance
+- Auto-blocks relay after 5 consecutive failures
+- Adaptive limit reduction on NOTICE/CLOSED rate-limit (min 3 subs)
+
+## NIP-65 Outbox
+
+- `Nip65RelayListRepository` resolves kind-10002 write relays
+- `OutboxFeedManager` uses Thompson Sampling for Bayesian relay ranking
+- Preloads quoted note authors' write relays when thread opens
+
+## Ktor Only
+
+All HTTP and WebSocket uses Ktor CIO engine. Do NOT introduce OkHttp.

@@ -102,28 +102,39 @@ class RelayCheckWorker(
         }
 
         val storageManager = RelayStorageManager(applicationContext)
-        // Only connect to inbox relays — events addressed to this user land there.
-        // Outbox/category relays are for publishing and feed, not needed for background checks.
-        // Missing profiles from fetched events will be populated when the app resumes.
         val inboxRelays = storageManager.loadInboxRelays(hexPubkey)
             .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
             .distinct()
 
-        if (inboxRelays.isEmpty()) {
-            Log.d(TAG, "No inbox relays configured, skipping")
+        // Load DM relay URLs for NIP-17 gift wrap checks
+        val dmPrefs = applicationContext.getSharedPreferences("dm_relay_prefs", Context.MODE_PRIVATE)
+        val dmRelays = dmPrefs.getString("dm_relay_urls", null)
+            ?.split(",")
+            ?.filter { it.isNotBlank() }
+            ?.map { it.trim().removeSuffix("/") }
+            ?.distinct()
+            ?: emptyList()
+
+        if (inboxRelays.isEmpty() && dmRelays.isEmpty()) {
+            Log.d(TAG, "No inbox or DM relays configured, skipping")
             return Result.success()
         }
 
         val lastCheckTimestamp = getLastCheckTimestamp()
         val sinceTimestamp = if (lastCheckTimestamp > 0) lastCheckTimestamp else {
-            // First run: only check last 30 minutes
             (System.currentTimeMillis() / 1000) - 1800
         }
 
-        Log.d(TAG, "Checking ${inboxRelays.size} inbox relays for events since $sinceTimestamp (${hexPubkey.take(8)}...)")
+        Log.d(TAG, "Checking ${inboxRelays.size} inbox + ${dmRelays.size} DM relays since $sinceTimestamp (${hexPubkey.take(8)}...)")
 
         try {
-            val events = fetchNotificationEvents(inboxRelays, hexPubkey, sinceTimestamp)
+            val events = mutableListOf<com.example.cybin.core.Event>()
+            if (inboxRelays.isNotEmpty()) {
+                events.addAll(fetchNotificationEvents(inboxRelays, hexPubkey, sinceTimestamp))
+            }
+            if (dmRelays.isNotEmpty()) {
+                events.addAll(fetchDmEvents(dmRelays, hexPubkey, sinceTimestamp))
+            }
             if (events.isNotEmpty()) {
                 Log.d(TAG, "Found ${events.size} new notification events")
                 dispatchNotifications(events, hexPubkey)
@@ -157,7 +168,7 @@ class RelayCheckWorker(
         val relayFilters = relayUrls.associate { url ->
             url to listOf(
                 Filter(
-                    kinds = listOf(1, 7, 9735, 4, 1111),
+                    kinds = listOf(1, 7, 9735, 1111),
                     tags = mapOf("p" to listOf(hexPubkey)),
                     since = sinceTimestamp,
                     limit = 50
@@ -176,6 +187,44 @@ class RelayCheckWorker(
         // Wait for EOSE or timeout
         withTimeoutOrNull(FETCH_TIMEOUT_MS) {
             // Simple time-based wait since we can't easily hook EOSE on the pool
+            kotlinx.coroutines.delay(FETCH_TIMEOUT_MS / 2)
+        }
+
+        handle.close()
+        return collectedEvents
+    }
+
+    /**
+     * Fetch NIP-17 gift-wrapped DM events from DM relays (kind 1059).
+     * We only count them — no decryption in background.
+     */
+    private suspend fun fetchDmEvents(
+        dmRelayUrls: List<String>,
+        hexPubkey: String,
+        sinceTimestamp: Long
+    ): List<com.example.cybin.core.Event> {
+        val rcsm = RelayConnectionStateMachine.getInstance()
+        val collectedEvents = mutableListOf<com.example.cybin.core.Event>()
+
+        val relayFilters = dmRelayUrls.associate { url ->
+            url to listOf(
+                Filter(
+                    kinds = listOf(1059),
+                    tags = mapOf("p" to listOf(hexPubkey)),
+                    since = sinceTimestamp,
+                    limit = 50
+                )
+            )
+        }
+
+        val handle = rcsm.relayPool.subscribe(relayFilters, SubscriptionPriority.BACKGROUND) { event, _ ->
+            if (event.pubKey != hexPubkey) {
+                collectedEvents.add(event)
+            }
+        }
+        rcsm.relayPool.connect()
+
+        withTimeoutOrNull(FETCH_TIMEOUT_MS) {
             kotlinx.coroutines.delay(FETCH_TIMEOUT_MS / 2)
         }
 
@@ -207,14 +256,13 @@ class RelayCheckWorker(
         for (event in events) {
             when (event.kind) {
                 1, 1111 -> {
-                    // Check if it's a reply (has 'e' tag) or a mention (tags 'p' without 'e')
                     val hasETag = event.tags.any { it.size >= 2 && it[0] == "e" }
                     if (hasETag && notifyReplies) replyCount++
                     else if (notifyMentions) mentionCount++
                 }
                 7 -> if (notifyReactions) reactionCount++
                 9735 -> if (notifyZaps) zapCount++
-                4 -> if (notifyDMs) dmCount++
+                1059 -> if (notifyDMs) dmCount++
             }
         }
 
@@ -251,8 +299,8 @@ class RelayCheckWorker(
             NotificationChannelManager.sendSummaryNotification(
                 ctx,
                 NotificationChannelManager.CHANNEL_DMS,
-                "New messages",
-                "$dmCount new ${if (dmCount == 1) "message" else "messages"}",
+                "New private messages",
+                "$dmCount new private ${if (dmCount == 1) "message" else "messages"}",
                 NotificationChannelManager.NOTIFICATION_ID_DM_SUMMARY
             )
         }

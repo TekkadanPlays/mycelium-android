@@ -1,0 +1,55 @@
+---
+description: Build configuration, deployment process, and versioning rules.
+globs:
+  - "app/build.gradle.kts"
+  - "build.gradle.kts"
+  - "settings.gradle.kts"
+  - "gradle/**"
+  - ".github/**"
+  - "obtanium.json"
+alwaysApply: false
+---
+
+# Build & Deploy Rules
+
+## Build Commands
+
+```bash
+./gradlew assembleDebug    # Local testing
+./gradlew assembleRelease  # Release build (needs keystore.properties or falls back to debug)
+./gradlew test             # Unit tests
+adb install app/build/outputs/apk/release/app-release.apk  # Device install
+```
+
+## Version Management
+
+- `versionCode` (integer) and `versionName` (string) live in `app/build.gradle.kts`
+- Format: `MAJOR.MINOR.PATCH` with `-beta` suffix (e.g., `0.5.11`)
+- Tags: `v{versionName}-beta` (e.g., `v0.5.11-beta`)
+- **NEVER bump versions or create tags without explicit owner request**
+
+## Release Process (Owner-Initiated Only)
+
+1. Owner requests version bump after sufficient testing
+2. Update `versionCode` + `versionName` in `app/build.gradle.kts`
+3. Update `obtanium.json` with new version entry
+4. Commit with message: `release: v{version} — summary`
+5. Tag: `git tag v{version}-beta`
+6. Push tag triggers GitHub Actions → builds APK → creates GitHub Release
+
+## Dependencies
+
+- Kotlin 2.2.0, AGP 8.13.0
+- Version catalog in `gradle/libs.versions.toml`
+- Do NOT add new dependencies without explicit owner approval
+- Do NOT introduce OkHttp — use Ktor CIO for all HTTP/WebSocket
+
+## ProGuard / R8
+
+Release builds use ProGuard with extensive keep rules. When adding new libraries that use reflection or serialization, add appropriate keep rules to `proguard-rules.pro`.
+
+## Signing
+
+- Debug: automatic debug keystore
+- Release: reads from `keystore.properties` (gitignored), falls back to debug signing
+- NEVER commit signing credentials

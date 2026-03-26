@@ -3893,8 +3893,7 @@ fun MyceliumNavigation(
 
                 composable("settings/notifications") {
                     NotificationSettingsScreen(
-                        onBackClick = { navController.popBackStack() },
-                        onNavigateToPower = { navController.navigate("settings/power") { launchSingleTop = true } }
+                        onBackClick = { navController.popBackStack() }
                     )
                 }
 

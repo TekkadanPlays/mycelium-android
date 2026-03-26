@@ -13,8 +13,11 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Conversation
@@ -132,6 +135,23 @@ object DirectMessageRepository {
     /** Whether the user has confirmed decryption this session (tapped "Decrypt"). */
     private val _hasUserApprovedDecrypt = MutableStateFlow(false)
     val hasUserApprovedDecrypt: StateFlow<Boolean> = _hasUserApprovedDecrypt.asStateFlow()
+
+    /** Emits the gift wrap event ID when a genuinely NEW gift wrap arrives (not historical replay).
+     *  NotificationsRepository observes this to fire obfuscated DM notifications. */
+    private val _newDmSignal = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    val newDmSignal: SharedFlow<String> = _newDmSignal.asSharedFlow()
+
+    /** Epoch second gate: gift wraps with createdAt before this are replay, not new.
+     *  Set when enableDmNotifications() is called after the initial fetch settles. */
+    @Volatile
+    private var dmNotificationGateEpoch: Long = Long.MAX_VALUE
+
+    /** Allow DM notifications for gift wraps arriving after this moment.
+     *  Called after the initial DM subscription replay has settled. */
+    fun enableDmNotifications() {
+        dmNotificationGateEpoch = System.currentTimeMillis() / 1000
+        Log.d(TAG, "DM notifications enabled for events after epoch=$dmNotificationGateEpoch")
+    }
 
     /** Cache of fetched inbox relays per pubkey (NIP-65 kind-10002 only — kind-10050 intentionally ignored). */
     private val inboxRelayCache = ConcurrentHashMap<String, List<String>>()
@@ -260,10 +280,26 @@ object DirectMessageRepository {
         _hasUserUnlockedDMs.value = true
         Log.d(TAG, "ensureSubscriptionStarted: user visited DM page, starting subscription")
         startRelaySubscription(pubkey)
-        // Fetch deeper DM history after initial subscription settles
         scope.launch {
             kotlinx.coroutines.delay(5_000)
             fetchDmHistory()
+        }
+    }
+
+    /**
+     * Start the DM relay subscription for background notification purposes.
+     * Unlike [ensureSubscriptionStarted], this does NOT set hasUserUnlockedDMs
+     * and does NOT fetch deep history — it only opens the live subscription
+     * so new gift wraps trigger notification signals.
+     */
+    fun ensureSubscriptionForNotifications() {
+        val pubkey = userPubkey ?: return
+        if (dmHandle != null) return
+        Log.d(TAG, "ensureSubscriptionForNotifications: starting DM sub for push notifications")
+        startRelaySubscription(pubkey)
+        scope.launch {
+            kotlinx.coroutines.delay(12_000)
+            enableDmNotifications()
         }
     }
 
@@ -442,6 +478,9 @@ object DirectMessageRepository {
             _pendingGiftWrapCount.value = pendingGiftWraps.size
             _debugStatus.value = "${pendingGiftWraps.size} encrypted, ${messagesById.size} decrypted"
             Log.d(TAG, "Buffered gift wrap ${event.id.take(8)} (${pendingGiftWraps.size} pending)")
+            if (event.createdAt >= dmNotificationGateEpoch) {
+                _newDmSignal.tryEmit(event.id)
+            }
         }
     }
 

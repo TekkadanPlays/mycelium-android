@@ -1,0 +1,48 @@
+---
+description: Token efficiency and agent workflow rules to minimize cost and maximize effectiveness.
+globs: []
+alwaysApply: true
+---
+
+# Agent Efficiency Rules
+
+## Read Order (Minimize Token Usage)
+
+1. **CLAUDE.md** — always read first. Contains compressed architecture, build commands, all layers.
+2. **AGENTS.md** — read for workflow rules, coding standards, and project goals.
+3. **Specific docs/** files — only when working in that area (relay, navigation, data models).
+4. **Source files** — read only the files you need to edit. Use search for large files.
+
+## Search Before Creating
+
+Before writing new code:
+- Search for existing utilities in `utils/`
+- Search for existing components in `ui/components/`
+- Check if a repository already handles the concern in `repository/`
+- Check if Cybin already has the NIP implementation in `cybin/`
+
+## File Size Awareness
+
+Many files are 1,000-5,000+ lines. Do NOT read entire large files unless necessary.
+Use targeted search (grep/ripgrep) to find relevant sections, then read specific line ranges.
+
+## Batch Operations
+
+- Read multiple related files in parallel when exploring
+- Make independent edits in parallel when possible
+- Run lint checks after substantive edits
+
+## Documentation Updates
+
+When changing architecture, update in this order:
+1. The code itself
+2. `CLAUDE.md` (if architecture/build/deps changed)
+3. Relevant `docs/` file
+4. `CHANGELOG.md` (for user-visible changes)
+5. `README.md` (for feature list or dependency table changes)
+
+## Commit Discipline
+
+- Use conventional commit messages: feat/fix/chore/refactor/release
+- Never commit `.gradle/`, `build/`, `.kotlin/`, `*.log`, `local.properties`
+- Never push without explicit owner request

@@ -46,6 +46,38 @@ object RelayCategorySyncRepository {
         }
     )
 
+    /**
+     * When a remote kind-10086 differs from the user's confirmed local indexers,
+     * the diff is held here for the UI to present as a non-blocking confirmation.
+     * Null = no pending change. Consumed by DashboardScreen / Relay Manager.
+     */
+    data class PendingIndexerDiff(
+        val remoteUrls: List<String>,
+        val localUrls: List<String>,
+        val added: Set<String>,
+        val removed: Set<String>,
+    )
+
+    private val _pendingIndexerDiff = kotlinx.coroutines.flow.MutableStateFlow<PendingIndexerDiff?>(null)
+    val pendingIndexerDiff: kotlinx.coroutines.flow.StateFlow<PendingIndexerDiff?> = _pendingIndexerDiff
+
+    /** Accept a pending indexer diff — applies the remote list and clears the diff. */
+    fun acceptPendingIndexerDiff(userPubkey: String, context: android.content.Context) {
+        val diff = _pendingIndexerDiff.value ?: return
+        val storageManager = RelayStorageManager(context)
+        val remoteRelays = diff.remoteUrls.map { UserRelay(url = it, read = true, write = true) }
+        storageManager.saveIndexerRelays(userPubkey, remoteRelays)
+        storageManager.setIndexersConfirmed(userPubkey, true)
+        _pendingIndexerDiff.value = null
+        Log.d(TAG, "Accepted pending indexer diff: ${remoteRelays.size} relays applied")
+    }
+
+    /** Dismiss a pending indexer diff — keeps local list, clears the banner. */
+    fun dismissPendingIndexerDiff() {
+        _pendingIndexerDiff.value = null
+        Log.d(TAG, "Dismissed pending indexer diff")
+    }
+
     private var fetchHandle: TemporarySubscriptionHandle? = null
     private var indexerFetchHandle: TemporarySubscriptionHandle? = null
 
@@ -318,12 +350,23 @@ object RelayCategorySyncRepository {
 
     /**
      * Fetch the user's indexer relay list (kind 10086) on cold start.
-     * Merges with locally stored indexer relays — remote URLs not already local are appended.
+     *
+     * Behavior depends on whether the user has confirmed their indexer list:
+     * - **Not confirmed:** Replaces local indexers with the remote list (first-time
+     *   setup or onboarding prefetch — the user hasn't curated yet).
+     * - **Confirmed:** Compares remote vs. local and, if they differ, emits a
+     *   [PendingIndexerDiff] for the UI to show as a non-blocking banner instead
+     *   of silently overwriting the user's curated list.
+     *
+     * @param forceReplace When true, always replace local indexers regardless of
+     *   the confirmed flag. Used during onboarding prefetch where the user is
+     *   actively reviewing and will re-confirm on the next screen.
      */
     fun fetchIndexerList(
         userPubkey: String,
         relayUrls: List<String>,
         context: android.content.Context,
+        forceReplace: Boolean = false,
     ) {
         if (relayUrls.isEmpty()) return
 
@@ -365,15 +408,34 @@ object RelayCategorySyncRepository {
 
                 if (remoteUrls.isEmpty()) return@launch
 
-                // Published kind-10086 is the user's authoritative indexer list.
-                // REPLACE local indexers entirely (discards auto-populated NIP-66 relays
-                // from onboarding if user has a published list).
-                val remoteRelays = remoteUrls.map { url ->
-                    UserRelay(url = url, read = true, write = true)
-                }
                 val localIndexers = storageManager.loadIndexerRelays(userPubkey)
-                storageManager.saveIndexerRelays(userPubkey, remoteRelays)
-                Log.d(TAG, "Replaced indexer list: ${localIndexers.size} local → ${remoteRelays.size} from published kind-$KIND_INDEXER_LIST")
+                val localUrls = localIndexers.map { it.url }
+                val localNormalized = localUrls.map { it.trim().removeSuffix("/").lowercase() }.toSet()
+                val remoteNormalized = remoteUrls.map { it.trim().removeSuffix("/").lowercase() }.toSet()
+
+                val listsMatch = localNormalized == remoteNormalized
+
+                if (forceReplace || !storageManager.areIndexersConfirmed(userPubkey)) {
+                    // User hasn't confirmed yet — safe to replace silently
+                    val remoteRelays = remoteUrls.map { url ->
+                        UserRelay(url = url, read = true, write = true)
+                    }
+                    storageManager.saveIndexerRelays(userPubkey, remoteRelays)
+                    Log.d(TAG, "Replaced indexer list: ${localIndexers.size} local → ${remoteRelays.size} from published kind-$KIND_INDEXER_LIST")
+                } else if (!listsMatch) {
+                    // User has confirmed their list — don't overwrite, emit a diff for the UI
+                    val added = remoteNormalized - localNormalized
+                    val removed = localNormalized - remoteNormalized
+                    _pendingIndexerDiff.value = PendingIndexerDiff(
+                        remoteUrls = remoteUrls,
+                        localUrls = localUrls,
+                        added = added,
+                        removed = removed,
+                    )
+                    Log.d(TAG, "Indexer list differs from confirmed: +${added.size} -${removed.size} — pending user approval")
+                } else {
+                    Log.d(TAG, "Indexer list matches confirmed local list — no changes needed")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch indexer list: ${e.message}", e)
             }

@@ -1,52 +1,66 @@
 # Changelog
 
 ## v0.5.12-beta (2026-03-26)
-- **Onboarding overhaul** — Redesigned phase flow: CHOOSE_MODE → REVIEW_OUTBOXES (diff UI) → SELECT_INDEXERS (post-outbox) → PREFETCHING_LISTS (follows/mutes/bookmarks) → NOTIFICATION_SETUP with interactive permission and battery optimization walkthrough
-- **ImmutableList feed optimization** — `NotesRepository` now emits `ImmutableList<Note>` for improved Compose recomposition skip rates across all feed surfaces
-- **Background DM relay checks** — `RelayCheckWorker` queries NIP-17 DM relays (kind 1059) alongside inbox relays for background notification detection
-- **Indexer diff banner** — Non-blocking banner on DashboardScreen when a fetched kind-10086 indexer list differs from the user's confirmed local list, with accept/dismiss actions
+- **Onboarding overhaul** — Redesigned phase flow with relay diff review, indexer confirmation, list prefetching, and interactive notification/battery setup walkthrough
+- **ImmutableList feed optimization** — `NotesRepository` emits `ImmutableList<Note>` for improved Compose recomposition skip rates
+- **Background DM relay checks** — `RelayCheckWorker` queries NIP-17 DM relays (kind 1059) alongside inbox relays
+- **Indexer diff banner** — Non-blocking DashboardScreen banner when remote kind-10086 differs from confirmed local indexers
 - **Notification settings redesign** — Permission checks, DM content preview toggle, streamlined UI
-- **Documentation framework** — `AGENTS.md` (universal AI agent guidance), `CONTRIBUTING.md` (fork/contribution guidelines), `.cursor/rules/` (context-aware agent rules), README refresh, `.gitignore` cleanup, orphaned submodule removal
+- **Documentation framework** — AGENTS.md, CONTRIBUTING.md, .cursor/rules, README refresh, .gitignore cleanup
 
-## v0.4.89-beta (2026-03-08)
-- **Reaction emoji on feed** — NIP-25 reactions made in thread view now display the correct emoji on the feed card (was showing heart instead of submitted emoji)
-- **Repost counts fix** — Reactions, zaps, and vote counts now display correctly on reposted notes (was using synthetic repost ID instead of real event ID)
-- **Vote loading speed** — Kind-30011 votes moved from Phase 2 (2.5s delay) to Phase 1 (immediate) in counts subscription; votes now appear alongside reply counts
-- **Own notes stay on feed** — User's own notes no longer vanish from the home feed when the follow filter re-runs
-- **Relay orbs accuracy** — Relay orbs only show confirmed relay locations (no more speculative NIP-65 outbox population)
+## v0.5.11-beta (2026-03-25)
+- Auto-save drafts system with 10s interval across all 5 compose screens
+- New ARTICLE draft type for NIP-23 long-form content
+- Media gallery flickering fix (content-based key for aspect ratio state)
+- FAB menu reorder (Drafts → Article → Post)
+- DM deduplication fix, NIP-42 auth improvements
 
-## v0.4.87-beta (2026-03-02)
-- **Smart profile fetching** — Kind-0 profiles fetched from indexer relays first; missing profiles automatically retried on outbox relays
-- **Relay filtering** — Payment-required and auth-required relays skipped in subscription routing (no wasted slots)
-- **Relay badges** — Paid and Auth labels shown on relay discovery and health screens
-- **Tappable relay URLs** — `wss://` URLs in notes are now clickable links to relay info
-- **Quoted note improvements** — Longer snippets (500 chars), 6 visible lines, smooth expand/collapse animation
-- **Quoted note media stability** — Images in quoted notes no longer reset on scroll (aspect ratio cached globally)
-- **Layout fixes** — Relay discovery and health screens no longer skew vertically from long tags/names
+## v0.5.10-beta (2026-03-25)
+- NIP-51 kind-30002 relay set sync with auto-publish on mutation
+- Kind-10086 indexer relay list cold-start fetch and merge
+- Cross-category relay overlap detection with severity-based warnings
+- DM relay isolation enforcement
+- NIP-66 indexer verification badge
+- Zap drawer escape-from-card fix
 
-## v0.4.24-beta (2026-02-28)
-- **Optimistic UI updates** — Reactions, boosts, and relay orbs now reflect immediately in thread view after publishing, without waiting for relay echo
-- **Video gesture controls** — Fullscreen player gains horizontal swipe seek, vertical volume/brightness, double-tap ±10s, long-press 2× speed, and pinch-to-zoom (ported from NextPlayer)
-- **HDR Night Mode fix** — Video player now uses TextureView to prevent HDR content from overriding system dark theme / Night Mode
-- **Video seekbar in feed** — Card-view video player now includes a draggable seekbar with timestamps (was fullscreen-only)
-- **Fullscreen controls centered** — Video controls pill is now full-width and bottom-centered in fullscreen mode
+## v0.5.03-beta
+- Persist poll responses to Room DB
+- Prefetch quoted notes in thread view
 
-## v0.4.23-beta (2026-02-28)
-- **Feed scroll position preserved** — dismissing fullscreen media no longer resets feed position (dashboard and profile)
-- **Profile header state persists** — collapsing header offset, selected tab, and bio expanded state survive navigation
-- **Video thumbnails** — Media tab now renders video frame thumbnails via Coil VideoFrameDecoder
-- **Contextual media fullscreen** — tapping media opens per-note gallery instead of all-profile media
-- **Scrollable profile header** — profile top section now collapses on scroll with nested scroll connection
+## v0.5.02-beta
+- Outbox feed freshness improvements
+- Quoted event counts in thread view
+- Media layout shift fix
+- NIP-30 custom emoji reaction rendering
 
-## v0.1.2 (2026-02-08)
-- Kind-1111 merge/UI fix, edge-to-edge embeds and images in feed
-- Conditional body highlight, relay orbs, OP styling
+## v0.5.01-beta
+- Notification enrichment and relay resilience
+- Feed deduplication improvements
+- Battery info panel
 
-## v0.1.1 (2026-02-08)
-- Amber lifecycle fix, zap error feedback, relay picker, NIP-25 on kind-1111
+## v0.5.00-beta
+- NIP-11 relay icon fix
+- People list feed filtering
+- Feed architecture overhaul
+- Kind-30011 NIP documentation support
 
-## v0.1.0 (2026-02-08)
-- Thread UI polish, topic and thread reply notifications
+## v0.4.99-beta
+- Replace OkHttp with Ktor CIO engine
+- Route all subscriptions through SubscriptionMultiplexer
 
-## v0.0.3 (2025-01-22)
-- Lightning Zaps and Wallet Connect
+## v0.4.98-beta
+- Fix notification leakage, poll display, @mentions, hyperlinks, kind-1111 jump
+
+## v0.4.97-beta
+- NIP-19 in articles, themed hyperlinks, outbox coverage improvements
+
+## v0.4.96-beta
+- Subscription priority rebalancing, feed layout shift fixes
+- Emoji packs, polls, GIF search
+
+## v0.4.95-beta
+- Scroll performance overhaul
+- Phoenix wallet + NWC service provider
+- Feature gate system
+
+See [GitHub Releases](https://github.com/TekkadanPlays/mycelium-android/releases) for earlier versions.

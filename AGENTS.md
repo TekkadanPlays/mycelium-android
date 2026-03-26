@@ -8,7 +8,7 @@
 
 - **Package:** `social.mycelium.android`
 - **Repository:** `TekkadanPlays/mycelium-android`
-- **License:** MIT (with Apache 2.0 components from ACINQ — see `NOTICE-ACINQ`)
+- **License:** MIT (with Apache 2.0 components from ACINQ — see `LICENSE.md`)
 - **Current version:** Check `app/build.gradle.kts` → `versionName` / `versionCode`
 
 ## Before You Start

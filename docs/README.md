@@ -1,6 +1,6 @@
 # Mycelium Android — Documentation
 
-> Last verified against source: v0.5.03 (versionCode 41)
+> Last verified against source: v0.5.12 (versionCode 44)
 
 ## Index
 
@@ -18,15 +18,12 @@
 
 | File | Description |
 |------|-------------|
-| [README.md](../README.md) | Project overview, features, build instructions, dependency table |
+| [README.md](../README.md) | Project overview, features, NIP support, build instructions |
 | [AGENTS.md](../AGENTS.md) | Universal AI agent guidance — architecture, workflow, coding standards, project goals |
 | [CLAUDE.md](../CLAUDE.md) | Compressed architecture summary and build commands (read first) |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | Fork/contribution guidelines for external contributors |
 | [CHANGELOG.md](../CHANGELOG.md) | Release history |
-| [CHANGELOG_NEXT.md](../CHANGELOG_NEXT.md) | Unreleased changes staged for next version |
-| [RELEASE_NOTES.md](../RELEASE_NOTES.md) | Detailed release notes for major versions |
-| [LICENSE](../LICENSE) | MIT license |
-| [NOTICE-ACINQ](../NOTICE-ACINQ) | Apache 2.0 notice for lightning-kmp and phoenix |
+| [LICENSE.md](../LICENSE.md) | MIT license + Apache 2.0 third-party notices |
 
 ## Quick Orientation
 

@@ -19,6 +19,28 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.20",
+      "versionCode": 45,
+      "releaseDate": "2026-03-27",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.20-beta/Mycelium-v0.5.20-beta.apk",
+      "changelog": "Major relay transport refactor (Ktor/Cybin pool), repository and startup coordination, debug diagnostics, Event Delivery screen, relay UI consolidation.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Relay layer: legacy WebSocket client removed; connections and subscriptions aligned with Ktor CIO and CybinRelayPool",
+        "RelayConnectionStateMachine, SubscriptionMultiplexer, RelayHealthTracker, Nip42AuthHandler, NetworkConnectivityMonitor updates for stability and metrics",
+        "Repositories: NotesRepository, outbox/NIP-65/66, relay storage, startup orchestration, DMs, and caches adjusted for the transport stack",
+        "Debug: session dump, verbose relay logging, pipeline diagnostics; debug settings and relay log screen integration",
+        "New Event Delivery screen for publish/delivery visibility; dashboard, onboarding, topics, and relay management UI tweaks",
+        "Relay Health standalone screen removed — health surfaced through relay management and related flows"
+      ]
+    },
+    {
       "version": "0.5.12",
       "versionCode": 44,
       "releaseDate": "2026-03-26",

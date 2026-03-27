@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayDeliveryTracker
+import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.TemporarySubscriptionHandle
 import java.util.concurrent.ConcurrentHashMap
 
@@ -98,6 +99,21 @@ class OutboxFeedManager private constructor() {
     private val _outboxNotesReceived = MutableStateFlow(0)
     val outboxNotesReceived: StateFlow<Int> = _outboxNotesReceived.asStateFlow()
 
+    /** Per-relay outbox connection state — exposed so the relay manager can show
+     *  what the outbox model is connecting to and why. */
+    data class OutboxRelayState(
+        val url: String,
+        val authorCount: Int,
+        val notesReceived: Int = 0,
+        val isHealing: Boolean = false
+    )
+
+    private val _activeOutboxRelays = MutableStateFlow<List<OutboxRelayState>>(emptyList())
+    val activeOutboxRelays: StateFlow<List<OutboxRelayState>> = _activeOutboxRelays.asStateFlow()
+
+    /** Per-relay note counter for outbox relays. */
+    private val outboxRelayNoteCounts = ConcurrentHashMap<String, Int>()
+
     /**
      * Start outbox discovery and subscription for the given follow list.
      *
@@ -172,6 +188,8 @@ class OutboxFeedManager private constructor() {
         _phase.value = Phase.STOPPED
         _outboxRelayCount.value = 0
         _discoveredAuthorCount.value = 0
+        _activeOutboxRelays.value = emptyList()
+        outboxRelayNoteCounts.clear()
         Log.d(TAG, "Outbox feed stopped")
     }
 
@@ -251,7 +269,22 @@ class OutboxFeedManager private constructor() {
             return
         }
 
-        // NIP-66 pre-filter: remove dead/stale relays before ranking
+        // Blocklist pre-filter: drop relays the user has blocked or that were auto-blocked
+        val blockedCount = relayToAuthors.keys.count { RelayHealthTracker.isBlocked(it) }
+        if (blockedCount > 0) {
+            relayToAuthors.keys.removeAll { RelayHealthTracker.isBlocked(it) }
+            Log.d(TAG, "Blocklist pre-filter: removed $blockedCount blocked relays (${relayToAuthors.size} remaining)")
+            if (relayToAuthors.isEmpty()) {
+                Log.d(TAG, "All outbox relays are blocked — nothing to subscribe to")
+                _phase.value = Phase.ACTIVE
+                return
+            }
+        }
+
+        // NIP-66 pre-filter: remove dead/stale relays before ranking.
+        // Also enforces the auth guard: we MUST NOT connect to auth-required or
+        // payment-required relays on behalf of users who did not opt in to those relays.
+        val nip11Cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
         val liveRelays = Nip66RelayDiscoveryRepository.discoveredRelays.value
         val candidateRelays = if (liveRelays.isNotEmpty()) {
             val now = System.currentTimeMillis() / 1000
@@ -260,8 +293,16 @@ class OutboxFeedManager private constructor() {
             val filtered = relayToAuthors.filterKeys { url ->
                 val discovered = liveRelays[url]
                 if (discovered == null) {
-                    // Relay not in NIP-66 data — keep it (benefit of the doubt)
-                    true
+                    // Relay not in NIP-66 data — keep only if it has previously connected
+                    // successfully AND is not known to require auth (from NIP-11 cache).
+                    // We must not silently connect to auth-required relays the user never
+                    // explicitly added to their relay manager.
+                    val health = RelayHealthTracker.getHealth(url)
+                    val knownAuthRequired = nip11Cache?.isAuthRequired(url) == true
+                    val knownPaymentRequired = nip11Cache?.isPaymentRequired(url) == true
+                    health != null && health.lastConnectedAt > 0 &&
+                        !RelayHealthTracker.isBlocked(url) &&
+                        !knownAuthRequired && !knownPaymentRequired
                 } else {
                     // Exclude if last seen too long ago, or requires auth/payment
                     discovered.lastSeen >= staleThreshold &&
@@ -271,20 +312,37 @@ class OutboxFeedManager private constructor() {
             }
             val removedCount = beforeCount - filtered.size
             if (removedCount > 0) {
-                Log.d(TAG, "NIP-66 pre-filter: removed $removedCount dead/stale/restricted relays " +
+                Log.d(TAG, "NIP-66 pre-filter: removed $removedCount dead/stale/auth-restricted relays " +
                     "($beforeCount → ${filtered.size})")
             }
             filtered
         } else {
-            Log.d(TAG, "NIP-66 data not available — skipping liveness pre-filter")
-            relayToAuthors
+            Log.d(TAG, "NIP-66 data not available — applying NIP-11 auth-only filter")
+            // NIP-66 dataset absent: fall back but still enforce auth guard via NIP-11 cache
+            relayToAuthors.filterKeys { url ->
+                val knownAuthRequired = nip11Cache?.isAuthRequired(url) == true
+                val knownPaymentRequired = nip11Cache?.isPaymentRequired(url) == true
+                !RelayHealthTracker.isBlocked(url) && !knownAuthRequired && !knownPaymentRequired
+            }
         }
 
         if (candidateRelays.isEmpty()) {
-            Log.d(TAG, "All outbox relays filtered out by NIP-66 — falling back to unfiltered")
-            // Fall back to unfiltered to avoid zero coverage
+            Log.d(TAG, "All outbox relays filtered out by NIP-66/NIP-11 — falling back to unfiltered (excluding auth-required)")
+            // Fall back to avoid zero coverage, but still strip auth/payment-required relays
+            // regardless — we must never authenticate with relays the user didn't explicitly configure.
         }
-        val selectionPool = candidateRelays.ifEmpty { relayToAuthors }
+        // When falling back to unfiltered, apply the minimum safety filter: strip any relay
+        // confirmed as auth-required or payment-required by NIP-66 OR NIP-11 cache.
+        // This closes the loophole where candidateRelays.isEmpty() would previously restore them.
+        val authSafePool = (candidateRelays.ifEmpty { relayToAuthors }).filterKeys { url ->
+            val nip66 = liveRelays[url]
+            val nip66AuthRequired = nip66?.authRequired == true
+            val nip66PaymentRequired = nip66?.paymentRequired == true
+            val nip11AuthRequired = nip11Cache?.isAuthRequired(url) == true
+            val nip11PaymentRequired = nip11Cache?.isPaymentRequired(url) == true
+            !nip66AuthRequired && !nip66PaymentRequired && !nip11AuthRequired && !nip11PaymentRequired
+        }
+        val selectionPool = authSafePool
 
         // Pre-compute Thompson Sampling scores — each call is stochastic, so we must
         // sample once and sort by the cached value. Re-evaluating inside the comparator
@@ -382,17 +440,67 @@ class OutboxFeedManager private constructor() {
             Log.d(TAG, "Indexer fallback: added $healingRelay for ${allFallbackAuthors.size} authors (${missedAuthors.size} missed + ${noNip65Authors.size} no-NIP-65)")
         }
 
-        _outboxRelayCount.value = relayFilters.size
+        // _outboxRelayCount is updated after the auth guard (below) with the final count.
+        // It is set here as a provisional value and overwritten after authGuardedFilters is built.
 
-        // Save relay→authors assignment for delivery attribution (include healing relay)
-        val assignmentMap = ranked.associate { (url, authors) -> url to authors.toSet() }.toMutableMap()
-        if (healingRelay != null && allFallbackAuthors.isNotEmpty()) {
+        // ── Final auth guard (catch-all) ──────────────────────────────────────────────
+        // Strip any relay that is confirmed to require authentication or payment by
+        // EITHER the NIP-66 monitor dataset OR the NIP-11 HTTP cache. This is the
+        // last line of defence before any WebSocket connection is opened.
+        //
+        // Rationale: we are connecting to other users' write relays on their behalf.
+        // The local user has NOT opted in to authenticate with these relays. If we
+        // respond to an AUTH challenge from a relay the user never explicitly added
+        // to their relay manager, we leak their identity without consent.
+        //
+        // This sweep is intentionally redundant with the NIP-66/NIP-11 pre-filter
+        // above — it catches auth-required relays that slipped through via the
+        // diversity pass, the healing relay slot, or a stale/empty NIP-66 cache.
+        val authGuardedFilters = relayFilters.filterKeys { url ->
+            val nip66 = liveRelays[url]
+            val nip66Auth = nip66?.authRequired == true
+            val nip66Pay  = nip66?.paymentRequired == true
+            val nip11Auth = nip11Cache?.isAuthRequired(url) == true
+            val nip11Pay  = nip11Cache?.isPaymentRequired(url) == true
+            val blocked   = nip66Auth || nip66Pay || nip11Auth || nip11Pay
+            if (blocked) {
+                Log.w(TAG, "Auth guard: refusing outbox connection to $url " +
+                    "(nip66Auth=$nip66Auth pay=$nip66Pay | nip11Auth=$nip11Auth pay=$nip11Pay) — " +
+                    "user has not consented to authenticate with this relay")
+            }
+            !blocked
+        }
+        val removedByAuthGuard = relayFilters.size - authGuardedFilters.size
+        if (removedByAuthGuard > 0) {
+            Log.w(TAG, "Auth guard: blocked $removedByAuthGuard auth/payment-required outbox relay(s) " +
+                "from connecting")
+        }
+        // Set the final relay count after auth guard filtering
+        _outboxRelayCount.value = authGuardedFilters.size
+
+        // Save relay→authors assignment for delivery attribution.
+        // Use authGuardedFilters (not relayFilters) so the assignment only tracks
+        // relays we actually connected to (auth-required relays are excluded).
+        val assignmentMap = ranked
+            .filter { (url, _) -> url in authGuardedFilters }
+            .associate { (url, authors) -> url to authors.toSet() }.toMutableMap()
+        if (healingRelay != null && allFallbackAuthors.isNotEmpty() && healingRelay in authGuardedFilters) {
             assignmentMap[healingRelay] = allFallbackAuthors
         }
         currentRelayAssignment = assignmentMap
 
+        // Expose per-relay state for relay manager transparency
+        outboxRelayNoteCounts.clear()
+        _activeOutboxRelays.value = assignmentMap.map { (url, authors) ->
+            OutboxRelayState(
+                url = url,
+                authorCount = authors.size,
+                isHealing = url == healingRelay
+            )
+        }
+
         // Record that we expect delivery from each selected relay (including healing relay)
-        relayFilters.keys.forEach { url -> RelayDeliveryTracker.recordExpected(url) }
+        authGuardedFilters.keys.forEach { url -> RelayDeliveryTracker.recordExpected(url) }
 
         // Subscribe using per-relay filter map — each relay only gets its relevant authors
         val callback = onNoteReceived
@@ -403,13 +511,18 @@ class OutboxFeedManager private constructor() {
         }
 
         outboxHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
-            relayFilters = relayFilters.mapValues { it.value },
+            relayFilters = authGuardedFilters.mapValues { it.value },
             priority = SubscriptionPriority.NORMAL,
         ) { event, relayUrl ->
             if (event.kind == 1) {
                 _outboxNotesReceived.value = _outboxNotesReceived.value + 1
                 // Track which authors delivered events (for relay attribution)
                 deliveredAuthors.add(event.pubKey)
+                // Track per-relay note counts for transparency
+                val newCount = outboxRelayNoteCounts.merge(relayUrl, 1) { old, inc -> old + inc } ?: 1
+                _activeOutboxRelays.value = _activeOutboxRelays.value.map { state ->
+                    if (state.url == relayUrl) state.copy(notesReceived = newCount) else state
+                }
                 // Inject into NotesRepository's existing pipeline with the actual
                 // source relay URL so relay orbs display correctly.
                 callback(event, relayUrl)
@@ -417,12 +530,13 @@ class OutboxFeedManager private constructor() {
         }
 
         _phase.value = Phase.ACTIVE
-        Log.d(TAG, "Outbox subscriptions active: ${relayFilters.size} relays")
+        Log.d(TAG, "Outbox subscriptions active: ${authGuardedFilters.size} relays" +
+            if (removedByAuthGuard > 0) " ($removedByAuthGuard auth-required relays blocked)" else "")
 
         // Batch preload NIP-11 for all outbox relay URLs so relay orb icons
         // are ready when notes arrive (avoids per-orb waterfall fetch on scroll).
         social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
-            ?.preloadRelayInfo(relayFilters.keys.toList(), scope)
+            ?.preloadRelayInfo(authGuardedFilters.keys.toList(), scope)
 
         // Log top 5 relays for diagnostics
         ranked.take(5).forEach { (url, authors) ->

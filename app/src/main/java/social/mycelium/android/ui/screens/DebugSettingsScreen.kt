@@ -1,20 +1,50 @@
 package social.mycelium.android.ui.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.AutoAwesome
-import androidx.compose.material.icons.outlined.BugReport
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.Save
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import social.mycelium.android.debug.DebugSessionDump
+import social.mycelium.android.debug.DebugVerboseLog
 import social.mycelium.android.repository.DebugEventStatsSnapshot
 import social.mycelium.android.repository.NotesRepository
 
@@ -25,6 +55,10 @@ fun DebugSettingsScreen(
     onEffectsLab: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val captureOn by DebugVerboseLog.captureEnabledFlow.collectAsState()
+    val lineCount by DebugVerboseLog.lineCountFlow.collectAsState()
+
     Scaffold(
         topBar = {
             Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
@@ -68,12 +102,126 @@ fun DebugSettingsScreen(
                 modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp)
             )
 
-            // Effects Lab
+            if (!DebugVerboseLog.isAvailable) {
+                Text(
+                    text = "Verbose session log is only available in debug builds.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(16.dp)
+                )
+            } else {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Verbose session log",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Captures layered audit lines (startup, relay state machine, network, lifecycle) and mirrors all relay log buffer entries. Max 20k lines in memory. Plain UTF-8 text with stable columns is best for pasting into AI tools; saving to a .txt file avoids clipboard limits. Debug APK only.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Capture to buffer",
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                            Text(
+                                text = "$lineCount lines",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = captureOn,
+                            onCheckedChange = { DebugVerboseLog.setCaptureEnabled(context, it) }
+                        )
+                    }
+                    Text(
+                        text = "Filter logcat tag: MyceliumVerbose",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = {
+                                val n = DebugSessionDump.copyToClipboard(context)
+                                Toast.makeText(
+                                    context,
+                                    if (n > 0) "Copied $n characters to clipboard" else "Nothing copied (debug only)",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.ContentCopy, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Copy dump")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = { DebugSessionDump.share(context) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Outlined.Share, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Share")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val path = DebugSessionDump.saveToFile(context)
+                            Toast.makeText(
+                                context,
+                                if (path != null) "Saved\n$path" else "Save failed — see logcat DebugSessionDump",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                    ) {
+                        Icon(Icons.Outlined.Save, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Save .txt to app Documents")
+                    }
+                    OutlinedButton(
+                        onClick = { DebugVerboseLog.clearBuffer() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp)
+                    ) {
+                        Icon(Icons.Outlined.DeleteSweep, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Clear buffer")
+                    }
+                }
+            }
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onEffectsLab)
-                    .padding(16.dp),
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(
@@ -82,7 +230,11 @@ fun DebugSettingsScreen(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.width(16.dp))
-                Column {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 8.dp)
+                ) {
                     Text(
                         text = "Effects Lab",
                         style = MaterialTheme.typography.bodyLarge
@@ -93,6 +245,9 @@ fun DebugSettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                OutlinedButton(onClick = onEffectsLab) {
+                    Text("Open")
+                }
             }
 
             HorizontalDivider(
@@ -101,7 +256,6 @@ fun DebugSettingsScreen(
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
 
-            // Event Stats
             val stats by NotesRepository.getInstance().debugEventStats.collectAsState(initial = DebugEventStatsSnapshot(0, 0, 0, 0, 0, 0, 0))
             Card(
                 modifier = Modifier

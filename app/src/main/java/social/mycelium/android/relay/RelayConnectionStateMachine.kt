@@ -7,9 +7,13 @@ import com.example.cybin.core.Filter
 import com.example.cybin.core.CybinUtils
 import com.example.cybin.relay.CybinRelayPool
 import com.example.cybin.relay.CybinSubscription
+import com.example.cybin.relay.RelayConnectionDiag
 import com.example.cybin.relay.RelayConnectionListener
 import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.network.MyceliumHttpClient
+import social.mycelium.android.BuildConfig
+import social.mycelium.android.debug.DebugVerboseLog
+import social.mycelium.android.utils.normalizeRelayUrl
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -178,27 +182,72 @@ class RelayConnectionStateMachine {
             override fun onConnecting(url: String) {
                 updateRelayStatus(url, RelayEndpointStatus.Connecting)
                 RelayHealthTracker.recordConnectionAttempt(url)
+                // No per-relay log — connection status card shows this live.
             }
 
             override fun onConnected(url: String) {
                 updateRelayStatus(url, RelayEndpointStatus.Connected)
                 RelayHealthTracker.recordConnectionSuccess(url)
+                // No per-relay log — connection status card shows this live.
             }
 
             override fun onDisconnected(url: String) {
                 Log.d(TAG, "[$url] Disconnected — pool will auto-reconnect if subs active")
                 updateRelayStatus(url, RelayEndpointStatus.Connecting)
+                // Disconnects are meaningful — log them so the user sees *why* connectivity dropped.
+                // (The transport reason comes via onRelayDiagnostic "transport" category.)
             }
 
             override fun onError(url: String, message: String) {
                 updateRelayStatus(url, RelayEndpointStatus.Failed)
                 RelayHealthTracker.recordConnectionFailure(url, message)
+                RelayLogBuffer.logError(normalizeRelayUrl(url), message)
             }
 
             override fun onOk(url: String, eventId: String, success: Boolean, message: String) {
                 RelayHealthTracker.recordPublishOk(url, eventId, success, message)
                 if (!success && message.contains("auth-required", ignoreCase = true)) {
                     nip42AuthHandler.onAuthRequiredPublishFailure(url, eventId)
+                }
+            }
+
+            override fun onSent(url: String, message: String) {
+                // All outbound messages are interesting — REQ shows subscription intent,
+                // EVENT shows publishes, CLOSE shows teardown, AUTH shows handshake.
+                RelayLogBuffer.logSent(normalizeRelayUrl(url), message)
+            }
+
+            override fun onReceived(url: String, message: String) {
+                // Skip individual EVENT messages — they're just data delivery and would
+                // flood the log (hundreds/sec). EVENT counts are visible in the health card.
+                // Log everything else: EOSE (subscription caught up), OK (publish result),
+                // NOTICE (relay message), AUTH (challenge), CLOSED (relay killed our sub).
+                val trimmed = message.trimStart()
+                if (trimmed.startsWith("[\"EVENT\"")) return
+                RelayLogBuffer.logReceived(normalizeRelayUrl(url), message)
+            }
+
+            override fun onRelayDiagnostic(url: String, category: String, detail: String) {
+                val key = normalizeRelayUrl(url)
+                when (category) {
+                    "transport" ->
+                        if (detail.startsWith("intentional_disconnect")) {
+                            // Intentional disconnects are low-noise; log as diagnostic
+                        } else {
+                            // Transport drop = meaningful event
+                            RelayLogBuffer.logDisconnected(key, detail)
+                        }
+                    "notice" -> RelayLogBuffer.logNotice(key, detail)
+                    "reconnect" -> {
+                        // Only log the actual handshake attempt, not scheduling chatter
+                        if (detail.startsWith("executing")) {
+                            RelayLogBuffer.logDiagnostic(key, "reconnect", detail)
+                        } else if (detail.startsWith("stopped")) {
+                            RelayLogBuffer.logDiagnostic(key, "reconnect", detail)
+                        }
+                        // Skip "scheduled" and "skipped" — those are internal scheduler noise
+                    }
+                    else -> RelayLogBuffer.logDiagnostic(key, category, detail)
                 }
             }
         })
@@ -324,6 +373,16 @@ class RelayConnectionStateMachine {
         onTransition { transition ->
             if (transition is StateMachine.Transition.Valid) {
                 _state.value = transition.toState
+                if (BuildConfig.DEBUG) {
+                    val from = transition.fromState::class.simpleName ?: "?"
+                    val to = transition.toState::class.simpleName ?: "?"
+                    val eff = transition.sideEffect?.let { it::class.simpleName } ?: "none"
+                    DebugVerboseLog.record(
+                        DebugVerboseLog.Layer.RELAY_STATE,
+                        "RelaySM",
+                        "$from → $to effect=$eff",
+                    )
+                }
                 when (val effect = transition.sideEffect) {
                     is RelaySideEffect.ConnectRelays -> {
                         pendingRelayUrlsForRetry = effect.relayUrls
@@ -540,6 +599,13 @@ class RelayConnectionStateMachine {
                     .toSet()
                 if (staleRelays.isNotEmpty()) {
                     Log.d(TAG, "Disconnecting ${staleRelays.size} stale relay(s): ${staleRelays.joinToString()}")
+                    for (u in staleRelays) {
+                        RelayLogBuffer.logDiagnostic(
+                            normalizeRelayUrl(u),
+                            "feed",
+                            "removed from main subscription set — pool will drop idle socket if no REQs remain",
+                        )
+                    }
                     relayPool.disconnectIdleRelays(staleRelays)
                 }
             } catch (e: Exception) {
@@ -627,6 +693,13 @@ class RelayConnectionStateMachine {
                 val connectedCount = relayPool.getConnectedCount()
                 if (disconnected.isNotEmpty()) {
                     Log.d(TAG, "Keepalive: $connectedCount connected, ${disconnected.size} disconnected with active subs — reconnecting dead relays")
+                    for (u in disconnected) {
+                        RelayLogBuffer.logDiagnostic(
+                            normalizeRelayUrl(u),
+                            "keepalive",
+                            "2min check: socket down but subscription still active → clearReconnectState + connect wave",
+                        )
+                    }
                     // Clear reconnect state for dead relays so they get a fresh attempt
                     relayPool.clearReconnectState()
                     relayPool.connect()
@@ -637,6 +710,13 @@ class RelayConnectionStateMachine {
                 val elapsed = System.currentTimeMillis() - lastEventReceivedAt
                 if (elapsed > STALE_FALLBACK_THRESHOLD_MS) {
                     Log.w(TAG, "Keepalive: no events in ${elapsed / 1000}s with $connectedCount connected relays — forcing full reconnect (possible half-open sockets)")
+                    for (u in currentSubscriptionRelayUrls) {
+                        RelayLogBuffer.logDiagnostic(
+                            normalizeRelayUrl(u),
+                            "keepalive",
+                            "no feed events for ${elapsed / 1000}s — requestReconnectOnResume() (half-open fallback)",
+                        )
+                    }
                     lastEventReceivedAt = System.currentTimeMillis()
                     requestReconnectOnResume()
                 } else {
@@ -752,6 +832,9 @@ class RelayConnectionStateMachine {
         relayPool.dumpRelaySlots(label)
     }
 
+    /** Live transport + scheduler snapshot for relay detail UI. */
+    fun getRelayDiagnostics(url: String): RelayConnectionDiag = relayPool.getRelayDiagnostics(url)
+
     private fun executeDisconnect() {
         scope.launch {
             try {
@@ -823,6 +906,15 @@ class RelayConnectionStateMachine {
     /** Request full disconnect (e.g. on screen exit or app shutdown). */
     fun requestDisconnect() {
         stateMachine.transition(RelayEvent.DisconnectRequested)
+    }
+
+    /**
+     * Drop idle WebSockets for these URLs only (no active REQ). Used after indexer-only
+     * bursts so user relays stay connected; see [com.example.cybin.relay.CybinRelayPool.disconnectIdleRelays].
+     */
+    fun disconnectIdleRelaysAtUrls(urls: Collection<String>) {
+        if (urls.isEmpty()) return
+        relayPool.disconnectIdleRelays(urls.toSet())
     }
 
     /**
@@ -907,6 +999,13 @@ class RelayConnectionStateMachine {
             val disconnected = relayPool.getDisconnectedSubscriptionRelays()
             if (disconnected.isNotEmpty()) {
                 Log.d(TAG, "App resumed: subscription unchanged, reconnecting ${disconnected.size} dead relays")
+                for (u in disconnected) {
+                    RelayLogBuffer.logDiagnostic(
+                        normalizeRelayUrl(u),
+                        "resume",
+                        "app foreground: subscription unchanged, socket dead → pool.connect()",
+                    )
+                }
                 relayPool.connect()
             } else {
                 Log.d(TAG, "App resumed: subscription active, ${activeUrls.size} relays healthy — no-op")
@@ -920,6 +1019,13 @@ class RelayConnectionStateMachine {
         // earlier offline period.
         retryAttempt = 0
         Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (${effectiveUrls.size} healthy, following=${kind1Filter != null})")
+        for (u in effectiveUrls) {
+            RelayLogBuffer.logDiagnostic(
+                normalizeRelayUrl(u),
+                "resume",
+                "full FeedChangeRequested (relay set or block list changed vs last subscribe)",
+            )
+        }
         stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter))
         // Re-start topics subscription (own slot, may have been lost during disconnect)
         startTopicsSubscription(relayUrls)

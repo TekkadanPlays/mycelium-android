@@ -6,6 +6,8 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.util.Log
+import social.mycelium.android.BuildConfig
+import social.mycelium.android.debug.DebugVerboseLog
 
 /**
  * Monitors network connectivity changes and triggers relay reconnection when
@@ -39,6 +41,9 @@ class NetworkConnectivityMonitor(private val context: Context) {
             if (!hadNetwork && now - lastReconnectAtMs > DEBOUNCE_MS) {
                 lastReconnectAtMs = now
                 Log.i(TAG, "Network available after loss — granting amnesty and triggering relay reconnect")
+                if (BuildConfig.DEBUG) {
+                    DebugVerboseLog.record(DebugVerboseLog.Layer.NETWORK, TAG, "onAvailable after loss → reconnect")
+                }
                 onNetworkRegained()
             }
             hadNetwork = true
@@ -50,6 +55,9 @@ class NetworkConnectivityMonitor(private val context: Context) {
             if (active == null) {
                 hadNetwork = false
                 Log.d(TAG, "All networks lost")
+                if (BuildConfig.DEBUG) {
+                    DebugVerboseLog.record(DebugVerboseLog.Layer.NETWORK, TAG, "onLost: no active network")
+                }
             }
         }
 
@@ -61,6 +69,9 @@ class NetworkConnectivityMonitor(private val context: Context) {
                 if (now - lastReconnectAtMs > DEBOUNCE_MS) {
                     lastReconnectAtMs = now
                     Log.i(TAG, "Network capabilities restored — granting amnesty and triggering relay reconnect")
+                    if (BuildConfig.DEBUG) {
+                        DebugVerboseLog.record(DebugVerboseLog.Layer.NETWORK, TAG, "capabilities restored → reconnect")
+                    }
                     onNetworkRegained()
                 }
                 hadNetwork = true

@@ -22,6 +22,10 @@ interface EventDao {
     @Query("SELECT * FROM cached_events WHERE kind IN (1, 6, 30023) ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getFeedEvents(limit: Int = 500): List<CachedEventEntity>
 
+    /** Oldest cached event timestamp (for DeepHistoryFetcher cursor initialization). */
+    @Query("SELECT MIN(createdAt) FROM cached_events WHERE kind IN (1, 6, 30023)")
+    suspend fun getOldestFeedEventTimestamp(): Long?
+
     /** Feed events for specific authors (Following mode). */
     @Query("SELECT * FROM cached_events WHERE kind IN (1, 6, 30023) AND pubkey IN (:pubkeys) ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getFeedEventsForAuthors(pubkeys: List<String>, limit: Int = 500): List<CachedEventEntity>

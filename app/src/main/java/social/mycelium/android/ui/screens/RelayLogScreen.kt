@@ -14,6 +14,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.RectangleShape
@@ -43,16 +45,20 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import com.example.cybin.relay.RelayConnectionDiag
 import com.example.cybin.relay.RelaySlotSnapshot
+import social.mycelium.android.utils.normalizeRelayUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.data.DiscoveredRelay
 import social.mycelium.android.data.RelayInformation
+import social.mycelium.android.relay.LogCategory
 import social.mycelium.android.relay.LogType
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayDeliveryTracker
+import social.mycelium.android.relay.RelayHealthInfo
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.RelayLogBuffer
 import social.mycelium.android.relay.RelayLogEntry
@@ -60,13 +66,14 @@ import androidx.compose.ui.window.Dialog
 import com.example.cybin.nip19.toNpub
 import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
 
-/** Types we show by default (connection lifecycle + errors/notices). RECEIVED/EOSE/SENT are hidden unless verbose. */
-private val RELEVANT_LOG_TYPES = setOf(
-    LogType.CONNECTING,
-    LogType.CONNECTED,
-    LogType.DISCONNECTED,
-    LogType.ERROR,
-    LogType.NOTICE
+/**
+ * Default enabled log categories. Wire is off by default (verbose).
+ */
+private val DEFAULT_ENABLED_CATEGORIES = setOf(
+    LogCategory.WIRE,
+    LogCategory.AUTH,
+    LogCategory.ERROR,
+    LogCategory.DIAGNOSTIC,
 )
 
 /**
@@ -94,6 +101,7 @@ fun RelayLogScreen(
     /** Navigate to dedicated NIP-86 auth list management screen. */
     onOpenAuthList: (() -> Unit)? = null
 ) {
+    val normalizedRelayUrl = remember(relayUrl) { normalizeRelayUrl(relayUrl) }
     val context = LocalContext.current
     val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
     var relayInfo by remember(relayUrl) { mutableStateOf<RelayInformation?>(nip11.getCachedRelayInfo(relayUrl)) }
@@ -109,11 +117,11 @@ fun RelayLogScreen(
     }
 
     val allLogs by RelayLogBuffer.getLogsForRelay(relayUrl).collectAsState()
-    var showVerbose by remember { mutableStateOf(false) }
-    // Newest-first log ordering
-    val filteredLogs = remember(allLogs, showVerbose) {
-        val logs = if (showVerbose) allLogs else allLogs.filter { it.type in RELEVANT_LOG_TYPES }
-        logs.sortedByDescending { it.timestamp }
+    var enabledCategories by remember { mutableStateOf(DEFAULT_ENABLED_CATEGORIES) }
+    // Newest-first log ordering, filtered by enabled categories
+    val filteredLogs = remember(allLogs, enabledCategories) {
+        allLogs.filter { it.category in enabledCategories }
+            .sortedByDescending { it.timestamp }
     }
     val listState = rememberLazyListState()
 
@@ -122,24 +130,36 @@ fun RelayLogScreen(
     var slotSnapshot by remember { mutableStateOf<RelaySlotSnapshot?>(null) }
     LaunchedEffect(relayUrl) {
         while (true) {
-            val normalized = relayUrl.trimEnd('/')
             slotSnapshot = relayStateMachine.getRelaySlotSnapshots()
-                .firstOrNull { it.url.trimEnd('/') == normalized }
+                .firstOrNull { normalizeRelayUrl(it.url) == normalizedRelayUrl }
             delay(1000)
         }
     }
 
-    // ── Delivery stats from Thompson Sampling tracker ──
-    val deliveryStat = remember(relayUrl) {
-        val normalized = relayUrl.trimEnd('/')
-        RelayDeliveryTracker.getStats().entries
-            .firstOrNull { it.key.trimEnd('/') == normalized }
-            ?.value
+    var relayDiag by remember(relayUrl) {
+        mutableStateOf(relayStateMachine.getRelayDiagnostics(relayUrl))
+    }
+    LaunchedEffect(relayUrl) {
+        while (true) {
+            relayDiag = relayStateMachine.getRelayDiagnostics(relayUrl)
+            delay(1000)
+        }
+    }
+
+    // ── Delivery stats (refreshes with slot snapshot) ──
+    var deliveryStat by remember { mutableStateOf<RelayDeliveryTracker.RelayStats?>(null) }
+    LaunchedEffect(relayUrl) {
+        while (true) {
+            deliveryStat = RelayDeliveryTracker.getStats().entries
+                .firstOrNull { normalizeRelayUrl(it.key) == normalizedRelayUrl }
+                ?.value
+            delay(3000)
+        }
     }
 
     // ── Health data (live) ──
     val healthMap by RelayHealthTracker.healthByRelay.collectAsState()
-    val health = healthMap[relayUrl]
+    val health = healthMap[relayUrl] ?: healthMap[normalizedRelayUrl]
 
     // ── NIP-86 Relay Admin Detection ──
     // NIP-11 pubkey field may be hex OR npub bech32 depending on relay implementation.
@@ -208,7 +228,7 @@ fun RelayLogScreen(
                             Text(
                                 text = discoveryData?.name ?: relayInfo?.name?.take(24) ?: relayUrl.takeAfterLastSlash(),
                                 style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
+                                fontWeight = FontWeight.Medium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -297,6 +317,18 @@ fun RelayLogScreen(
                 RelayInfoHeader(relayUrl = relayUrl, info = relayInfo, discovery = discoveryData)
             }
 
+            // ── Live Status Bar ──
+            item(key = "live_status") {
+                val perRelayState by relayStateMachine.perRelayState.collectAsState()
+                val connState = perRelayState[relayUrl] ?: perRelayState[normalizedRelayUrl]
+                LiveStatusBar(
+                    connState = connState,
+                    health = health,
+                    eventsReceived = health?.eventsReceived ?: 0L,
+                    delivery = deliveryStat,
+                )
+            }
+
             // ── NIP-86 Relay Admin Controls ──
             val methods = nip86Methods
             if (isRelayOperator && currentSigner != null && methods != null && methods.isNotEmpty()) {
@@ -378,8 +410,13 @@ fun RelayLogScreen(
             // ── Connection Status ──
             item(key = "connection_status") {
                 val perRelayState by relayStateMachine.perRelayState.collectAsState()
-                val connState = perRelayState[relayUrl]
+                val connState = perRelayState[relayUrl] ?: perRelayState[normalizedRelayUrl]
                 ConnectionStatusCard(relayUrl = relayUrl, connState = connState, health = health)
+            }
+
+            // ── Pool transport & reconnect state (live) ──
+            item(key = "pool_diagnostics") {
+                RelayPoolDiagnosticsCard(diag = relayDiag)
             }
 
             // ── Subscription Slots (live) ──
@@ -389,10 +426,11 @@ fun RelayLogScreen(
                 }
             }
 
-            // ── Delivery Performance (Thompson Sampling) ──
-            if (deliveryStat != null && deliveryStat.expected >= 1.0) {
+            // ── Delivery Performance ──
+            val deliveryStatSnapshot = deliveryStat
+            if (deliveryStatSnapshot != null && deliveryStatSnapshot.expected >= 1.0) {
                 item(key = "delivery_stats") {
-                    DeliveryPerformanceCard(stat = deliveryStat)
+                    DeliveryPerformanceCard(stat = deliveryStatSnapshot)
                 }
             }
 
@@ -400,6 +438,29 @@ fun RelayLogScreen(
             if (discoveryData != null) {
                 item(key = "nip66_data") {
                     Nip66DataCard(discovery = discoveryData!!)
+                }
+            }
+
+            // ── Extra NIP-11/NIP-66 Metadata ──
+            val countries = relayInfo?.relay_countries
+            val languages = relayInfo?.language_tags
+            val paymentsUrl = relayInfo?.payments_url
+            val network = discoveryData?.network
+            val isp = discoveryData?.isp
+            val lastSeen = discoveryData?.lastSeen
+            val topics = discoveryData?.topics
+            if (!countries.isNullOrEmpty() || !languages.isNullOrEmpty() || paymentsUrl != null ||
+                network != null || isp != null || lastSeen != null || !topics.isNullOrEmpty()) {
+                item(key = "extra_metadata") {
+                    ExtraMetadataCard(
+                        countries = countries,
+                        languages = languages,
+                        paymentsUrl = paymentsUrl,
+                        network = network,
+                        isp = isp,
+                        lastSeen = lastSeen,
+                        topics = topics
+                    )
                 }
             }
 
@@ -503,19 +564,40 @@ fun RelayLogScreen(
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
                     )
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${filteredLogs.size} entries",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                    Text(
+                        text = "${filteredLogs.size} entries",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                // Category filter chips
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    data class CategoryChip(val category: LogCategory, val label: String)
+                    val chips = listOf(
+                        CategoryChip(LogCategory.WIRE, "Traffic"),
+                        CategoryChip(LogCategory.AUTH, "Auth"),
+                        CategoryChip(LogCategory.ERROR, "Errors"),
+                        CategoryChip(LogCategory.DIAGNOSTIC, "Diagnostics"),
+                        CategoryChip(LogCategory.LIFECYCLE, "Connects"),
+                        CategoryChip(LogCategory.SUBSCRIPTION, "Subs"),
+                    )
+                    chips.forEach { chip ->
                         FilterChip(
-                            selected = showVerbose,
-                            onClick = { showVerbose = !showVerbose },
-                            label = { Text("Verbose", style = MaterialTheme.typography.labelSmall) },
+                            selected = chip.category in enabledCategories,
+                            onClick = {
+                                enabledCategories = if (chip.category in enabledCategories)
+                                    enabledCategories - chip.category
+                                else
+                                    enabledCategories + chip.category
+                            },
+                            label = { Text(chip.label, style = MaterialTheme.typography.labelSmall) },
                             modifier = Modifier.height(28.dp)
                         )
                     }
@@ -540,7 +622,10 @@ fun RelayLogScreen(
                             )
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                text = if (allLogs.isEmpty()) "No activity yet" else "No connection or notice events",
+                                text = when {
+                                    allLogs.isEmpty() -> "No activity yet \u2014 connect or publish to this relay to populate logs."
+                                    else -> "No entries match the active filters. Tap \u201cWire\u201d to see raw send/receive traffic."
+                                },
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -557,6 +642,155 @@ fun RelayLogScreen(
 }
 
 private fun String.takeAfterLastSlash(): String = substringAfterLast('/')
+
+// ── Live Status Bar — compact real-time connection indicator ──
+
+@Composable
+private fun LiveStatusBar(
+    connState: social.mycelium.android.relay.RelayEndpointStatus?,
+    health: RelayHealthInfo?,
+    eventsReceived: Long,
+    delivery: RelayDeliveryTracker.RelayStats?,
+) {
+    val deliveryStats = delivery?.takeIf { it.expected >= 1.0 }
+    val hasDelivery = deliveryStats != null
+    val rate = deliveryStats?.successRate ?: 0.0
+    val statusLabel = when {
+        health?.isBlocked == true -> "Blocked"
+        health?.isFlagged == true -> "Flagged"
+        hasDelivery && rate >= 0.75 -> "Delivering well"
+        hasDelivery && rate >= 0.45 -> "Delivery mixed"
+        hasDelivery -> "Delivery weak"
+        connState == social.mycelium.android.relay.RelayEndpointStatus.Connected -> "Socket connected"
+        connState == social.mycelium.android.relay.RelayEndpointStatus.Connecting -> "Socket connecting"
+        connState == social.mycelium.android.relay.RelayEndpointStatus.Failed -> "Socket failed"
+        else -> "Socket disconnected"
+    }
+    val statusColor = when {
+        health?.isBlocked == true -> MaterialTheme.colorScheme.error
+        health?.isFlagged == true -> Color(0xFFFFA726)
+        hasDelivery && rate >= 0.75 -> Color(0xFF4CAF50)
+        hasDelivery && rate >= 0.45 -> Color(0xFFFFA726)
+        hasDelivery -> MaterialTheme.colorScheme.error
+        connState == social.mycelium.android.relay.RelayEndpointStatus.Connected -> Color(0xFF4CAF50)
+        connState == social.mycelium.android.relay.RelayEndpointStatus.Connecting -> Color(0xFFFFA726)
+        connState == social.mycelium.android.relay.RelayEndpointStatus.Failed -> MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+    }
+
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f)
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Text(
+                "Summary (outbox delivery when known, else socket)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(statusColor)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(statusLabel, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = statusColor)
+            }
+            if (hasDelivery && deliveryStats != null) {
+                val pct = (rate * 100).toInt()
+                val d = kotlin.math.round(deliveryStats.delivered).toInt()
+                val e = kotlin.math.round(deliveryStats.expected).toInt()
+                Text(
+                    "Outbox delivery ~$pct% ($d/$e)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else if (health != null) {
+                val uptimePct = if (health.connectionAttempts > 0) ((1.0 - health.failureRate) * 100).toInt() else 0
+                Text(
+                    "Handshake $uptimePct% OK (no outbox trials yet)",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (eventsReceived > 0) {
+                Text("${eventsReceived} events seen", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (health?.connectTimeMs != null && health.connectTimeMs > 0) {
+                Text("${health.connectTimeMs}ms connect", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            }
+        }
+    }
+}
+
+// ── Extra Metadata Card — NIP-11/NIP-66 fields not shown elsewhere ──
+
+@Composable
+private fun ExtraMetadataCard(
+    countries: List<String>?,
+    languages: List<String>?,
+    paymentsUrl: String?,
+    network: String?,
+    isp: String?,
+    lastSeen: Long?,
+    topics: Collection<String>?
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Additional Info", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(10.dp))
+
+            if (!countries.isNullOrEmpty()) {
+                MetadataRow("Countries", countries.joinToString(", "))
+            }
+            if (!languages.isNullOrEmpty()) {
+                MetadataRow("Languages", languages.joinToString(", "))
+            }
+            if (network != null) {
+                MetadataRow("Network", network)
+            }
+            if (isp != null) {
+                MetadataRow("ISP", isp)
+            }
+            if (lastSeen != null && lastSeen > 0) {
+                val relTime = android.text.format.DateUtils.getRelativeTimeSpanString(
+                    lastSeen * 1000, System.currentTimeMillis(),
+                    android.text.format.DateUtils.MINUTE_IN_MILLIS
+                ).toString()
+                MetadataRow("Last Seen", relTime)
+            }
+            if (!topics.isNullOrEmpty()) {
+                MetadataRow("Topics", topics.joinToString(", "))
+            }
+            if (paymentsUrl != null) {
+                MetadataRow("Payments", paymentsUrl)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MetadataRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.widthIn(min = 80.dp))
+        Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
 
 // ── Relay Info Header ──
 
@@ -732,6 +966,26 @@ private fun Nip66DataCard(discovery: DiscoveredRelay) {
                 RelayStatItem("NIP-11", if (discovery.hasNip11) "Yes" else "No")
             }
 
+            // Read/Write latency breakdown
+            if (discovery.avgRttRead != null || discovery.avgRttWrite != null) {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    discovery.avgRttRead?.let { rtt ->
+                        RelayStatItem("Read RTT", "${rtt}ms", when {
+                            rtt < 500 -> Color(0xFF66BB6A); rtt < 1000 -> Color(0xFFFFA726); else -> MaterialTheme.colorScheme.error
+                        })
+                    }
+                    discovery.avgRttWrite?.let { rtt ->
+                        RelayStatItem("Write RTT", "${rtt}ms", when {
+                            rtt < 500 -> Color(0xFF66BB6A); rtt < 1000 -> Color(0xFFFFA726); else -> MaterialTheme.colorScheme.error
+                        })
+                    }
+                }
+            }
+
             // Metadata row
             val hasMetadata = discovery.countryCode != null || discovery.softwareShort != null ||
                 discovery.paymentRequired || discovery.authRequired
@@ -815,6 +1069,12 @@ private fun ConnectionStatusCard(
         color = MaterialTheme.colorScheme.surfaceContainerLow
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "WebSocket & handshake",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
             // Top row: status icon + label + events
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -854,7 +1114,12 @@ private fun ConnectionStatusCard(
                     label = "uptimeBar"
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Uptime", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(48.dp))
+                    Text(
+                        "Connect OK",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.width(72.dp)
+                    )
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -919,6 +1184,76 @@ private fun ConnectionStatusCard(
                             color = MaterialTheme.colorScheme.error.copy(alpha = 0.9f),
                             maxLines = 3,
                             overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Cybin pool transport / scheduler (live) ──
+
+@Composable
+private fun RelayPoolDiagnosticsCard(diag: RelayConnectionDiag) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerLow
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Hub, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("Pool & socket", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            }
+            Text(
+                "Live CybinRelayPool state (~1s refresh). Explains reconnects: transport drop, backoff, blacklist, scheduler.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+            Spacer(Modifier.height(10.dp))
+
+            if (!diag.hasSocket) {
+                Text(
+                    "No socket in pool for this URL yet. A WebSocket opens when a REQ or EVENT targets this relay.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    RelayStatItem("Transport", diag.transportState)
+                    RelayStatItem(
+                        "Socket",
+                        if (diag.isConnected) "OPEN" else "DOWN",
+                        if (diag.isConnected) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error
+                    )
+                    RelayStatItem("REQ@sock", "${diag.activeSubscriptionsOnSocket}")
+                    RelayStatItem("Reconn#", "${diag.reconnectAttempts}")
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    RelayStatItem("SL active", "${diag.schedulerActiveSubs}")
+                    RelayStatItem(
+                        "SL queue",
+                        "${diag.schedulerQueuedSubs}",
+                        if (diag.schedulerQueuedSubs > 0) Color(0xFFFFA726) else null
+                    )
+                    RelayStatItem("Limit", "${diag.effectiveLimit}")
+                }
+                if (diag.sessionBlacklisted) {
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        shape = RectangleShape,
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Session blacklist: reconnect paused ~${diag.blacklistRemainingMs / 1000}s (exhausted backoff; clears automatically).",
+                            modifier = Modifier.padding(8.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
                         )
                     }
                 }
@@ -1040,9 +1375,7 @@ private fun DeliveryPerformanceCard(stat: RelayDeliveryTracker.RelayStats) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Outbox, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.width(8.dp))
-                Text("Delivery", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.weight(1f))
-                Text("Thompson Sampling", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), fontSize = 10.sp)
+                Text("Delivery Performance", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             }
             Spacer(Modifier.height(12.dp))
 
@@ -1145,12 +1478,21 @@ private fun LimitationsCard(info: RelayInformation) {
             // Fees
             info.fees?.let { fees ->
                 val feeItems = mutableListOf<String>()
-                fees.admission?.forEach { fee -> feeItems.add("Admission: ${fee.amount} ${fee.unit}") }
+                
+                // Helper to gracefully normalize msats to sats for display
+                fun formatFee(fee: social.mycelium.android.data.RelayFee): String {
+                    val isMsats = fee.unit.lowercase() == "msats" || fee.unit.lowercase() == "millisatoshis"
+                    val displayAmount = if (isMsats) fee.amount / 1000 else fee.amount
+                    val displayUnit = if (isMsats) "sats" else fee.unit
+                    return "$displayAmount $displayUnit"
+                }
+
+                fees.admission?.forEach { fee -> feeItems.add("Admission: ${formatFee(fee)}") }
                 fees.subscription?.forEach { fee ->
                     val period = fee.period?.let { p -> " / ${p / 86400}d" } ?: ""
-                    feeItems.add("Subscription: ${fee.amount} ${fee.unit}$period")
+                    feeItems.add("Subscription: ${formatFee(fee)}$period")
                 }
-                fees.publication?.forEach { fee -> feeItems.add("Publication: ${fee.amount} ${fee.unit}") }
+                fees.publication?.forEach { fee -> feeItems.add("Publication: ${formatFee(fee)}") }
                 if (feeItems.isNotEmpty()) {
                     Spacer(Modifier.height(12.dp))
                     feeItems.forEach { feeText ->
@@ -1303,6 +1645,12 @@ private fun HealthCard(
                 Spacer(Modifier.width(8.dp))
                 Text("Health", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             }
+            Text(
+                "One WebSocket per relay; REQs multiplex. Handshakes = lifetime TCP/WS connects. Activity log adds DIAG lines (why reconnect, CLOSED, notices).",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 4.dp)
+            )
             Spacer(Modifier.height(12.dp))
 
             // Stats grid row 1
@@ -1310,7 +1658,7 @@ private fun HealthCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                RelayStatItem("Connections", "${health.connectionAttempts}")
+                RelayStatItem("Handshakes", "${health.connectionAttempts}")
                 RelayStatItem("Failures", "${health.connectionFailures}",
                     if (health.connectionFailures > 0) MaterialTheme.colorScheme.error else null)
                 val ratePercent = (health.failureRate * 100).toInt()
@@ -1435,23 +1783,151 @@ private fun ActionChip(
     }
 }
 
+// ── Wire message summarizers ──
+
+/** Human-readable kind name for common Nostr event kinds. */
+private fun kindName(kind: Int): String = when (kind) {
+    0 -> "profile"
+    1 -> "note"
+    3 -> "contacts"
+    4 -> "DM"
+    6 -> "repost"
+    7 -> "reaction"
+    10 -> "relay list"
+    11 -> "topic"
+    13 -> "seal"
+    14 -> "chat"
+    1111 -> "comment"
+    1311 -> "live chat"
+    9735 -> "zap"
+    10000 -> "mute list"
+    10002 -> "relay list (NIP-65)"
+    10003 -> "bookmarks"
+    22242 -> "auth"
+    24242 -> "blossom auth"
+    27235 -> "HTTP auth"
+    30023 -> "article"
+    30073 -> "anchor sub"
+    else -> "kind $kind"
+}
+
+/** Summarize an outbound (SENT) Nostr message for display. */
+private fun summarizeSentMessage(raw: String): String {
+    return try {
+        val trimmed = raw.trim()
+        when {
+            trimmed.startsWith("[\"REQ\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                val subId = parts.optString(1, "?").take(8)
+                if (parts.length() > 2) {
+                    val filter = parts.optJSONObject(2)
+                    val kinds = filter?.optJSONArray("kinds")?.let { arr ->
+                        (0 until arr.length()).map { arr.getInt(it) }
+                    }
+                    val authors = filter?.optJSONArray("authors")?.length()
+                    val limit = filter?.optInt("limit", -1)?.takeIf { it > 0 }
+                    val ids = filter?.optJSONArray("ids")?.length()
+                    val kindStr = kinds?.joinToString(", ") { kindName(it) } ?: "data"
+                    val details = buildList {
+                        authors?.let { add("from $it authors") }
+                        ids?.let { add("for $it specific events") }
+                        limit?.let { add("limit $it") }
+                    }.joinToString(", ")
+                    
+                    if (details.isNotBlank()) "Device requested '$kindStr' ($details)"
+                    else "Device requested '$kindStr'"
+                } else "Device requested data stream ($subId)"
+            }
+            trimmed.startsWith("[\"EVENT\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                val event = parts.optJSONObject(1)
+                val kind = event?.optInt("kind", -1) ?: -1
+                "Device published a ${kindName(kind)}"
+            }
+            trimmed.startsWith("[\"CLOSE\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                "Device closed request ${parts.optString(1, "?").take(8)}"
+            }
+            trimmed.startsWith("[\"AUTH\"") -> "Device replied to authentication challenge (NIP-42)"
+            else -> raw.take(120)
+        }
+    } catch (_: Exception) {
+        raw.take(120)
+    }
+}
+
+/** Summarize an inbound (RECEIVED) Nostr message for display. */
+private fun summarizeReceivedMessage(raw: String): String {
+    return try {
+        val trimmed = raw.trim()
+        when {
+            trimmed.startsWith("[\"EOSE\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                "Relay finished sending older data for request (${parts.optString(1, "?").take(8)})"
+            }
+            trimmed.startsWith("[\"OK\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                val success = parts.optBoolean(2, false)
+                val msg = parts.optString(3, "")
+                if (success) "Relay successfully received your published event" + if (msg.isNotBlank()) " ($msg)" else ""
+                else "Relay rejected event: $msg"
+            }
+            trimmed.startsWith("[\"NOTICE\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                "Relay sent a notice: ${parts.optString(1, "").take(100)}"
+            }
+            trimmed.startsWith("[\"CLOSED\"") -> {
+                val parts = org.json.JSONArray(trimmed)
+                "Relay terminated the request: \"${parts.optString(2, "").take(80)}\""
+            }
+            trimmed.startsWith("[\"AUTH\"") -> "Relay requested authentication (NIP-42)"
+            trimmed.startsWith("[\"EVENT\"") -> {
+                // Shouldn't normally appear (filtered in listener), but handle gracefully
+                val parts = org.json.JSONArray(trimmed)
+                val event = parts.optJSONObject(2)
+                val kind = event?.optInt("kind", -1) ?: -1
+                "Relay sent a ${kindName(kind)}"
+            }
+            else -> raw.take(120)
+        }
+    } catch (_: Exception) {
+        raw.take(120)
+    }
+}
+
 // ── Log Entry Row ──
 
 @Composable
 private fun LogEntryRow(entry: RelayLogEntry) {
     val (iconTint, label) = when (entry.type) {
-        LogType.CONNECTING -> MaterialTheme.colorScheme.primary to "CONN"
-        LogType.CONNECTED -> Color(0xFF66BB6A) to "OK"
-        LogType.DISCONNECTED -> MaterialTheme.colorScheme.outline to "DISC"
+        LogType.CONNECTING -> MaterialTheme.colorScheme.primary to "🔄"
+        LogType.CONNECTED -> Color(0xFF66BB6A) to "✓"
+        LogType.DISCONNECTED -> MaterialTheme.colorScheme.outline to "✗"
         LogType.ERROR -> MaterialTheme.colorScheme.error to "ERR"
-        LogType.NOTICE -> MaterialTheme.colorScheme.tertiary to "NOTE"
-        LogType.SENT -> MaterialTheme.colorScheme.secondary to "SEND"
-        LogType.RECEIVED -> MaterialTheme.colorScheme.onSurfaceVariant to "RECV"
-        LogType.EOSE -> MaterialTheme.colorScheme.onSurfaceVariant to "EOSE"
+        LogType.NOTICE -> MaterialTheme.colorScheme.tertiary to "⚠"
+        LogType.SENT -> Color(0xFF42A5F5) to "APP"
+        LogType.RECEIVED -> Color(0xFF66BB6A) to "R"
+        LogType.EOSE -> MaterialTheme.colorScheme.onSurfaceVariant to "R"
+        LogType.DIAG -> Color(0xFFAB47BC) to "•"
     }
+
+    // For wire traffic, show a formatted summary instead of raw JSON
+    val displayMessage = remember(entry) {
+        when (entry.type) {
+            LogType.SENT -> summarizeSentMessage(entry.message)
+            LogType.RECEIVED -> summarizeReceivedMessage(entry.message)
+            else -> entry.message
+        }
+    }
+
+    // Tap-to-expand: wire traffic entries can show full raw JSON
+    val isWire = entry.type == LogType.SENT || entry.type == LogType.RECEIVED
+    var expanded by remember { mutableStateOf(false) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (isWire) Modifier.clickable { expanded = !expanded } else Modifier)
             .padding(vertical = 4.dp)
             .padding(start = 16.dp, end = 16.dp)
     ) {
@@ -1485,11 +1961,11 @@ private fun LogEntryRow(entry: RelayLogEntry) {
             Spacer(Modifier.width(8.dp))
             // Message
             Text(
-                text = entry.message,
+                text = displayMessage,
                 style = MaterialTheme.typography.bodySmall,
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
+                maxLines = if (entry.type == LogType.DIAG) 5 else 3,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
@@ -1502,6 +1978,28 @@ private fun LogEntryRow(entry: RelayLogEntry) {
                 fontSize = 10.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
             )
+        }
+
+        // Expanded raw message for wire traffic
+        if (isWire && expanded) {
+            Surface(
+                shape = RectangleShape,
+                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 55.dp, top = 4.dp)
+            ) {
+                Text(
+                    text = entry.message,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    maxLines = 20,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(8.dp)
+                )
+            }
         }
     }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.20-beta (2026-03-27)
+- **Relay transport** — Removed legacy `WebSocketClient`; relay traffic consolidated on Ktor/Cybin pool path with updates across state machine, multiplexer, health, NIP-42 auth, and connectivity monitoring
+- **Repositories & feed** — Coordinated changes in notes, outbox, NIP-65/66, relay storage, startup, DMs, and related caches for the new transport behavior
+- **Debug & diagnostics** — Session dump, verbose logging, and pipeline diagnostics helpers; relay log and debug settings wiring
+- **UI** — Event delivery screen; relay management and dashboard adjustments; relay health screen removed in favor of integrated flows
+
 ## v0.5.12-beta (2026-03-26)
 - **Onboarding overhaul** — Redesigned phase flow with relay diff review, indexer confirmation, list prefetching, and interactive notification/battery setup walkthrough
 - **ImmutableList feed optimization** — `NotesRepository` emits `ImmutableList<Note>` for improved Compose recomposition skip rates

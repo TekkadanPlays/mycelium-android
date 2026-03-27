@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.debug.DebugVerboseLog
 
 /**
  * Coordinates phased startup so relay subscriptions don't all fire at once.
@@ -23,9 +24,9 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
  * ## Phases
  *
  * **Phase 0 — Settings** (CRITICAL priority, runs concurrently with Phase 1)
- *   Kind-30078 settings sync. Cosmetic settings (compact-media, theme, accent)
- *   that apply retroactively via SharedPreferences → Compose recomposition.
- *   Does **not** block Phase 1 or the feed — see [runPhase0Settings].
+ *   Kind-30078 settings sync on **outbox (write) relays first**, then fallback URLs.
+ *   Cosmetic settings apply via SharedPreferences → Compose; [DashboardScreen]
+ *   waits for [settingsReady] (up to ~8s on first session) before the main feed REQ.
  *
  * **Phase 1 — User State** (HIGH priority, runs concurrently with Phase 0)
  *   Kind-3 follow list + Kind-10000 mute list. Feed waits for [userStateReady].
@@ -43,8 +44,8 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
  * **Phase 4 — Background** (LOW priority, starts after Phase 3 or 15s)
  *   DMs (kind-1059), background account notification subs.
  *
- * **Phase 5 — Deep History** (starts 5s after Phase 4)
- *   Historical note fetching via [DeepHistoryFetcher].
+ * **Phase 5 — Deep History** (starts ~5s after Phase 1 completes, overlapping feed/enrichment)
+ *   Historical note fetching via [DeepHistoryFetcher] (idempotent; LOW priority batches).
  *
  * Each phase emits a [StartupPhase] via [currentPhase]. Consumers gate their
  * work on the phase being >= their required phase.
@@ -52,6 +53,22 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
 object StartupOrchestrator {
 
     private const val TAG = "StartupOrchestrator"
+
+    private fun logD(msg: String) {
+        Log.d(TAG, msg)
+        DebugVerboseLog.record(DebugVerboseLog.Layer.STARTUP, TAG, msg)
+    }
+
+    private fun logW(msg: String) {
+        Log.w(TAG, msg)
+        DebugVerboseLog.record(DebugVerboseLog.Layer.STARTUP, TAG, "[W] $msg")
+    }
+
+    private fun logE(msg: String, e: Throwable? = null) {
+        if (e != null) Log.e(TAG, msg, e) else Log.e(TAG, msg)
+        val tail = e?.message?.let { " — $it" } ?: ""
+        DebugVerboseLog.record(DebugVerboseLog.Layer.STARTUP, TAG, "[E] $msg$tail")
+    }
 
     enum class StartupPhase {
         IDLE,
@@ -113,41 +130,72 @@ object StartupOrchestrator {
         phase0Started = false
         phase1Started = false
         phase1Deferred = null
-        Log.d(TAG, "Reset — all phases cleared (deep fetch stopped)")
+        logD( "Reset — all phases cleared (deep fetch stopped)")
     }
 
     /** Skip Phase 0 when settings are already applied or no signer is available. */
     fun skipPhase0() {
         _settingsReady.value = true
         _currentPhase.value = StartupPhase.USER_STATE
-        Log.d(TAG, "Phase 0: skipped → advancing to Phase 1")
+        logD( "Phase 0: skipped → advancing to Phase 1")
+    }
+
+    /** Max relays to query for kind-30078 (outbox first, then fallbacks). */
+    private const val SETTINGS_RELAY_CAP = 16
+
+    private fun normalizeRelayUrlForSettings(url: String): String =
+        url.trim().removeSuffix("/")
+
+    /**
+     * Outbox/write relays first; if none, use fallbacks only. Otherwise append fallbacks
+     * up to [SETTINGS_RELAY_CAP] for resilience when the event is only on read/indexer relays.
+     */
+    private fun buildSettingsRelayUrls(outbox: List<String>, fallback: List<String>): List<String> {
+        val ordered = LinkedHashSet<String>()
+        for (u in outbox) {
+            val n = normalizeRelayUrlForSettings(u)
+            if (n.isNotEmpty() && (n.startsWith("ws://") || n.startsWith("wss://"))) ordered.add(n)
+        }
+        if (ordered.isEmpty()) {
+            for (u in fallback) {
+                val n = normalizeRelayUrlForSettings(u)
+                if (n.isNotEmpty() && (n.startsWith("ws://") || n.startsWith("wss://"))) ordered.add(n)
+            }
+        } else {
+            for (u in fallback) {
+                if (ordered.size >= SETTINGS_RELAY_CAP) break
+                val n = normalizeRelayUrlForSettings(u)
+                if (n.isNotEmpty() && (n.startsWith("ws://") || n.startsWith("wss://"))) ordered.add(n)
+            }
+        }
+        return ordered.toList()
     }
 
     // ── Phase 0: Settings ───────────────────────────────────────────────────
 
     /**
-     * Run Phase 0: fetch settings with CRITICAL priority.
-     * Runs **concurrently** with Phase 1 — does NOT block the feed.
-     * Settings are cosmetic (compact media, theme, accent) and apply retroactively
-     * via Compose recomposition when the StateFlow/SharedPreferences update.
-     * The feed only waits for [userStateReady] (follow list + mute list).
+     * Run Phase 0: fetch kind-30078 with CRITICAL priority.
+     * Runs concurrently with Phase 1. Relay order: [outboxRelayUrls] first (where settings
+     * are typically published), then [fallbackRelayUrls] for redundancy (deduped, capped).
      */
     fun runPhase0Settings(
         signer: NostrSigner,
         userPubkey: String,
-        relayUrls: List<String>,
+        outboxRelayUrls: List<String>,
+        fallbackRelayUrls: List<String>,
     ) {
         if (phase0Started) return // Guard against LaunchedEffect re-fire
         phase0Started = true
 
+        val relayUrls = buildSettingsRelayUrls(outboxRelayUrls, fallbackRelayUrls)
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "Phase 0: no relays — skipping settings fetch")
+            logW("Phase 0: no relays — skipping settings fetch")
             _settingsReady.value = true
             return
         }
 
         _currentPhase.value = StartupPhase.SETTINGS
-        Log.d(TAG, "Phase 0: fetching settings from ${relayUrls.size} relays (CRITICAL, non-blocking)")
+        logD( "Phase 0: fetching settings from ${relayUrls.size} relays (outbox-first, CRITICAL)")
 
         // Fire-and-forget: settings apply reactively via SharedPreferences → Compose recomposition
         scope.launch {
@@ -174,7 +222,7 @@ object StartupOrchestrator {
 
                 val event = latestEvent
                 if (event != null) {
-                    Log.d(TAG, "Phase 0: found settings event ${event.id.take(8)}, decrypting...")
+                    logD( "Phase 0: found settings event ${event.id.take(8)}, decrypting...")
                     try {
                         val plaintext = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
                             signer.nip44DecryptBackgroundOnly(event.content, userPubkey)
@@ -184,18 +232,18 @@ object StartupOrchestrator {
                         }
                         val remoteSettings = social.mycelium.android.data.SyncedSettings.fromJson(plaintext)
                         SettingsSyncManager.applyRemoteSettings(remoteSettings)
-                        Log.d(TAG, "Phase 0: settings applied (compactMedia=${remoteSettings.compactMedia})")
+                        logD( "Phase 0: settings applied (compactMedia=${remoteSettings.compactMedia})")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Phase 0: decrypt/apply failed: ${e.message}", e)
+                        logE("Phase 0: decrypt/apply failed: ${e.message}", e)
                     }
                 } else {
-                    Log.d(TAG, "Phase 0: no settings event found — using local defaults")
+                    logD( "Phase 0: no settings event found — using local defaults")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Phase 0: settings fetch failed: ${e.message}", e)
+                logE("Phase 0: settings fetch failed: ${e.message}", e)
             } finally {
                 _settingsReady.value = true
-                Log.d(TAG, "Phase 0: complete")
+                logD( "Phase 0: complete")
             }
         }
     }
@@ -224,7 +272,7 @@ object StartupOrchestrator {
         phase1Deferred = deferred
 
         _currentPhase.value = StartupPhase.USER_STATE
-        Log.d(TAG, "Phase 1: fetching follow list + mute list")
+        logD( "Phase 1: fetching follow list + mute list")
 
         scope.launch {
             try {
@@ -232,44 +280,66 @@ object StartupOrchestrator {
                 val followJob = scope.launch {
                     try {
                         ContactListRepository.fetchFollowList(userPubkey, followRelayUrls, forceRefresh = false)
-                        Log.d(TAG, "Phase 1: follow list fetched")
+                        logD( "Phase 1: follow list fetched")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Phase 1: follow list failed: ${e.message}")
+                        logE("Phase 1: follow list failed: ${e.message}")
                     }
                 }
                 val muteJob = scope.launch {
                     try {
                         MuteListRepository.fetchMuteList(userPubkey, allUserRelayUrls)
-                        Log.d(TAG, "Phase 1: mute list fetched")
+                        logD( "Phase 1: mute list fetched")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Phase 1: mute list failed: ${e.message}")
+                        logE("Phase 1: mute list failed: ${e.message}")
                     }
                 }
 
-                // Wait for both with a timeout
+                // Self NIP-65 + relay category sync run concurrently with follow/mute
+                // (elevated from Phase 3 / Phase 1 tail to improve feed rendering speed)
+                val nip65Job = scope.launch {
+                    try {
+                        val indexerUrls = if (context != null)
+                            social.mycelium.android.repository.RelayStorageManager(context)
+                                .loadIndexerRelays(userPubkey).map { it.url }
+                        else emptyList()
+                        if (indexerUrls.isNotEmpty()) {
+                            Nip65RelayListRepository.fetchRelayList(userPubkey, indexerUrls)
+                            logD( "Phase 1: self NIP-65 fetched")
+                        }
+                    } catch (e: Exception) {
+                        logE("Phase 1: self NIP-65 failed: ${e.message}")
+                    }
+                }
+                val relaySyncJob = if (context != null) scope.launch {
+                    try {
+                        RelayCategorySyncRepository.fetchRelaySets(userPubkey, allUserRelayUrls, context)
+                        RelayCategorySyncRepository.fetchIndexerList(userPubkey, allUserRelayUrls, context)
+                        logD( "Phase 1: relay sets + indexer list fetched")
+                    } catch (e: Exception) {
+                        logE("Phase 1: relay sync failed: ${e.message}")
+                    }
+                } else null
+
+                // Wait for follow + mute with a timeout (relay sync and NIP-65 continue independently)
                 val deadline = System.currentTimeMillis() + 6_000L
                 while (System.currentTimeMillis() < deadline) {
                     if (followJob.isCompleted && muteJob.isCompleted) break
                     delay(100)
                 }
-                if (!followJob.isCompleted) Log.w(TAG, "Phase 1: follow list timed out")
-                if (!muteJob.isCompleted) Log.w(TAG, "Phase 1: mute list timed out")
+                if (!followJob.isCompleted) logW("Phase 1: follow list timed out")
+                if (!muteJob.isCompleted) logW("Phase 1: mute list timed out")
 
-                // Fire-and-forget: people lists + hashtag interests + relay sets + indexer list (LOW priority, don't block feed)
+                // Fire-and-forget: people lists + hashtag interests (LOW priority, don't block feed)
                 PeopleListRepository.fetchPeopleLists(userPubkey, allUserRelayUrls, signer)
                 PeopleListRepository.fetchHashtagList(userPubkey, allUserRelayUrls)
-                if (context != null) {
-                    RelayCategorySyncRepository.fetchRelaySets(userPubkey, allUserRelayUrls, context)
-                    RelayCategorySyncRepository.fetchIndexerList(userPubkey, allUserRelayUrls, context)
-                }
-                Log.d(TAG, "Phase 1: people lists + hashtag interests + relay sets + indexer list fetch launched (non-blocking)")
+                logD( "Phase 1: people lists + hashtag interests fetch launched (non-blocking)")
             } catch (e: Exception) {
-                Log.e(TAG, "Phase 1: failed: ${e.message}", e)
+                logE("Phase 1: failed: ${e.message}", e)
             } finally {
                 _userStateReady.value = true
                 _currentPhase.value = StartupPhase.FEED
                 deferred.complete(Unit)
-                Log.d(TAG, "Phase 1: complete → advancing to Phase 2 (feed)")
+                logD( "Phase 1: complete → advancing to Phase 2 (feed)")
             }
         }
         return deferred
@@ -285,14 +355,14 @@ object StartupOrchestrator {
         if (_feedStarted.value) return
         _feedStarted.value = true
         _currentPhase.value = StartupPhase.ENRICHMENT
-        Log.d(TAG, "Phase 2: feed subscription started → advancing to Phase 3")
+        logD( "Phase 2: feed subscription started → advancing to Phase 3")
 
         // Auto-advance to enrichment after a brief delay for EOSE
         scope.launch {
             delay(3_000L)
             if (!_enrichmentStarted.value) {
                 _enrichmentStarted.value = true
-                Log.d(TAG, "Phase 3: enrichment gate opened (3s after feed start)")
+                logD( "Phase 3: enrichment gate opened (3s after feed start)")
             }
         }
     }
@@ -316,34 +386,31 @@ object StartupOrchestrator {
     ) {
         _enrichmentStarted.value = true
         _currentPhase.value = StartupPhase.ENRICHMENT
-        Log.d(TAG, "Phase 3: starting enrichment subscriptions")
+        logD( "Phase 3: starting enrichment subscriptions")
 
         // Notifications
         NotificationsRepository.setCacheRelayUrls(indexerUrls)
         NotificationsRepository.startSubscription(userPubkey, inboxUrls, outboxUrls, categoryUrls)
-        Log.d(TAG, "Phase 3: notifications started")
+        logD( "Phase 3: notifications started")
 
         // Outbox feed (NIP-65 discovery for followed users)
         if (followedPubkeys.isNotEmpty() && indexerUrls.isNotEmpty()) {
             NotesRepository.getInstance().startOutboxFeed(followedPubkeys, indexerUrls)
-            Log.d(TAG, "Phase 3: outbox feed started (${followedPubkeys.size} followed)")
+            logD( "Phase 3: outbox feed started (${followedPubkeys.size} followed)")
         }
 
         // Topics (kind-11) — separate subscription slot, pre-populates for Topics screen
         val stateMachine = RelayConnectionStateMachine.getInstance()
         stateMachine.startTopicsSubscription(allUserRelayUrls)
-        Log.d(TAG, "Phase 3: topics subscription started (separate slot)")
+        logD( "Phase 3: topics subscription started (separate slot)")
 
         // Bookmarks, emoji packs, anchor subs
         BookmarkRepository.fetchBookmarks(userPubkey, allUserRelayUrls)
         EmojiPackRepository.setUserRelays(allUserRelayUrls)
         EmojiPackSelectionRepository.start(userPubkey, allUserRelayUrls)
-        Log.d(TAG, "Phase 3: bookmarks + emoji packs started")
+        logD( "Phase 3: bookmarks + emoji packs started")
 
-        // Self NIP-65
-        if (indexerUrls.isNotEmpty()) {
-            Nip65RelayListRepository.fetchRelayList(userPubkey, indexerUrls)
-        }
+        // Self NIP-65 is now fetched in Phase 1 concurrently with follow/mute
 
         // Profile fetch for self
         scope.launch { ProfileMetadataCache.getInstance().requestProfiles(listOf(userPubkey), indexerUrls) }
@@ -352,7 +419,7 @@ object StartupOrchestrator {
         scope.launch {
             delay(4_000L)
             NotificationsRepository.enableAndroidNotifications()
-            Log.d(TAG, "Phase 3: push notifications enabled")
+            logD( "Phase 3: push notifications enabled")
         }
 
         // Auto-advance to Phase 4 after 10s
@@ -360,7 +427,7 @@ object StartupOrchestrator {
             delay(10_000L)
             if (_currentPhase.value != StartupPhase.BACKGROUND && _currentPhase.value != StartupPhase.COMPLETE) {
                 _currentPhase.value = StartupPhase.BACKGROUND
-                Log.d(TAG, "Phase 4: background gate opened (10s after enrichment)")
+                logD( "Phase 4: background gate opened (10s after enrichment)")
             }
         }
     }
@@ -380,22 +447,24 @@ object StartupOrchestrator {
         indexerUrls: List<String>,
     ) {
         _currentPhase.value = StartupPhase.BACKGROUND
-        Log.d(TAG, "Phase 4: starting background subscriptions")
+        logD( "Phase 4: starting background subscriptions")
 
         // DMs (deferred: store credentials but don't connect until user visits DM page)
         DirectMessageRepository.startSubscription(userPubkey, signer, inboxUrls, outboxUrls, deferred = true)
-        Log.d(TAG, "Phase 4: DM credentials stored (deferred — relay connection starts on DM page visit)")
+        logD( "Phase 4: DM credentials stored (deferred — relay connection starts on DM page visit)")
 
-        // Fetch kind-10050 DM relay lists for self + followed network.
-        // Results are stored in DirectMessageRepository for the DM system to use.
+        // Fetch kind-10050 DM relay lists for self + followed network, then
+        // proactively connect to DM relays so gift wraps start buffering immediately.
         scope.launch {
             fetchDmRelayLists(userPubkey, followedPubkeys, inboxUrls + outboxUrls, indexerUrls)
+            DirectMessageRepository.startEarlyConnection()
+            logD( "Phase 4: DM relays connected proactively after kind-10050 fetch")
         }
 
         scope.launch {
             delay(2_000L)
             _currentPhase.value = StartupPhase.COMPLETE
-            Log.d(TAG, "Startup complete — all phases done")
+            logD( "Startup complete — all phases done")
         }
     }
 
@@ -412,12 +481,12 @@ object StartupOrchestrator {
     ) {
         val availableRelays = (fallbackRelays + indexerUrls).filter { it.startsWith("ws") }.distinct().take(10)
         if (availableRelays.isEmpty()) {
-            Log.d(TAG, "Phase 4: no relays for kind-10050 fetch, skipping")
+            logD( "Phase 4: no relays for kind-10050 fetch, skipping")
             return
         }
 
         val allPubkeys = (listOf(userPubkey) + followedPubkeys).distinct()
-        Log.d(TAG, "Phase 4: fetching kind-10050 DM relay lists for ${userPubkey.take(8)} and ${followedPubkeys.size} followed")
+        logD( "Phase 4: fetching kind-10050 DM relay lists for ${userPubkey.take(8)} and ${followedPubkeys.size} followed")
 
         allPubkeys.chunked(200).forEach { chunk ->
             val filter = Filter(
@@ -455,7 +524,7 @@ object StartupOrchestrator {
                 }
                 handle.cancel()
             } catch (e: Exception) {
-                Log.e(TAG, "Phase 4: kind-10050 batch fetch failed: ${e.message}")
+                logE("Phase 4: kind-10050 batch fetch failed: ${e.message}")
             }
 
             eventsByAuthor.forEach { (pubkey, event) ->
@@ -468,7 +537,7 @@ object StartupOrchestrator {
                 if (dmRelayUrls.isNotEmpty()) {
                     if (pubkey == userPubkey) {
                         DirectMessageRepository.setDmRelayUrls(dmRelayUrls)
-                        Log.d(TAG, "Phase 4: kind-10050 self found — ${dmRelayUrls.size} DM relays")
+                        logD( "Phase 4: kind-10050 self found — ${dmRelayUrls.size} DM relays")
                     } else {
                         DirectMessageRepository.setPeerDmRelayUrls(pubkey, dmRelayUrls)
                     }
@@ -483,7 +552,7 @@ object StartupOrchestrator {
      * Run Phase 5: deep history fetch (LOW priority, background batches).
      * Walks backward through the user's relay history in 30-day windows,
      * persisting events to Room. Resumable across app restarts.
-     * Called automatically 5s after Phase 4 completes.
+     * Called from navigation shortly after Phase 1 (see [MyceliumNavigation]); safe to call again — no-op while running.
      */
     fun runPhase5DeepHistory(
         context: android.content.Context,
@@ -495,14 +564,13 @@ object StartupOrchestrator {
         // (detached scope survives LaunchedEffect cancellation on account switch),
         // skip the deep fetch to avoid fetching history for the wrong account.
         if (activePubkey != userPubkey) {
-            Log.w(
-                TAG,
+            logW(
                 "Phase 5: skipping — account changed (active=${activePubkey?.take(8)}, requested=${userPubkey.take(8)})"
             )
             return
         }
         scope.launch {
-            Log.d(TAG, "Phase 5: starting deep history fetch for ${userPubkey.take(8)}")
+            logD( "Phase 5: starting deep history fetch for ${userPubkey.take(8)}")
             DeepHistoryFetcher.start(context, userPubkey, followedPubkeys, relayUrls)
         }
     }

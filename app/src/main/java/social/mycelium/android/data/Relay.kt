@@ -64,6 +64,19 @@ data class RelayFee(
 )
 
 /**
+ * How a relay was added to the user's configuration.
+ */
+@Serializable
+enum class RelaySource {
+    USER_ADDED,
+    NIP65_IMPORT,
+    OUTBOX_HINT,
+    NIP66_DISCOVERY,
+    DEFAULT_SEED,
+    SYSTEM
+}
+
+/**
  * User's relay configuration
  */
 @Immutable
@@ -75,7 +88,8 @@ data class UserRelay(
     val info: RelayInformation? = null,
     val isOnline: Boolean = false,
     val lastChecked: Long = 0,
-    val addedAt: Long = System.currentTimeMillis()
+    val addedAt: Long = System.currentTimeMillis(),
+    val source: RelaySource = RelaySource.USER_ADDED
 ) {
     val displayName: String
         get() = info?.name ?: url.removePrefix("wss://").removePrefix("ws://")

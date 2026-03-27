@@ -33,6 +33,7 @@ import social.mycelium.android.services.RelayForegroundService
 import social.mycelium.android.ui.navigation.MyceliumNavigation
 import social.mycelium.android.ui.theme.MyceliumTheme
 import social.mycelium.android.BuildConfig
+import social.mycelium.android.debug.DebugVerboseLog
 import social.mycelium.android.utils.AppMemoryTrimmer
 import social.mycelium.android.viewmodel.AppViewModel
 import social.mycelium.android.viewmodel.AccountStateViewModel
@@ -89,6 +90,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
 
         // Detect main-thread disk/network violations in debug to avoid ANR regressions
         if (BuildConfig.DEBUG) {
+            DebugVerboseLog.init(applicationContext)
             StrictMode.setThreadPolicy(
                 StrictMode.ThreadPolicy.Builder()
                     .detectAll()
@@ -207,6 +209,13 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         lifecycle.addObserver(LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
+                    if (BuildConfig.DEBUG) {
+                        DebugVerboseLog.record(
+                            DebugVerboseLog.Layer.SYSTEM,
+                            "MainActivity",
+                            "ON_RESUME onboardingComplete=${accountStateViewModel.onboardingComplete.value}",
+                        )
+                    }
                     // Only reconnect relays if onboarding is complete — prevents premature connections during login flow
                     if (accountStateViewModel.onboardingComplete.value) {
                         RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
@@ -215,6 +224,9 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     social.mycelium.android.repository.Nip66RelayDiscoveryRepository.refreshIfStale()
                 }
                 Lifecycle.Event.ON_STOP -> {
+                    if (BuildConfig.DEBUG) {
+                        DebugVerboseLog.record(DebugVerboseLog.Layer.SYSTEM, "MainActivity", "ON_STOP")
+                    }
                     // Pause all inline video players when app goes to background
                     social.mycelium.android.ui.components.SharedPlayerPool.pauseAll()
                     if (!social.mycelium.android.ui.components.PipStreamManager.continueInBackground.value) {

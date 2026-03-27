@@ -404,11 +404,13 @@ When the app resumes from background:
 
 Tracks per-relay health metrics across all connection paths (main feed, direct WebSocket, profile fetches, etc.).
 
+**Recording:** `RelayConnectionStateMachine` registers a `RelayConnectionListener` on `CybinRelayPool` and updates health on `onConnecting` / `onConnected` / `onError`. Do not double-record from repository code that already uses the pool — one WebSocket per normalized relay URL; multiple REQs multiplex on that socket.
+
 #### Metrics Per Relay (`RelayHealthInfo`)
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `connectionAttempts` | `Int` | Total connection attempts |
+| `connectionAttempts` | `Int` | Lifetime TCP/WebSocket handshake starts (not parallel socket count) |
 | `connectionFailures` | `Int` | Total failures |
 | `consecutiveFailures` | `Int` | Failures without a success in between |
 | `eventsReceived` | `Long` | Total events from this relay |

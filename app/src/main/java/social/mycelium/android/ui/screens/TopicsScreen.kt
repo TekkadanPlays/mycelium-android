@@ -612,7 +612,10 @@ fun TopicsScreen(
                                 else -> viewModel.onMoreOptionClick(option)
                             }
                         },
-                        onBackClick = { },
+                        onBackClick = {
+                            feedStateViewModel.clearTopicsSelectedHashtag()
+                            topicsViewModel.clearSelectedHashtag()
+                        },
                         onClearSearch = { },
                         onLoginClick = onLoginClick,
                         onProfileClick = {

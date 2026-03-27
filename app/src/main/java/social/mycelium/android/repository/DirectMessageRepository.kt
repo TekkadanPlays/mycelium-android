@@ -303,6 +303,18 @@ object DirectMessageRepository {
         }
     }
 
+    /**
+     * Connect to DM relays proactively during startup. Opens WebSocket connections
+     * and begins buffering kind-1059 events without triggering decryption or history
+     * fetches. Called from [StartupOrchestrator] after kind-10050 relay lists resolve.
+     */
+    fun startEarlyConnection() {
+        val pubkey = userPubkey ?: return
+        if (dmHandle != null) return
+        Log.d(TAG, "startEarlyConnection: proactively connecting to DM relays")
+        startRelaySubscription(pubkey)
+    }
+
     /** Internal: actually opens relay connections for DM events. */
     private fun startRelaySubscription(pubkey: String) {
         val stateMachine = RelayConnectionStateMachine.getInstance()

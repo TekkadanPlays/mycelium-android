@@ -239,8 +239,8 @@ data class ZapPollData(
                         val idx = tag[1].toIntOrNull()
                         if (idx != null) options.add(ZapPollOption(idx, tag[2]))
                     }
-                    "value_minimum" -> valueMinimum = tag[1].toLongOrNull()
-                    "value_maximum" -> valueMaximum = tag[1].toLongOrNull()
+                    "value_minimum" -> valueMinimum = tag[1].toLongOrNull()?.let { it / 1000 }
+                    "value_maximum" -> valueMaximum = tag[1].toLongOrNull()?.let { it / 1000 }
                     "closed_at" -> closedAt = tag[1].toLongOrNull()
                     "consensus_threshold" -> consensusThreshold = tag[1].toIntOrNull()
                 }

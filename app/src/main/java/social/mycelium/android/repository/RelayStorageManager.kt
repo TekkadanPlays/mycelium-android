@@ -50,7 +50,7 @@ class RelayStorageManager(val context: Context) {
 
         /** Default announcement relay — official Mycelium news relay, seeded for all users. */
         val DEFAULT_ANNOUNCEMENT_RELAYS = listOf(
-            UserRelay(url = "wss://news.mycelium.social", read = true, write = true)
+            UserRelay(url = "wss://news.mycelium.social", read = true, write = true, source = social.mycelium.android.data.RelaySource.SYSTEM)
         )
     }
 

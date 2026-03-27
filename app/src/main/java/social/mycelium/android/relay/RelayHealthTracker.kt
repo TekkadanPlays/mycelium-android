@@ -473,6 +473,12 @@ object RelayHealthTracker {
             persistBlockedRelays()
             persistAutoBlockExpiry()
             Log.w(TAG, "Relay $url AUTO-BLOCKED for ${AUTO_BLOCK_DURATION_MS / 3600000}h after $AUTO_BLOCK_CONSECUTIVE_FAILURES consecutive failures")
+            // Cancel any pending reconnect and ensure socket stays closed
+            try {
+                RelayConnectionStateMachine.getInstance().relayPool.disconnectRelay(url)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to cancel reconnect for auto-blocked relay: ${e.message}")
+            }
         }
         emitState()
         RelayLogBuffer.logError(url, error ?: "Connection failed")
@@ -513,7 +519,8 @@ object RelayHealthTracker {
         return _blockedRelays.value.contains(normalize(relayUrl))
     }
 
-    /** Block a relay manually (no expiry). Persisted immediately. */
+    /** Block a relay manually (no expiry). Persisted immediately.
+     *  Immediately disconnects any open socket to this relay. */
     fun blockRelay(relayUrl: String) {
         val url = normalize(relayUrl)
         synchronized(lock) {
@@ -526,6 +533,12 @@ object RelayHealthTracker {
         persistAutoBlockExpiry()
         emitState()
         Log.i(TAG, "Relay BLOCKED (manual): $url")
+        // Immediately disconnect any open socket to this relay
+        try {
+            RelayConnectionStateMachine.getInstance().relayPool.disconnectRelay(url)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to disconnect blocked relay: ${e.message}")
+        }
     }
 
     /** Unblock a relay. Persisted immediately. Triggers reconnect + resubscribe

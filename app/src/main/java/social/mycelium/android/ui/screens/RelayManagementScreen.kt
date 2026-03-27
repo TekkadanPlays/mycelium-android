@@ -55,6 +55,9 @@ import social.mycelium.android.data.UserRelay
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.relay.RelayEndpointStatus
+import social.mycelium.android.relay.RelayHealthInfo
+import social.mycelium.android.relay.RelayHealthTracker
+import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.repository.RelayRepository
 import social.mycelium.android.repository.RelayStorageManager
 import social.mycelium.android.repository.DirectMessageRepository
@@ -189,10 +192,11 @@ fun RelayManagementScreen(
     val perRelayState by social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
         .perRelayState.collectAsState()
 
-    // Trouble relay count for health icon badge — scoped to user-configured relays only
-    // (matches sidebar logic: excludes blocked relays and non-user relays like indexer temps)
-    val flaggedRelays by social.mycelium.android.relay.RelayHealthTracker.flaggedRelays.collectAsState()
-    val blockedRelays by social.mycelium.android.relay.RelayHealthTracker.blockedRelays.collectAsState()
+    // Health, delivery, and flagged/blocked state from ViewModel
+    val healthByRelay by viewModel.healthByRelay.collectAsState()
+    val deliveryStats by viewModel.deliveryStats.collectAsState()
+    val flaggedRelays by viewModel.flaggedRelays.collectAsState()
+    val blockedRelays by viewModel.blockedRelays.collectAsState()
     val userRelayUrlSet = remember(relayCategories, outboxRelays, inboxRelays) {
         val categoryUrls = relayCategories.flatMap { it.relays }.map { it.url.trim().removeSuffix("/").lowercase() }
         val outbox = outboxRelays.map { it.url.trim().removeSuffix("/").lowercase() }
@@ -258,6 +262,16 @@ fun RelayManagementScreen(
     )
     var overlapWarning by remember { mutableStateOf<OverlapWarning?>(null) }
 
+    // NOTE: We intentionally do NOT expose OutboxFeedManager.activeOutboxRelays here.
+    // Those are transient connections to *other users'* write relays, managed automatically
+    // by the outbox model. Showing them in the Relay Manager causes two problems:
+    //   1. On fresh install all ~20 relays attempt connection simultaneously, fail, and
+    //      stack up health warnings that resolve seconds later — causing irrational panic.
+    //   2. They can trigger NIP-42 AUTH challenges from relays the user never configured,
+    //      leaking identity to arbitrary third-party relays.
+    // The outbox model is a read-only background mechanism; the user has no reason to see
+    // or manage these connections.
+
     // NIP-66 discovered relays for indexer verification
     val discoveredRelays by social.mycelium.android.repository.Nip66RelayDiscoveryRepository
         .discoveredRelays.collectAsState()
@@ -270,7 +284,6 @@ fun RelayManagementScreen(
 
     // Tab + pager state — fixed tabs + dynamic profile tabs
     val fixedTabs = RelayTab.entries
-    // During onboarding, only show Indexer tab, so count is 1
     val totalPageCount by remember(relayProfiles) {
         derivedStateOf {
             fixedTabs.size + relayProfiles.size
@@ -574,7 +587,7 @@ fun RelayManagementScreen(
                     // Fixed tabs
                     fixedTabs.forEachIndexed { index, tab ->
                         val count = when (tab) {
-                            RelayTab.SYSTEM -> announcementRelays.size + draftsRelays.size + blossomServers.size + nip96Servers.size
+                            RelayTab.SYSTEM -> announcementRelays.size + dmRelays.size + draftsRelays.size + blossomServers.size + nip96Servers.size
                             RelayTab.INDEXER -> indexerRelays.size
                             RelayTab.OUTBOX -> outboxRelays.size + inboxRelays.size
                         }
@@ -602,6 +615,7 @@ fun RelayManagementScreen(
                     relayProfiles.forEachIndexed { profileIdx, profile ->
                         val pageIndex = fixedTabs.size + profileIdx
                         val isSelected = pagerState.currentPage == pageIndex
+                        val profileRelayCount = profile.categories.sumOf { it.relays.size }
                         Tab(
                             selected = isSelected,
                             onClick = { pagerScope.launch { pagerState.animateScrollToPage(pageIndex) } },
@@ -620,6 +634,13 @@ fun RelayManagementScreen(
                                     }
                                     Text(profile.name, style = MaterialTheme.typography.labelMedium,
                                         maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (profileRelayCount > 0) {
+                                        Text(
+                                            "$profileRelayCount",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
                         )
@@ -643,6 +664,10 @@ fun RelayManagementScreen(
                             blossomServers = blossomServers,
                             nip96Servers = nip96Servers,
                             perRelayState = perRelayState,
+                            healthByRelay = healthByRelay,
+                            deliveryStats = deliveryStats,
+                            flaggedRelays = flaggedRelays,
+                            blockedRelays = blockedRelays,
                             onAddAnnouncementRelay = { url ->
                                 addRelayTo(url, announcementRelays) { viewModel.addAnnouncementRelay(it) }
                             },
@@ -677,6 +702,9 @@ fun RelayManagementScreen(
                         )
                         RelayTab.INDEXER -> RelayListTab(
                             relays = indexerRelays, perRelayState = perRelayState,
+                            healthByRelay = healthByRelay, deliveryStats = deliveryStats,
+                            flaggedRelays = flaggedRelays, blockedRelays = blockedRelays,
+                            onUnflag = { viewModel.unflagRelay(it) },
                             onAddRelay = { url -> addRelayWithOverlapCheck(url, indexerRelays, "Indexers", isIndexerSection = true) { viewModel.addIndexerRelay(it) } },
                             onEditRelay = { url ->
                                 val relay = indexerRelays.find { it.url == url }
@@ -710,6 +738,10 @@ fun RelayManagementScreen(
                                 outboxOnlyRelays = outboxOnlyRelays,
                                 inboxOnlyRelays = inboxOnlyRelays,
                                 perRelayState = perRelayState,
+                                healthByRelay = healthByRelay,
+                                deliveryStats = deliveryStats,
+                                flaggedRelays = flaggedRelays,
+                                blockedRelays = blockedRelays,
                                 onAddRelay = { url ->
                                     val normalized = normalizeRelayUrl(url)
                                     if (url.isBlank()) return@OutboxSectionedTab
@@ -771,6 +803,10 @@ fun RelayManagementScreen(
                             profileId = profile.id,
                             categories = profile.categories,
                             perRelayState = perRelayState,
+                            healthByRelay = healthByRelay,
+                            deliveryStats = deliveryStats,
+                            flaggedRelays = flaggedRelays,
+                            blockedRelays = blockedRelays,
                             categoryExpanded = categoryExpanded,
                             onCategoryExpandedChange = { categoryExpanded = it },
                             onAddCategory = { viewModel.addCategoryToProfile(profile.id, RelayCategory(name = "New Category")) },
@@ -1505,6 +1541,10 @@ private fun SystemTabContent(
     blossomServers: List<social.mycelium.android.data.MediaServer>,
     nip96Servers: List<social.mycelium.android.data.MediaServer>,
     perRelayState: Map<String, RelayEndpointStatus>,
+    healthByRelay: Map<String, RelayHealthInfo>,
+    deliveryStats: Map<String, RelayDeliveryTracker.RelayStats>,
+    flaggedRelays: Set<String>,
+    blockedRelays: Set<String>,
     onAddAnnouncementRelay: (String) -> Unit,
     onRemoveAnnouncementRelay: (String) -> Unit,
     onAddDmRelay: (String) -> Unit,
@@ -1530,7 +1570,24 @@ private fun SystemTabContent(
     var blossomInput by remember { mutableStateOf("") }
     var nip96Input by remember { mutableStateOf("") }
 
+    val allSystemRelayUrls = remember(announcementRelays, dmRelays, draftsRelays) {
+        (announcementRelays + dmRelays + draftsRelays).map { it.url }
+    }
     LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 32.dp)) {
+        if (allSystemRelayUrls.isNotEmpty()) {
+            item(key = "system_health_summary") {
+                TabHealthSummary(
+                    relayUrls = allSystemRelayUrls,
+                    perRelayState = perRelayState,
+                    healthByRelay = healthByRelay,
+                    flaggedRelays = flaggedRelays,
+                    blockedRelays = blockedRelays,
+                    onUnflag = { RelayHealthTracker.unflagRelay(it) },
+                    onUnblock = { RelayHealthTracker.unblockRelay(it) },
+                    onOpenRelayLog = onOpenRelayLog
+                )
+            }
+        }
         // ── Announcements Section ──
         item(key = "announcements_header") {
             SystemSectionHeader(
@@ -1554,11 +1611,18 @@ private fun SystemTabContent(
             }
             announcementRelays.forEachIndexed { idx, relay ->
                 item(key = "ann_${relay.url}") {
-                    SystemRelayItem(
-                        relay = relay,
+                    EnrichedRelayRow(
+                        url = relay.url, relay = relay,
                         connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onRemove = { onRemoveAnnouncementRelay(relay.url) },
+                        actionIcon = Icons.Outlined.RemoveCircleOutline,
+                        actionDescription = "Remove",
+                        actionTint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                        onAction = { onRemoveAnnouncementRelay(relay.url) },
                         showDivider = true
                     )
                 }
@@ -1598,11 +1662,18 @@ private fun SystemTabContent(
             }
             dmRelays.forEachIndexed { idx, relay ->
                 item(key = "dm_${relay.url}") {
-                    SystemRelayItem(
-                        relay = relay,
+                    EnrichedRelayRow(
+                        url = relay.url, relay = relay,
                         connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onRemove = { onRemoveDmRelay(relay.url) },
+                        actionIcon = Icons.Outlined.RemoveCircleOutline,
+                        actionDescription = "Remove",
+                        actionTint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                        onAction = { onRemoveDmRelay(relay.url) },
                         showDivider = true
                     )
                 }
@@ -1651,11 +1722,18 @@ private fun SystemTabContent(
             }
             draftsRelays.forEachIndexed { idx, relay ->
                 item(key = "draft_${relay.url}") {
-                    SystemRelayItem(
-                        relay = relay,
+                    EnrichedRelayRow(
+                        url = relay.url, relay = relay,
                         connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onRemove = { onRemoveDraftsRelay(relay.url) },
+                        actionIcon = Icons.Outlined.RemoveCircleOutline,
+                        actionDescription = "Remove",
+                        actionTint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
+                        onAction = { onRemoveDraftsRelay(relay.url) },
                         showDivider = true
                     )
                 }
@@ -1874,55 +1952,289 @@ private fun SystemSectionHeader(
     HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 }
 
+/**
+ * Unified relay row that replaces SystemRelayItem, RelayItem, and ActiveOutboxRelayItem.
+ * Adapts its detail level based on available data — shows NIP-11 icon, health mini-stats,
+ * delivery score, flagged/blocked badges, and connection status inline.
+ */
 @Composable
-private fun SystemRelayItem(
-    relay: UserRelay,
+private fun EnrichedRelayRow(
+    url: String,
     connectionStatus: RelayEndpointStatus?,
+    healthInfo: RelayHealthInfo?,
+    deliveryStats: RelayDeliveryTracker.RelayStats?,
+    isFlagged: Boolean,
+    isBlocked: Boolean,
     onOpenRelayLog: (String) -> Unit,
-    onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
+    relay: UserRelay? = null,
+    outboxAuthorCount: Int? = null,
+    outboxNotesReceived: Int? = null,
+    isHealing: Boolean = false,
+    showRwTag: Boolean = false,
+    sourceLabel: String? = null,
+    actionIcon: ImageVector = Icons.Outlined.Edit,
+    actionDescription: String = "Edit",
+    actionTint: Color = Color.Unspecified,
+    onAction: (() -> Unit)? = null,
     showDivider: Boolean = true
 ) {
+    val nip11Name = relay?.info?.name?.takeIf { it.isNotBlank() }
+    val displayName = nip11Name
+        ?: relay?.displayName
+        ?: url.removePrefix("wss://").removePrefix("ws://").trimEnd('/')
+    val iconImg = relay?.profileImage
+
+    val dotColor = when {
+        isBlocked -> MaterialTheme.colorScheme.error
+        connectionStatus == RelayEndpointStatus.Connected -> MaterialTheme.colorScheme.primary
+        connectionStatus == RelayEndpointStatus.Connecting -> MaterialTheme.colorScheme.tertiary
+        connectionStatus == RelayEndpointStatus.Failed -> MaterialTheme.colorScheme.error
+        healthInfo != null && healthInfo.lastConnectedAt > 0 && healthInfo.consecutiveFailures == 0 ->
+            MaterialTheme.colorScheme.primary
+        healthInfo != null && healthInfo.consecutiveFailures > 0 ->
+            MaterialTheme.colorScheme.error
+        else -> MaterialTheme.colorScheme.outlineVariant
+    }
+
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .clickable { onOpenRelayLog(relay.url) }
+            .clickable { onOpenRelayLog(url) }
             .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val dotColor = when (connectionStatus) {
-            RelayEndpointStatus.Connected -> MaterialTheme.colorScheme.primary
-            RelayEndpointStatus.Connecting -> MaterialTheme.colorScheme.tertiary
-            RelayEndpointStatus.Failed -> MaterialTheme.colorScheme.error
-            else -> MaterialTheme.colorScheme.outlineVariant
-        }
         Box(Modifier.size(8.dp).clip(CircleShape).background(dotColor))
         Spacer(Modifier.width(12.dp))
-        Icon(Icons.Outlined.Router, null, Modifier.size(24.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (iconImg != null) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(iconImg).crossfade(true).build(),
+                contentDescription = null,
+                modifier = Modifier.size(24.dp).clip(CircleShape),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Icon(
+                when {
+                    isHealing -> Icons.Outlined.HealthAndSafety
+                    outboxAuthorCount != null -> Icons.Outlined.Hub
+                    else -> Icons.Outlined.Router
+                },
+                null, Modifier.size(24.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(
-                relay.url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
-            )
-            if (relay.info?.name != null) {
-                Text(relay.info!!.name!!, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    displayName, style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                if (showRwTag && relay != null) {
+                    val tag = when {
+                        relay.read && relay.write -> "r/w"
+                        relay.read -> "r"
+                        relay.write -> "w"
+                        else -> ""
+                    }
+                    if (tag.isNotEmpty()) {
+                        Spacer(Modifier.width(6.dp))
+                        Text(tag, style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                    }
+                }
+                if (isFlagged && !isBlocked) {
+                    Spacer(Modifier.width(6.dp))
+                    Text("flagged", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f))
+                }
+                if (isBlocked) {
+                    Spacer(Modifier.width(6.dp))
+                    Text("blocked", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error)
+                }
+            }
+            // URL subtitle
+            val showUrlSubtitle = nip11Name != null || outboxAuthorCount != null
+            if (showUrlSubtitle) {
+                Text(
+                    url.removePrefix("wss://").removePrefix("ws://").trimEnd('/'),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            }
+            // Health + delivery mini-stats
+            val statsChips = buildList {
+                if (outboxAuthorCount != null) add("${outboxAuthorCount} authors")
+                if (outboxNotesReceived != null && outboxNotesReceived > 0) add("${outboxNotesReceived} notes")
+                if (isHealing) add("fallback")
+                if (healthInfo != null && healthInfo.eventsReceived > 0) {
+                    add("${formatCompactCount(healthInfo.eventsReceived)} events")
+                }
+                if (healthInfo != null && healthInfo.connectTimeMs > 0) {
+                    add("${healthInfo.connectTimeMs}ms")
+                }
+                if (healthInfo != null && healthInfo.connectionAttempts >= 2) {
+                    add("${(healthInfo.uptimeRatio * 100).toInt()}% up")
+                }
+                if (deliveryStats != null && deliveryStats.expected >= 3) {
+                    add("${(deliveryStats.successRate * 100).toInt()}% delivery")
+                }
+                if (healthInfo != null && healthInfo.consecutiveFailures > 0) {
+                    add("${healthInfo.consecutiveFailures} failures")
+                }
+                val src = sourceLabel ?: relay?.let {
+                    when (it.source) {
+                        social.mycelium.android.data.RelaySource.NIP65_IMPORT -> "NIP-65"
+                        social.mycelium.android.data.RelaySource.OUTBOX_HINT -> "hint"
+                        social.mycelium.android.data.RelaySource.NIP66_DISCOVERY -> "NIP-66"
+                        social.mycelium.android.data.RelaySource.DEFAULT_SEED -> "default"
+                        social.mycelium.android.data.RelaySource.SYSTEM -> "system"
+                        social.mycelium.android.data.RelaySource.USER_ADDED -> null
+                    }
+                }
+                if (src != null) add(src)
+            }
+            if (statsChips.isNotEmpty()) {
+                Text(
+                    statsChips.joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            } else if (!showUrlSubtitle) {
+                // Bare URL as subtitle when no NIP-11 name and no stats
+                Text(
+                    url, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
             }
         }
-        IconButton(onClick = onRemove) {
-            Icon(Icons.Outlined.RemoveCircleOutline, contentDescription = "Remove",
-                tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f))
+        if (onAction != null) {
+            IconButton(onClick = onAction, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    actionIcon, actionDescription, Modifier.size(18.dp),
+                    tint = if (actionTint != Color.Unspecified) actionTint
+                           else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
     if (showDivider) {
         HorizontalDivider(
-            modifier = Modifier.padding(start = 52.dp),
-            thickness = 0.5.dp,
-            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
+            modifier = Modifier.padding(start = 56.dp)
         )
+    }
+}
+
+private fun formatCompactCount(count: Long): String = when {
+    count >= 1_000_000 -> "${count / 1_000_000}.${(count % 1_000_000) / 100_000}M"
+    count >= 1_000 -> "${count / 1_000}.${(count % 1_000) / 100}K"
+    else -> "$count"
+}
+
+/**
+ * Compact health summary header shown at the top of each tab.
+ * Displays connected/total counts and inline attention banners for troubled relays.
+ */
+@Composable
+private fun TabHealthSummary(
+    relayUrls: List<String>,
+    perRelayState: Map<String, RelayEndpointStatus>,
+    healthByRelay: Map<String, RelayHealthInfo>,
+    flaggedRelays: Set<String>,
+    blockedRelays: Set<String>,
+    onUnflag: (String) -> Unit,
+    onUnblock: (String) -> Unit,
+    onOpenRelayLog: (String) -> Unit
+) {
+    val connectedCount = relayUrls.count { perRelayState[it] == RelayEndpointStatus.Connected }
+    val failedCount = relayUrls.count { perRelayState[it] == RelayEndpointStatus.Failed }
+    val troubledUrls = relayUrls.filter { url ->
+        val norm = url.trimEnd('/').lowercase()
+        (norm in flaggedRelays || url in flaggedRelays) && norm !in blockedRelays && url !in blockedRelays
+    }
+
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val total = relayUrls.size
+            Text(
+                "$connectedCount/$total connected",
+                style = MaterialTheme.typography.labelMedium,
+                color = if (connectedCount == total && total > 0) MaterialTheme.colorScheme.primary
+                       else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (failedCount > 0) {
+                Text(
+                    "$failedCount failed",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+            val totalEvents = relayUrls.sumOf { healthByRelay[it]?.eventsReceived ?: 0L }
+            if (totalEvents > 0) {
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "${formatCompactCount(totalEvents)} events",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        // Inline attention banners for troubled relays
+        troubledUrls.forEach { url ->
+            val health = healthByRelay[url]
+            Spacer(Modifier.height(6.dp))
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Outlined.Warning, null, Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            url.removePrefix("wss://").removePrefix("ws://").trimEnd('/'),
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        if (health?.lastError != null) {
+                            Text(
+                                health.lastError,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    TextButton(onClick = { onUnflag(url) }, modifier = Modifier.height(28.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                        Text("Dismiss", style = MaterialTheme.typography.labelSmall)
+                    }
+                    TextButton(onClick = { onOpenRelayLog(url) }, modifier = Modifier.height(28.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                        Text("Details", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+    }
+    if (relayUrls.isNotEmpty()) {
+        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
     }
 }
 
@@ -1932,9 +2244,14 @@ private fun SystemRelayItem(
 private fun RelayListTab(
     relays: List<UserRelay>,
     perRelayState: Map<String, RelayEndpointStatus>,
+    healthByRelay: Map<String, RelayHealthInfo>,
+    deliveryStats: Map<String, RelayDeliveryTracker.RelayStats>,
+    flaggedRelays: Set<String>,
+    blockedRelays: Set<String>,
     onAddRelay: (String) -> Unit,
     onEditRelay: (String) -> Unit,
     onOpenRelayLog: (String) -> Unit,
+    onUnflag: (String) -> Unit = {},
     nip65Source: String?,
     nip65CreatedAt: Long?,
     emptyMessage: String,
@@ -1946,6 +2263,20 @@ private fun RelayListTab(
 ) {
     var addRelayUrl by remember { mutableStateOf("") }
     LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+        if (relays.isNotEmpty()) {
+            item(key = "health_summary") {
+                TabHealthSummary(
+                    relayUrls = relays.map { it.url },
+                    perRelayState = perRelayState,
+                    healthByRelay = healthByRelay,
+                    flaggedRelays = flaggedRelays,
+                    blockedRelays = blockedRelays,
+                    onUnflag = onUnflag,
+                    onUnblock = {},
+                    onOpenRelayLog = onOpenRelayLog
+                )
+            }
+        }
         if (nip65Source != null && relays.isNotEmpty()) {
             item(key = "source_banner") { Nip65SourceBanner(nip65Source, nip65CreatedAt) }
         }
@@ -1960,11 +2291,18 @@ private fun RelayListTab(
         }
         relays.forEachIndexed { idx, relay ->
             item(key = "relay_${relay.url}") {
-                RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                EnrichedRelayRow(
+                    url = relay.url, relay = relay,
+                    connectionStatus = perRelayState[relay.url],
+                    healthInfo = healthByRelay[relay.url],
+                    deliveryStats = deliveryStats[relay.url],
+                    isFlagged = relay.url in flaggedRelays,
+                    isBlocked = relay.url in blockedRelays,
                     onOpenRelayLog = onOpenRelayLog,
-                    onEdit = { onEditRelay(relay.url) },
+                    onAction = { onEditRelay(relay.url) },
                     showDivider = true,
-                    showRwTag = showRwTags)
+                    showRwTag = showRwTags
+                )
             }
         }
         item(key = "add_relay") {
@@ -1993,6 +2331,10 @@ private fun CategoriesTab(
     profileId: String,
     categories: List<RelayCategory>,
     perRelayState: Map<String, RelayEndpointStatus>,
+    healthByRelay: Map<String, RelayHealthInfo>,
+    deliveryStats: Map<String, RelayDeliveryTracker.RelayStats>,
+    flaggedRelays: Set<String>,
+    blockedRelays: Set<String>,
     categoryExpanded: Map<String, Boolean>,
     onCategoryExpandedChange: (Map<String, Boolean>) -> Unit,
     onAddCategory: () -> Unit,
@@ -2076,6 +2418,10 @@ private fun CategoriesTab(
                     onEditRelay = { relay -> onEditRelay(category.id, relay) },
                     onOpenRelayLog = onOpenRelayLog,
                     perRelayState = perRelayState,
+                    healthByRelay = healthByRelay,
+                    deliveryStats = deliveryStats,
+                    flaggedRelays = flaggedRelays,
+                    blockedRelays = blockedRelays,
                     nip65OutboxUrls = nip65OutboxUrls,
                     nip65InboxUrls = nip65InboxUrls
                 )
@@ -2086,68 +2432,7 @@ private fun CategoriesTab(
 
 //  Relay Item 
 
-@Composable
-private fun RelayItem(
-    relay: UserRelay,
-    connectionStatus: RelayEndpointStatus?,
-    onOpenRelayLog: (String) -> Unit,
-    onEdit: () -> Unit,
-    showDivider: Boolean = true,
-    showRwTag: Boolean = false
-) {
-    Row(modifier = Modifier.fillMaxWidth().clickable { onOpenRelayLog(relay.url) }
-        .padding(start = 16.dp, end = 8.dp, top = 10.dp, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically) {
-        val dotColor = when (connectionStatus) {
-            RelayEndpointStatus.Connected -> MaterialTheme.colorScheme.primary
-            RelayEndpointStatus.Connecting -> MaterialTheme.colorScheme.tertiary
-            RelayEndpointStatus.Failed -> MaterialTheme.colorScheme.error
-            else -> MaterialTheme.colorScheme.outlineVariant
-        }
-        Box(Modifier.size(8.dp).clip(CircleShape).background(dotColor))
-        Spacer(Modifier.width(12.dp))
-        if (relay.profileImage != null) {
-            AsyncImage(model = ImageRequest.Builder(LocalContext.current).data(relay.profileImage).crossfade(true).build(),
-                contentDescription = null, modifier = Modifier.size(24.dp).clip(CircleShape),
-                contentScale = ContentScale.Crop)
-        } else {
-            Icon(Icons.Outlined.Router, null, Modifier.size(24.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(relay.displayName, style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false))
-                if (showRwTag) {
-                    Spacer(Modifier.width(6.dp))
-                    val tag = when {
-                        relay.read && relay.write -> "r/w"
-                        relay.read -> "r"
-                        relay.write -> "w"
-                        else -> ""
-                    }
-                    if (tag.isNotEmpty()) {
-                        Text(tag, style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
-                    }
-                }
-            }
-            Text(relay.url, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        IconButton(onClick = onEdit, modifier = Modifier.size(36.dp)) {
-            Icon(Icons.Outlined.Edit, "Edit relay", Modifier.size(18.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-    if (showDivider) {
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f),
-            modifier = Modifier.padding(start = 56.dp))
-    }
-}
+
 
 //  Add Relay Row (styled like a relay item) 
 
@@ -2249,6 +2534,10 @@ private fun FeedCategorySection(
     onEditRelay: (UserRelay) -> Unit,
     onOpenRelayLog: (String) -> Unit,
     perRelayState: Map<String, RelayEndpointStatus>,
+    healthByRelay: Map<String, RelayHealthInfo>,
+    deliveryStats: Map<String, RelayDeliveryTracker.RelayStats>,
+    flaggedRelays: Set<String>,
+    blockedRelays: Set<String>,
     nip65OutboxUrls: Set<String> = emptySet(),
     nip65InboxUrls: Set<String> = emptySet()
 ) {
@@ -2317,11 +2606,18 @@ private fun FeedCategorySection(
                     val inOutbox = normalizedUrl in nip65OutboxUrls
                     val inInbox = normalizedUrl in nip65InboxUrls
                     val enrichedRelay = if (inOutbox || inInbox) relay.copy(read = inInbox, write = inOutbox) else relay
-                    RelayItem(relay = enrichedRelay, connectionStatus = perRelayState[relay.url],
+                    EnrichedRelayRow(
+                        url = relay.url, relay = enrichedRelay,
+                        connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onEdit = { onEditRelay(relay) },
+                        onAction = { onEditRelay(relay) },
                         showDivider = true,
-                        showRwTag = inOutbox || inInbox)
+                        showRwTag = inOutbox || inInbox
+                    )
                 }
                 // Add relay row — always at the bottom, styled like a relay
                 AddRelayRow(
@@ -2438,6 +2734,10 @@ private fun OutboxSectionedTab(
     outboxOnlyRelays: List<UserRelay>,
     inboxOnlyRelays: List<UserRelay>,
     perRelayState: Map<String, RelayEndpointStatus>,
+    healthByRelay: Map<String, RelayHealthInfo>,
+    deliveryStats: Map<String, RelayDeliveryTracker.RelayStats>,
+    flaggedRelays: Set<String>,
+    blockedRelays: Set<String>,
     onAddRelay: (String) -> Unit,
     onEditRelay: (String) -> Unit,
     onOpenRelayLog: (String) -> Unit,
@@ -2449,8 +2749,29 @@ private fun OutboxSectionedTab(
 ) {
     val allEmpty = bothRelays.isEmpty() && outboxOnlyRelays.isEmpty() && inboxOnlyRelays.isEmpty()
     var addRelayUrl by remember { mutableStateOf("") }
-
+    // Only include user-configured relays in the health summary.
+    // OutboxFeedManager.activeOutboxRelays are transient connections to other users'
+    // write relays and must NOT be shown here — they flood the UI with simultaneous
+    // connection failures on startup and can trigger NIP-42 AUTH for relays the
+    // user never explicitly added to their relay manager.
+    val allOutboxUrls = remember(bothRelays, outboxOnlyRelays, inboxOnlyRelays) {
+        (bothRelays + outboxOnlyRelays + inboxOnlyRelays).map { it.url }
+    }
     LazyColumn(modifier = modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 120.dp)) {
+        if (!allEmpty) {
+            item(key = "outbox_health_summary") {
+                TabHealthSummary(
+                    relayUrls = allOutboxUrls,
+                    perRelayState = perRelayState,
+                    healthByRelay = healthByRelay,
+                    flaggedRelays = flaggedRelays,
+                    blockedRelays = blockedRelays,
+                    onUnflag = { RelayHealthTracker.unflagRelay(it) },
+                    onUnblock = { RelayHealthTracker.unblockRelay(it) },
+                    onOpenRelayLog = onOpenRelayLog
+                )
+            }
+        }
         if (nip65Source != null && !allEmpty) {
             item(key = "source_banner") { Nip65SourceBanner(nip65Source, nip65CreatedAt) }
         }
@@ -2475,11 +2796,18 @@ private fun OutboxSectionedTab(
             }
             bothRelays.forEachIndexed { idx, relay ->
                 item(key = "both_${relay.url}") {
-                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                    EnrichedRelayRow(
+                        url = relay.url, relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onEdit = { onEditRelay(relay.url) },
+                        onAction = { onEditRelay(relay.url) },
                         showDivider = idx < bothRelays.size - 1,
-                        showRwTag = true)
+                        showRwTag = true
+                    )
                 }
             }
         }
@@ -2495,11 +2823,18 @@ private fun OutboxSectionedTab(
             }
             outboxOnlyRelays.forEachIndexed { idx, relay ->
                 item(key = "outbox_${relay.url}") {
-                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                    EnrichedRelayRow(
+                        url = relay.url, relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onEdit = { onEditRelay(relay.url) },
+                        onAction = { onEditRelay(relay.url) },
                         showDivider = idx < outboxOnlyRelays.size - 1,
-                        showRwTag = true)
+                        showRwTag = true
+                    )
                 }
             }
         }
@@ -2515,14 +2850,26 @@ private fun OutboxSectionedTab(
             }
             inboxOnlyRelays.forEachIndexed { idx, relay ->
                 item(key = "inbox_${relay.url}") {
-                    RelayItem(relay = relay, connectionStatus = perRelayState[relay.url],
+                    EnrichedRelayRow(
+                        url = relay.url, relay = relay,
+                        connectionStatus = perRelayState[relay.url],
+                        healthInfo = healthByRelay[relay.url],
+                        deliveryStats = deliveryStats[relay.url],
+                        isFlagged = relay.url in flaggedRelays,
+                        isBlocked = relay.url in blockedRelays,
                         onOpenRelayLog = onOpenRelayLog,
-                        onEdit = { onEditRelay(relay.url) },
+                        onAction = { onEditRelay(relay.url) },
                         showDivider = true,
-                        showRwTag = true)
+                        showRwTag = true
+                    )
                 }
             }
         }
+        // NOTE: OutboxFeedManager "Active Outbox Connections" section intentionally removed.
+        // Those relays are transient connections for the NIP-65 outbox model and are managed
+        // automatically — the user has no configuration action to take on them. Displaying
+        // them caused a flood of simultaneous failure warnings on fresh install and falsely
+        // implied the user should manage foreign relay connections.
         item(key = "add_relay") {
             AddRelayRow(
                 relayUrl = addRelayUrl,
@@ -2549,26 +2896,34 @@ private fun SectionHeader(
     icon: ImageVector,
     description: String
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 6.dp)
     ) {
-        Icon(icon, null, Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.primary)
-        Text(
-            "$label ($count)",
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Text(
-            "· $description",
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(icon, null, Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.primary)
+            Text(
+                "$label ($count)",
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        if (description.isNotEmpty()) {
+            Text(
+                description,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier.padding(start = 24.dp),
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 

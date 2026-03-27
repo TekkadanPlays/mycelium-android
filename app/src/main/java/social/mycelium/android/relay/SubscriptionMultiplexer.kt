@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import social.mycelium.android.debug.PipelineDiagnostics
 
 /**
  * Best-in-class Flow-based subscription multiplexer for Nostr.
@@ -501,7 +502,7 @@ class SubscriptionMultiplexer private constructor(
     fun stats(): MultiplexerStats = MultiplexerStats(
         consumerCount = consumers.size,
         mergedSubCount = mergedSubs.size,
-        seenEventCount = mergedSubs.values.sumOf { synchronized(it.seenEventIds) { it.seenEventIds.size } },
+        seenEventCount = mergedSubs.values.sumOf { it.seenEventIds.size },
     )
 
     // ── Internal ────────────────────────────────────────────────────────────
@@ -596,30 +597,34 @@ class SubscriptionMultiplexer private constructor(
     /**
      * Handle an event from the relay pool. Dedup, then dispatch to registered
      * callbacks (O(1) lookup) and emit to Flow-based consumers.
+     *
+     * Dedup is **lock-free**: backed by a [ConcurrentHashMap] where the value is a
+     * monotonically increasing insertion-order counter. [putIfAbsent] is a single
+     * atomic CAS — no monitor acquisition on the ingest thread, eliminating the
+     * contention bottleneck under high multi-relay throughput.
      */
     private fun handleEvent(filterKey: FilterKey, event: Event, relayUrl: String) {
         val merged = mergedSubs[filterKey] ?: return
-        // Dedup per merged subscription — different subscriptions (e.g. feed vs thread
-        // replies) can independently receive the same event. Only prevents the same
-        // event from being emitted multiple times to the SAME merged subscription
-        // (e.g. from different relays delivering the same event).
-        val isNew = synchronized(merged.seenEventIds) {
-            if (event.id in merged.seenEventIds) {
-                false
-            } else {
-                merged.seenEventIds.add(event.id)
-                if (merged.seenEventIds.size > maxSeenIdsPerSub) {
-                    val evictCount = maxSeenIdsPerSub / 5
-                    val iter = merged.seenEventIds.iterator()
-                    repeat(evictCount) { if (iter.hasNext()) { iter.next(); iter.remove() } }
-                }
-                true
-            }
-        }
+        // Lock-free dedup per merged subscription.
+        // putIfAbsent returns null  → brand-new event (pass through)
+        //              returns value → already seen   (drop)
+        val ordinal = merged.seenInsertCounter.incrementAndGet()
+        val isNew = merged.seenEventIds.putIfAbsent(event.id, ordinal) == null
         if (!isNew) return
+
+        // Evict oldest 20% when the cap is reached — remove entries with the
+        // smallest counter values (true insertion-order LRU without a linked list).
+        if (merged.seenEventIds.size > maxSeenIdsPerSub) {
+            val evictCount = maxSeenIdsPerSub / 5
+            merged.seenEventIds.entries
+                .sortedBy { it.value }
+                .take(evictCount)
+                .forEach { merged.seenEventIds.remove(it.key, it.value) }
+        }
 
         // Track event against source relay for health stats
         RelayHealthTracker.recordEventReceived(relayUrl)
+        PipelineDiagnostics.recordEventIngested()
 
         // Direct dispatch to registered callbacks (O(1) lookup by filterKey)
         eventCallbacks[filterKey]?.let { callbacks ->
@@ -708,9 +713,13 @@ class SubscriptionMultiplexer private constructor(
         var needsRefresh: Boolean = false,
         /** Per-relay filter map (outbox model). When set, relayUrls/filters are ignored. */
         val relayFilterMap: Map<String, List<Filter>>? = null,
-        /** Per-subscription dedup set so different subscriptions can independently
-         *  receive the same event (e.g. feed vs thread replies). */
-        val seenEventIds: LinkedHashSet<String> = LinkedHashSet(),
+        /** Per-subscription lock-free dedup map: event ID → insertion-order counter.
+         *  Different subscriptions (e.g. feed vs thread replies) can independently
+         *  receive the same event; this only deduplicates within one merged sub
+         *  (i.e. the same event arriving from multiple relays simultaneously). */
+        val seenEventIds: java.util.concurrent.ConcurrentHashMap<String, Long> = java.util.concurrent.ConcurrentHashMap(),
+        /** Monotonically increasing counter for insertion-order eviction. */
+        val seenInsertCounter: AtomicLong = AtomicLong(0L),
         /** One-shot subs auto-free their relay slot on EOSE instead of holding for stale reaping. */
         val isOneShot: Boolean = false,
     )

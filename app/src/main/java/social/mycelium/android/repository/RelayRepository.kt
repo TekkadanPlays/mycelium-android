@@ -49,8 +49,11 @@ class RelayRepository(private val context: Context) {
     private val _relays = MutableStateFlow<List<UserRelay>>(emptyList())
     val relays: StateFlow<List<UserRelay>> = _relays.asStateFlow()
 
-    // StateFlow for connection status updates
+    // Deprecated: live connection status comes from RelayConnectionStateMachine.perRelayState.
+    // This flow is only updated by testRelayConnection() manual probes.
+    @Deprecated("Use RelayConnectionStateMachine.perRelayState for live status", level = DeprecationLevel.WARNING)
     private val _connectionStatus = MutableStateFlow<Map<String, RelayConnectionStatus>>(emptyMap())
+    @Deprecated("Use RelayConnectionStateMachine.perRelayState for live status", level = DeprecationLevel.WARNING)
     val connectionStatus: StateFlow<Map<String, RelayConnectionStatus>> = _connectionStatus.asStateFlow()
 
     init {

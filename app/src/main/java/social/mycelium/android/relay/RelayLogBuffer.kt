@@ -3,6 +3,9 @@ package social.mycelium.android.relay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import social.mycelium.android.BuildConfig
+import social.mycelium.android.debug.DebugVerboseLog
+import social.mycelium.android.utils.normalizeRelayUrl
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -19,7 +22,27 @@ enum class LogType {
     RECEIVED,
     ERROR,
     NOTICE,
-    EOSE
+    EOSE,
+    /** Pool / scheduler / reconnect / app-layer diagnostics (control panel). */
+    DIAG
+}
+
+/**
+ * Semantic categories for relay log entries. Used for UI filtering.
+ */
+enum class LogCategory {
+    /** Connect / disconnect / reconnect lifecycle. */
+    LIFECYCLE,
+    /** Raw outbound / inbound WebSocket messages. */
+    WIRE,
+    /** NIP-42 AUTH challenges and responses. */
+    AUTH,
+    /** REQ / CLOSE / EOSE subscription management. */
+    SUBSCRIPTION,
+    /** Errors, NOTICEs, and failures. */
+    ERROR,
+    /** Pool / scheduler / keepalive / app-layer diagnostics. */
+    DIAGNOSTIC,
 }
 
 /**
@@ -29,7 +52,8 @@ data class RelayLogEntry(
     val timestamp: Long = System.currentTimeMillis(),
     val type: LogType,
     val message: String,
-    val relayUrl: String
+    val relayUrl: String,
+    val category: LogCategory = LogCategory.DIAGNOSTIC,
 ) {
     private val dateFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 
@@ -44,6 +68,7 @@ data class RelayLogEntry(
         LogType.ERROR -> "ERR"
         LogType.NOTICE -> "NOTE"
         LogType.EOSE -> "EOSE"
+        LogType.DIAG -> "DIAG"
     }
 }
 
@@ -62,7 +87,7 @@ object RelayLogBuffer {
      * Get the log flow for a specific relay URL.
      */
     fun getLogsForRelay(relayUrl: String): StateFlow<List<RelayLogEntry>> {
-        return getOrCreateBuffer(relayUrl).asStateFlow()
+        return getOrCreateBuffer(normalizeRelayUrl(relayUrl)).asStateFlow()
     }
 
     /**
@@ -77,15 +102,25 @@ object RelayLogBuffer {
     private val _allLogs = MutableStateFlow<List<RelayLogEntry>>(emptyList())
 
     /**
-     * Log a new entry.
+     * Log a new entry with auto-categorization based on LogType.
      */
-    fun log(relayUrl: String, type: LogType, message: String) {
+    fun log(relayUrl: String, type: LogType, message: String, category: LogCategory? = null) {
+        val flow = getOrCreateBuffer(relayUrl)
+        val key = normalizeRelayUrl(relayUrl)
+        // Auto-derive category from LogType if not specified
+        val effectiveCategory = category ?: when (type) {
+            LogType.CONNECTING, LogType.CONNECTED, LogType.DISCONNECTED -> LogCategory.LIFECYCLE
+            LogType.SENT, LogType.RECEIVED -> LogCategory.WIRE
+            LogType.ERROR, LogType.NOTICE -> LogCategory.ERROR
+            LogType.EOSE -> LogCategory.SUBSCRIPTION
+            LogType.DIAG -> LogCategory.DIAGNOSTIC
+        }
         val entry = RelayLogEntry(
             type = type,
             message = message,
-            relayUrl = relayUrl
+            relayUrl = key,
+            category = effectiveCategory,
         )
-        val flow = getOrCreateBuffer(relayUrl)
         val current = flow.value.toMutableList()
         current.add(entry)
 
@@ -105,24 +140,36 @@ object RelayLogBuffer {
         } else {
             _allLogs.value = all
         }
+
+        if (BuildConfig.DEBUG) {
+            DebugVerboseLog.mirrorRelayLog(key, type, message)
+        }
     }
 
     // Convenience methods
     fun logConnecting(relayUrl: String) = log(relayUrl, LogType.CONNECTING, "Connecting...")
     fun logConnected(relayUrl: String) = log(relayUrl, LogType.CONNECTED, "Connected")
     fun logDisconnected(relayUrl: String, reason: String = "") =
-        log(relayUrl, LogType.DISCONNECTED, if (reason.isNotBlank()) "Disconnected: $reason" else "Disconnected")
+        log(relayUrl, LogType.DISCONNECTED, if (reason.isNotBlank()) reason else "Disconnected (reason unknown)")
     fun logSent(relayUrl: String, message: String) = log(relayUrl, LogType.SENT, message)
     fun logReceived(relayUrl: String, message: String) = log(relayUrl, LogType.RECEIVED, message)
     fun logError(relayUrl: String, error: String) = log(relayUrl, LogType.ERROR, error)
     fun logNotice(relayUrl: String, message: String) = log(relayUrl, LogType.NOTICE, message)
-    fun logEose(relayUrl: String, subId: String) = log(relayUrl, LogType.EOSE, "EOSE: $subId")
+    fun logEose(relayUrl: String, subId: String) = log(relayUrl, LogType.EOSE, "EOSE: $subId", LogCategory.SUBSCRIPTION)
+
+    /** Structured diagnostic line: `[category] detail` for the relay control panel. */
+    fun logDiagnostic(relayUrl: String, category: String, detail: String) {
+        val cat = category.trim().ifBlank { "app" }
+        // Detect auth-related diagnostics and categorize them separately
+        val logCat = if (cat == "auth" || cat == "nip42") LogCategory.AUTH else LogCategory.DIAGNOSTIC
+        log(relayUrl, LogType.DIAG, "[$cat] $detail", logCat)
+    }
 
     /**
      * Clear logs for a specific relay.
      */
     fun clearLogsForRelay(relayUrl: String) {
-        buffers[relayUrl]?.value = emptyList()
+        buffers[normalizeRelayUrl(relayUrl)]?.value = emptyList()
     }
 
     /**
@@ -134,6 +181,7 @@ object RelayLogBuffer {
     }
 
     private fun getOrCreateBuffer(relayUrl: String): MutableStateFlow<List<RelayLogEntry>> {
-        return buffers.getOrPut(relayUrl) { MutableStateFlow(emptyList()) }
+        val key = normalizeRelayUrl(relayUrl)
+        return buffers.getOrPut(key) { MutableStateFlow(emptyList()) }
     }
 }

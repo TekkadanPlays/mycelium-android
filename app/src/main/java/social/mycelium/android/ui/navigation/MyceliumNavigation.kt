@@ -65,6 +65,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import social.mycelium.android.BuildConfig
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.DefaultRelayCategories
 import social.mycelium.android.repository.NotesRepository
@@ -108,7 +109,7 @@ import social.mycelium.android.ui.screens.ProfileScreen
 import social.mycelium.android.ui.screens.RelayLogScreen
 import social.mycelium.android.ui.screens.RelayDiscoveryScreen
 import social.mycelium.android.ui.screens.RelayConnectionStatusScreen
-import social.mycelium.android.ui.screens.RelayHealthScreen
+import social.mycelium.android.ui.screens.EventDeliveryScreen
 import social.mycelium.android.ui.screens.RelayManagementScreen
 import social.mycelium.android.ui.screens.SettingsScreen
 import social.mycelium.android.ui.screens.LiveExplorerScreen
@@ -1482,7 +1483,7 @@ fun MyceliumNavigation(
         val signer = accountStateViewModel.getCurrentSigner()
         if (signer != null && !accountStateViewModel.isSettingsAlreadyApplied(pubkey)) {
             social.mycelium.android.repository.StartupOrchestrator.runPhase0Settings(
-                signer, pubkey, allUserRelayUrls
+                signer, pubkey, outboxUrls, allUserRelayUrls
             )
             // Mark applied after launching — the orchestrator will apply settings
             // when they arrive. On next launch, skipPhase0() fires instantly.
@@ -1502,6 +1503,17 @@ fun MyceliumNavigation(
         phase1Deferred.await()
         val cachedFollowList = social.mycelium.android.repository.ContactListRepository.getCachedFollowList(pubkey)
         Log.d("MyceliumNav", "Phase 1: follow list ready (${cachedFollowList?.size ?: 0} follows)")
+
+        // Deep history (LOW priority, batched) — start after brief yield to feed wiring; idempotent.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            kotlinx.coroutines.delay(5_000L)
+            social.mycelium.android.repository.StartupOrchestrator.runPhase5DeepHistory(
+                context.applicationContext,
+                pubkey,
+                cachedFollowList ?: emptySet(),
+                allUserRelayUrls
+            )
+        }
 
         // Phase 2 (feed) is driven by DashboardScreen via markFeedStarted().
         // Phase 3+4 run on a detached scope so they survive LaunchedEffect cancellation.
@@ -1544,12 +1556,6 @@ fun MyceliumNavigation(
                     indexerUrls = indexerUrls
                 )
             }
-
-            // ── Phase 5: Deep History — 5s after Phase 4 ──────────────
-            kotlinx.coroutines.delay(5_000L)
-            social.mycelium.android.repository.StartupOrchestrator.runPhase5DeepHistory(
-                context, pubkey, cachedFollowList ?: emptySet(), allUserRelayUrls
-            )
         }
     }
 
@@ -1964,7 +1970,7 @@ fun MyceliumNavigation(
                             onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
                             onSidebarRelayHealthClick = {
                                 closeDrawerThen {
-                                    navController.navigate("settings/relay_health") {
+                                    navController.navigate("settings/event_delivery") {
                                         launchSingleTop = true
                                     }
                                 }
@@ -3997,13 +4003,15 @@ fun MyceliumNavigation(
                     )
                 }
 
-                composable("settings/debug") {
-                    DebugSettingsScreen(
-                        onBackClick = { navController.popBackStack() },
-                        onEffectsLab = {
-                            navController.navigate("effects_lab") { launchSingleTop = true }
-                        }
-                    )
+                if (BuildConfig.DEBUG) {
+                    composable("settings/debug") {
+                        DebugSettingsScreen(
+                            onBackClick = { navController.popBackStack() },
+                            onEffectsLab = {
+                                navController.navigate("effects_lab") { launchSingleTop = true }
+                            }
+                        )
+                    }
                 }
 
                 composable("effects_lab") {
@@ -4041,35 +4049,12 @@ fun MyceliumNavigation(
                     )
                 }
 
-                composable("settings/relay_health") {
-                    RelayHealthScreen(
-                        onBackClick = { navController.popBackStack() },
-                        onOpenRelayManager = {
-                            // Pop back to relays instead of pushing a new instance (avoids routing loop)
-                            navController.navigate("relays") {
-                                popUpTo("relays") { inclusive = true }
-                                launchSingleTop = true
-                            }
-                        },
-                        onOpenRelayDiscovery = {
-                            navController.navigate("relay_discovery") {
-                                launchSingleTop = true
-                            }
-                        },
+                composable("settings/event_delivery") {
+                    EventDeliveryScreen(
+                        onBack = { navController.popBackStack() },
                         onOpenRelayLog = { relayUrl ->
                             val encoded = android.net.Uri.encode(relayUrl)
                             navController.navigate("relay_log/$encoded") {
-                                launchSingleTop = true
-                            }
-                        },
-                        onOpenRelayUsers = { relayUrl ->
-                            val encoded = android.net.Uri.encode(relayUrl)
-                            navController.navigate("relay_users/$encoded") {
-                                launchSingleTop = true
-                            }
-                        },
-                        onOpenPublishResults = {
-                            navController.navigate("settings/publish_results") {
                                 launchSingleTop = true
                             }
                         },
@@ -4310,7 +4295,7 @@ fun MyceliumNavigation(
                             }
                         },
                         onOpenRelayHealth = {
-                            navController.navigate("settings/relay_health") {
+                            navController.navigate("settings/event_delivery") {
                                 launchSingleTop = true
                             }
                         },
@@ -4375,7 +4360,7 @@ fun MyceliumNavigation(
                             val sm = RelayStorageManager(context)
                             val normalized = RelayStorageManager.normalizeRelayUrl(url)
                             val newRelay =
-                                social.mycelium.android.data.UserRelay(url = normalized, read = true, write = true)
+                                social.mycelium.android.data.UserRelay(url = normalized, read = true, write = true, source = social.mycelium.android.data.RelaySource.USER_ADDED)
                             val label = when {
                                 profileType == "outbox" -> {
                                     val existing = sm.loadOutboxRelays(pubkey)
@@ -5052,7 +5037,7 @@ fun MyceliumNavigation(
                             onQrClick = { navController.navigate("user_qr") { launchSingleTop = true } },
                             onSidebarRelayHealthClick = {
                                 closeDrawerThen {
-                                    navController.navigate("settings/relay_health") {
+                                    navController.navigate("settings/event_delivery") {
                                         launchSingleTop = true
                                     }
                                 }

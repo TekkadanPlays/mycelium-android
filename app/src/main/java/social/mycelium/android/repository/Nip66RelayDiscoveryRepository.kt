@@ -50,7 +50,7 @@ object Nip66RelayDiscoveryRepository {
     private const val TAG = "Nip66Discovery"
     private const val KIND_RELAY_DISCOVERY = 30166
     private const val KIND_MONITOR_ANNOUNCEMENT = 10166
-    private const val FETCH_TIMEOUT_MS = 12_000L
+    private const val FETCH_TIMEOUT_MS = 8_000L
     private const val CACHE_PREFS = "nip66_discovery_cache_v2"
     private const val CACHE_KEY_RELAYS = "discovered_relays"
     private const val CACHE_KEY_MONITORS = "known_monitors"
@@ -253,9 +253,18 @@ object Nip66RelayDiscoveryRepository {
         discoveryRelays: List<String> = emptyList(),
         monitorPubkeys: List<String> = emptyList()
     ) {
-        // Skip if cache is fresh
         val lastFetch = prefs?.getLong(CACHE_KEY_TIMESTAMP, 0L) ?: 0L
-        if (_hasFetched.value && System.currentTimeMillis() - lastFetch < CACHE_EXPIRY_MS) {
+        val cacheAge = System.currentTimeMillis() - lastFetch
+
+        // Serve stale cache immediately so downstream consumers (onboarding,
+        // OutboxFeedManager) don't block waiting for a network fetch. The
+        // background refresh will update the data transparently.
+        if (!_hasFetched.value && _discoveredRelays.value.isEmpty()) {
+            loadFromDisk() // re-attempt in case init() raced
+        }
+
+        // Skip network fetch if cache is fresh
+        if (_hasFetched.value && cacheAge < CACHE_EXPIRY_MS) {
             Log.d(TAG, "Discovery cache is fresh (${_discoveredRelays.value.size} relays), skipping fetch")
             return
         }
@@ -265,11 +274,10 @@ object Nip66RelayDiscoveryRepository {
 
         scope.launch {
             // On cold start the relay pool hasn't connected yet — poll until
-            // at least one relay is connected, capped at 3s. Replaces the old
-            // hardcoded 4s delay that wasted time on warm pools.
+            // at least one relay is connected, capped at 2s.
             if (_discoveredRelays.value.isEmpty() && !_hasFetched.value) {
                 Log.d(TAG, "Cold start — polling for relay pool readiness")
-                val poolDeadline = System.currentTimeMillis() + 3_000L
+                val poolDeadline = System.currentTimeMillis() + 2_000L
                 while (System.currentTimeMillis() < poolDeadline) {
                     try {
                         val pool = RelayConnectionStateMachine.getInstance().relayPool
@@ -278,7 +286,7 @@ object Nip66RelayDiscoveryRepository {
                             break
                         }
                     } catch (_: Exception) { /* pool not initialized yet */ }
-                    delay(200L)
+                    delay(150L)
                 }
             }
             fetchRelayDiscoveryViaWebSocket(discoveryRelays, monitorPubkeys)
@@ -341,7 +349,7 @@ object Nip66RelayDiscoveryRepository {
                 if (lastAt > 0) {
                     // First event received — now apply settle logic
                     val quietMs = System.currentTimeMillis() - lastAt
-                    if (quietMs >= 2_000L) break
+                    if (quietMs >= 1_500L) break
                 }
                 // No events yet → keep waiting for relays to connect
             }

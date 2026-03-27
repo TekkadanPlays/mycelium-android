@@ -691,8 +691,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
     /**
      * Register the settings sync publish callback so local setting changes are synced to relays.
-     * The initial fetch is handled by [StartupOrchestrator.runPhase0Settings] with CRITICAL
-     * priority to guarantee it completes before any other relay subscriptions.
+     * The initial fetch is handled by [StartupOrchestrator.runPhase0Settings] (outbox-first)
+     * or onboarding kind-30078; CRITICAL priority relative to other subs.
      */
     private fun initSettingsSync(hexPubkey: String) {
         val signer = getCurrentSigner() ?: return
@@ -1262,8 +1262,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 for ((index, description) in options) {
                     add(arrayOf("poll_option", index.toString(), description))
                 }
-                if (valueMinimum != null) add(arrayOf("value_minimum", valueMinimum.toString()))
-                if (valueMaximum != null) add(arrayOf("value_maximum", valueMaximum.toString()))
+                if (valueMinimum != null) add(arrayOf("value_minimum", (valueMinimum * 1000).toString()))
+                if (valueMaximum != null) add(arrayOf("value_maximum", (valueMaximum * 1000).toString()))
                 if (closedAtEpochSeconds != null) add(arrayOf("closed_at", closedAtEpochSeconds.toString()))
                 if (consensusThreshold != null) add(arrayOf("consensus_threshold", consensusThreshold.toString()))
                 add(arrayOf("alt", "Zap Poll"))

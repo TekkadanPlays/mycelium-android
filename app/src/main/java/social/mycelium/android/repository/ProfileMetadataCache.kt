@@ -387,11 +387,31 @@ class ProfileMetadataCache {
                     fetchProfilesBatch(batch, relays)
                     if (internalPendingPubkeys.isNotEmpty()) delay(300)
                 }
+                // Circuit breaker tripped: instead of abandoning, wait for a relay to reconnect.
+                // When one does, reset the breaker and restart the batch so pending profiles resolve.
+                if (consecutiveEarlyOuts >= 5 && internalPendingPubkeys.isNotEmpty()) {
+                    Log.d(TAG, "Kind-0 circuit open — waiting for relay reconnect to resume ${internalPendingPubkeys.size} pending profiles")
+                    scope.launch {
+                        val stateMachine = social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
+                        stateMachine.perRelayState.collect { perRelay ->
+                            val connected = perRelay.values.count {
+                                it == social.mycelium.android.relay.RelayEndpointStatus.Connected
+                            }
+                            if (connected > 0 && consecutiveEarlyOuts >= 5) {
+                                Log.d(TAG, "Kind-0 circuit reset: relay reconnected ($connected online), retrying ${internalPendingPubkeys.size} profiles")
+                                consecutiveEarlyOuts = 0
+                                scheduleInternalBatch()
+                                return@collect
+                            }
+                        }
+                    }
+                }
                 internalBatchFetchJob = null
             }
             internalBatchScheduleJob = null
         }
     }
+
 
     /**
      * Fetch kind-0 profiles for a batch of pubkeys via [RelayConnectionStateMachine].
@@ -399,19 +419,25 @@ class ProfileMetadataCache {
      * are properly managed, reused, and cleaned up. No raw WebSockets.
      */
     private suspend fun fetchProfilesBatch(pubkeys: List<String>, cacheRelayUrls: List<String>) {
-        val uncached = pubkeys.filter { cache[normalizeKey(it)] == null }
-        if (uncached.isEmpty()) return
+        // Fetch both uncached AND stale profiles.
+        // requestProfiles() already filters to needed=uncached|stale before adding to the queue;
+        // previously this inner filter dropped stale profiles (cache[key] != null) silently.
+        val toFetch = pubkeys.filter { pk ->
+            val key = normalizeKey(pk)
+            cache[key] == null || isProfileStale(pk)
+        }
+        if (toFetch.isEmpty()) return
 
         val allRelays = cacheRelayUrls.distinct()
         if (allRelays.isEmpty()) return
 
-        Log.d(TAG, "Fetching kind-0 for ${uncached.size} pubkeys from ${allRelays.size} relays (state machine)")
+        Log.d(TAG, "Fetching kind-0 for ${toFetch.size} pubkeys (${pubkeys.size - toFetch.size} already fresh) from ${allRelays.size} relays")
         val beforeCount = poolReceived.get()
 
         val filter = Filter(
             kinds = listOf(0),
-            authors = uncached,
-            limit = uncached.size
+            authors = toFetch,
+            limit = toFetch.size
         )
 
         val batchReceived = AtomicInteger(0)
@@ -446,13 +472,13 @@ class ProfileMetadataCache {
             handle.cancel()
             consecutiveEarlyOuts++
             // Re-queue so next batch picks them up (relays may be connected by then)
-            synchronized(internalPendingPubkeys) { internalPendingPubkeys.addAll(uncached) }
+            synchronized(internalPendingPubkeys) { internalPendingPubkeys.addAll(toFetch) }
             // Hard cap: after 5 consecutive failures, stop retrying entirely.
             // Pubkeys stay in the queue and will be picked up when new notes trigger a fresh batch.
             if (consecutiveEarlyOuts >= 5) {
                 Log.d(
                     TAG,
-                    "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts) — giving up, relays appear offline"
+                    "Kind-0 early-out: 0/${toFetch.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts) — giving up, relays appear offline"
                 )
                 return
             }
@@ -461,7 +487,7 @@ class ProfileMetadataCache {
             else (1000L * (1L shl (consecutiveEarlyOuts - 2).coerceAtMost(3))).coerceAtMost(8_000L)
             Log.d(
                 TAG,
-                "Kind-0 early-out: 0/${uncached.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts, next backoff ${backoffMs}ms), re-queued"
+                "Kind-0 early-out: 0/${toFetch.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts, next backoff ${backoffMs}ms), re-queued"
             )
             if (backoffMs > 0) delay(backoffMs)
             return
@@ -470,16 +496,16 @@ class ProfileMetadataCache {
 
         // Relays are responding — wait for the full timeout
         val remainingMs =
-            ((if (uncached.size > BULK_THRESHOLD) KIND0_BULK_FETCH_TIMEOUT_MS else KIND0_FETCH_TIMEOUT_MS) - probeElapsed).coerceAtLeast(
+            ((if (toFetch.size > BULK_THRESHOLD) KIND0_BULK_FETCH_TIMEOUT_MS else KIND0_FETCH_TIMEOUT_MS) - probeElapsed).coerceAtLeast(
                 1000L
             )
         delay(remainingMs)
 
         handle.cancel()
-        Log.d(TAG, "Kind-0 fetch done: ${batchReceived.get()}/${uncached.size} profiles from ${allRelays.size} relays")
+        Log.d(TAG, "Kind-0 fetch done: ${batchReceived.get()}/${toFetch.size} profiles from ${allRelays.size} relays")
 
         // ── Fallback: retry missing profiles on outbox/subscription relays ──
-        val stillMissing = uncached.filter { cache[normalizeKey(it)] == null }
+        val stillMissing = toFetch.filter { cache[normalizeKey(it)] == null }
         val fallback = fallbackRelayUrls.filter { it.isNotBlank() && it !in allRelays }
         if (stillMissing.isNotEmpty() && fallback.isNotEmpty()) {
             Log.d(TAG, "Kind-0 fallback: ${stillMissing.size} missing, trying ${fallback.size} outbox relays")

@@ -288,6 +288,12 @@ class Nip42AuthHandler(
         val (event, _) = recentEvents[eventId] ?: return
         pendingReplayEvents.getOrPut(relayUrl) { mutableListOf() }.add(event)
         Log.d(TAG, "Queued event ${eventId.take(8)}… for replay on $relayUrl — forcing reconnect")
+        val norm = social.mycelium.android.utils.normalizeRelayUrl(relayUrl)
+        RelayLogBuffer.logDiagnostic(
+            norm,
+            "nip42",
+            "publish rejected auth-required — queued replay; forceReconnect in ~2s if still not AUTHENTICATED",
+        )
         // Wipe challenge state so the fresh connection gets a clean attempt
         resetRelayState(relayUrl)
         scope.launch {

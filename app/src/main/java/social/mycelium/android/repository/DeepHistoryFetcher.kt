@@ -38,7 +38,7 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
  *
  * ## Usage
  *
- * Called by `StartupOrchestrator` after Phase 4 completes:
+ * Called by `StartupOrchestrator.runPhase5DeepHistory` soon after Phase 1 (staggered in nav):
  * ```
  * DeepHistoryFetcher.start(context, pubkey, followList, relayUrls)
  * ```
@@ -238,7 +238,7 @@ object DeepHistoryFetcher {
         // Resume from persisted cursor, or start from the oldest note in the feed
         var cursorSec = prefs.getLong(KEY_CURSOR_PREFIX + shortKey, 0L)
         if (cursorSec == 0L) {
-            val oldestInRoom = eventDao.getFeedEvents(1).minByOrNull { it.createdAt }?.createdAt
+            val oldestInRoom = eventDao.getOldestFeedEventTimestamp()
             cursorSec = oldestInRoom ?: (System.currentTimeMillis() / 1000)
             Log.d(TAG, "Starting deep fetch from ${formatSec(cursorSec)} (oldest in Room)")
         } else {

@@ -470,7 +470,7 @@ private fun FeedOverlay(
                     }
                     Spacer(Modifier.height(8.dp))
                     TextButton(
-                        onClick = { onNavigateTo("settings/relay_health") }
+                        onClick = { onNavigateTo("relays") }
                     ) {
                         Text(
                             "Set up manually",
@@ -1321,23 +1321,32 @@ fun DashboardScreen(
     // Sidebar relay/category selection is handled by setDisplayFilterOnly in onItemClick — NOT here.
     // Key on allCategoryRelayUrls (stable URL list) instead of relayCategories (object list that
     // changes on every NIP-11 info update, causing cascading re-fires that delay feed loading).
-    // Gated on userStateReady from StartupOrchestrator to ensure settings + follow list are
-    // applied before the feed renders (prevents 8s of wrong UI on fresh install).
+    // Gated on userStateReady from StartupOrchestrator to ensure follow list is
+    // applied before the feed renders. Waits for settingsReady up to ~9s so Phase 0
+    // outbox-first kind-30078 fetch can apply before the main feed REQ.
     val userStateReady by social.mycelium.android.repository.StartupOrchestrator.userStateReady.collectAsState()
+    val settingsReady by social.mycelium.android.repository.StartupOrchestrator.settingsReady.collectAsState()
     LaunchedEffect(
         currentAccount,
         subscribedCategoryRelayUrls,
         relayUiState.outboxRelays,
         homeFeedState.isGlobal,
         onboardingComplete,
-        userStateReady
+        userStateReady,
+        settingsReady
     ) {
         if (!onboardingComplete) return@LaunchedEffect
         if (subscribedCategoryRelayUrls.isEmpty() && relayUiState.outboxRelays.isEmpty()) return@LaunchedEffect
-        // Wait for Phase 0 (settings) + Phase 1 (follow list) before firing the feed subscription.
-        // On returning users (settings already applied), userStateReady is set immediately by skipPhase0().
-        // On fresh install, this blocks until settings are fetched or timeout (8s max).
         if (!userStateReady) return@LaunchedEffect
+        // Wait for Phase 0 (kind-30078) up to maxWaitMs + buffer so outbox-first settings apply before main REQ.
+        // Returning users: skipPhase0() leaves settingsReady true immediately.
+        if (!settingsReady) {
+            val deadline = System.currentTimeMillis() + 9_000L
+            while (!social.mycelium.android.repository.StartupOrchestrator.settingsReady.value
+                && System.currentTimeMillis() < deadline) {
+                kotlinx.coroutines.delay(100)
+            }
+        }
         // Debounce: keys settle in rapid succession (visibility, categories, outbox);
         // wait briefly so we only fire the subscription once.
         kotlinx.coroutines.delay(150)

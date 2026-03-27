@@ -43,6 +43,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
+import social.mycelium.android.debug.PipelineDiagnostics
 
 /** Separate counts of pending new notes for All vs Following. Nonce ensures StateFlow always emits on update. */
 data class NewNotesCounts(val all: Int, val following: Int, val nonce: Long = 0L)
@@ -227,6 +228,7 @@ class NotesRepository private constructor() {
             scheduleEventStoreFlush()
         }
 
+        val flushStartMs = System.currentTimeMillis()
         android.os.Trace.beginSection("NotesRepo.flushKind1Events(${batch.size})")
         try {
             // Convert all events to Notes (no lock needed — convertEventToNote is stateless except profile cache)
@@ -659,6 +661,8 @@ class NotesRepository private constructor() {
         } catch (e: Throwable) {
             Log.e(TAG, "flushKind1Events failed: ${e.message}", e)
         } finally {
+            PipelineDiagnostics.recordBatch(batch.size, System.currentTimeMillis() - flushStartMs)
+            if (BuildConfig.DEBUG) PipelineDiagnostics.logSummary(TAG)
             android.os.Trace.endSection()
         }
     }
@@ -794,6 +798,7 @@ class NotesRepository private constructor() {
             if (entities.isEmpty()) return@withContext
             try {
                 dao.insertAll(entities)
+                PipelineDiagnostics.recordDbCommit(entities.size)
                 if (entities.size > 20) {
                     Log.d(TAG, "Event store: persisted ${entities.size} events (total=${dao.count()})")
                 }
@@ -999,6 +1004,123 @@ class NotesRepository private constructor() {
         private var instance: NotesRepository? = null
         fun getInstance(): NotesRepository =
             instance ?: synchronized(this) { instance ?: NotesRepository().also { instance = it } }
+    }
+
+    /**
+     * Preload up to [limit] notes into the Room event cache during onboarding's PREFETCHING_LISTS
+     * phase, before the dashboard is visible. Uses a temporary one-shot subscription so it does
+     * NOT touch the live feed state (no notes.value mutation, no cutoff change). When the dashboard
+     * later calls loadFeedCacheFromRoom() it will find these events and render the feed instantly
+     * without any relay round-trip.
+     *
+     * Uses the follow list when available so the prewarmed cache matches the Following feed.
+     * Also batch-prefetches kind-0 profiles for all unique authors in one subscription so
+     * the feed renders with resolved display names from the very first frame.
+     *
+     * Safe to call multiple times; no-ops if Room is not yet initialized.
+     */
+    suspend fun prewarmFeedCache(
+        relayUrls: List<String>,
+        followedPubkeys: Set<String>,
+        indexerUrls: List<String>,
+        limit: Int = 500
+    ) {
+        val dao = eventDao
+        if (dao == null) {
+            Log.w(TAG, "prewarmFeedCache: Room not initialized, skipping")
+            return
+        }
+        if (relayUrls.isEmpty()) {
+            Log.w(TAG, "prewarmFeedCache: no relay URLs, skipping")
+            return
+        }
+
+        Log.d(TAG, "prewarmFeedCache: preloading $limit notes from ${relayUrls.size} relays (${followedPubkeys.size} follows)")
+        val startMs = System.currentTimeMillis()
+
+        val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400L * FEED_SINCE_DAYS
+        val filter = if (followedPubkeys.isNotEmpty()) {
+            // Following mode: fetch from followed authors only to match the default feed view
+            Filter(
+                kinds = listOf(1),
+                authors = followedPubkeys.toList(),
+                limit = limit,
+                since = sevenDaysAgo
+            )
+        } else {
+            // No follow list yet: fetch globally so the cache isn't empty
+            Filter(kinds = listOf(1), limit = limit, since = sevenDaysAgo)
+        }
+
+        val receivedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
+        val lastEventAt = java.util.concurrent.atomic.AtomicLong(0L)
+
+        val handle = relayStateMachine.requestTemporarySubscriptionWithRelay(
+            relayUrls = relayUrls,
+            filters = listOf(filter),
+            priority = SubscriptionPriority.HIGH
+        ) { event, relayUrl ->
+            if (event.kind == 1) {
+                receivedEvents.add(event to relayUrl)
+                lastEventAt.set(System.currentTimeMillis())
+            }
+        }
+
+        // Settle-based wait: stop early when events go quiet, cap at 8s
+        val deadline = System.currentTimeMillis() + 8_000L
+        val settleMs = 1_200L
+        while (System.currentTimeMillis() < deadline) {
+            delay(300)
+            val last = lastEventAt.get()
+            if (last > 0 && System.currentTimeMillis() - last > settleMs) break
+            if (receivedEvents.size >= limit) break
+        }
+        handle.cancel()
+
+        val events = receivedEvents.toList()
+        if (events.isEmpty()) {
+            Log.d(TAG, "prewarmFeedCache: no events received after ${System.currentTimeMillis() - startMs}ms")
+            return
+        }
+
+        // Persist to Room (same pipeline as live events, deduped by eventId)
+        val entities = events.mapNotNull { (event, relayUrl) ->
+            if (event.id in deletedEventIds) return@mapNotNull null
+            val normalizedUrl = relayUrl.ifBlank { null }
+            EventRelayTracker.addRelay(event.id, relayUrl)
+            CachedEventEntity(
+                eventId = event.id,
+                kind = event.kind,
+                pubkey = event.pubKey.lowercase(),
+                createdAt = event.createdAt,
+                eventJson = event.toJson(),
+                relayUrl = normalizedUrl,
+                relayUrls = normalizedUrl
+            )
+        }
+        withContext(Dispatchers.IO) {
+            try {
+                dao.insertAll(entities)
+                Log.d(TAG, "prewarmFeedCache: persisted ${entities.size} events in ${System.currentTimeMillis() - startMs}ms")
+            } catch (e: Exception) {
+                Log.e(TAG, "prewarmFeedCache: Room insert failed: ${e.message}", e)
+            }
+        }
+
+        // Prefetch kind-0 profiles for all unique authors in the prewarm batch
+        // so the feed renders with real display names from the first frame
+        val profileRelayUrls = (indexerUrls + relayUrls).distinct().take(6)
+        if (profileRelayUrls.isNotEmpty()) {
+            val authorPubkeys = events.map { (ev, _) -> ev.pubKey.lowercase() }.distinct()
+            scope.launch {
+                try {
+                    profileCache.requestProfiles(authorPubkeys, profileRelayUrls)
+                    Log.d(TAG, "prewarmFeedCache: queued ${authorPubkeys.size} profile fetches")
+                } catch (e: Exception) {
+                    Log.w(TAG, "prewarmFeedCache: profile prefetch failed: ${e.message}")
+                }
+            }
+        }
     }
 
     /**

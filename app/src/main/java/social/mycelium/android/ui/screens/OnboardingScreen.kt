@@ -30,13 +30,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import social.mycelium.android.data.DiscoveredRelay
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayType
+import social.mycelium.android.data.RelaySource
 import social.mycelium.android.data.UserRelay
 import social.mycelium.android.repository.Nip65RelayListRepository
 import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
 import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.SettingsSyncManager
+import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.viewmodel.AccountStateViewModel
 import social.mycelium.android.ui.settings.ConnectionMode
 import social.mycelium.android.ui.settings.NotificationPreferences
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +60,7 @@ import java.util.Locale
  * 1. CHOOSE_MODE — user picks "Find my relays" (auto) or "Set up manually"
  * 2. LOADING_INDEXERS — wait for NIP-66 relay monitor data (fetched at app init)
  * 3. SEARCHING_NIP65 — query anchor + NIP-66 indexers for kind-10002, stream results
- * 4. REVIEW_OUTBOXES — user reviews and confirms the discovered outbox/inbox config
+ * 4. CONFIRM_RELAYS — user confirms the discovered outbox/inbox config
  * 5. SAVING — apply confirmed NIP-65 config, clean indexers, fetch kind-10086/10050
  * 6. SELECT_INDEXERS — user confirms indexer relay set (AFTER outbox config is saved)
  * 7. PREFETCHING_LISTS — fetch follows, mutes, relay sets, bookmarks
@@ -69,7 +74,7 @@ private enum class OnboardingPhase {
     CHOOSE_MODE,           // Instant: user picks "Find my relays" or "Set up manually"
     LOADING_INDEXERS,      // Waiting for NIP-66 relay monitor data
     SEARCHING_NIP65,       // Querying indexers for kind-10002
-    REVIEW_OUTBOXES,       // User reviews and merges discovered relay config (Diff UI)
+    CONFIRM_RELAYS,        // User confirms discovered relay list (simple view, no diff)
     SELECT_INDEXERS,       // User picks indexers AFTER confirming outboxes
     PREFETCHING_LISTS,     // Background fetch of Mutes/Follows/People
     NOTIFICATION_SETUP,    // Interactive notification permission & power walkthrough
@@ -96,6 +101,7 @@ fun OnboardingScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val accountStateViewModel: AccountStateViewModel = viewModel()
     val storageManager = remember(context) { RelayStorageManager(context) }
 
     // Restore persisted onboarding state if available
@@ -110,7 +116,7 @@ fun OnboardingScreen(
         // Only restore phases that can be meaningfully resumed (user was interacting).
         // Transient phases (LOADING, SEARCHING, SAVING, READY) restart from scratch
         // to avoid visible phase jumping on re-entry.
-        val restorable = setOf("REVIEW_OUTBOXES", "SELECT_INDEXERS", "NIP65_NOT_FOUND", "PREFETCHING_LISTS", "NOTIFICATION_SETUP")
+        val restorable = setOf("CONFIRM_RELAYS", "SELECT_INDEXERS", "NIP65_NOT_FOUND", "PREFETCHING_LISTS", "NOTIFICATION_SETUP")
         val initial = savedPhase?.takeIf { it in restorable }?.let {
             try {
                 OnboardingPhase.valueOf(it)
@@ -124,7 +130,7 @@ fun OnboardingScreen(
         mutableStateOf(
             when (phase) {
                 OnboardingPhase.SELECT_INDEXERS -> "Select your indexer relays"
-                OnboardingPhase.REVIEW_OUTBOXES -> "Review your relay configuration"
+                OnboardingPhase.CONFIRM_RELAYS -> "Confirm your relay configuration"
                 OnboardingPhase.PREFETCHING_LISTS -> "Downloading your lists…"
                 OnboardingPhase.NOTIFICATION_SETUP -> "Configure notifications for the best experience"
                 OnboardingPhase.CHOOSE_MODE -> "Welcome to Mycelium"
@@ -207,13 +213,9 @@ fun OnboardingScreen(
             chosenResult = best
             val statuses = Nip65RelayListRepository.multiSourceStatuses.value
             val successCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
-            // Restore to REVIEW_OUTBOXES if that's where the user was (e.g. back from relay manager)
-            if (savedPhase == "REVIEW_OUTBOXES") {
-                val uniqueTimestamps = cachedResults.map { it.createdAt }.distinct()
-                statusText = if (uniqueTimestamps.size > 1)
-                    "Found ${cachedResults.size} sources — review your relay configuration"
-                else "Found your relay configuration"
-                phase = OnboardingPhase.REVIEW_OUTBOXES
+            if (savedPhase == "CONFIRM_RELAYS") {
+                statusText = "Found your relay configuration"
+                phase = OnboardingPhase.CONFIRM_RELAYS
             } else {
                 statusText = "Search complete — $successCount responded"
                 phase = OnboardingPhase.SEARCHING_NIP65
@@ -273,7 +275,7 @@ fun OnboardingScreen(
 
     // ── Start NIP-65 search with selected indexers ──
     val searchScope = rememberCoroutineScope()
-    fun startNip65Search(indexerUrls: List<String>, timeoutMs: Long = 3_000L) {
+    fun startNip65Search(indexerUrls: List<String>, timeoutMs: Long = 5_000L) {
         if (indexerUrls.isEmpty()) {
             phase = OnboardingPhase.NIP65_NOT_FOUND
             statusText = "No indexers selected"
@@ -282,7 +284,7 @@ fun OnboardingScreen(
 
         // Persist selected indexers to relay manager immediately so they
         // appear in the relay manager even before the search finishes.
-        val newIndexerRelays = indexerUrls.map { UserRelay(url = it, read = true, write = false) }
+        val newIndexerRelays = indexerUrls.map { UserRelay(url = it, read = true, write = false, source = RelaySource.NIP66_DISCOVERY) }
         val existingIndexers = storageManager.loadIndexerRelays(hexPubkey)
         val existingUrls = existingIndexers.map { it.url.trim().removeSuffix("/").lowercase() }.toSet()
         val toAdd = newIndexerRelays.filter { it.url.trim().removeSuffix("/").lowercase() !in existingUrls }
@@ -298,11 +300,8 @@ fun OnboardingScreen(
             try {
                 Nip65RelayListRepository.fetchRelayListMultiSource(hexPubkey, indexerUrls, timeoutMs)
 
-                // Wait for multi-source search to complete. With early completion
-                // (3+ results → done) and 3s per-indexer timeout, this typically
-                // finishes in under 5s. Cap at 30s as a safety net.
                 var waited = 0L
-                while (!Nip65RelayListRepository.multiSourceDone.value && waited < 30_000L) {
+                while (!Nip65RelayListRepository.multiSourceDone.value && waited < 20_000L) {
                     delay(500)
                     waited += 500
                 }
@@ -321,6 +320,29 @@ fun OnboardingScreen(
                     val best = results.maxByOrNull { it.createdAt }!!
                     chosenResult = best
                     statusText = "Search complete — $successCount responded"
+                } else if (failCount > 0 && successCount < 3) {
+                    // Auto-retry failed/timed-out indexers once — cold WebSocket
+                    // connections often fail on first attempt
+                    statusText = "Retrying $failCount failed relays…"
+                    delay(500)
+                    Nip65RelayListRepository.rePingAllFailed()
+
+                    var retryWaited = 0L
+                    while (!Nip65RelayListRepository.multiSourceDone.value && retryWaited < 15_000L) {
+                        delay(500)
+                        retryWaited += 500
+                    }
+                    val retryResults = Nip65RelayListRepository.multiSourceResults.value
+                    val retryStatuses = Nip65RelayListRepository.multiSourceStatuses.value
+                    val retrySuccessCount = retryStatuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
+                    Log.d("OnboardingScreen", "Auto-retry: $retrySuccessCount success after retry")
+                    if (retryResults.isNotEmpty()) {
+                        val best = retryResults.maxByOrNull { it.createdAt }!!
+                        chosenResult = best
+                        statusText = "Search complete — $retrySuccessCount responded (after retry)"
+                    } else {
+                        statusText = "No relay configuration found"
+                    }
                 } else {
                     statusText = "No relay configuration found"
                 }
@@ -353,7 +375,7 @@ fun OnboardingScreen(
             // Wait for NIP-66 data — but only briefly. It's already fetching from
             // MainActivity.onCreate(). Most fetches complete in <2s from disk cache.
             var waited = 0L
-            val maxWait = 6_000L
+            val maxWait = 5_000L
             while (waited < maxWait) {
                 val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
                 val hasIndexers = discovered.values.any { it.isSearch }
@@ -399,26 +421,19 @@ fun OnboardingScreen(
                 "Auto-search: selected ${autoSelected.size} indexers (${anchorIndexers.size} anchors + ${nip66Extras.size} NIP-66)"
             )
 
-            // Immediately start the NIP-65 multi-source search with 5s timeout
-            // (cold WebSocket connections to new relays need more than 3s for
-            // DNS + TCP + TLS + WS upgrade + REQ + response)
             withContext(Dispatchers.Main) {
-                startNip65Search(autoSelected, timeoutMs = 5_000L)
+                startNip65Search(autoSelected, timeoutMs = 6_000L)
             }
         }
     }
 
-    // Helper to proceed from search results to review or not-found
     fun proceedFromSearch() {
         val results = Nip65RelayListRepository.multiSourceResults.value
         if (results.isNotEmpty()) {
             val best = results.maxByOrNull { it.createdAt }!!
             chosenResult = best
-            val uniqueTimestamps = results.map { it.createdAt }.distinct()
-            statusText = if (uniqueTimestamps.size > 1)
-                "Found ${results.size} sources — review your relay configuration"
-            else "Found your relay configuration"
-            phase = OnboardingPhase.REVIEW_OUTBOXES
+            statusText = "Found your relay configuration"
+            phase = OnboardingPhase.CONFIRM_RELAYS
         } else {
             phase = OnboardingPhase.NIP65_NOT_FOUND
             statusText = "No relay configuration found"
@@ -461,23 +476,48 @@ fun OnboardingScreen(
             // merge rather than replace.
             Nip65RelayListRepository.applyMultiSourceResult(result)
 
+            // ── Liveness filter: purge dead relays before saving ──
+            // Cross-reference NIP-66 monitor data to exclude relays that haven't been
+            // seen alive in 7+ days. This is the primary defense against "ghost" relays
+            // like tekkadan.mycelium.social that are permanently offline but still
+            // appear in older kind-10002 events.
+            val nip66Relays = Nip66RelayDiscoveryRepository.discoveredRelays.value
+            val sevenDaysAgoSecs = (System.currentTimeMillis() / 1000) - (7 * 24 * 60 * 60)
+            fun isRelayAlive(url: String): Boolean {
+                if (social.mycelium.android.relay.RelayHealthTracker.isBlocked(url)) return false
+                val normalized = url.trim().removeSuffix("/").lowercase()
+                val discovered = nip66Relays[normalized]
+                // If NIP-66 has no data for a relay, give it the benefit of the doubt
+                // (it might be a private relay not tracked by monitors)
+                if (discovered == null) return true
+                return discovered.lastSeen >= sevenDaysAgoSecs
+            }
+
+            val liveWriteRelays = result.writeRelays.filter { isRelayAlive(it) }
+            val liveReadRelays = result.readRelays.filter { isRelayAlive(it) }
+            val prunedWrite = result.writeRelays.size - liveWriteRelays.size
+            val prunedRead = result.readRelays.size - liveReadRelays.size
+            if (prunedWrite > 0 || prunedRead > 0) {
+                val dead = (result.writeRelays + result.readRelays).filter { !isRelayAlive(it) }.distinct()
+                Log.d("OnboardingScreen", "Pruned $prunedWrite write + $prunedRead read dead relays: ${dead.joinToString()}")
+            }
+
             // REPLACE outbox/inbox storage entirely — do NOT merge. This ensures removed relays
             // are actually removed and no ghost connections are established.
-            val outboxRelays = result.writeRelays.map { UserRelay(url = it, read = false, write = true) }
-            val inboxRelays = result.readRelays.map { UserRelay(url = it, read = true, write = false) }
+            val outboxRelays = liveWriteRelays.map { UserRelay(url = it, read = false, write = true, source = RelaySource.NIP65_IMPORT) }
+            val inboxRelays = liveReadRelays.map { UserRelay(url = it, read = true, write = false, source = RelaySource.NIP65_IMPORT) }
             storageManager.saveOutboxRelays(hexPubkey, outboxRelays)
             storageManager.saveInboxRelays(hexPubkey, inboxRelays)
 
-            // Populate Home relays category for feed subscription
-            val allNip65Urls = (result.writeRelays + result.readRelays).distinct()
-            val categoryRelays = allNip65Urls.map { UserRelay(url = it, read = true, write = true) }
+            // Populate Home relays category for feed subscription.
+            // REPLACE the relay list entirely — not merge — so relays removed from the
+            // user's NIP-65 event are pruned here too and never flow into persistentUrls.
+            val allNip65Urls = (liveWriteRelays + liveReadRelays).distinct()
+            val categoryRelays = allNip65Urls.map { UserRelay(url = it, read = true, write = true, source = RelaySource.NIP65_IMPORT) }
             val existingCategories = storageManager.loadCategories(hexPubkey)
-            val defaultCat = existingCategories.firstOrNull { it.id == "default_my_relays" }
-            val updatedCategories = if (defaultCat != null) {
-                val existingUrls = defaultCat.relays.map { it.url }.toSet()
-                val newRelays = categoryRelays.filter { it.url !in existingUrls }
+            val updatedCategories = if (existingCategories.any { it.id == "default_my_relays" }) {
                 existingCategories.map { cat ->
-                    if (cat.id == "default_my_relays") cat.copy(relays = cat.relays + newRelays, isSubscribed = true)
+                    if (cat.id == "default_my_relays") cat.copy(relays = categoryRelays, isSubscribed = true)
                     else cat
                 }
             } else {
@@ -491,7 +531,7 @@ fun OnboardingScreen(
                 existingCategories + newCat
             }
             storageManager.saveCategories(hexPubkey, updatedCategories)
-            Log.d("OnboardingScreen", "Saved ${categoryRelays.size} relays to Home category")
+            Log.d("OnboardingScreen", "Replaced Home relays category with ${categoryRelays.size} NIP-65 relays")
 
             // Clean up: remove outbox/inbox relay URLs from the Indexer list.
             // These were seeded during auto-search as anchor indexers but if they
@@ -554,6 +594,53 @@ fun OnboardingScreen(
                 Log.e("OnboardingScreen", "Failed to fetch existing lists: ${e.message}")
             }
 
+            // Kind-30078 (NIP-78): apply synced feed settings from outbox before indexer UI / dashboard.
+            try {
+                val signer = accountStateViewModel.getCurrentSigner()
+                val writeUrls = result.writeRelays
+                    .map { it.trim().removeSuffix("/") }
+                    .distinct()
+                    .filter { it.startsWith("ws://") || it.startsWith("wss://") }
+                    .take(8)
+                if (signer != null && writeUrls.isNotEmpty()) {
+                    val settingsFilter = com.example.cybin.core.Filter(
+                        kinds = listOf(30078),
+                        authors = listOf(hexPubkey),
+                        tags = mapOf("d" to listOf("MyceliumSettings")),
+                        limit = 1
+                    )
+                    var latestSettingsEvent: com.example.cybin.core.Event? = null
+                    RelayConnectionStateMachine.getInstance().awaitOneShotSubscription(
+                        writeUrls,
+                        settingsFilter,
+                        priority = com.example.cybin.relay.SubscriptionPriority.CRITICAL,
+                        settleMs = 800L,
+                        maxWaitMs = 6_000L
+                    ) { event ->
+                        if (latestSettingsEvent == null || event.createdAt > (latestSettingsEvent?.createdAt ?: 0)) {
+                            latestSettingsEvent = event
+                        }
+                    }
+                    val settingsEv = latestSettingsEvent
+                    if (settingsEv != null) {
+                        val plaintext = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
+                            signer.nip44DecryptBackgroundOnly(settingsEv.content, hexPubkey)
+                                ?: signer.nip44Decrypt(settingsEv.content, hexPubkey)
+                        } else {
+                            signer.nip44Decrypt(settingsEv.content, hexPubkey)
+                        }
+                        val remote = social.mycelium.android.data.SyncedSettings.fromJson(plaintext)
+                        SettingsSyncManager.applyRemoteSettings(remote)
+                        Log.d("OnboardingScreen", "Applied kind-30078 (compactMedia=${remote.compactMedia})")
+                        withContext(Dispatchers.Main) {
+                            accountStateViewModel.markSettingsApplied(hexPubkey)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("OnboardingScreen", "Kind-30078 during saveRelayConfig: ${e.message}")
+            }
+
             withContext(Dispatchers.Main) {
                 val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
                 val indexers = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry)
@@ -563,26 +650,35 @@ fun OnboardingScreen(
                     .map { it.url.trim().removeSuffix("/").lowercase() }.toSet()
 
                 if (fetchedIndexerUrls != null && fetchedIndexerUrls!!.isNotEmpty()) {
-                    selectedIndexerUrls = fetchedIndexerUrls!!
+                    // User already has a published indexer list — save it directly and skip
+                    // the SELECT_INDEXERS step entirely to avoid a redundant confirmation screen.
+                    val filteredUrls = fetchedIndexerUrls!!
                         .filter { it.trim().removeSuffix("/").lowercase() !in outboxes }
                         .toSet()
-                    indexerSourceIsPublished = true
-                    statusText = "Your published indexer list"
+                    val newIndexerRelays = filteredUrls.map { url ->
+                        UserRelay(url = url, read = true, write = false, source = RelaySource.NIP66_DISCOVERY)
+                    }
+                    withContext(Dispatchers.IO) {
+                        storageManager.saveIndexerRelays(hexPubkey, newIndexerRelays)
+                    }
+                    Log.d("OnboardingScreen", "Auto-saved ${newIndexerRelays.size} published indexer relays — skipping SELECT_INDEXERS")
+                    statusText = "Downloading your lists\u2026"
+                    phase = OnboardingPhase.PREFETCHING_LISTS
                 } else if (selectedIndexerUrls.isEmpty()) {
                     selectedIndexerUrls = indexers.map { it.url }
                         .filter { it.trim().removeSuffix("/").lowercase() !in outboxes }
                         .take(5).toSet()
                     indexerSourceIsPublished = false
                     statusText = "Select your indexer relays"
+                    phase = OnboardingPhase.SELECT_INDEXERS
                 } else {
                     selectedIndexerUrls = selectedIndexerUrls
                         .filter { it.trim().removeSuffix("/").lowercase() !in outboxes }
                         .toSet()
                     indexerSourceIsPublished = false
                     statusText = "Select your indexer relays"
+                    phase = OnboardingPhase.SELECT_INDEXERS
                 }
-
-                phase = OnboardingPhase.SELECT_INDEXERS
             }
         }
     }
@@ -608,7 +704,7 @@ fun OnboardingScreen(
     )
     val phaseColor = when (phase) {
         OnboardingPhase.CHOOSE_MODE -> MaterialTheme.colorScheme.primary
-        OnboardingPhase.REVIEW_OUTBOXES -> MaterialTheme.colorScheme.primary
+        OnboardingPhase.CONFIRM_RELAYS -> MaterialTheme.colorScheme.primary
         OnboardingPhase.SELECT_INDEXERS -> MaterialTheme.colorScheme.primary
         OnboardingPhase.NOTIFICATION_SETUP -> MaterialTheme.colorScheme.primary
         OnboardingPhase.READY -> Color(0xFF4CAF50)
@@ -619,7 +715,7 @@ fun OnboardingScreen(
         else -> MaterialTheme.colorScheme.primary
     }
     val scrollablePhases =
-        phase == OnboardingPhase.REVIEW_OUTBOXES || phase == OnboardingPhase.SELECT_INDEXERS || phase == OnboardingPhase.SEARCHING_NIP65 || phase == OnboardingPhase.PREFETCHING_LISTS || phase == OnboardingPhase.NOTIFICATION_SETUP
+        phase == OnboardingPhase.CONFIRM_RELAYS || phase == OnboardingPhase.SELECT_INDEXERS || phase == OnboardingPhase.SEARCHING_NIP65
 
     // ── UI ──
     Scaffold(
@@ -648,7 +744,7 @@ fun OnboardingScreen(
                     OnboardingPhase.CHOOSE_MODE -> Icons.Outlined.Hub
                     OnboardingPhase.LOADING_INDEXERS -> Icons.Outlined.Radar
                     OnboardingPhase.SEARCHING_NIP65 -> Icons.Outlined.Search
-                    OnboardingPhase.REVIEW_OUTBOXES -> Icons.Outlined.Hub
+                    OnboardingPhase.CONFIRM_RELAYS -> Icons.Outlined.Hub
                     OnboardingPhase.SELECT_INDEXERS -> Icons.Outlined.Checklist
                     OnboardingPhase.PREFETCHING_LISTS -> Icons.Outlined.CloudDownload
                     OnboardingPhase.NOTIFICATION_SETUP -> Icons.Outlined.Notifications
@@ -685,7 +781,7 @@ fun OnboardingScreen(
                     OnboardingPhase.CHOOSE_MODE -> "Set Up Relays"
                     OnboardingPhase.LOADING_INDEXERS -> "Preparing"
                     OnboardingPhase.SEARCHING_NIP65 -> "Searching Relays"
-                    OnboardingPhase.REVIEW_OUTBOXES -> "Review Your Relays"
+                    OnboardingPhase.CONFIRM_RELAYS -> "Confirm Your Relays"
                     OnboardingPhase.SELECT_INDEXERS -> "Select Indexers"
                     OnboardingPhase.PREFETCHING_LISTS -> "Downloading Lists"
                     OnboardingPhase.NOTIFICATION_SETUP -> "Notifications"
@@ -908,10 +1004,9 @@ fun OnboardingScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         textAlign = TextAlign.Center
                                     )
-                                    // Allow bailing out after 3 seconds
                                     var showSkip by remember { mutableStateOf(false) }
                                     LaunchedEffect(Unit) {
-                                        delay(3000)
+                                        delay(5000)
                                         showSkip = true
                                     }
                                     AnimatedVisibility(visible = showSkip) {
@@ -951,27 +1046,13 @@ fun OnboardingScreen(
                                 )
                             }
 
-                            OnboardingPhase.REVIEW_OUTBOXES -> {
-                                val multiSourceResults by Nip65RelayListRepository.multiSourceResults.collectAsState()
-                                val nip66Relays by Nip66RelayDiscoveryRepository.discoveredRelays.collectAsState()
+                            OnboardingPhase.CONFIRM_RELAYS -> {
                                 val result = chosenResult
                                 if (result != null) {
-                                    RelayReviewCard(
+                                    RelayConfirmCard(
                                         result = result,
-                                        allResults = multiSourceResults,
-                                        nip66Relays = nip66Relays,
-                                        onConfirm = { selectedResult ->
-                                            saveRelayConfig(selectedResult)
-                                        },
-                                        onEdit = { selectedResult ->
-                                            onOpenRelayManager(selectedResult.writeRelays, selectedResult.readRelays)
-                                        },
-                                        onUpdateOutdated = { correctResult, outdatedUrls ->
-                                            Nip65RelayListRepository.publishToOutdatedRelays(
-                                                correctResult,
-                                                outdatedUrls
-                                            )
-                                        }
+                                        onConfirm = { saveRelayConfig(result) },
+                                        onEdit = { onOpenRelayManager(result.writeRelays, result.readRelays) }
                                     )
                                 }
                             }
@@ -993,7 +1074,7 @@ fun OnboardingScreen(
                                     onSelectionChanged = { latestSelectionRef.value = it },
                                     onConfirm = { urls ->
                                         selectedIndexerUrls = urls
-                                        val newIndexerRelays = urls.map { UserRelay(url = it, read = true, write = false) }
+                                        val newIndexerRelays = urls.map { UserRelay(url = it, read = true, write = false, source = RelaySource.NIP66_DISCOVERY) }
                                         val existingIndexers = storageManager.loadIndexerRelays(hexPubkey)
                                         val existingUrls = existingIndexers.map { it.url.trim().removeSuffix("/").lowercase() }.toSet()
                                         val toAdd = newIndexerRelays.filter { it.url.trim().removeSuffix("/").lowercase() !in existingUrls }
@@ -1150,8 +1231,8 @@ private fun IndexerSelectionCard(
         mutableStateOf(initialSelectedUrls.isNotEmpty() && topUrls.isNotEmpty() && initialSelectedUrls.none { it in topUrls })
     }
 
-    // Visible recommended group: hide if user cleared defaults
-    val visibleTopGroup = if (defaultsCleared) emptyList() else topGroup
+    // Visible recommended group: hide if user cleared defaults or is from published list
+    val visibleTopGroup = if (defaultsCleared || isFromPublishedList) emptyList() else topGroup
 
     // Your Picks: selected URLs that aren't in the visible top group
     val visibleTopUrls = remember(visibleTopGroup) { visibleTopGroup.map { it.url }.toSet() }
@@ -2006,297 +2087,43 @@ private fun IndexerStatusRow(
     }
 }
 
-// ── Relay Review Card — shows ALL returned events grouped by created_at ──
-// Groups results by event timestamp. Each group shows which indexers returned
-// that version, the relay list, and diffs vs the latest version. Outlier
-// groups (old events from few indexers) are flagged.
-// Buttons are placed ABOVE the relay list so the user doesn't have to scroll.
-
 @Composable
-private fun RelayReviewCard(
+private fun RelayConfirmCard(
     result: Nip65RelayListRepository.Nip65SourceResult,
-    allResults: List<Nip65RelayListRepository.Nip65SourceResult>,
-    nip66Relays: Map<String, DiscoveredRelay>,
-    onConfirm: (Nip65RelayListRepository.Nip65SourceResult) -> Unit,
-    onEdit: (Nip65RelayListRepository.Nip65SourceResult) -> Unit,
-    onUpdateOutdated: (Nip65RelayListRepository.Nip65SourceResult, List<String>) -> Map<String, Boolean> = { _, _ -> emptyMap() }
+    onConfirm: () -> Unit,
+    onEdit: () -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("MMM d, yyyy h:mm a", Locale.getDefault()) }
-
-    // Group results by created_at timestamp, sorted newest first
-    val groupedByTimestamp = remember(allResults) {
-        allResults.groupBy { it.createdAt }
-            .entries
-            .sortedByDescending { it.key }
+    val writeSet = result.writeRelays.toSet()
+    val readSet = result.readRelays.toSet()
+    val allRelays = result.allRelays.distinct().map { url ->
+        Triple(url, url in writeSet, url in readSet)
     }
-    val latestGroup = groupedByTimestamp.firstOrNull()
-    val latestRelaySet = remember(latestGroup) {
-        latestGroup?.value?.firstOrNull()?.allRelays?.toSet() ?: emptySet()
-    }
-
-    // Track which group the user wants to use (default: latest)
-    var selectedTimestamp by remember(result) { mutableStateOf(result.createdAt) }
-
-    // The result the user has selected
-    val selectedResult = remember(selectedTimestamp, allResults) {
-        allResults.firstOrNull { it.createdAt == selectedTimestamp } ?: result
-    }
-    val selectedRelays = remember(selectedResult) {
-        val writeSet = selectedResult.writeRelays.toSet()
-        val readSet = selectedResult.readRelays.toSet()
-        selectedResult.allRelays.distinct().map { url ->
-            Triple(url, url in writeSet, url in readSet)
-        }
-    }
-
-    // Per-relay update status tracking: url → true (success) / false (fail)
-    var updateResults by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
-    var isUpdating by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-
-    // Only allow updating when the selected version is the LATEST (newest created_at).
-    // This prevents accidentally pushing older NIP-65 events to the network.
-    val isLatestSelected = selectedTimestamp == groupedByTimestamp.firstOrNull()?.key
-    val outdatedForSelected = remember(groupedByTimestamp, selectedTimestamp, isLatestSelected) {
-        if (!isLatestSelected) emptyList()
-        else groupedByTimestamp
-            .filter { it.key != selectedTimestamp }
-            .flatMap { (_, results) -> results.map { it.indexerUrl } }
-    }
-    // Only allow update if we have the raw signed event AND selected version is latest
-    val canUpdate = isLatestSelected && outdatedForSelected.isNotEmpty() && selectedResult.rawEvent != null
-    // Filter out already-successfully-updated relays
-    val pendingOutdated = remember(outdatedForSelected, updateResults) {
-        outdatedForSelected.filter { url -> updateResults[url] != true }
-    }
+    val maxVisible = 8
+    var showAll by remember { mutableStateOf(false) }
+    val visible = if (showAll) allRelays else allRelays.take(maxVisible)
 
     Column(modifier = Modifier.fillMaxWidth()) {
-
-        // ═══ EVENT VERSION GROUPS (only if multiple versions) ═══
-        if (groupedByTimestamp.size > 1) {
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        "${groupedByTimestamp.size} event versions found",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "Indexers returned different versions of your relay list. " +
-                                "Tap a version to review it.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 10.sp
-                    )
-
-                    Spacer(Modifier.height(10.dp))
-
-                    groupedByTimestamp.forEachIndexed { idx, (timestamp, results) ->
-                        val isLatest = idx == 0
-                        val isSelected = timestamp == selectedTimestamp
-                        val indexerCount = results.size
-                        val relayCount = results.first().rTagCount
-                        val relaySet = results.first().allRelays.toSet()
-
-                        // Compute diff vs latest
-                        val added = if (!isLatest) relaySet - latestRelaySet else emptySet()
-                        val removed = if (!isLatest) latestRelaySet - relaySet else emptySet()
-                        val isOutlier = !isLatest && indexerCount == 1 && groupedByTimestamp.first().value.size > 1
-
-                        // Per-relay update status for this group's indexers
-                        val groupIndexerUrls = results.map { it.indexerUrl }
-                        val groupUpdatedOk = groupIndexerUrls.count { updateResults[it] == true }
-                        val groupUpdatedFail = groupIndexerUrls.count { updateResults[it] == false }
-
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
-                            else MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f),
-                            border = if (isSelected) androidx.compose.foundation.BorderStroke(
-                                1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                            ) else null,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 3.dp)
-                                .clickable { selectedTimestamp = timestamp }
-                        ) {
-                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (isSelected) {
-                                        Icon(
-                                            Icons.Filled.RadioButtonChecked, null, Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    } else {
-                                        Icon(
-                                            Icons.Filled.RadioButtonUnchecked, null, Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                                        )
-                                    }
-                                    Spacer(Modifier.width(8.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = dateFormat.format(Date(timestamp * 1000)),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            fontWeight = if (isLatest) FontWeight.SemiBold else FontWeight.Normal,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                        Text(
-                                            text = "$indexerCount indexer${if (indexerCount != 1) "s" else ""} · $relayCount relays",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            fontSize = 10.sp
-                                        )
-                                    }
-                                    if (isLatest) {
-                                        Surface(
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = Color(0xFF4CAF50).copy(alpha = 0.15f)
-                                        ) {
-                                            Text(
-                                                "latest", style = MaterialTheme.typography.labelSmall,
-                                                color = Color(0xFF4CAF50), fontSize = 9.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                            )
-                                        }
-                                    }
-                                    if (isOutlier) {
-                                        Spacer(Modifier.width(4.dp))
-                                        Surface(
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
-                                        ) {
-                                            Text(
-                                                "outlier", style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.error, fontSize = 9.sp,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // Diff summary for non-latest groups
-                                if (!isLatest && (added.isNotEmpty() || removed.isNotEmpty())) {
-                                    Spacer(Modifier.height(4.dp))
-                                    Row {
-                                        if (removed.isNotEmpty()) {
-                                            Text(
-                                                "−${removed.size} missing",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.error,
-                                                fontSize = 9.sp
-                                            )
-                                        }
-                                        if (removed.isNotEmpty() && added.isNotEmpty()) {
-                                            Spacer(Modifier.width(8.dp))
-                                        }
-                                        if (added.isNotEmpty()) {
-                                            Text(
-                                                "+${added.size} extra",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = Color(0xFF4CAF50),
-                                                fontSize = 9.sp
-                                            )
-                                        }
-                                    }
-                                }
-
-                                // Per-indexer rows with update status indicators
-                                results.forEach { r ->
-                                    val urlShort = r.indexerUrl.removePrefix("wss://").removeSuffix("/")
-                                    val status = updateResults[r.indexerUrl]
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        when (status) {
-                                            true -> Icon(
-                                                Icons.Filled.CheckCircle, null, Modifier.size(10.dp),
-                                                tint = Color(0xFF4CAF50)
-                                            )
-
-                                            false -> Icon(
-                                                Icons.Filled.Error, null, Modifier.size(10.dp),
-                                                tint = MaterialTheme.colorScheme.error
-                                            )
-
-                                            null -> Spacer(Modifier.width(10.dp))
-                                        }
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            text = "↳ $urlShort",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = when (status) {
-                                                true -> Color(0xFF4CAF50).copy(alpha = 0.7f)
-                                                false -> MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
-                                                null -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                                            },
-                                            fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                }
-
-                                // Per-group update status summary
-                                if (groupUpdatedOk > 0 || groupUpdatedFail > 0) {
-                                    Spacer(Modifier.height(2.dp))
-                                    Text(
-                                        text = buildString {
-                                            if (groupUpdatedOk > 0) append("$groupUpdatedOk updated")
-                                            if (groupUpdatedOk > 0 && groupUpdatedFail > 0) append(" · ")
-                                            if (groupUpdatedFail > 0) append("$groupUpdatedFail failed")
-                                        },
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (groupUpdatedFail > 0) MaterialTheme.colorScheme.error
-                                        else Color(0xFF4CAF50),
-                                        fontSize = 9.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(12.dp))
-        }
-
-        // ═══ SELECTED VERSION RELAY LIST (capped for performance) ═══
-        val maxVisibleRelays = 8
-        var showAllRelays by remember { mutableStateOf(false) }
-        val visibleRelays = if (showAllRelays) selectedRelays else selectedRelays.take(maxVisibleRelays)
-        val hasMore = selectedRelays.size > maxVisibleRelays && !showAllRelays
-
         Surface(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
-                // Summary row
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Outlined.Hub, null, Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Icon(Icons.Outlined.Hub, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.width(8.dp))
                     Text(
-                        "${selectedRelays.size} relay${if (selectedRelays.size != 1) "s" else ""}",
+                        "${allRelays.size} relay${if (allRelays.size != 1) "s" else ""} found",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.weight(1f)
                     )
-                    if (selectedResult.writeRelays.isNotEmpty()) {
-                        RelayBadge(
-                            "${selectedResult.writeRelays.size}",
-                            Icons.Outlined.Upload,
-                            MaterialTheme.colorScheme.primary
-                        )
+                    if (result.writeRelays.isNotEmpty()) {
+                        RelayBadge("${result.writeRelays.size}", Icons.Outlined.Upload, MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(6.dp))
                     }
-                    if (selectedResult.readRelays.isNotEmpty()) {
-                        RelayBadge("${selectedResult.readRelays.size}", Icons.Outlined.Download, Color(0xFF4CAF50))
+                    if (result.readRelays.isNotEmpty()) {
+                        RelayBadge("${result.readRelays.size}", Icons.Outlined.Download, Color(0xFF4CAF50))
                     }
                 }
 
@@ -2304,40 +2131,20 @@ private fun RelayReviewCard(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
                 Spacer(Modifier.height(8.dp))
 
-                // Relay URL list with NIP-66 enrichment (capped)
-                visibleRelays.forEach { (url, isWrite, isRead) ->
-                    val nip66 = nip66Relays[url.trim().removeSuffix("/").lowercase()]
+                visible.forEach { (url, isWrite, isRead) ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
                     ) {
                         Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF4CAF50)))
                         Spacer(Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis
-                            )
-                            if (nip66 != null) {
-                                val meta = buildList {
-                                    nip66.name?.let { add(it) }
-                                    nip66.countryCode?.let { add(countryCodeToFlag(it)) }
-                                    if (nip66.paymentRequired) add("💳 Paid")
-                                    if (nip66.authRequired) add("🔒 Auth")
-                                    nip66.avgRttRead?.let { add("${it}ms") }
-                                }
-                                if (meta.isNotEmpty()) {
-                                    Text(
-                                        text = meta.joinToString(" · "),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                        fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                            }
-                        }
+                        Text(
+                            text = url.removePrefix("wss://").removePrefix("ws://").removeSuffix("/"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
                         Spacer(Modifier.width(6.dp))
                         val label = if (isWrite && isRead) "r/w" else if (isWrite) "write" else "read"
                         val labelColor =
@@ -2348,60 +2155,25 @@ private fun RelayReviewCard(
                     }
                 }
 
-                // "Show all" button if list is capped
-                if (hasMore) {
+                if (!showAll && allRelays.size > maxVisible) {
                     Spacer(Modifier.height(4.dp))
-                    TextButton(
-                        onClick = { showAllRelays = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            "Show all ${selectedRelays.size} relays",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                    TextButton(onClick = { showAll = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Show all ${allRelays.size} relays", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
 
-                // Source info
-                Spacer(Modifier.height(8.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
-                Spacer(Modifier.height(6.dp))
-
-                val dateStr = if (selectedResult.createdAt > 0)
-                    dateFormat.format(Date(selectedResult.createdAt * 1000)) else null
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Outlined.Info, null, Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Column {
-                        if (dateStr != null) {
-                            Text(
-                                "Published $dateStr",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                            )
-                        }
-                        val matchingIndexers = allResults.filter { it.createdAt == selectedTimestamp }
-                        Text(
-                            "${matchingIndexers.size} indexer${if (matchingIndexers.size != 1) "s" else ""} returned this version",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)
-                        )
-                    }
-                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "You can reconfigure your relays at any time in the Relay Manager.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                )
             }
         }
 
-        // ═══ ACTION BUTTONS — at bottom after reviewing relay list ═══
         Spacer(Modifier.height(16.dp))
 
-        Button(
-            onClick = { onConfirm(selectedResult) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        Button(onClick = onConfirm, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Outlined.CheckCircle, null, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("Confirm Relay Choices")
@@ -2409,72 +2181,10 @@ private fun RelayReviewCard(
 
         Spacer(Modifier.height(8.dp))
 
-        OutlinedButton(
-            onClick = { onEdit(selectedResult) },
-            modifier = Modifier.fillMaxWidth()
-        ) {
+        OutlinedButton(onClick = onEdit, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
             Text("Edit in Relay Manager")
-        }
-
-        if (canUpdate && pendingOutdated.isNotEmpty()) {
-            Spacer(Modifier.height(8.dp))
-
-            OutlinedButton(
-                onClick = {
-                    if (!isUpdating) {
-                        isUpdating = true
-                        scope.launch(Dispatchers.IO) {
-                            val results = onUpdateOutdated(selectedResult, pendingOutdated)
-                            withContext(Dispatchers.Main) {
-                                updateResults = updateResults + results
-                                isUpdating = false
-                            }
-                        }
-                    }
-                },
-                enabled = !isUpdating,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                if (isUpdating) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 1.5.dp)
-                } else {
-                    Icon(Icons.Outlined.Sync, null, Modifier.size(18.dp))
-                }
-                Spacer(Modifier.width(8.dp))
-                Text("Update ${pendingOutdated.size} outdated relays")
-            }
-
-            // Show update summary if any updates have been attempted
-            val updatedOk = updateResults.count { it.value }
-            val updatedFail = updateResults.count { !it.value }
-            if (updatedOk > 0 || updatedFail > 0) {
-                Spacer(Modifier.height(4.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    if (updatedOk > 0) {
-                        Icon(Icons.Filled.CheckCircle, null, Modifier.size(12.dp), tint = Color(0xFF4CAF50))
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            "$updatedOk updated", style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF4CAF50), fontSize = 10.sp
-                        )
-                    }
-                    if (updatedOk > 0 && updatedFail > 0) Spacer(Modifier.width(12.dp))
-                    if (updatedFail > 0) {
-                        Icon(Icons.Filled.Error, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.error)
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            "$updatedFail failed", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error, fontSize = 10.sp
-                        )
-                    }
-                }
-            }
         }
 
         Spacer(Modifier.height(24.dp))
@@ -2524,9 +2234,7 @@ private fun PrefetchingListsUI(
     onComplete: () -> Unit
 ) {
     val context = LocalContext.current
-    val accountStateViewModel: social.mycelium.android.viewmodel.AccountStateViewModel = androidx.lifecycle.viewmodel.compose.viewModel()
-    var isFetching by remember { mutableStateOf(true) }
-    var currentTask by remember { mutableStateOf("Starting...") }
+    var currentTask by remember { mutableStateOf("Connecting to relays…") }
 
     LaunchedEffect(Unit) {
         val storageManager = RelayStorageManager(context)
@@ -2536,7 +2244,7 @@ private fun PrefetchingListsUI(
         val categoryUrls = storageManager.loadCategories(hexPubkey).flatMap { it.relays }.map { it.url }
         val allUserRelayUrls = (allOutboxUrls + allInboxUrls + allIndexerUrls + categoryUrls).distinct()
 
-        val signer = accountStateViewModel.getCurrentSigner()
+
 
         // ── Step 1: Reconnect to relays ──
         // saveRelayConfig called requestDisconnect() above. We now have the correct relay
@@ -2546,9 +2254,10 @@ private fun PrefetchingListsUI(
             try {
                 val stateMachine = social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
                 stateMachine.requestConnect(allUserRelayUrls)
-                // Poll for at least 1 connection, up to 4s
+                // Poll for at least 1 connection, up to 6s (cold connections
+                // need time for DNS + TCP + TLS + WS upgrade)
                 var waitedMs = 0L
-                while (waitedMs < 4_000L) {
+                while (waitedMs < 6_000L) {
                     delay(250L)
                     waitedMs += 250L
                     if (stateMachine.relayPool.getConnectedCount() >= 1) break
@@ -2559,81 +2268,100 @@ private fun PrefetchingListsUI(
             }
         }
 
-        // ── Step 2: Follows & Mutes ──
-        // Fetch directly without StartupOrchestrator — the orchestrator will run
-        // its own Phase 1 when the dashboard loads. Running it here too caused a
-        // double Phase 1 (reset → run → reset → run) that re-triggered
-        // fetchIndexerList and silently replaced the user's confirmed indexers.
-        currentTask = "Fetching contacts & mutes\u2026"
         val followRelayUrls = (allIndexerUrls + allOutboxUrls).distinct()
-        withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                val followJob = kotlinx.coroutines.CoroutineScope(coroutineContext).launch {
-                    social.mycelium.android.repository.ContactListRepository.fetchFollowList(hexPubkey, followRelayUrls, forceRefresh = false)
+
+        // ── Steps 2-5: Run all list fetches in PARALLEL ──
+        // Previously these ran sequentially with hardcoded delays totalling 10+ seconds.
+        // Now they run concurrently — total wall-clock is the slowest individual step.
+        // Each repository method is already EOSE-aware internally.
+        currentTask = "Downloading your lists\u2026"
+        kotlinx.coroutines.coroutineScope {
+            // Step 2: Follow list + mute list (parallel within this step too)
+            launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    kotlinx.coroutines.coroutineScope {
+                        launch {
+                            social.mycelium.android.repository.ContactListRepository.fetchFollowList(
+                                hexPubkey, followRelayUrls, forceRefresh = false
+                            )
+                        }
+                        launch {
+                            social.mycelium.android.repository.MuteListRepository.fetchMuteList(
+                                hexPubkey, allUserRelayUrls
+                            )
+                        }
+                    }
+                    android.util.Log.d("PrefetchingListsUI", "Step 2 done: contacts & mutes")
+                } catch (e: Exception) {
+                    android.util.Log.e("PrefetchingListsUI", "Follow/mute fetch error: ${e.message}")
                 }
-                val muteJob = kotlinx.coroutines.CoroutineScope(coroutineContext).launch {
-                    social.mycelium.android.repository.MuteListRepository.fetchMuteList(hexPubkey, allUserRelayUrls)
+            }
+
+            // Step 3: Relay Collections (kind-30002)
+            // fetchRelaySets is EOSE-aware — no extra delay needed
+            launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    social.mycelium.android.repository.RelayCategorySyncRepository.fetchRelaySets(
+                        userPubkey = hexPubkey,
+                        relayUrls = (allOutboxUrls + allInboxUrls + allIndexerUrls).distinct(),
+                        context = context.applicationContext,
+                    )
+                    android.util.Log.d("PrefetchingListsUI", "Step 3 done: relay collections fetched")
+                } catch (e: Exception) {
+                    android.util.Log.e("PrefetchingListsUI", "Relay sets fetch error: ${e.message}")
                 }
-                val deadline = System.currentTimeMillis() + 6_000L
-                while (System.currentTimeMillis() < deadline) {
-                    if (followJob.isCompleted && muteJob.isCompleted) break
-                    delay(100)
+            }
+
+            // Step 4: Published Indexer List (kind-10086)
+            // Use forceReplace=true because the user just confirmed their indexers.
+            launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    social.mycelium.android.repository.RelayCategorySyncRepository.fetchIndexerList(
+                        userPubkey = hexPubkey,
+                        relayUrls = (allOutboxUrls + allIndexerUrls).distinct(),
+                        context = context.applicationContext,
+                        forceReplace = true,
+                    )
+                    android.util.Log.d("PrefetchingListsUI", "Step 4 done: indexer list fetched")
+                } catch (e: Exception) {
+                    android.util.Log.e("PrefetchingListsUI", "Indexer list fetch error: ${e.message}")
                 }
-            } catch (e: Exception) {
-                android.util.Log.e("PrefetchingListsUI", "Follow/mute fetch error: ${e.message}")
+            }
+
+            // Step 5: Bookmarks
+            launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(hexPubkey, allUserRelayUrls)
+                    android.util.Log.d("PrefetchingListsUI", "Step 5 done: bookmarks fetched")
+                } catch (e: Exception) {
+                    android.util.Log.e("PrefetchingListsUI", "Bookmarks fetch error: ${e.message}")
+                }
             }
         }
-        android.util.Log.d("PrefetchingListsUI", "Step 2 done: contacts & mutes")
 
-        // ── Step 3: Relay Collections (kind-30002) ──
-        currentTask = "Restoring relay collections\u2026"
+        // ── Step 6: Feed Prewarm ──
+        // Now that the follow list is loaded, preload 500 enriched notes into the
+        // Room event cache. When the dashboard opens, loadFeedCacheFromRoom() finds
+        // these events and renders the feed instantly — no relay round-trip needed.
+        // This fires AFTER steps 2-5 so the follow list filter is accurate.
+        currentTask = "Pre-loading your feed\u2026"
         withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                social.mycelium.android.repository.RelayCategorySyncRepository.fetchRelaySets(
-                    userPubkey = hexPubkey,
-                    relayUrls = (allOutboxUrls + allInboxUrls + allIndexerUrls).distinct(),
-                    context = context.applicationContext,
+                val notesRepo = social.mycelium.android.repository.NotesRepository.getInstance()
+                val followedPubkeys = social.mycelium.android.repository.ContactListRepository
+                    .getCachedFollowList(hexPubkey) ?: emptySet()
+                notesRepo.prewarmFeedCache(
+                    relayUrls = allUserRelayUrls,
+                    followedPubkeys = followedPubkeys,
+                    indexerUrls = allIndexerUrls,
+                    limit = 500
                 )
-                delay(5_000L)
-                android.util.Log.d("PrefetchingListsUI", "Step 3 done: relay collections fetched")
+                android.util.Log.d("PrefetchingListsUI", "Step 6 done: feed prewarm complete")
             } catch (e: Exception) {
-                android.util.Log.e("PrefetchingListsUI", "Relay sets fetch error: ${e.message}")
+                android.util.Log.e("PrefetchingListsUI", "Feed prewarm error: ${e.message}")
             }
         }
 
-        // ── Step 4: Published Indexer List (kind-10086) ──
-        // Use forceReplace=true here because the user will have JUST confirmed
-        // their indexers in SELECT_INDEXERS. If a published 10086 exists, it should
-        // be applied (the user can re-confirm on next startup via the diff banner).
-        currentTask = "Restoring indexer list\u2026"
-        withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                social.mycelium.android.repository.RelayCategorySyncRepository.fetchIndexerList(
-                    userPubkey = hexPubkey,
-                    relayUrls = (allOutboxUrls + allIndexerUrls).distinct(),
-                    context = context.applicationContext,
-                    forceReplace = true,
-                )
-                delay(3_000L)
-                android.util.Log.d("PrefetchingListsUI", "Step 4 done: indexer list fetched")
-            } catch (e: Exception) {
-                android.util.Log.e("PrefetchingListsUI", "Indexer list fetch error: ${e.message}")
-            }
-        }
-
-        // ── Step 5: Bookmarks ──
-        currentTask = "Fetching bookmarks\u2026"
-        withContext(kotlinx.coroutines.Dispatchers.IO) {
-            try {
-                social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(hexPubkey, allUserRelayUrls)
-                delay(2_000L)
-                android.util.Log.d("PrefetchingListsUI", "Step 5 done: bookmarks fetched")
-            } catch (e: Exception) {
-                android.util.Log.e("PrefetchingListsUI", "Bookmarks fetch error: ${e.message}")
-            }
-        }
-
-        isFetching = false
         onComplete()
     }
 
@@ -2727,7 +2455,9 @@ private fun NotificationSetupUI(
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
     ) {
         Text(
             text = "Mycelium needs a few permissions to deliver notifications reliably. " +

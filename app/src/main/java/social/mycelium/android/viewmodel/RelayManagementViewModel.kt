@@ -12,6 +12,9 @@ import social.mycelium.android.data.DefaultRelayCategories
 import social.mycelium.android.data.DefaultRelayProfiles
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.relay.RelayConnectionStateMachine
+import social.mycelium.android.relay.RelayHealthInfo
+import social.mycelium.android.relay.RelayHealthTracker
+import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.repository.RelayRepository
 import social.mycelium.android.repository.RelayStorageManager
 import kotlinx.coroutines.Dispatchers
@@ -20,7 +23,6 @@ import kotlinx.coroutines.launch
 
 data class RelayManagementUiState(
     val relays: List<UserRelay> = emptyList(),
-    val connectionStatus: Map<String, RelayConnectionStatus> = emptyMap(),
     val showAddRelayDialog: Boolean = false,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
@@ -114,6 +116,21 @@ class RelayManagementViewModel(
         .map { it.relayProfiles }
         .stateIn(viewModelScope, SharingStarted.Eagerly, listOf(DefaultRelayProfiles.getDefaultProfile()))
 
+    // Live health data from RelayHealthTracker — exposed for inline display on relay rows
+    val healthByRelay: StateFlow<Map<String, RelayHealthInfo>> = RelayHealthTracker.healthByRelay
+    val flaggedRelays: StateFlow<Set<String>> = RelayHealthTracker.flaggedRelays
+    val blockedRelays: StateFlow<Set<String>> = RelayHealthTracker.blockedRelays
+
+    // Delivery stats from Thompson Sampling tracker
+    private val _deliveryStats = MutableStateFlow<Map<String, RelayDeliveryTracker.RelayStats>>(emptyMap())
+    val deliveryStats: StateFlow<Map<String, RelayDeliveryTracker.RelayStats>> = _deliveryStats.asStateFlow()
+
+    // Health actions — delegate to RelayHealthTracker
+    fun blockRelay(url: String) = RelayHealthTracker.blockRelay(url)
+    fun unblockRelay(url: String) = RelayHealthTracker.unblockRelay(url)
+    fun unflagRelay(url: String) = RelayHealthTracker.unflagRelay(url)
+    fun resetRelayHealth(url: String) = RelayHealthTracker.resetRelay(url)
+
     init {
         // Collect relay updates from repository
         viewModelScope.launch {
@@ -122,10 +139,11 @@ class RelayManagementViewModel(
             }
         }
 
-        // Collect connection status updates from repository
-        viewModelScope.launch {
-            relayRepository.connectionStatus.collect { connectionStatus ->
-                _uiState.update { it.copy(connectionStatus = connectionStatus) }
+        // Periodically refresh delivery stats (not a StateFlow in the tracker, so poll)
+        viewModelScope.launch(Dispatchers.IO) {
+            while (true) {
+                _deliveryStats.value = RelayDeliveryTracker.getStats()
+                kotlinx.coroutines.delay(5_000)
             }
         }
     }

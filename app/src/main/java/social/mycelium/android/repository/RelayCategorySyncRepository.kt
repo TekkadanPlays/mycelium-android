@@ -65,7 +65,7 @@ object RelayCategorySyncRepository {
     fun acceptPendingIndexerDiff(userPubkey: String, context: android.content.Context) {
         val diff = _pendingIndexerDiff.value ?: return
         val storageManager = RelayStorageManager(context)
-        val remoteRelays = diff.remoteUrls.map { UserRelay(url = it, read = true, write = true) }
+        val remoteRelays = diff.remoteUrls.map { UserRelay(url = it, read = true, write = true, source = social.mycelium.android.data.RelaySource.NIP66_DISCOVERY) }
         storageManager.saveIndexerRelays(userPubkey, remoteRelays)
         storageManager.setIndexersConfirmed(userPubkey, true)
         _pendingIndexerDiff.value = null
@@ -76,6 +76,39 @@ object RelayCategorySyncRepository {
     fun dismissPendingIndexerDiff() {
         _pendingIndexerDiff.value = null
         Log.d(TAG, "Dismissed pending indexer diff")
+    }
+
+    // ── Relay Category Diff ──────────────────────────────────────────────────
+
+    /**
+     * When remote kind-30002 relay sets differ from local categories, the diff
+     * is held here for the user to review. This prevents orphaned events from
+     * prior builds/sessions from silently polluting the relay configuration.
+     */
+    data class PendingRelayCategoryDiff(
+        val remoteCategories: List<social.mycelium.android.data.RelayCategory>,
+        val localCategories: List<social.mycelium.android.data.RelayCategory>,
+        val newFromRemote: List<social.mycelium.android.data.RelayCategory>,
+        val updatedFromRemote: List<social.mycelium.android.data.RelayCategory>,
+    )
+
+    private val _pendingCategoryDiff = kotlinx.coroutines.flow.MutableStateFlow<PendingRelayCategoryDiff?>(null)
+    val pendingCategoryDiff: kotlinx.coroutines.flow.StateFlow<PendingRelayCategoryDiff?> = _pendingCategoryDiff
+
+    /** Accept a pending category diff — merges remote categories into local storage. */
+    fun acceptPendingCategoryDiff(userPubkey: String, context: android.content.Context) {
+        val diff = _pendingCategoryDiff.value ?: return
+        val storageManager = RelayStorageManager(context)
+        val merged = mergeCategories(diff.localCategories, diff.remoteCategories)
+        storageManager.saveCategories(userPubkey, merged)
+        _pendingCategoryDiff.value = null
+        Log.d(TAG, "Accepted pending category diff: ${merged.size} categories merged")
+    }
+
+    /** Dismiss a pending category diff — keeps local categories, clears the banner. */
+    fun dismissPendingCategoryDiff() {
+        _pendingCategoryDiff.value = null
+        Log.d(TAG, "Dismissed pending category diff")
     }
 
     private var fetchHandle: TemporarySubscriptionHandle? = null
@@ -248,18 +281,50 @@ object RelayCategorySyncRepository {
                 }
 
                 val remoteCategories = collected.values.mapNotNull { parseRelaySet(it) }
+                    .filter { it.relays.isNotEmpty() } // Skip empty/pruned categories
                 Log.d(TAG, "Fetched ${remoteCategories.size} relay sets for ${userPubkey.take(8)}: " +
                     remoteCategories.joinToString { "'${it.name}'(${it.relays.size})" })
 
-                // Merge with local
-                val localCategories = storageManager.loadCategories(userPubkey)
-                val merged = mergeCategories(localCategories, remoteCategories)
-
-                if (merged != localCategories) {
-                    storageManager.saveCategories(userPubkey, merged)
-                    Log.d(TAG, "Merged categories: ${localCategories.size} local + " +
-                        "${remoteCategories.size} remote → ${merged.size} merged")
+                if (remoteCategories.isEmpty()) {
+                    Log.d(TAG, "All fetched relay sets were empty after filtering — nothing to merge")
+                    return@launch
                 }
+
+                val localCategories = storageManager.loadCategories(userPubkey)
+
+                // On first sign-in (no local categories or only the empty default),
+                // auto-apply remote categories since there's nothing to conflict with.
+                val hasSubstantiveLocal = localCategories.any { it.relays.isNotEmpty() }
+                if (!hasSubstantiveLocal) {
+                    val merged = mergeCategories(localCategories, remoteCategories)
+                    storageManager.saveCategories(userPubkey, merged)
+                    Log.d(TAG, "First sign-in: auto-applied ${remoteCategories.size} remote categories")
+                    return@launch
+                }
+
+                // Returning user: check if remote differs from local. If so, hold for
+                // user confirmation instead of silently merging (prevents orphaned events
+                // from prior builds/sessions from polluting the relay config).
+                val localById = localCategories.associateBy { it.id }
+                val newFromRemote = remoteCategories.filter { it.id !in localById }
+                val updatedFromRemote = remoteCategories.filter { rc ->
+                    val lc = localById[rc.id]
+                    lc != null && rc.createdAt >= lc.createdAt && rc.relays != lc.relays
+                }
+
+                if (newFromRemote.isEmpty() && updatedFromRemote.isEmpty()) {
+                    Log.d(TAG, "Remote relay sets match local — no merge needed")
+                    return@launch
+                }
+
+                // Emit diff for user confirmation
+                _pendingCategoryDiff.value = PendingRelayCategoryDiff(
+                    remoteCategories = remoteCategories,
+                    localCategories = localCategories,
+                    newFromRemote = newFromRemote,
+                    updatedFromRemote = updatedFromRemote,
+                )
+                Log.d(TAG, "Relay sets differ: ${newFromRemote.size} new, ${updatedFromRemote.size} updated — pending user confirmation")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch relay sets: ${e.message}", e)
             }
@@ -281,13 +346,32 @@ object RelayCategorySyncRepository {
         val isSubscribed = event.tags.firstOrNull { it.size >= 2 && it[0] == "subscribed" }
             ?.get(1)?.toBooleanStrictOrNull() ?: true
 
+        // Build NIP-66 liveness lookup once for this parse
+        val nip66Relays = Nip66RelayDiscoveryRepository.discoveredRelays.value
+        val sevenDaysAgoSecs = (System.currentTimeMillis() / 1000) - (7 * 24 * 60 * 60)
+
         val relays = event.tags
             .filter { it.size >= 2 && it[0] == "relay" }
             .map { tag ->
                 val url = social.mycelium.android.utils.normalizeRelayUrl(tag[1])
-                UserRelay(url = url, read = true, write = true)
+                UserRelay(url = url, read = true, write = true, source = social.mycelium.android.data.RelaySource.NIP65_IMPORT)
             }
             .distinctBy { it.url }
+            // Filter out blocked/dead relays so ghost entries from permanently
+            // offline relays (e.g. tekkadan.mycelium.social) don't re-enter
+            // the connection pool via synced relay categories.
+            .filter { relay ->
+                if (RelayHealthTracker.isBlocked(relay.url)) return@filter false
+                // Cross-check NIP-66 liveness: if monitors track this relay but
+                // haven't seen it alive in 7+ days, exclude it.
+                val normalized = relay.url.trim().removeSuffix("/").lowercase()
+                val discovered = nip66Relays[normalized]
+                // Unmonitored relays (private, niche) pass through — benefit of the doubt
+                if (discovered == null) return@filter true
+                val alive = discovered.lastSeen >= sevenDaysAgoSecs
+                if (!alive) Log.d(TAG, "Pruned dead relay from category '$title': ${relay.url}")
+                alive
+            }
 
         return RelayCategory(
             id = dTag,
@@ -344,6 +428,8 @@ object RelayCategorySyncRepository {
         fetchHandle = null
         indexerFetchHandle?.cancel()
         indexerFetchHandle = null
+        _pendingCategoryDiff.value = null
+        _pendingIndexerDiff.value = null
     }
 
     // ── Indexer List (Kind 10086) ────────────────────────────────────────────
@@ -418,7 +504,7 @@ object RelayCategorySyncRepository {
                 if (forceReplace || !storageManager.areIndexersConfirmed(userPubkey)) {
                     // User hasn't confirmed yet — safe to replace silently
                     val remoteRelays = remoteUrls.map { url ->
-                        UserRelay(url = url, read = true, write = true)
+                        UserRelay(url = url, read = true, write = true, source = social.mycelium.android.data.RelaySource.NIP66_DISCOVERY)
                     }
                     storageManager.saveIndexerRelays(userPubkey, remoteRelays)
                     Log.d(TAG, "Replaced indexer list: ${localIndexers.size} local → ${remoteRelays.size} from published kind-$KIND_INDEXER_LIST")

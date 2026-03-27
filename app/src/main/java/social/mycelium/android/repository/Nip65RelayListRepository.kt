@@ -54,11 +54,15 @@ object Nip65RelayListRepository {
                 var restored = 0
                 for (entity in allEntities) {
                     val pk = entity.pubkey
-                    if (!authorOutboxCache.containsKey(pk)) {
-                        val writeRelays = entity.writeRelays.split(",").filter { it.isNotBlank() }
-                        val readRelays = entity.readRelays.split(",").filter { it.isNotBlank() }
+                    if (!hasValidCachedOutbox(pk)) {
+                        // Filter out blocked/dead relays so ghost entries from
+                        // permanently offline relays don't re-enter the outbox cache.
+                        val writeRelays = entity.writeRelays.split(",")
+                            .filter { it.isNotBlank() && !RelayHealthTracker.isBlocked(it) }
+                        val readRelays = entity.readRelays.split(",")
+                            .filter { it.isNotBlank() && !RelayHealthTracker.isBlocked(it) }
                         if (writeRelays.isNotEmpty() || readRelays.isNotEmpty()) {
-                            authorOutboxCache[pk] = writeRelays
+                            authorOutboxCache[pk] = OutboxCacheEntry(writeRelays, isAuthoritative = true)
                             authorRelayCache[pk] = AuthorRelayList(pk, readRelays, writeRelays)
                             restored++
                         }
@@ -421,12 +425,9 @@ object Nip65RelayListRepository {
                 multiSourceHandles = emptyList()
             }
 
-            // CRITICAL: Disconnect ALL relay connections. The relay pool
-            // keeps WebSocket connections alive even after subscriptions
-            // are destroyed. Without this full disconnect, hundreds of indexer
-            // connections persist and bleed into feed/notification subscriptions.
-            // The feed will re-establish only the connections it actually needs.
-            RelayConnectionStateMachine.getInstance().requestDisconnect()
+            // Drop idle indexer sockets only — avoids nuking user relay connections
+            // and inflating handshake metrics with a full pool reconnect storm.
+            RelayConnectionStateMachine.getInstance().disconnectIdleRelaysAtUrls(indexerUrls)
 
             _multiSourceDone.value = true
             Log.d(TAG, "Multi-source search complete: ${_multiSourceResults.value.size}/${indexerUrls.size} indexers returned results (early=${_multiSourceResults.value.size >= MIN_RESULTS_FOR_EARLY_DONE})")
@@ -448,7 +449,6 @@ object Nip65RelayListRepository {
             var bestEvent: Event? = null
             val gotEvent = kotlinx.coroutines.CompletableDeferred<Unit>()
             val startTime = System.currentTimeMillis()
-            RelayHealthTracker.recordConnectionAttempt(indexerUrl)
 
             val handle = RelayConnectionStateMachine.getInstance()
                 .requestTemporarySubscriptionWithRelay(listOf(indexerUrl), filter, priority = SubscriptionPriority.LOW) { event, _ ->
@@ -480,7 +480,6 @@ object Nip65RelayListRepository {
 
             val event = bestEvent
             if (event != null) {
-                RelayHealthTracker.recordConnectionSuccess(indexerUrl)
                 val result = parseEventToSourceResult(event, indexerUrl)
                 synchronized(_multiSourceResults) {
                     _multiSourceResults.value = _multiSourceResults.value + result
@@ -488,24 +487,18 @@ object Nip65RelayListRepository {
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.SUCCESS, result = result)
                 Log.d(TAG, "  $indexerUrl: ${result.writeRelays.size}w/${result.readRelays.size}r, created=${result.createdAt} (${elapsed}ms)")
             } else {
-                // Check if the relay actually connected or had a connection error.
-                // RelayHealthTracker records failures with the actual error message.
+                // Pool listener already records connect success/failure; avoid double-counting here.
                 val health = RelayHealthTracker.getHealth(indexerUrl)
                 val lastError = health?.lastError
                 val failedDuringQuery = health != null && health.lastFailedAt >= startTime
                 if (failedDuringQuery && lastError != null) {
-                    // Relay had a connection error — report it as FAILED with the real reason
                     val shortError = lastError.take(80)
-                    RelayHealthTracker.recordConnectionFailure(indexerUrl, shortError)
                     updateIndexerStatus(indexerUrl, IndexerQueryStatus.FAILED, errorMessage = shortError)
                     Log.d(TAG, "  $indexerUrl: connect failed: $shortError (${elapsed}ms)")
                 } else if (elapsed >= timeoutMs - 500) {
-                    // Timed out without connecting or receiving data
-                    RelayHealthTracker.recordConnectionFailure(indexerUrl, "Timeout")
                     updateIndexerStatus(indexerUrl, IndexerQueryStatus.TIMEOUT)
                     Log.d(TAG, "  $indexerUrl: timeout (${elapsed}ms)")
                 } else {
-                    // Relay connected but genuinely has no kind-10002 for this pubkey
                     updateIndexerStatus(indexerUrl, IndexerQueryStatus.NO_DATA)
                     Log.d(TAG, "  $indexerUrl: no data (${elapsed}ms)")
                 }
@@ -513,7 +506,6 @@ object Nip65RelayListRepository {
         } catch (e: Exception) {
             val isCancellation = e is kotlinx.coroutines.CancellationException
             if (!isCancellation) {
-                RelayHealthTracker.recordConnectionFailure(indexerUrl, e.message)
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.FAILED, errorMessage = e.message)
                 Log.e(TAG, "  $indexerUrl: failed: ${e.message}")
             }
@@ -723,12 +715,38 @@ object Nip65RelayListRepository {
 
     // --- Outbox relay lookup for other authors (quoted note preloading) ---
 
+    /** TTL for authoritative entries (from kind-10002 events). */
+    private const val OUTBOX_TTL_AUTHORITATIVE_MS = 24L * 60 * 60 * 1000 // 24h
+    /** TTL for hint-based entries (from p-tag/e-tag relay hints). */
+    private const val OUTBOX_TTL_HINT_MS = 4L * 60 * 60 * 1000 // 4h
+
+    private data class OutboxCacheEntry(
+        val relayUrls: List<String>,
+        val insertedAt: Long = System.currentTimeMillis(),
+        val isAuthoritative: Boolean = false
+    ) {
+        fun isExpired(): Boolean {
+            val ttl = if (isAuthoritative) OUTBOX_TTL_AUTHORITATIVE_MS else OUTBOX_TTL_HINT_MS
+            return System.currentTimeMillis() - insertedAt > ttl
+        }
+    }
+
     /** Cache of other authors' write (outbox) relays. LRU, max 500 entries. */
     private val authorOutboxCache = java.util.Collections.synchronizedMap(
-        object : LinkedHashMap<String, List<String>>(500, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<String>>): Boolean = size > 500
+        object : LinkedHashMap<String, OutboxCacheEntry>(500, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, OutboxCacheEntry>): Boolean = size > 500
         }
     )
+
+    /** Check if a pubkey has a valid (non-expired) outbox cache entry. */
+    private fun hasValidCachedOutbox(pubkeyHex: String): Boolean {
+        val entry = authorOutboxCache[pubkeyHex] ?: return false
+        if (entry.isExpired()) {
+            authorOutboxCache.remove(pubkeyHex)
+            return false
+        }
+        return true
+    }
 
     /** Debounced batch state for individual outbox lookups. */
     private val pendingOutboxPubkeys = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -737,9 +755,16 @@ object Nip65RelayListRepository {
     private val OUTBOX_BATCH_DEBOUNCE_MS = 300L
 
     /**
-     * Get cached outbox (write) relays for an author, or null if not yet fetched.
+     * Get cached outbox (write) relays for an author, or null if not yet fetched or expired.
      */
-    fun getCachedOutboxRelays(pubkeyHex: String): List<String>? = authorOutboxCache[pubkeyHex]
+    fun getCachedOutboxRelays(pubkeyHex: String): List<String>? {
+        val entry = authorOutboxCache[pubkeyHex] ?: return null
+        if (entry.isExpired()) {
+            authorOutboxCache.remove(pubkeyHex)
+            return null
+        }
+        return entry.relayUrls
+    }
 
     /**
      * Queue an author's outbox relay lookup into a debounced batch.
@@ -749,7 +774,7 @@ object Nip65RelayListRepository {
      */
     fun fetchOutboxRelaysForAuthor(pubkeyHex: String, discoveryRelays: List<String>) {
         if (pubkeyHex.isBlank() || discoveryRelays.isEmpty()) return
-        if (authorOutboxCache.containsKey(pubkeyHex)) return
+        if (hasValidCachedOutbox(pubkeyHex)) return
         if (!pendingOutboxPubkeys.add(pubkeyHex)) return // already pending
 
         if (discoveryRelays.isNotEmpty()) pendingOutboxRelays = discoveryRelays
@@ -770,8 +795,8 @@ object Nip65RelayListRepository {
         pendingOutboxPubkeys.clear()
         if (pubkeys.isEmpty() || relays.isEmpty()) return
 
-        // Filter out already-cached
-        val needed = pubkeys.filter { !authorOutboxCache.containsKey(it) }
+        // Filter out already-cached (TTL-aware)
+        val needed = pubkeys.filter { !hasValidCachedOutbox(it) }
         if (needed.isEmpty()) return
 
         Log.d(TAG, "Outbox batch flush: ${needed.size} pubkeys on ${relays.size} relays")
@@ -827,12 +852,12 @@ object Nip65RelayListRepository {
                                 }
                             }
                         }
-                        authorOutboxCache[pk] = writeUrls.distinct()
-                        authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct(), writeUrls.distinct())
+                        authorOutboxCache[pk] = OutboxCacheEntry(writeUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) }, isAuthoritative = true)
+                        authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) }, writeUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) })
                         Log.d(TAG, "Relays for ${pk.take(8)}: ${writeUrls.size} write, ${readUrls.size} read")
                         scheduleRoomSave()
                     } else {
-                        authorOutboxCache[pk] = emptyList()
+                        authorOutboxCache[pk] = OutboxCacheEntry(emptyList(), isAuthoritative = true)
                         authorRelayCache[pk] = AuthorRelayList(pk, emptyList(), emptyList())
                         Log.d(TAG, "No kind-10002 for ${pk.take(8)}")
                     }
@@ -840,7 +865,7 @@ object Nip65RelayListRepository {
                 emitAuthorRelaySnapshot()
             } catch (e: Exception) {
                 Log.e(TAG, "Outbox batch chunk $chunkIdx failed: ${e.message}")
-                chunk.forEach { pk -> authorOutboxCache.putIfAbsent(pk, emptyList()) }
+                chunk.forEach { pk -> authorOutboxCache.putIfAbsent(pk, OutboxCacheEntry(emptyList(), isAuthoritative = true)) }
             }
         }
     }
@@ -917,8 +942,8 @@ object Nip65RelayListRepository {
                                     }
                                 }
                             }
-                            authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct(), writeUrls.distinct())
-                            authorOutboxCache[pk] = writeUrls.distinct()
+                            authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) }, writeUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) })
+                            authorOutboxCache[pk] = OutboxCacheEntry(writeUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) }, isAuthoritative = true)
                             found++
                         } else {
                             authorRelayCache[pk] = AuthorRelayList(pk, emptyList(), emptyList())
@@ -998,8 +1023,10 @@ object Nip65RelayListRepository {
         if (pubkeyHex.isBlank() || relayUrls.isEmpty()) return
         // Don't overwrite authoritative NIP-65 data with weaker hints
         val existing = authorOutboxCache[pubkeyHex]
-        if (existing != null && existing.isNotEmpty()) return
-        authorOutboxCache[pubkeyHex] = relayUrls.distinct()
+        if (existing != null && existing.relayUrls.isNotEmpty() && !existing.isExpired()) return
+        val filtered = relayUrls.filter { !RelayHealthTracker.isBlocked(it) }.distinct()
+        if (filtered.isEmpty()) return
+        authorOutboxCache[pubkeyHex] = OutboxCacheEntry(filtered, isAuthoritative = false)
     }
 
     /**
@@ -1023,6 +1050,7 @@ object Nip65RelayListRepository {
         _sourceRelayUrl.value = null
         _eventCreatedAt.value = null
         authorRelayCache.clear()
+        authorOutboxCache.clear()
         _authorRelaySnapshot.value = emptyMap()
     }
 }

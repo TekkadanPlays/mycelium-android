@@ -1134,7 +1134,7 @@ private fun ProfileIdentity(
                 // NIP-05 or @username
                 val nip05Value = author.nip05?.takeIf { it.isNotBlank() }
                 if (nip05Value != null) {
-                    social.mycelium.android.ui.components.Nip05Badge(
+                    social.mycelium.android.ui.components.common.Nip05Badge(
                         nip05 = nip05Value,
                         pubkeyHex = author.id,
                         showFullIdentifier = true

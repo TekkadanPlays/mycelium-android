@@ -199,7 +199,7 @@ fun AboutScreen(
 
                 // NIP-05 if available
                 author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
-                    social.mycelium.android.ui.components.Nip05Badge(
+                    social.mycelium.android.ui.components.common.Nip05Badge(
                         nip05 = nip05,
                         pubkeyHex = author.id,
                         showFullIdentifier = true

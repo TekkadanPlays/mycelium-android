@@ -365,7 +365,7 @@ private fun ProfileSectionHeader(
                     overflow = TextOverflow.Ellipsis
                 )
                 if (!author.nip05.isNullOrBlank()) {
-                    social.mycelium.android.ui.components.Nip05Badge(
+                    social.mycelium.android.ui.components.common.Nip05Badge(
                         nip05 = author.nip05,
                         pubkeyHex = author.id,
                         showFullIdentifier = true

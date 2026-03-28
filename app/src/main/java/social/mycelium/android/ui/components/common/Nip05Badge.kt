@@ -1,4 +1,4 @@
-package social.mycelium.android.ui.components
+package social.mycelium.android.ui.components.common
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Row

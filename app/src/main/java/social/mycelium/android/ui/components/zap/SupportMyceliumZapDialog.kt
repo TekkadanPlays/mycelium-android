@@ -16,8 +16,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.NwcConfigRepository
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.services.LnurlResolver
 import social.mycelium.android.services.NwcPaymentManager
 import social.mycelium.android.services.NwcPaymentResult

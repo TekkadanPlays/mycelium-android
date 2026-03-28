@@ -21,8 +21,8 @@ import social.mycelium.android.data.Note
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
-import social.mycelium.android.repository.Nip65RelayListRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.relay.Nip65RelayListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import android.widget.Toast
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.TextRange

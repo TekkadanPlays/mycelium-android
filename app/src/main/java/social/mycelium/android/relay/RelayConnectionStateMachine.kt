@@ -564,7 +564,7 @@ class RelayConnectionStateMachine {
                         when (event.kind) {
                             1 -> {
                                 onKind1WithRelay?.invoke(event, relayUrl)
-                                social.mycelium.android.repository.NoteCountsRepository.onLiveEvent(event)
+                                social.mycelium.android.repository.social.NoteCountsRepository.onLiveEvent(event)
                             }
                             1068 -> {
                                 // NIP-88 polls: route to kind-1 handler so they appear in feed
@@ -576,7 +576,7 @@ class RelayConnectionStateMachine {
                             30023 -> onKind1WithRelay?.invoke(event, relayUrl)
                             30073 -> onKind30073?.invoke(event)
                             30311 -> onKind30311?.invoke(event, relayUrl)
-                            7, 9735 -> social.mycelium.android.repository.NoteCountsRepository.onCountsEvent(event)
+                            7, 9735 -> social.mycelium.android.repository.social.NoteCountsRepository.onCountsEvent(event)
                             else -> { }
                         }
                     }
@@ -934,9 +934,9 @@ class RelayConnectionStateMachine {
         // Clear NIP-42 auth tracking immediately (signer will be re-set by caller)
         nip42AuthHandler.setSigner(null)
         // Clear NIP-65 so stale relay lists from the previous user don't persist
-        social.mycelium.android.repository.Nip65RelayListRepository.clear()
+        social.mycelium.android.repository.relay.Nip65RelayListRepository.clear()
         // Clear feed notes so the old account's notes don't leak into the new account's UI
-        social.mycelium.android.repository.NotesRepository.getInstance().clearNotes()
+        social.mycelium.android.repository.feed.NotesRepository.getInstance().clearNotes()
         // Clear notification subscription handle so it can be re-created after reconnect
         social.mycelium.android.repository.NotificationsRepository.stopSubscription()
         // Clear all multiplexed subscriptions (dedup state, ref-counts, merged subs)

@@ -313,7 +313,7 @@ private fun UserResultRow(user: SearchResultItem.UserItem, query: String, onClic
 @Composable
 private fun NoteResultRow(noteItem: SearchResultItem.NoteItem, query: String, onClick: () -> Unit) {
     val note = noteItem.note
-    val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+    val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
     val linkStyle = SpanStyle(color = MaterialTheme.colorScheme.primary)
     val mediaUrls = remember(note.id) { note.mediaUrls.toSet() }
 

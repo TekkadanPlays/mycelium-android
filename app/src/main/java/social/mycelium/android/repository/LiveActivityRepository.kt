@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 /**
  * Repository for NIP-53 Live Activities (kind:30311).
  * Maintains a live list of active streams, auto-expires stale entries,

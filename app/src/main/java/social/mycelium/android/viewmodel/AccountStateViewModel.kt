@@ -8,24 +8,24 @@ import androidx.lifecycle.viewModelScope
 import social.mycelium.android.auth.AmberSignerManager
 import social.mycelium.android.auth.AmberState
 import social.mycelium.android.data.AccountInfo
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.data.AuthState
 import social.mycelium.android.data.UserProfile
 import social.mycelium.android.data.GUEST_PROFILE
 import social.mycelium.android.data.Note
-import social.mycelium.android.repository.ContactListRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.NoteCountsRepository
-import social.mycelium.android.repository.ReactionsRepository
-import social.mycelium.android.repository.ZapStatePersistence
-import social.mycelium.android.repository.NotesRepository
-import social.mycelium.android.repository.TopicsPublishService
-import social.mycelium.android.repository.TopicsRepository
-import social.mycelium.android.repository.VoteRepository
-import social.mycelium.android.repository.PollResponseRepository
+import social.mycelium.android.repository.social.ContactListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.social.NoteCountsRepository
+import social.mycelium.android.repository.social.ReactionsRepository
+import social.mycelium.android.repository.cache.ZapStatePersistence
+import social.mycelium.android.repository.feed.NotesRepository
+import social.mycelium.android.repository.content.TopicsPublishService
+import social.mycelium.android.repository.content.TopicsRepository
+import social.mycelium.android.repository.social.VoteRepository
+import social.mycelium.android.repository.content.PollResponseRepository
 import social.mycelium.android.repository.EmojiPackSelectionRepository
 import social.mycelium.android.repository.EmojiPackRepository
-import social.mycelium.android.repository.QuotedNoteCache
+import social.mycelium.android.repository.cache.QuotedNoteCache
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.bechToBytes
 import com.example.cybin.nip19.NPub
@@ -61,6 +61,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+import social.mycelium.android.repository.sync.ZapType
 /**
  * Manages account state across the entire app.
  * Handles:
@@ -334,7 +335,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         Log.d("AccountStateViewModel", "\uD83D\uDD1D Setting guest mode")
         _currentAccount.value = null
         NoteCountsRepository.currentUserPubkey = null
-        social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(null)
+        social.mycelium.android.repository.sync.AccountScopedRegistry.setActiveAccount(null)
         social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(null)
         _zappedNoteIds.value = emptySet()
         _zappedAmountByNoteId.value = emptyMap()
@@ -347,7 +348,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // Full teardown: disconnect relays, clear NIP-42 auth, reset NIP-65
         RelayConnectionStateMachine.getInstance().disconnectAndClearForAccountSwitch()
         // Clear settings sync callback
-        social.mycelium.android.repository.SettingsSyncManager.clearPublishCallback()
+        social.mycelium.android.repository.sync.SettingsSyncManager.clearPublishCallback()
     }
 
     private suspend fun handleNewAmberLogin(hexPubkey: String) {
@@ -446,8 +447,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         VoteRepository.loadForAccount(getApplication(), accountInfo.npub)
         NoteCountsRepository.currentUserPubkey = hexPubkey
         // Create per-account scope (NotificationsRepository instance) and set as active
-        social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
-        social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(hexPubkey)
+        social.mycelium.android.repository.sync.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
+        social.mycelium.android.repository.sync.AccountScopedRegistry.setActiveAccount(hexPubkey)
         social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
         // Restore persisted kind-3 before any relay fetch can overwrite with stale data
         ContactListRepository.restorePersistedKind3(hexPubkey)
@@ -510,8 +511,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         if (isSameAccount) {
             Log.d("AccountStateViewModel", "\uD83D\uDD04 Same account already active — skipping teardown")
             // Ensure registry knows this is the active account (ViewModel may have been re-created)
-            social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(incomingHex, getApplication())
-            social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(incomingHex)
+            social.mycelium.android.repository.sync.AccountScopedRegistry.getOrCreateScope(incomingHex, getApplication())
+            social.mycelium.android.repository.sync.AccountScopedRegistry.setActiveAccount(incomingHex)
             // Populate this instance's state so the UI works, but skip destructive operations
             val updatedAccount = accountInfo.copy(lastUsed = System.currentTimeMillis())
             val updatedAccounts = _savedAccounts.value
@@ -629,8 +630,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             VoteRepository.loadForAccount(getApplication(), updatedAccount.npub)
             NoteCountsRepository.currentUserPubkey = hexPubkey
             // Create per-account scope (NotificationsRepository instance) and set as active
-            social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
-            social.mycelium.android.repository.AccountScopedRegistry.setActiveAccount(hexPubkey)
+            social.mycelium.android.repository.sync.AccountScopedRegistry.getOrCreateScope(hexPubkey, getApplication())
+            social.mycelium.android.repository.sync.AccountScopedRegistry.setActiveAccount(hexPubkey)
             social.mycelium.android.ui.settings.NotificationPreferences.setActiveAccount(hexPubkey)
             // Restore persisted kind-3 before any relay fetch can overwrite with stale data
             ContactListRepository.restorePersistedKind3(hexPubkey)
@@ -702,12 +703,12 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // NIP-78 data that only need to live on the user's outbox relays; publishing them to
         // all subscribed category relays (kind-30002 collections) wastes bandwidth and inflates
         // the relay confirmation counter with irrelevant relays.
-        social.mycelium.android.repository.SettingsSyncManager.registerPublishCallback {
+        social.mycelium.android.repository.sync.SettingsSyncManager.registerPublishCallback {
             val outboxOnly = relayStorageManager.loadOutboxRelays(hexPubkey)
                 .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
                 .toSet()
             if (outboxOnly.isNotEmpty()) {
-                social.mycelium.android.repository.SettingsSyncManager.publishSettings(
+                social.mycelium.android.repository.sync.SettingsSyncManager.publishSettings(
                     context, signer, hexPubkey, outboxOnly
                 )
             }
@@ -1338,7 +1339,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             .map { it.url }
         // Include NIP-17 DM relays (kind-10050) — some DM relays require auth
         // before they'll serve kind-1059 gift wraps or accept published events
-        val dmRelays = social.mycelium.android.repository.DirectMessageRepository.dmRelayUrls.value
+        val dmRelays = social.mycelium.android.repository.messaging.DirectMessageRepository.dmRelayUrls.value
         val all = (outbox + inbox + indexer + categories + profileRelays + dmRelays).toSet()
         RelayConnectionStateMachine.getInstance().nip42AuthHandler.setAllowedRelayUrls(all)
     }
@@ -1875,7 +1876,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val relaySet = getPublishRelayUrlSet()
         if (relaySet.isEmpty()) return "No relays configured"
         val userPubkey = _currentAccount.value?.toHexKey() ?: return "No account"
-        val moderationRepo = social.mycelium.android.repository.ScopedModerationRepository.getInstance()
+        val moderationRepo = social.mycelium.android.repository.social.ScopedModerationRepository.getInstance()
         val flagEventId = moderationRepo.getOwnFlagEventId(anchor, noteId, userPubkey) ?: return "No flag found"
         // Optimistic local removal
         moderationRepo.removeOwnFlag(anchor, noteId, userPubkey)
@@ -2004,7 +2005,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     fun sendZap(
         note: Note,
         amountSats: Long,
-        zapType: social.mycelium.android.repository.ZapType,
+        zapType: social.mycelium.android.repository.sync.ZapType,
         message: String = ""
     ): String? {
         val account = _currentAccount.value ?: return "Sign in to zap"
@@ -2072,7 +2073,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             val pubkey = accountInfo.toHexKey()
             if (pubkey != null) {
                 // Destroy per-account scope (stops notification subscription, cancels coroutines)
-                social.mycelium.android.repository.AccountScopedRegistry.removeScope(pubkey)
+                social.mycelium.android.repository.sync.AccountScopedRegistry.removeScope(pubkey)
                 relayStorageManager.clearUserData(pubkey)
                 Log.d("AccountStateViewModel", "🗑️ Cleared relay data for account: ${accountInfo.toShortNpub()}")
             }
@@ -2136,7 +2137,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
     // ── Anchor Subscription Management ──────────────────────────────────────
 
-    private val anchorSubscriptionRepo = social.mycelium.android.repository.AnchorSubscriptionRepository.getInstance()
+    private val anchorSubscriptionRepo = social.mycelium.android.repository.feed.AnchorSubscriptionRepository.getInstance()
 
     /**
      * Get the current set of subscribed anchors
@@ -2250,7 +2251,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
         viewModelScope.launch {
             try {
-                social.mycelium.android.repository.Nip65RelayListRepository.publishNip65(
+                social.mycelium.android.repository.relay.Nip65RelayListRepository.publishNip65(
                     context = getApplication(),
                     outboxUrls = outboxRelays,
                     inboxUrls = inboxRelays,

@@ -19,6 +19,7 @@ import social.mycelium.android.db.CachedEmojiPackEntity
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import java.util.concurrent.ConcurrentHashMap
 
+import social.mycelium.android.repository.relay.Nip65RelayListRepository
 /**
  * Repository for NIP-30 Emoji Pack events (kind 30030).
  *

@@ -184,61 +184,61 @@ object NotificationPreferences {
     fun setNotifyReactions(enabled: Boolean) {
         _notifyReactions.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_REACTIONS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyZaps(enabled: Boolean) {
         _notifyZaps.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_ZAPS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyReposts(enabled: Boolean) {
         _notifyReposts.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_REPOSTS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyMentions(enabled: Boolean) {
         _notifyMentions.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_MENTIONS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyReplies(enabled: Boolean) {
         _notifyReplies.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_REPLIES), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyDMs(enabled: Boolean) {
         _notifyDMs.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_DMS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyPolls(enabled: Boolean) {
         _notifyPolls.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_POLLS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setNotifyQuotes(enabled: Boolean) {
         _notifyQuotes.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_NOTIFY_QUOTES), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setMuteStrangers(enabled: Boolean) {
         _muteStrangers.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_MUTE_STRANGERS), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setShowDmContent(enabled: Boolean) {
         _showDmContent.value = enabled
         prefs.edit().putBoolean(acctKey(KEY_SHOW_DM_CONTENT), enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     // ── Per-account preference lookup (for background accounts) ─────────────

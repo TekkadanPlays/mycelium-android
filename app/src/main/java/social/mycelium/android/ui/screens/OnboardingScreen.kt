@@ -36,10 +36,10 @@ import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayType
 import social.mycelium.android.data.RelaySource
 import social.mycelium.android.data.UserRelay
-import social.mycelium.android.repository.Nip65RelayListRepository
-import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
-import social.mycelium.android.repository.RelayStorageManager
-import social.mycelium.android.repository.SettingsSyncManager
+import social.mycelium.android.repository.relay.Nip65RelayListRepository
+import social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository
+import social.mycelium.android.repository.relay.RelayStorageManager
+import social.mycelium.android.repository.sync.SettingsSyncManager
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import social.mycelium.android.ui.settings.ConnectionMode
@@ -2281,12 +2281,12 @@ private fun PrefetchingListsUI(
                 try {
                     kotlinx.coroutines.coroutineScope {
                         launch {
-                            social.mycelium.android.repository.ContactListRepository.fetchFollowList(
+                            social.mycelium.android.repository.social.ContactListRepository.fetchFollowList(
                                 hexPubkey, followRelayUrls, forceRefresh = false
                             )
                         }
                         launch {
-                            social.mycelium.android.repository.MuteListRepository.fetchMuteList(
+                            social.mycelium.android.repository.social.MuteListRepository.fetchMuteList(
                                 hexPubkey, allUserRelayUrls
                             )
                         }
@@ -2301,7 +2301,7 @@ private fun PrefetchingListsUI(
             // fetchRelaySets is EOSE-aware — no extra delay needed
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    social.mycelium.android.repository.RelayCategorySyncRepository.fetchRelaySets(
+                    social.mycelium.android.repository.relay.RelayCategorySyncRepository.fetchRelaySets(
                         userPubkey = hexPubkey,
                         relayUrls = (allOutboxUrls + allInboxUrls + allIndexerUrls).distinct(),
                         context = context.applicationContext,
@@ -2316,7 +2316,7 @@ private fun PrefetchingListsUI(
             // Use forceReplace=true because the user just confirmed their indexers.
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    social.mycelium.android.repository.RelayCategorySyncRepository.fetchIndexerList(
+                    social.mycelium.android.repository.relay.RelayCategorySyncRepository.fetchIndexerList(
                         userPubkey = hexPubkey,
                         relayUrls = (allOutboxUrls + allIndexerUrls).distinct(),
                         context = context.applicationContext,
@@ -2331,7 +2331,7 @@ private fun PrefetchingListsUI(
             // Step 5: Bookmarks
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
-                    social.mycelium.android.repository.BookmarkRepository.fetchBookmarks(hexPubkey, allUserRelayUrls)
+                    social.mycelium.android.repository.social.BookmarkRepository.fetchBookmarks(hexPubkey, allUserRelayUrls)
                     android.util.Log.d("PrefetchingListsUI", "Step 5 done: bookmarks fetched")
                 } catch (e: Exception) {
                     android.util.Log.e("PrefetchingListsUI", "Bookmarks fetch error: ${e.message}")
@@ -2347,8 +2347,8 @@ private fun PrefetchingListsUI(
         currentTask = "Pre-loading your feed\u2026"
         withContext(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                val notesRepo = social.mycelium.android.repository.NotesRepository.getInstance()
-                val followedPubkeys = social.mycelium.android.repository.ContactListRepository
+                val notesRepo = social.mycelium.android.repository.feed.NotesRepository.getInstance()
+                val followedPubkeys = social.mycelium.android.repository.social.ContactListRepository
                     .getCachedFollowList(hexPubkey) ?: emptySet()
                 notesRepo.prewarmFeedCache(
                     relayUrls = allUserRelayUrls,

@@ -44,24 +44,24 @@ object MediaPreferences {
     fun setAutoplayVideos(enabled: Boolean) {
         _autoplayVideos.value = enabled
         prefs.edit().putBoolean(KEY_AUTOPLAY_VIDEOS, enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setAutoplaySound(enabled: Boolean) {
         _autoplaySound.value = enabled
         prefs.edit().putBoolean(KEY_AUTOPLAY_SOUND, enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setShowSensitiveContent(enabled: Boolean) {
         _showSensitiveContent.value = enabled
         prefs.edit().putBoolean(KEY_SHOW_SENSITIVE, enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setAutoPipLiveActivities(enabled: Boolean) {
         _autoPipLiveActivities.value = enabled
         prefs.edit().putBoolean(KEY_AUTO_PIP_LIVE, enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 }

@@ -12,7 +12,7 @@ import com.example.cybin.nip19.NNote
 import com.example.cybin.nip19.NPub
 import com.example.cybin.nip19.NProfile
 import com.example.cybin.nip19.Nip19Parser
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 
 /**
  * Visual transformation for compose text fields that enriches nostr: references on the fly:

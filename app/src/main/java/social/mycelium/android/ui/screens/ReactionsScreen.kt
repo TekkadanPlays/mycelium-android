@@ -22,7 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Author
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.ui.components.emoji.ReactionEmoji
 import social.mycelium.android.viewmodel.ReactionsData

@@ -51,7 +51,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Note
-import social.mycelium.android.repository.TopicNote
+import social.mycelium.android.repository.content.TopicNote
 import social.mycelium.android.ui.components.nav.AdaptiveHeader
 import social.mycelium.android.ui.components.nav.BottomNavigationBar
 import social.mycelium.android.ui.components.nav.SmartBottomNavigationBar
@@ -72,11 +72,11 @@ import social.mycelium.android.viewmodel.RelayManagementViewModel
 import social.mycelium.android.viewmodel.TopicsViewModel
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayState
-import social.mycelium.android.repository.RelayRepository
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayRepository
+import social.mycelium.android.repository.relay.RelayStorageManager
 import androidx.compose.ui.platform.LocalContext
 import social.mycelium.android.ui.performance.animatedYOffset
-import social.mycelium.android.repository.HashtagStats
+import social.mycelium.android.repository.content.HashtagStats
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.MoreVert
@@ -85,13 +85,14 @@ import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.PersonOff
 import androidx.compose.foundation.shape.RoundedCornerShape
 import social.mycelium.android.ui.icons.ChatBubbleOutline
-import social.mycelium.android.repository.ModerationFilterMode
-import social.mycelium.android.repository.ScopedModerationRepository
+import social.mycelium.android.repository.social.ModerationFilterMode
+import social.mycelium.android.repository.social.ScopedModerationRepository
 import social.mycelium.android.utils.normalizeRelayUrl
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
 
+import social.mycelium.android.repository.sync.ZapType
 // ✅ PERFORMANCE: Cached date formatter (Thread view pattern)
 private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault()) }
 
@@ -357,7 +358,7 @@ fun TopicsScreen(
     var avatarProfileRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(currentUserHexForAvatar) {
         val hex = currentUserHexForAvatar ?: return@LaunchedEffect
-        social.mycelium.android.repository.ProfileMetadataCache.getInstance().profileUpdated
+        social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().profileUpdated
             .collect { pk -> if (pk == hex) avatarProfileRevision++ }
     }
     val resolvedAvatarUrl = remember(
@@ -367,7 +368,7 @@ fun TopicsScreen(
     ) {
         authState.userProfile?.picture?.takeIf { it.isNotBlank() }
             ?: currentUserHexForAvatar?.let {
-                social.mycelium.android.repository.ProfileMetadataCache.getInstance().getAuthor(it)?.avatarUrl
+                social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().getAuthor(it)?.avatarUrl
             }?.takeIf { it.isNotBlank() }
             ?: avatarAccount?.picture?.takeIf { it.isNotBlank() }
     }
@@ -958,7 +959,7 @@ fun TopicsScreen(
                                 val anchor = "#${selectedHashtag?.lowercase() ?: ""}"
 
                                 // Observe reactive vote scores so Popular sort recomposes when votes change
-                                val voteScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+                                val voteScores by social.mycelium.android.repository.social.VoteRepository.scoreByNoteId.collectAsState()
 
                                 // Pre-fetch: trigger older topics load 10 items from bottom
                                 // (kind-11 feeds are sparse, so use a smaller threshold)
@@ -991,7 +992,7 @@ fun TopicsScreen(
                                     }
                                 }
                                 val stableTopicOnCustomZapSend =
-                                    remember<(social.mycelium.android.data.Note, Long, social.mycelium.android.repository.ZapType, String) -> Unit> {
+                                    remember<(social.mycelium.android.data.Note, Long, social.mycelium.android.repository.sync.ZapType, String) -> Unit> {
                                         { n, amount, zapType, msg ->
                                             accountStateViewModel.sendZap(n, amount, zapType, msg)
                                         }
@@ -1153,16 +1154,16 @@ fun TopicsScreen(
                                                             accountStateViewModel.sendZap(
                                                                 note,
                                                                 amount,
-                                                                social.mycelium.android.repository.ZapType.PUBLIC,
+                                                                social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                                                 ""
                                                             )
                                                         },
                                                         onCustomZapSend = stableTopicOnCustomZapSend,
                                                         onVote = stableTopicOnVote,
-                                                        ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(
+                                                        ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(
                                                             note.id
                                                         ),
-                                                        voteScore = social.mycelium.android.repository.VoteRepository.getScore(
+                                                        voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(
                                                             note.id
                                                         ),
                                                         shouldCloseZapMenus = shouldCloseZapMenus,
@@ -1202,16 +1203,16 @@ fun TopicsScreen(
                                                         accountStateViewModel.sendZap(
                                                             note,
                                                             amount,
-                                                            social.mycelium.android.repository.ZapType.PUBLIC,
+                                                            social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                                             ""
                                                         )
                                                     },
                                                     onCustomZapSend = stableTopicOnCustomZapSend,
                                                     onVote = stableTopicOnVote,
-                                                    ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(
+                                                    ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(
                                                         note.id
                                                     ),
-                                                    voteScore = social.mycelium.android.repository.VoteRepository.getScore(
+                                                    voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(
                                                         note.id
                                                     ),
                                                     shouldCloseZapMenus = shouldCloseZapMenus,
@@ -1423,7 +1424,7 @@ private fun HashtagCard(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         // Cumulative vote score across all topics in this hashtag
-                        val voteScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+                        val voteScores by social.mycelium.android.repository.social.VoteRepository.scoreByNoteId.collectAsState()
                         val netScore = remember(voteScores, stats.topicIds) {
                             stats.topicIds.sumOf { voteScores[it] ?: 0 }
                         }
@@ -1515,7 +1516,7 @@ private fun formatHashtagTimestamp(timestamp: Long): String {
  */
 @Composable
 private fun Kind11TopicCard(
-    topic: social.mycelium.android.repository.TopicNote,
+    topic: social.mycelium.android.repository.content.TopicNote,
     isFavorited: Boolean,
     onToggleFavorite: () -> Unit,
     onMenuClick: () -> Unit,

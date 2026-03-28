@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
+import social.mycelium.android.repository.social.ModerationFilterMode
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FiltersBlocksSettingsScreen(
@@ -80,7 +81,7 @@ fun FiltersBlocksSettingsScreen(
             // ── Topic Moderation (NIP-22) ──
             FiltersBlocksSectionHeader("Topic Moderation")
 
-            val moderationRepo = remember { social.mycelium.android.repository.ScopedModerationRepository.getInstance() }
+            val moderationRepo = remember { social.mycelium.android.repository.social.ScopedModerationRepository.getInstance() }
             val currentFilterMode by moderationRepo.filterMode.collectAsState()
             val currentThreshold by moderationRepo.flagThreshold.collectAsState()
             val moderationCount by moderationRepo.moderationCount.collectAsState()
@@ -93,7 +94,7 @@ fun FiltersBlocksSettingsScreen(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
 
-            social.mycelium.android.repository.ModerationFilterMode.entries.forEach { mode ->
+            social.mycelium.android.repository.social.ModerationFilterMode.entries.forEach { mode ->
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -108,17 +109,17 @@ fun FiltersBlocksSettingsScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = when (mode) {
-                                social.mycelium.android.repository.ModerationFilterMode.OFF -> "Off"
-                                social.mycelium.android.repository.ModerationFilterMode.THRESHOLD -> "Threshold"
-                                social.mycelium.android.repository.ModerationFilterMode.WOT -> "Web of Trust"
+                                social.mycelium.android.repository.social.ModerationFilterMode.OFF -> "Off"
+                                social.mycelium.android.repository.social.ModerationFilterMode.THRESHOLD -> "Threshold"
+                                social.mycelium.android.repository.social.ModerationFilterMode.WOT -> "Web of Trust"
                             },
                             style = MaterialTheme.typography.bodyLarge
                         )
                         Text(
                             text = when (mode) {
-                                social.mycelium.android.repository.ModerationFilterMode.OFF -> "Show all notes regardless of moderation flags"
-                                social.mycelium.android.repository.ModerationFilterMode.THRESHOLD -> "Hide notes/users that exceed a flag count threshold"
-                                social.mycelium.android.repository.ModerationFilterMode.WOT -> "Only count flags from people you follow"
+                                social.mycelium.android.repository.social.ModerationFilterMode.OFF -> "Show all notes regardless of moderation flags"
+                                social.mycelium.android.repository.social.ModerationFilterMode.THRESHOLD -> "Hide notes/users that exceed a flag count threshold"
+                                social.mycelium.android.repository.social.ModerationFilterMode.WOT -> "Only count flags from people you follow"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -128,7 +129,7 @@ fun FiltersBlocksSettingsScreen(
             }
 
             // Threshold picker (only visible when not OFF)
-            if (currentFilterMode != social.mycelium.android.repository.ModerationFilterMode.OFF) {
+            if (currentFilterMode != social.mycelium.android.repository.social.ModerationFilterMode.OFF) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

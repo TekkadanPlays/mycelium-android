@@ -58,9 +58,9 @@ import social.mycelium.android.relay.RelayEndpointStatus
 import social.mycelium.android.relay.RelayHealthInfo
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.RelayDeliveryTracker
-import social.mycelium.android.repository.RelayRepository
-import social.mycelium.android.repository.RelayStorageManager
-import social.mycelium.android.repository.DirectMessageRepository
+import social.mycelium.android.repository.relay.RelayRepository
+import social.mycelium.android.repository.relay.RelayStorageManager
+import social.mycelium.android.repository.messaging.DirectMessageRepository
 import social.mycelium.android.utils.normalizeRelayUrl
 import social.mycelium.android.viewmodel.RelayManagementViewModel
 import social.mycelium.android.viewmodel.AccountStateViewModel
@@ -273,14 +273,14 @@ fun RelayManagementScreen(
     // or manage these connections.
 
     // NIP-66 discovered relays for indexer verification
-    val discoveredRelays by social.mycelium.android.repository.Nip66RelayDiscoveryRepository
+    val discoveredRelays by social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository
         .discoveredRelays.collectAsState()
 
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior(topAppBarState)
 
     // NIP-65 source info
-    val nip65Source by social.mycelium.android.repository.Nip65RelayListRepository.sourceRelayUrl.collectAsState()
-    val nip65CreatedAt by social.mycelium.android.repository.Nip65RelayListRepository.eventCreatedAt.collectAsState()
+    val nip65Source by social.mycelium.android.repository.relay.Nip65RelayListRepository.sourceRelayUrl.collectAsState()
+    val nip65CreatedAt by social.mycelium.android.repository.relay.Nip65RelayListRepository.eventCreatedAt.collectAsState()
 
     // Tab + pager state — fixed tabs + dynamic profile tabs
     val fixedTabs = RelayTab.entries
@@ -322,7 +322,7 @@ fun RelayManagementScreen(
     fun findRelayLocations(normalizedUrl: String): List<String> {
         val key = normalizedUrl.trim().removeSuffix("/").lowercase()
         val locs = mutableListOf<String>()
-        val dmUrls = social.mycelium.android.repository.DirectMessageRepository.dmRelayUrls.value
+        val dmUrls = social.mycelium.android.repository.messaging.DirectMessageRepository.dmRelayUrls.value
         if (dmUrls.any { it.trim().removeSuffix("/").lowercase() == key }) locs.add("DM Relays")
         if (uiState.outboxRelays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Outbox")
         if (uiState.inboxRelays.any { it.url.trim().removeSuffix("/").lowercase() == key }) locs.add("Inbox")
@@ -349,7 +349,7 @@ fun RelayManagementScreen(
             return
         }
         val locations = findRelayLocations(normalized).filter { it != targetSection }
-        val isVerifiedIdx = social.mycelium.android.repository.Nip66RelayDiscoveryRepository.isSearchRelay(normalized)
+        val isVerifiedIdx = social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository.isSearchRelay(normalized)
         val doAdd = { onAdd(createRelayWithNip11Info(normalized, nip11Cache = nip11Cache)) }
 
         // DM section: warn if relay also used elsewhere
@@ -1537,7 +1537,7 @@ fun RelayManagementScreen(
                 scope.launch {
                     val signer = accountStateViewModel.getCurrentSigner()
                     if (signer != null) {
-                        social.mycelium.android.repository.Nip65RelayListRepository.publishNip65(
+                        social.mycelium.android.repository.relay.Nip65RelayListRepository.publishNip65(
                             context = context,
                             outboxUrls = outboxRelays.map { it.url },
                             inboxUrls = inboxRelays.map { it.url },

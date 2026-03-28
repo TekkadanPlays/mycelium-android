@@ -21,7 +21,7 @@ import coil.compose.AsyncImage
 import com.example.cybin.nip19.NPub
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.toNpub
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 
 /**
  * Screen for starting a new DM conversation.

@@ -4,8 +4,8 @@ import android.content.Context
 import android.util.Log
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
-import social.mycelium.android.repository.NwcConfig
-import social.mycelium.android.repository.NwcConfigRepository
+import social.mycelium.android.repository.sync.NwcConfig
+import social.mycelium.android.repository.sync.NwcConfigRepository
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority

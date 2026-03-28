@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.graphics.Color
 import social.mycelium.android.data.Author
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.ui.components.zap.SupportZapBottomSheet

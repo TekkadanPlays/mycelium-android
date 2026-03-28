@@ -68,11 +68,11 @@ import androidx.navigation.navArgument
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.DefaultRelayCategories
-import social.mycelium.android.repository.NotesRepository
+import social.mycelium.android.repository.feed.NotesRepository
 import social.mycelium.android.repository.NotificationsRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.RelayRepository
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.relay.RelayRepository
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import social.mycelium.android.ui.components.nav.ScrollAwareBottomNavigationBar
@@ -137,6 +137,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+import social.mycelium.android.repository.social.NoteCounts
+import social.mycelium.android.repository.sync.ZapType
 /**
  * Main navigation composable for Mycelium app using Jetpack Navigation. This provides proper
  * backstack management like Primal, allowing infinite exploration through feeds, threads, and
@@ -202,17 +204,17 @@ private fun buildRootStubNote(
 /** Build ReactionsData merging boost authors from note + NoteCountsRepository. */
 private fun buildReactionsData(
     noteId: String,
-    counts: social.mycelium.android.repository.NoteCounts?,
+    counts: social.mycelium.android.repository.social.NoteCounts?,
     noteBoostAuthors: List<social.mycelium.android.data.Author> = emptyList(),
     noteReactions: List<String> = emptyList(),
 ): social.mycelium.android.viewmodel.ReactionsData {
-    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+    val profileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
     val repostPubkeys = counts?.repostAuthors ?: emptyList()
     val existingIds = noteBoostAuthors.map { it.id }.toSet()
     val extra = repostPubkeys.filter { it !in existingIds }.map { profileCache.resolveAuthor(it) }
     val mergedBoosts = (noteBoostAuthors + extra).distinctBy { it.id }
     // NIP-88: Include poll tally data if available
-    val pollTally = social.mycelium.android.repository.PollResponseRepository.tallies.value[noteId]
+    val pollTally = social.mycelium.android.repository.content.PollResponseRepository.tallies.value[noteId]
     val pollVotesByOption = pollTally?.votesByOption?.mapValues { it.value.toList() } ?: emptyMap()
     val pollOptionLabels = pollTally?.optionLabels ?: emptyMap()
     val pollTotalVoters = pollTally?.totalVoters ?: 0
@@ -407,7 +409,7 @@ private fun OverlayThreadPanel(
                     val err = accountStateViewModel.sendZap(
                         stackNote,
                         amount,
-                        social.mycelium.android.repository.ZapType.PUBLIC,
+                        social.mycelium.android.repository.sync.ZapType.PUBLIC,
                         ""
                     )
                     if (err != null) showSnackbar(err)
@@ -463,7 +465,7 @@ private fun OverlayThreadPanel(
                 }
             },
             onSeeAllReactions = { nId ->
-                val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[nId]
+                val counts = social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[nId]
                 appViewModel.storeReactionsData(buildReactionsData(nId, counts, note.repostedByAuthors))
                 navController.navigate("reactions/$nId") { launchSingleTop = true }
             },
@@ -593,13 +595,13 @@ private fun OverlayProfilePanel(
         if (cacheKey.isNotBlank()) {
             val discoveryRelays = cacheUrls.ifEmpty { userRelayUrls }
             if (discoveryRelays.isNotEmpty()) {
-                social.mycelium.android.repository.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
+                social.mycelium.android.repository.relay.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
                     cacheKey,
                     discoveryRelays
                 )
                 repeat(10) {
                     val cached =
-                        social.mycelium.android.repository.Nip65RelayListRepository.getCachedOutboxRelays(cacheKey)
+                        social.mycelium.android.repository.relay.Nip65RelayListRepository.getCachedOutboxRelays(cacheKey)
                     if (cached != null && cached.isNotEmpty()) {
                         authorOutboxRelays = cached
                         return@LaunchedEffect
@@ -681,13 +683,13 @@ private fun OverlayProfilePanel(
     }
     // Counts
     LaunchedEffect(cacheKey, profileRelayUrls) {
-        social.mycelium.android.repository.ProfileCountsRepository.fetchCounts(cacheKey, profileRelayUrls)
+        social.mycelium.android.repository.social.ProfileCountsRepository.fetchCounts(cacheKey, profileRelayUrls)
     }
-    val allProfileCounts by social.mycelium.android.repository.ProfileCountsRepository.countsMap.collectAsState()
+    val allProfileCounts by social.mycelium.android.repository.social.ProfileCountsRepository.countsMap.collectAsState()
     val profileCounts = allProfileCounts[cacheKey]
     // Badges
     val profileBadges by remember(cacheKey, profileRelayUrls) {
-        social.mycelium.android.repository.BadgeRepository.badgesFor(cacheKey, profileRelayUrls)
+        social.mycelium.android.repository.social.BadgeRepository.badgesFor(cacheKey, profileRelayUrls)
     }.collectAsState()
     // Parent notes for reply context (resolve replyToId with rootNoteId fallback)
     val parentNotesMap =
@@ -726,8 +728,8 @@ private fun OverlayProfilePanel(
     val zapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
     val zappedIds by accountStateViewModel.zappedNoteIds.collectAsState()
     val zappedAmountByNoteId by accountStateViewModel.zappedAmountByNoteId.collectAsState()
-    val replyCountByNoteId by social.mycelium.android.repository.ReplyCountCache.replyCountByNoteId.collectAsState()
-    val noteCountsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+    val replyCountByNoteId by social.mycelium.android.repository.cache.ReplyCountCache.replyCountByNoteId.collectAsState()
+    val noteCountsByNoteId by social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.collectAsState()
     val fallbackRelayUrls = remember(cacheUrls, userRelayUrls) { (cacheUrls + userRelayUrls).distinct() }
 
     ThreadSlideBackBox(onBack = onBack) {
@@ -780,7 +782,7 @@ private fun OverlayProfilePanel(
                 val n = authorNotes.find { it.id == noteId }
                 if (n != null) {
                     val err =
-                        accountStateViewModel.sendZap(n, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                        accountStateViewModel.sendZap(n, amount, social.mycelium.android.repository.sync.ZapType.PUBLIC, "")
                     if (err != null) showSnackbar(err)
                 }
             },
@@ -827,15 +829,15 @@ private fun OverlayProfilePanel(
                 else accountStateViewModel.followUser(targetHex)
                 if (error != null) showSnackbar(error)
                 else currentAccount?.toHexKey()?.let { pk ->
-                    social.mycelium.android.repository.ProfileCountsRepository.invalidate(pk)
-                    social.mycelium.android.repository.ProfileCountsRepository.invalidate(targetHex)
+                    social.mycelium.android.repository.social.ProfileCountsRepository.invalidate(pk)
+                    social.mycelium.android.repository.social.ProfileCountsRepository.invalidate(targetHex)
                 }
             },
             parentNoteForReply = { parentId -> parentNotesMap[parentId] },
             onSeeAllReactions = { note ->
                 val effectiveId = note.originalNoteId ?: note.id
-                val counts = social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[effectiveId]
-                    ?: social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
+                val counts = social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[effectiveId]
+                    ?: social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[note.id]
                 appViewModel.storeReactionsData(
                     buildReactionsData(
                         effectiveId,
@@ -929,7 +931,7 @@ private fun OverlayProfilePanel(
                             val err = accountStateViewModel.sendZap(
                                 stackNote,
                                 amount,
-                                social.mycelium.android.repository.ZapType.PUBLIC,
+                                social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                 ""
                             )
                             if (err != null) showSnackbar(err)
@@ -962,7 +964,7 @@ private fun OverlayProfilePanel(
                     },
                     onSeeAllReactions = { noteId ->
                         val counts =
-                            social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[noteId]
+                            social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[noteId]
                         appViewModel.storeReactionsData(buildReactionsData(noteId, counts, emptyList()))
                         navController.navigate("reactions/$noteId") { launchSingleTop = true }
                     },
@@ -1073,7 +1075,7 @@ fun MyceliumNavigation(
         // If we just switched accounts, the companion shim now points to the new active account.
         // Also try the specific account's repo directly for robustness.
         val specificRepo = if (navAccountPubkey != null) {
-            social.mycelium.android.repository.AccountScopedRegistry.getScope(navAccountPubkey)?.notificationsRepository
+            social.mycelium.android.repository.sync.AccountScopedRegistry.getScope(navAccountPubkey)?.notificationsRepository
         } else null
         val notifData = specificRepo?.findNotificationByNoteId(nav.noteId)
             ?: NotificationsRepository.findNotificationByNoteId(nav.noteId)
@@ -1490,21 +1492,21 @@ fun MyceliumNavigation(
         }
 
         // Reset orchestrator for this account session
-        social.mycelium.android.repository.StartupOrchestrator.reset()
+        social.mycelium.android.repository.sync.StartupOrchestrator.reset()
 
         // ── Phase 0: Settings (CRITICAL priority, non-blocking) ──────────
         // Fires concurrently with Phase 1. Settings are cosmetic and apply
         // retroactively via SharedPreferences → Compose recomposition.
         val signer = accountStateViewModel.getCurrentSigner()
         if (signer != null && !accountStateViewModel.isSettingsAlreadyApplied(pubkey)) {
-            social.mycelium.android.repository.StartupOrchestrator.runPhase0Settings(
+            social.mycelium.android.repository.sync.StartupOrchestrator.runPhase0Settings(
                 signer, pubkey, outboxUrls, allUserRelayUrls
             )
             // Mark applied after launching — the orchestrator will apply settings
             // when they arrive. On next launch, skipPhase0() fires instantly.
             accountStateViewModel.markSettingsApplied(pubkey)
         } else {
-            social.mycelium.android.repository.StartupOrchestrator.skipPhase0()
+            social.mycelium.android.repository.sync.StartupOrchestrator.skipPhase0()
             Log.d("MyceliumNav", "Phase 0: settings already applied or no signer — skipping")
         }
 
@@ -1512,17 +1514,17 @@ fun MyceliumNavigation(
         // Runs on orchestrator's own scope (survives recomposition).
         // Await completion so follow list is ready before Phase 3 reads it.
         val followRelayUrls = (indexerUrls + outboxUrls).distinct()
-        val phase1Deferred = social.mycelium.android.repository.StartupOrchestrator.runPhase1UserState(
+        val phase1Deferred = social.mycelium.android.repository.sync.StartupOrchestrator.runPhase1UserState(
             pubkey, followRelayUrls, allUserRelayUrls, signer, context.applicationContext
         )
         phase1Deferred.await()
-        val cachedFollowList = social.mycelium.android.repository.ContactListRepository.getCachedFollowList(pubkey)
+        val cachedFollowList = social.mycelium.android.repository.social.ContactListRepository.getCachedFollowList(pubkey)
         Log.d("MyceliumNav", "Phase 1: follow list ready (${cachedFollowList?.size ?: 0} follows)")
 
         // Deep history (LOW priority, batched) — start after brief yield to feed wiring; idempotent.
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             kotlinx.coroutines.delay(5_000L)
-            social.mycelium.android.repository.StartupOrchestrator.runPhase5DeepHistory(
+            social.mycelium.android.repository.sync.StartupOrchestrator.runPhase5DeepHistory(
                 context.applicationContext,
                 pubkey,
                 cachedFollowList ?: emptySet(),
@@ -1535,7 +1537,7 @@ fun MyceliumNavigation(
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
             // Wait for feed to start, or timeout after 8s
             val feedDeadline = System.currentTimeMillis() + 8_000L
-            while (!social.mycelium.android.repository.StartupOrchestrator.feedStarted.value
+            while (!social.mycelium.android.repository.sync.StartupOrchestrator.feedStarted.value
                 && System.currentTimeMillis() < feedDeadline
             ) {
                 kotlinx.coroutines.delay(200)
@@ -1544,7 +1546,7 @@ fun MyceliumNavigation(
             kotlinx.coroutines.delay(2_000L)
 
             // ── Phase 3: Enrichment ─────────────────────────────────────
-            social.mycelium.android.repository.StartupOrchestrator.runPhase3Enrichment(
+            social.mycelium.android.repository.sync.StartupOrchestrator.runPhase3Enrichment(
                 context = context,
                 userPubkey = pubkey,
                 inboxUrls = inboxUrls,
@@ -1562,7 +1564,7 @@ fun MyceliumNavigation(
             kotlinx.coroutines.delay(10_000L)
             val dmSigner = accountStateViewModel.getCurrentSigner()
             if (dmSigner != null) {
-                social.mycelium.android.repository.StartupOrchestrator.runPhase4Background(
+                social.mycelium.android.repository.sync.StartupOrchestrator.runPhase4Background(
                     userPubkey = pubkey,
                     signer = dmSigner,
                     inboxUrls = inboxUrls,
@@ -1599,7 +1601,7 @@ fun MyceliumNavigation(
                 continue
             }
             // Ensure the background account has a scope in the registry
-            val bgScope = social.mycelium.android.repository.AccountScopedRegistry.getOrCreateScope(bgPubkey, context)
+            val bgScope = social.mycelium.android.repository.sync.AccountScopedRegistry.getOrCreateScope(bgPubkey, context)
             val bgIndexerUrls = storageManager.loadIndexerRelays(bgPubkey).map { it.url }
             bgScope.notificationsRepository.setCacheRelayUrls(bgIndexerUrls)
             bgScope.notificationsRepository.startSubscription(bgPubkey, bgInboxUrls, bgOutboxUrls, bgCategoryUrls)
@@ -1738,7 +1740,7 @@ fun MyceliumNavigation(
                     val onboardingComplete by accountStateViewModel.onboardingComplete.collectAsState()
                     val appState by appViewModel.appState.collectAsState()
                     val context = LocalContext.current
-                    val storageManager = remember { social.mycelium.android.repository.RelayStorageManager(context) }
+                    val storageManager = remember { social.mycelium.android.repository.relay.RelayStorageManager(context) }
                     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
 
                     LaunchedEffect(currentAccount, onboardingComplete) {
@@ -2004,8 +2006,8 @@ fun MyceliumNavigation(
                             onSeeAllReactions = { note ->
                                 val effectiveId = note.originalNoteId ?: note.id
                                 val counts =
-                                    social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[effectiveId]
-                                        ?: social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
+                                    social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[effectiveId]
+                                        ?: social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[note.id]
                                 appViewModel.storeReactionsData(
                                     buildReactionsData(
                                         effectiveId,
@@ -2344,7 +2346,7 @@ fun MyceliumNavigation(
                         // Build user's configured relay URLs once
                         val pubkey = currentAccountForRoot?.toHexKey()
                         val userRelayUrls = if (pubkey != null) {
-                            val sm = social.mycelium.android.repository.RelayStorageManager(context)
+                            val sm = social.mycelium.android.repository.relay.RelayStorageManager(context)
                             sm.loadCategories(pubkey).flatMap { it.relays }.map { it.url }.distinct()
                         } else emptyList()
 
@@ -2488,7 +2490,7 @@ fun MyceliumNavigation(
                     val authState by accountStateViewModel.authState.collectAsState()
 
                     // Get relay URLs for thread replies: use feed's relays when opened from topics/dashboard, else default category
-                    val storageManager = remember { social.mycelium.android.repository.RelayStorageManager(context) }
+                    val storageManager = remember { social.mycelium.android.repository.relay.RelayStorageManager(context) }
                     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
                     val fallbackRelayUrls = remember(currentAccount) {
                         currentAccount?.toHexKey()?.let { pubkey ->
@@ -2515,14 +2517,14 @@ fun MyceliumNavigation(
                         val authorPubkey = resolvedNote.author.id
                         if (authorPubkey.isNotBlank()) {
                             val discoveryRelays = cacheRelayUrls
-                            social.mycelium.android.repository.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
+                            social.mycelium.android.repository.relay.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
                                 authorPubkey,
                                 discoveryRelays
                             )
                             // Poll for cached result (async fetch)
                             repeat(8) {
                                 val cached =
-                                    social.mycelium.android.repository.Nip65RelayListRepository.getCachedOutboxRelays(
+                                    social.mycelium.android.repository.relay.Nip65RelayListRepository.getCachedOutboxRelays(
                                         authorPubkey
                                     )
                                 if (cached != null && cached.isNotEmpty()) {
@@ -2673,7 +2675,7 @@ fun MyceliumNavigation(
                                     val err = accountStateViewModel.sendZap(
                                         resolvedNote,
                                         amount,
-                                        social.mycelium.android.repository.ZapType.PUBLIC,
+                                        social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                         ""
                                     )
                                     if (err != null) showSnackbar(err)
@@ -2683,7 +2685,7 @@ fun MyceliumNavigation(
                                 val err = accountStateViewModel.sendZap(
                                     targetNote,
                                     amount,
-                                    social.mycelium.android.repository.ZapType.PUBLIC,
+                                    social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                     ""
                                 )
                                 if (err != null) showSnackbar(err)
@@ -2773,7 +2775,7 @@ fun MyceliumNavigation(
                             },
                             onSeeAllReactions = { nId ->
                                 val counts =
-                                    social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[nId]
+                                    social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[nId]
                                 appViewModel.storeReactionsData(
                                     buildReactionsData(
                                         nId,
@@ -3049,14 +3051,14 @@ fun MyceliumNavigation(
                         if (cacheKey.isNotBlank()) {
                             val discoveryRelays = cacheUrls.ifEmpty { userRelayUrls }
                             if (discoveryRelays.isNotEmpty()) {
-                                social.mycelium.android.repository.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
+                                social.mycelium.android.repository.relay.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
                                     cacheKey,
                                     discoveryRelays
                                 )
                                 // Poll for cached result (async batch fetch)
                                 repeat(10) {
                                     val cached =
-                                        social.mycelium.android.repository.Nip65RelayListRepository.getCachedOutboxRelays(
+                                        social.mycelium.android.repository.relay.Nip65RelayListRepository.getCachedOutboxRelays(
                                             cacheKey
                                         )
                                     if (cached != null && cached.isNotEmpty()) {
@@ -3113,17 +3115,17 @@ fun MyceliumNavigation(
                     }
                     // Fetch profile counts (following/followers) from indexer relays
                     LaunchedEffect(cacheKey, profileRelayUrls) {
-                        social.mycelium.android.repository.ProfileCountsRepository.fetchCounts(
+                        social.mycelium.android.repository.social.ProfileCountsRepository.fetchCounts(
                             cacheKey,
                             profileRelayUrls
                         )
                     }
-                    val allProfileCounts by social.mycelium.android.repository.ProfileCountsRepository.countsMap.collectAsState()
+                    val allProfileCounts by social.mycelium.android.repository.social.ProfileCountsRepository.countsMap.collectAsState()
                     val profileCounts = allProfileCounts[cacheKey]
 
                     // ── Badge fetching (NIP-58) ──
                     val profileBadges by remember(cacheKey, profileRelayUrls) {
-                        social.mycelium.android.repository.BadgeRepository.badgesFor(cacheKey, profileRelayUrls)
+                        social.mycelium.android.repository.social.BadgeRepository.badgesFor(cacheKey, profileRelayUrls)
                     }.collectAsState()
 
                     // ── Parent note fetching for reply context (batch via indexer relays) ──
@@ -3226,7 +3228,7 @@ fun MyceliumNavigation(
                                 val err = accountStateViewModel.sendZap(
                                     n,
                                     amount,
-                                    social.mycelium.android.repository.ZapType.PUBLIC,
+                                    social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                     ""
                                 )
                                 if (err != null) showSnackbar(err)
@@ -3235,8 +3237,8 @@ fun MyceliumNavigation(
                         isZapInProgress = { id -> id in zapInProgressIds },
                         isZapped = { id -> id in zappedIds },
                         myZappedAmountForNote = { id -> zappedAmountByNoteId[id] },
-                        overrideReplyCountForNote = { id -> social.mycelium.android.repository.ReplyCountCache.replyCountByNoteId.value[id] },
-                        countsForNote = { id -> social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[id] },
+                        overrideReplyCountForNote = { id -> social.mycelium.android.repository.cache.ReplyCountCache.replyCountByNoteId.value[id] },
+                        countsForNote = { id -> social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[id] },
                         onImageTap = { _, urls, idx ->
                             appViewModel.openImageViewer(urls, idx)
                             navController.navigate("image_viewer")
@@ -3282,8 +3284,8 @@ fun MyceliumNavigation(
                                 // follow/unfollow emits via followListUpdates flow — no forceRefresh needed.
                                 // Invalidate profile counts so following/follower numbers refresh.
                                 currentAccount?.toHexKey()?.let { pubkey ->
-                                    social.mycelium.android.repository.ProfileCountsRepository.invalidate(pubkey)
-                                    social.mycelium.android.repository.ProfileCountsRepository.invalidate(targetHex)
+                                    social.mycelium.android.repository.social.ProfileCountsRepository.invalidate(pubkey)
+                                    social.mycelium.android.repository.social.ProfileCountsRepository.invalidate(targetHex)
                                 }
                             }
                         },
@@ -3291,8 +3293,8 @@ fun MyceliumNavigation(
                         onSeeAllReactions = { note ->
                             val effectiveId = note.originalNoteId ?: note.id
                             val counts =
-                                social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[effectiveId]
-                                    ?: social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
+                                social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[effectiveId]
+                                    ?: social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[note.id]
                             appViewModel.storeReactionsData(
                                 buildReactionsData(
                                     effectiveId,
@@ -3438,7 +3440,7 @@ fun MyceliumNavigation(
                                             val err = accountStateViewModel.sendZap(
                                                 profileDisplayNote,
                                                 amount,
-                                                social.mycelium.android.repository.ZapType.PUBLIC,
+                                                social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                                 ""
                                             )
                                             if (err != null) showSnackbar(err)
@@ -3507,7 +3509,7 @@ fun MyceliumNavigation(
                                     },
                                     onSeeAllReactions = { nId ->
                                         val counts =
-                                            social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[nId]
+                                            social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[nId]
                                         appViewModel.storeReactionsData(
                                             buildReactionsData(
                                                 nId,
@@ -3717,11 +3719,11 @@ fun MyceliumNavigation(
 
                     // ── Own-profile badge fetching (NIP-58) ──
                     val ownProfileBadges by remember(userCacheKey, userProfileRelayUrls) {
-                        if (userCacheKey != null) social.mycelium.android.repository.BadgeRepository.badgesFor(
+                        if (userCacheKey != null) social.mycelium.android.repository.social.BadgeRepository.badgesFor(
                             userCacheKey,
                             userProfileRelayUrls
                         )
-                        else kotlinx.coroutines.flow.MutableStateFlow(emptyList<social.mycelium.android.repository.BadgeRepository.Badge>())
+                        else kotlinx.coroutines.flow.MutableStateFlow(emptyList<social.mycelium.android.repository.social.BadgeRepository.Badge>())
                     }.collectAsState()
 
                     val userZapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
@@ -3755,7 +3757,7 @@ fun MyceliumNavigation(
                                 val err = accountStateViewModel.sendZap(
                                     n,
                                     amount,
-                                    social.mycelium.android.repository.ZapType.PUBLIC,
+                                    social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                     ""
                                 )
                                 if (err != null) showSnackbar(err)
@@ -3764,8 +3766,8 @@ fun MyceliumNavigation(
                         isZapInProgress = { id -> id in userZapInProgressIds },
                         isZapped = { id -> id in userZappedIds },
                         myZappedAmountForNote = { id -> userZappedAmountByNoteId[id] },
-                        overrideReplyCountForNote = { id -> social.mycelium.android.repository.ReplyCountCache.replyCountByNoteId.value[id] },
-                        countsForNote = { id -> social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[id] },
+                        overrideReplyCountForNote = { id -> social.mycelium.android.repository.cache.ReplyCountCache.replyCountByNoteId.value[id] },
+                        countsForNote = { id -> social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[id] },
                         onImageTap = { _, urls, idx ->
                             appViewModel.openImageViewer(urls, idx)
                             navController.navigate("image_viewer")
@@ -3802,8 +3804,8 @@ fun MyceliumNavigation(
                         onSeeAllReactions = { note ->
                             val effectiveId = note.originalNoteId ?: note.id
                             val counts =
-                                social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[effectiveId]
-                                    ?: social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[note.id]
+                                social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[effectiveId]
+                                    ?: social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[note.id]
                             appViewModel.storeReactionsData(
                                 buildReactionsData(
                                     effectiveId,
@@ -3832,7 +3834,7 @@ fun MyceliumNavigation(
                         getOutboxRelays = {
                             val pk = accountStateViewModel.currentAccount.value?.toHexKey()
                             if (pk != null) {
-                                val sm = social.mycelium.android.repository.RelayStorageManager(listsContext)
+                                val sm = social.mycelium.android.repository.relay.RelayStorageManager(listsContext)
                                 sm.loadOutboxRelays(pk).map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
                                     .toSet()
                             } else emptySet()
@@ -3855,7 +3857,7 @@ fun MyceliumNavigation(
                         getOutboxRelays = {
                             val pk = accountStateViewModel.currentAccount.value?.toHexKey()
                             if (pk != null) {
-                                val sm = social.mycelium.android.repository.RelayStorageManager(listDetailContext)
+                                val sm = social.mycelium.android.repository.relay.RelayStorageManager(listDetailContext)
                                 sm.loadOutboxRelays(pk).map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
                                     .toSet()
                             } else emptySet()
@@ -3921,7 +3923,7 @@ fun MyceliumNavigation(
                 }
 
                 composable("settings/account_preferences") {
-                    val lists by social.mycelium.android.repository.PeopleListRepository.peopleLists.collectAsState()
+                    val lists by social.mycelium.android.repository.social.PeopleListRepository.peopleLists.collectAsState()
                     FeedPreferencesScreen(
                         onBackClick = { navController.popBackStack() },
                         peopleLists = remember(lists) { lists.map { it.dTag to it.title } }
@@ -4006,7 +4008,7 @@ fun MyceliumNavigation(
                     val chatPubkey = accountStateViewModel.currentAccount.collectAsState().value?.toHexKey()
                     val chatRelayUrls = remember {
                         val ctx = navController.context
-                        val sm = social.mycelium.android.repository.RelayStorageManager(ctx)
+                        val sm = social.mycelium.android.repository.relay.RelayStorageManager(ctx)
                         val pk = chatPubkey ?: ""
                         (sm.loadOutboxRelays(pk).map { it.url } + sm.loadInboxRelays(pk).map { it.url })
                             .map { it.trim().removeSuffix("/") }
@@ -4352,11 +4354,11 @@ fun MyceliumNavigation(
                         logPubkey?.let { RelayStorageManager(context).loadProfiles(it) } ?: emptyList()
                     }
                     // Count followed users who write/read to this relay per NIP-65
-                    val logAuthorRelaySnapshot by social.mycelium.android.repository.Nip65RelayListRepository.authorRelaySnapshot.collectAsState()
-                    val logNip65Pubkey = social.mycelium.android.repository.Nip65RelayListRepository.currentPubkey
+                    val logAuthorRelaySnapshot by social.mycelium.android.repository.relay.Nip65RelayListRepository.authorRelaySnapshot.collectAsState()
+                    val logNip65Pubkey = social.mycelium.android.repository.relay.Nip65RelayListRepository.currentPubkey
                     val logFollowSet = remember(logNip65Pubkey ?: logPubkey) {
                         val pk = logNip65Pubkey ?: logPubkey
-                        pk?.let { social.mycelium.android.repository.ContactListRepository.getCachedFollowList(it) }
+                        pk?.let { social.mycelium.android.repository.social.ContactListRepository.getCachedFollowList(it) }
                             ?: emptySet()
                     }
                     val logNormalizedUrl = relayUrl.trimEnd('/')
@@ -4458,13 +4460,13 @@ fun MyceliumNavigation(
                         backStackEntry.arguments?.getString("relayUrl") ?: "",
                         "UTF-8"
                     )
-                    val authorRelaySnapshot by social.mycelium.android.repository.Nip65RelayListRepository.authorRelaySnapshot.collectAsState()
+                    val authorRelaySnapshot by social.mycelium.android.repository.relay.Nip65RelayListRepository.authorRelaySnapshot.collectAsState()
                     val normalizedUrl = relayUrl.trimEnd('/')
-                    val nip65Pubkey = social.mycelium.android.repository.Nip65RelayListRepository.currentPubkey
+                    val nip65Pubkey = social.mycelium.android.repository.relay.Nip65RelayListRepository.currentPubkey
                     val accountPubkey = accountStateViewModel.currentAccount.value?.toHexKey()
                     val followSet = remember(nip65Pubkey ?: accountPubkey) {
                         val pk = nip65Pubkey ?: accountPubkey
-                        pk?.let { social.mycelium.android.repository.ContactListRepository.getCachedFollowList(it) }
+                        pk?.let { social.mycelium.android.repository.social.ContactListRepository.getCachedFollowList(it) }
                             ?: emptySet()
                     }
                     val (outboxUsers, inboxUsers) = remember(normalizedUrl, authorRelaySnapshot, followSet) {
@@ -4828,7 +4830,7 @@ fun MyceliumNavigation(
                                             val err = accountStateViewModel.sendZap(
                                                 notifDisplayNote,
                                                 amount,
-                                                social.mycelium.android.repository.ZapType.PUBLIC,
+                                                social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                                 ""
                                             )
                                             if (err != null) showSnackbar(err)
@@ -4886,7 +4888,7 @@ fun MyceliumNavigation(
                                     },
                                     onSeeAllReactions = { nId ->
                                         val counts =
-                                            social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[nId]
+                                            social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[nId]
                                         appViewModel.storeReactionsData(
                                             buildReactionsData(
                                                 nId,
@@ -5013,7 +5015,7 @@ fun MyceliumNavigation(
                         }
                     }
                     val topicStorageManager =
-                        remember { social.mycelium.android.repository.RelayStorageManager(context) }
+                        remember { social.mycelium.android.repository.relay.RelayStorageManager(context) }
                     val topicFallbackRelayUrls = remember(currentAccount) {
                         currentAccount?.toHexKey()?.let { pubkey ->
                             val categories = topicStorageManager.loadCategories(pubkey)
@@ -5256,7 +5258,7 @@ fun MyceliumNavigation(
                                                 val err = accountStateViewModel.sendZap(
                                                     topicContentNote,
                                                     amount,
-                                                    social.mycelium.android.repository.ZapType.PUBLIC,
+                                                    social.mycelium.android.repository.sync.ZapType.PUBLIC,
                                                     ""
                                                 )
                                                 if (err != null) showSnackbar(err)
@@ -5334,7 +5336,7 @@ fun MyceliumNavigation(
                                         },
                                         onSeeAllReactions = { nId ->
                                             val counts =
-                                                social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.value[nId]
+                                                social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.value[nId]
                                             appViewModel.storeReactionsData(
                                                 buildReactionsData(
                                                     nId,
@@ -5435,7 +5437,7 @@ fun MyceliumNavigation(
                 ) { backStackEntry ->
                     val topicId = backStackEntry.arguments?.getString("topicId") ?: return@composable
                     val topicsRepository =
-                        remember { social.mycelium.android.repository.TopicsRepository.getInstance(context) }
+                        remember { social.mycelium.android.repository.content.TopicsRepository.getInstance(context) }
                     val allTopics by topicsRepository.topics.collectAsState()
                     val topic = allTopics[topicId]
 
@@ -5596,7 +5598,7 @@ fun MyceliumNavigation(
                 ) { backStackEntry ->
                     val noteId = backStackEntry.arguments?.getString("noteId") ?: return@composable
                     val note = remember(noteId) {
-                        social.mycelium.android.repository.NotesRepository.getInstance().getNoteFromCache(noteId)
+                        social.mycelium.android.repository.feed.NotesRepository.getInstance().getNoteFromCache(noteId)
                     }
                     if (note != null) {
                         ArticleViewScreen(
@@ -5637,7 +5639,7 @@ fun MyceliumNavigation(
                     val myPubkeyHex = remember(currentAccountForBoost) { currentAccountForBoost?.toHexKey() }
                     val myAuthor = remember(myPubkeyHex) {
                         myPubkeyHex?.let {
-                            social.mycelium.android.repository.ProfileMetadataCache.getInstance().resolveAuthor(it)
+                            social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().resolveAuthor(it)
                         }
                     }
                     val outboxRelays = remember(currentAccountForBoost) {
@@ -5763,7 +5765,7 @@ fun MyceliumNavigation(
                     val topicMyPubkeyHex = currentAccountForTopic?.toHexKey()
                     val topicMyAuthor = remember(topicMyPubkeyHex) {
                         topicMyPubkeyHex?.let {
-                            social.mycelium.android.repository.ProfileMetadataCache.getInstance().resolveAuthor(it)
+                            social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().resolveAuthor(it)
                         }
                     }
                     val topicBlossomServers = remember(currentAccountForTopic) {
@@ -5821,7 +5823,7 @@ fun MyceliumNavigation(
                     val articleMyPubkeyHex = currentAccountForArticle?.toHexKey()
                     val articleMyAuthor = remember(articleMyPubkeyHex) {
                         articleMyPubkeyHex?.let {
-                            social.mycelium.android.repository.ProfileMetadataCache.getInstance().resolveAuthor(it)
+                            social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().resolveAuthor(it)
                         }
                     }
                     val articleBlossomServers = remember(currentAccountForArticle) {
@@ -5869,7 +5871,7 @@ fun MyceliumNavigation(
                     val topicReplyDraftId =
                         backStackEntry.arguments?.getString("draftId").orEmpty().takeIf { it.isNotEmpty() }
                     val topicsRepository =
-                        remember { social.mycelium.android.repository.TopicsRepository.getInstance(context) }
+                        remember { social.mycelium.android.repository.content.TopicsRepository.getInstance(context) }
                     val allTopics by topicsRepository.topics.collectAsState()
                     val topic = allTopics[topicId]
 
@@ -5894,7 +5896,7 @@ fun MyceliumNavigation(
                         val replyMyPubkeyHex = currentAccountForReply?.toHexKey()
                         val replyMyAuthor = remember(replyMyPubkeyHex) {
                             replyMyPubkeyHex?.let {
-                                social.mycelium.android.repository.ProfileMetadataCache.getInstance().resolveAuthor(it)
+                                social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().resolveAuthor(it)
                             }
                         }
                         ComposeTopicReplyScreen(
@@ -5959,7 +5961,7 @@ fun MyceliumNavigation(
                     val threadReplyMyHex = currentAccountForThreadReply?.toHexKey()
                     val threadReplyMyAuthor = remember(threadReplyMyHex) {
                         threadReplyMyHex?.let {
-                            social.mycelium.android.repository.ProfileMetadataCache.getInstance().resolveAuthor(it)
+                            social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().resolveAuthor(it)
                         }
                     }
                     ReplyComposeScreen(

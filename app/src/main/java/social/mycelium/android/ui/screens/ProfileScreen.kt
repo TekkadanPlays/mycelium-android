@@ -62,7 +62,7 @@ import social.mycelium.android.data.Note
 import social.mycelium.android.data.SampleData
 import social.mycelium.android.ui.components.common.ModernSearchBar
 import social.mycelium.android.repository.ProfileFeedRepository
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.ui.components.note.NoteCard
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -73,6 +73,7 @@ import androidx.compose.ui.layout.layout
 import kotlin.math.roundToInt
 import social.mycelium.android.ui.components.zap.ZapCustomDialog
 
+import social.mycelium.android.repository.social.NoteCounts
 // ─── Profile tab definitions ────────────────────────────────────────────────
 
 private data class ProfileTab(val label: String, val icon: @Composable () -> Unit)
@@ -109,7 +110,7 @@ fun ProfileScreen(
     isZapped: (String) -> Boolean = { false },
     myZappedAmountForNote: (String) -> Long? = { null },
     overrideReplyCountForNote: (String) -> Int? = { null },
-    countsForNote: (String) -> social.mycelium.android.repository.NoteCounts? = { null },
+    countsForNote: (String) -> social.mycelium.android.repository.social.NoteCounts? = { null },
     onLike: (String) -> Unit = {},
     onShare: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
@@ -125,7 +126,7 @@ fun ProfileScreen(
     perTabHasMore: Map<Int, Boolean> = emptyMap(),
     onSeeAllReactions: (Note) -> Unit = {},
     onDeleteNote: ((Note) -> Unit)? = null,
-    badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
+    badges: List<social.mycelium.android.repository.social.BadgeRepository.Badge> = emptyList(),
     modifier: Modifier = Modifier
 ) {
     androidx.activity.compose.BackHandler { onBackClick() }
@@ -729,7 +730,7 @@ private fun ProfileNoteCard(
     isZapped: (String) -> Boolean,
     myZappedAmountForNote: (String) -> Long?,
     overrideReplyCountForNote: (String) -> Int?,
-    countsForNote: (String) -> social.mycelium.android.repository.NoteCounts?,
+    countsForNote: (String) -> social.mycelium.android.repository.social.NoteCounts?,
     onRelayClick: (String) -> Unit,
     accountNpub: String?,
     onSeeAllReactions: (Note) -> Unit,
@@ -754,7 +755,7 @@ private fun ProfileNoteCard(
         onZap = onZap,
         isZapInProgress = isZapInProgress(note.id),
         isZapped = isZapped(note.id),
-        isBoosted = social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(note.id),
+        isBoosted = social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(note.id),
         myZappedAmount = myZappedAmountForNote(note.id),
         overrideReplyCount = overrideReplyCountForNote(note.id),
         overrideZapCount = counts?.zapCount,
@@ -936,7 +937,7 @@ private fun ReplyWithParentContext(
 @Composable
 private fun ProfileBanner(
     author: Author,
-    badges: List<social.mycelium.android.repository.BadgeRepository.Badge> = emptyList(),
+    badges: List<social.mycelium.android.repository.social.BadgeRepository.Badge> = emptyList(),
     onBannerClick: (String?) -> Unit,
     onAvatarClick: (String?) -> Unit,
 ) {
@@ -1232,7 +1233,7 @@ private fun ProfileIdentity(
         // ── Bio ──
         author.about?.takeIf { it.isNotBlank() }?.let { about ->
             // Extract mentioned pubkeys and request their profiles so display names resolve
-            val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+            val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
             val bioMentionPubkeys = remember(about) {
                 social.mycelium.android.utils.extractPubkeysFromContent(about)
             }
@@ -1335,7 +1336,7 @@ private fun ProfileIdentity(
 
 @Composable
 private fun ProfileBadgesRow(
-    badges: List<social.mycelium.android.repository.BadgeRepository.Badge>,
+    badges: List<social.mycelium.android.repository.social.BadgeRepository.Badge>,
 ) {
     val badgeSize = 30.dp
     val badgeSpacing = 6.dp
@@ -1409,7 +1410,7 @@ private fun ProfileBadgesRow(
 
 @Composable
 private fun BadgeThumbnail(
-    badge: social.mycelium.android.repository.BadgeRepository.Badge,
+    badge: social.mycelium.android.repository.social.BadgeRepository.Badge,
     size: androidx.compose.ui.unit.Dp,
 ) {
     val imageUrl = badge.displayImageUrl
@@ -1598,7 +1599,7 @@ private fun parseBioWithNpubs(text: String): AnnotatedString {
 
         if (hexKey != null) {
             // Resolve display name from cache
-            val author = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+            val author = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
                 .resolveAuthor(hexKey)
             val displayText = if (author.displayName.endsWith("...") && author.displayName.length <= 12) {
                 // Fallback: show truncated npub

@@ -16,8 +16,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import social.mycelium.android.data.Note
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.ui.components.relay.RelayOrbs
 import social.mycelium.android.ui.components.emoji.ReactionEmoji

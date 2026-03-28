@@ -45,7 +45,7 @@ import social.mycelium.android.data.NotificationData
 import social.mycelium.android.data.NotificationType
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.NotificationsRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import androidx.compose.ui.text.SpanStyle

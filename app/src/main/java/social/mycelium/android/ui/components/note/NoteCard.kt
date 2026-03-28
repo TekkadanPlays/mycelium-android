@@ -60,8 +60,8 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.ReactionsRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.social.ReactionsRepository
 import com.example.cybin.nip19.toNpub
 import com.example.cybin.nip19.encodeNevent
 import social.mycelium.android.utils.NoteContentBlock
@@ -95,9 +95,9 @@ import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.PublishState
 import social.mycelium.android.data.QuotedNoteMeta
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.data.SampleData
-import social.mycelium.android.repository.QuotedNoteCache
+import social.mycelium.android.repository.cache.QuotedNoteCache
 import social.mycelium.android.ui.icons.ArrowDownward
 import social.mycelium.android.ui.icons.ArrowUpward
 import social.mycelium.android.ui.icons.Bolt
@@ -124,6 +124,7 @@ import social.mycelium.android.ui.components.zap.ZapCustomDialog
 import social.mycelium.android.ui.components.preview.Kind1LinkEmbedBlock
 import social.mycelium.android.ui.components.emoji.isImageUrl
 
+import social.mycelium.android.repository.social.NoteCounts
 /**
  * Composition local that provides the feed [LazyListState] to nested composables.
  * Used by [QuotedNoteExpandedState] to restore exact scroll offset when collapsing
@@ -226,7 +227,7 @@ internal fun QuotedNoteBody(
     onOpenImageViewer: (List<String>, Int) -> Unit,
     onRelayClick: (String) -> Unit = {},
     navigateToQuotedNote: () -> Unit = {},
-    countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    countsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
     depth: Int = 0,
     rootParentNoteId: String = "",
     myPubkey: String? = null,
@@ -507,7 +508,7 @@ internal fun QuotedNoteBody(
                 if (depth < 2) {
                     // Recursive rendering: fetch and display the nested quoted note
                     val nestedEventId = qBlock.eventId
-                    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                    val profileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
                     val linkStyle = SpanStyle(
                         color = MaterialTheme.colorScheme.primary,
                         textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
@@ -568,8 +569,8 @@ internal fun QuotedNoteBody(
                             .clip(RoundedCornerShape(4.dp))
                             .clickable {
                                 val cached =
-                                    social.mycelium.android.repository.QuotedNoteCache.getCached(qBlock.eventId)
-                                val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                                    social.mycelium.android.repository.cache.QuotedNoteCache.getCached(qBlock.eventId)
+                                val profileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
                                 if (cached != null) {
                                     val qAuthor = profileCache.resolveAuthor(cached.authorId)
                                     val qMediaUrls =
@@ -735,16 +736,16 @@ internal fun QuotedNoteContent(
     parentNoteId: String,
     meta: QuotedNoteMeta,
     quotedAuthor: social.mycelium.android.data.Author,
-    quotedCounts: social.mycelium.android.repository.NoteCounts?,
+    quotedCounts: social.mycelium.android.repository.social.NoteCounts?,
     linkStyle: SpanStyle,
-    profileCache: social.mycelium.android.repository.ProfileMetadataCache,
+    profileCache: social.mycelium.android.repository.cache.ProfileMetadataCache,
     isVisible: Boolean,
     onProfileClick: (String) -> Unit,
     onNoteClick: (Note) -> Unit,
     onVideoClick: (List<String>, Int) -> Unit,
     onOpenImageViewer: (List<String>, Int) -> Unit,
     onRelayClick: (String) -> Unit = {},
-    countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    countsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
     depth: Int = 0,
     rootParentNoteId: String = parentNoteId,
     myPubkey: String? = null,
@@ -1758,7 +1759,7 @@ internal fun NoteActionMenus(
     onBookmarkToggle: ((String, Boolean) -> Unit)?,
     onDelete: ((Note) -> Unit)?,
     extraMoreMenuItems: List<Pair<String, () -> Unit>>,
-    translationResult: social.mycelium.android.repository.TranslationService.TranslationResult?,
+    translationResult: social.mycelium.android.repository.sync.TranslationService.TranslationResult?,
     isTranslating: Boolean,
     showOriginal: Boolean,
     onTranslate: () -> Unit,
@@ -2119,7 +2120,7 @@ internal fun NoteActionMenus(
                             }
                             // ═══ BOOKMARKS SUB-MENU ═══
                             2 -> {
-                                val bookmarkedIds by social.mycelium.android.repository.BookmarkRepository.bookmarkedNoteIds.collectAsState()
+                                val bookmarkedIds by social.mycelium.android.repository.social.BookmarkRepository.bookmarkedNoteIds.collectAsState()
                                 val isBookmarked = note.id in bookmarkedIds
                                 DropdownMenuItem(
                                     text = { Text(if (isBookmarked) "Remove bookmark" else "Add to public") },
@@ -2328,7 +2329,7 @@ internal fun NoteActionRow(
     onBookmarkToggle: ((String, Boolean) -> Unit)?,
     onDelete: ((Note) -> Unit)?,
     extraMoreMenuItems: List<Pair<String, () -> Unit>>,
-    translationResult: social.mycelium.android.repository.TranslationService.TranslationResult?,
+    translationResult: social.mycelium.android.repository.sync.TranslationService.TranslationResult?,
     isTranslating: Boolean,
     showOriginal: Boolean,
     onTranslate: () -> Unit,
@@ -2353,9 +2354,9 @@ internal fun NoteActionRow(
 
         // Upvote / Downvote — kind-11 feed + kind-1111 replies
         if (showVoting) {
-            val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
-            val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
-            val reactiveDownvotes by social.mycelium.android.repository.VoteRepository.downvoteCounts.collectAsState()
+            val reactiveOwnVotes by social.mycelium.android.repository.social.VoteRepository.ownVotes.collectAsState()
+            val reactiveUpvotes by social.mycelium.android.repository.social.VoteRepository.upvoteCounts.collectAsState()
+            val reactiveDownvotes by social.mycelium.android.repository.social.VoteRepository.downvoteCounts.collectAsState()
             val reactiveOwnVote = reactiveOwnVotes[note.id] ?: 0
             val upCount = reactiveUpvotes[note.id] ?: 0
             val downCount = reactiveDownvotes[note.id] ?: 0
@@ -2846,7 +2847,7 @@ fun NoteCard(
     /** Whether this card is currently visible on screen; off-screen cards pause video playback. */
     isVisible: Boolean = true,
     /** Aggregated counts for all notes (feed + quoted); used to show counters on quoted note previews. */
-    countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    countsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
     /** Called when user taps "See all" in the expanded reaction details panel. */
     onSeeAllReactions: (() -> Unit)? = null,
     /** NIP-22: Number of moderation flags on this note (shown as badge when > 0). */
@@ -2916,7 +2917,7 @@ fun NoteCard(
     // On-demand translation state
     var translationResult by remember(note.id) {
         mutableStateOf(
-            social.mycelium.android.repository.TranslationService.getCached(
+            social.mycelium.android.repository.sync.TranslationService.getCached(
                 note.id
             )
         )
@@ -3197,7 +3198,7 @@ fun NoteCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     // Vote score — left of timestamp for kind-11 / kind-1111
                     if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
-                        val reactiveScores by social.mycelium.android.repository.VoteRepository.scoreByNoteId.collectAsState()
+                        val reactiveScores by social.mycelium.android.repository.social.VoteRepository.scoreByNoteId.collectAsState()
                         val score = reactiveScores[note.id] ?: 0
                         if (score != 0) {
                             val scoreColor = if (score > 0) MyceliumGreen else pastelRed
@@ -3905,7 +3906,7 @@ fun NoteCard(
                     recentEmojis = ReactionsRepository.getRecentEmojis(context, accountNpub)
                 },
                 ownReactions = remember(effectiveReactionNoteId, overrideReactions) {
-                    social.mycelium.android.repository.NoteCountsRepository.getOwnReactions(effectiveReactionNoteId)
+                    social.mycelium.android.repository.social.NoteCountsRepository.getOwnReactions(effectiveReactionNoteId)
                 },
                 onRemoveReaction = if (onDeleteReaction != null) { eventId, emoji ->
                     onDeleteReaction(effectiveReactionNoteId, eventId, emoji)
@@ -3935,7 +3936,7 @@ fun NoteCard(
                         isTranslating = true
                         translationScope.launch {
                             val result =
-                                social.mycelium.android.repository.TranslationService.translate(note.id, note.content)
+                                social.mycelium.android.repository.sync.TranslationService.translate(note.id, note.content)
                             translationResult = result
                             isTranslating = false
                             if (result != null) showOriginal = false
@@ -4095,14 +4096,14 @@ internal fun EmbeddedArticlePreview(
     onNoteClick: (Note) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+    val profileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
     var articleNote by remember(author, dTag) {
-        mutableStateOf(social.mycelium.android.repository.ArticleEmbedCache.getCached(author, dTag))
+        mutableStateOf(social.mycelium.android.repository.cache.ArticleEmbedCache.getCached(author, dTag))
     }
     if (articleNote == null) {
         LaunchedEffect(author, dTag) {
             kotlinx.coroutines.delay(200)
-            articleNote = social.mycelium.android.repository.ArticleEmbedCache.get(author, dTag, relayHints)
+            articleNote = social.mycelium.android.repository.cache.ArticleEmbedCache.get(author, dTag, relayHints)
         }
     }
     val note = articleNote
@@ -4142,7 +4143,7 @@ internal fun EmbeddedArticlePreview(
     val readMinutes = (wordCount / 200).coerceAtLeast(1)
 
     // Counts from NoteCountsRepository (reactive)
-    val allCounts by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+    val allCounts by social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.collectAsState()
     val counts = allCounts[note.id]
 
     val accentColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)

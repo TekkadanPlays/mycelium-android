@@ -281,7 +281,7 @@ object RelayHealthTracker {
         // Merge relay URL into feed note so relay orbs update in real-time
         if (success) {
             try {
-                social.mycelium.android.repository.NotesRepository.getInstance().mergePublishRelayUrl(eventId, url)
+                social.mycelium.android.repository.feed.NotesRepository.getInstance().mergePublishRelayUrl(eventId, url)
             } catch (_: Exception) { /* NotesRepository may not be initialized yet */ }
             // Broadcast so thread reply repositories can also update relay orbs
             _publishRelayConfirmed.tryEmit(PublishRelayConfirmation(eventId, url))

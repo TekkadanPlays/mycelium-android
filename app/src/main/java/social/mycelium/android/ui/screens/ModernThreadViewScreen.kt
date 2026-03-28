@@ -81,10 +81,10 @@ import social.mycelium.android.data.ThreadedReply
 import social.mycelium.android.data.toThreadReplyForThread
 import social.mycelium.android.data.toNote
 import social.mycelium.android.data.SampleData
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.ui.components.nav.AdaptiveHeader
 import social.mycelium.android.ui.components.nav.BottomNavigationBar
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.ui.components.relay.RelayOrbs
@@ -103,6 +103,7 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
 
+import social.mycelium.android.repository.social.NoteCounts
 // ✅ PERFORMANCE: Cached date formatter
 private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault()) }
 
@@ -424,16 +425,16 @@ fun ModernThreadViewScreen(
         // Ensure quoted notes are in cache (may already be from feed prefetch; if not, fetch now)
         if (note.quotedEventIds.isNotEmpty()) {
             val uncached =
-                note.quotedEventIds.filter { social.mycelium.android.repository.QuotedNoteCache.getCached(it) == null }
+                note.quotedEventIds.filter { social.mycelium.android.repository.cache.QuotedNoteCache.getCached(it) == null }
             if (uncached.isNotEmpty()) {
-                social.mycelium.android.repository.QuotedNoteCache.prefetchForNotes(listOf(note))
+                social.mycelium.android.repository.cache.QuotedNoteCache.prefetchForNotes(listOf(note))
             }
         }
         val discoveryRelays = cacheRelayUrls
         note.quotedEventIds.forEach { quotedId ->
-            val quotedMeta = social.mycelium.android.repository.QuotedNoteCache.getCached(quotedId)
+            val quotedMeta = social.mycelium.android.repository.cache.QuotedNoteCache.getCached(quotedId)
             if (quotedMeta != null && quotedMeta.authorId.isNotBlank()) {
-                social.mycelium.android.repository.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
+                social.mycelium.android.repository.relay.Nip65RelayListRepository.fetchOutboxRelaysForAuthor(
                     quotedMeta.authorId, discoveryRelays
                 )
             }
@@ -524,7 +525,7 @@ fun ModernThreadViewScreen(
         // Include quoted event IDs from the root note so their counts render
         note.quotedEventIds.forEach { qid ->
             if (qid !in map) {
-                val cached = social.mycelium.android.repository.QuotedNoteCache.getCached(qid)
+                val cached = social.mycelium.android.repository.cache.QuotedNoteCache.getCached(qid)
                 map[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { rootRelays }
             }
         }
@@ -533,7 +534,7 @@ fun ModernThreadViewScreen(
             // Extract quoted event IDs from reply content
             social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(reply.content).forEach { qid ->
                 if (qid !in map) {
-                    val cached = social.mycelium.android.repository.QuotedNoteCache.getCached(qid)
+                    val cached = social.mycelium.android.repository.cache.QuotedNoteCache.getCached(qid)
                     map[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { reply.relayUrls }
                 }
             }
@@ -541,13 +542,13 @@ fun ModernThreadViewScreen(
         map.toMap()
     }
     LaunchedEffect(threadNoteRelays) {
-        social.mycelium.android.repository.NoteCountsRepository.setThreadNoteIdsOfInterest(threadNoteRelays)
+        social.mycelium.android.repository.social.NoteCountsRepository.setThreadNoteIdsOfInterest(threadNoteRelays)
     }
     DisposableEffect(Unit) {
-        onDispose { social.mycelium.android.repository.NoteCountsRepository.setThreadNoteIdsOfInterest(emptyMap()) }
+        onDispose { social.mycelium.android.repository.social.NoteCountsRepository.setThreadNoteIdsOfInterest(emptyMap()) }
     }
 
-    val noteCountsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+    val noteCountsByNoteId by social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.collectAsState()
 
     // ✅ ZAP MENU AWARENESS: Global state for zap menu closure (like feed cards)
     var shouldCloseZapMenus by remember { mutableStateOf(false) }
@@ -837,15 +838,15 @@ fun ModernThreadViewScreen(
                             onCustomZapSend = onCustomZapSend,
                             onZap = effectiveOnZap,
                             isZapInProgress = note.id in zapInProgressNoteIds,
-                            isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(
+                            isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
                                 note.id
                             ),
-                            isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(
+                            isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
                                 note.originalNoteId ?: note.id
                             ),
                             onVote = onVote,
-                            ownVoteValue = social.mycelium.android.repository.VoteRepository.getOwnVote(note.id),
-                            voteScore = social.mycelium.android.repository.VoteRepository.getScore(note.id),
+                            ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(note.id),
+                            voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(note.id),
                             myZappedAmount = myZappedAmountByNoteId[note.id],
                             overrideReplyCount = repliesState.totalReplyCount,
                             overrideZapCount = noteCountsByNoteId[note.id]?.zapCount,
@@ -1934,7 +1935,7 @@ private fun ReplyHeader(
     reply: ThreadReply,
     displayAuthor: Author,
     rootAuthorId: String?,
-    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts>,
     onProfileClick: (String) -> Unit,
     onRelayClick: (String) -> Unit,
     onNavigateToRelayList: ((List<String>) -> Unit)? = null,
@@ -2083,12 +2084,12 @@ private fun ReplyContentBody(
     onVideoClick: (List<String>, Int) -> Unit,
     onToggleControls: () -> Unit,
     onLongPress: (() -> Unit)? = null,
-    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
     compactMedia: Boolean = false,
     myPubkey: String? = null,
     onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
 ) {
-    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+    val profileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
     val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
     val linkStyle = androidx.compose.ui.text.SpanStyle(
         color = MaterialTheme.colorScheme.primary,
@@ -2345,21 +2346,21 @@ private fun ReplyContentBody(
             }
 
             is social.mycelium.android.utils.NoteContentBlock.QuotedNote -> {
-                val qProfileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                val qProfileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
                 val qLinkStyle = androidx.compose.ui.text.SpanStyle(
                     color = MaterialTheme.colorScheme.primary,
                     textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline
                 )
                 var qMeta by remember(block.eventId) {
                     mutableStateOf(
-                        social.mycelium.android.repository.QuotedNoteCache.getCached(
+                        social.mycelium.android.repository.cache.QuotedNoteCache.getCached(
                             block.eventId
                         )
                     )
                 }
                 LaunchedEffect(block.eventId) {
                     if (qMeta == null) {
-                        qMeta = social.mycelium.android.repository.QuotedNoteCache.get(block.eventId)
+                        qMeta = social.mycelium.android.repository.cache.QuotedNoteCache.get(block.eventId)
                     }
                 }
                 val meta = qMeta
@@ -2417,7 +2418,7 @@ private fun ReplyControlsPanel(
     replyKind: Int = 1111,
     isControlsExpanded: Boolean,
     isZapMenuExpanded: Boolean,
-    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts>,
     onReply: (String) -> Unit,
     onProfileClick: (String) -> Unit,
     onExpandZapMenu: (String) -> Unit,
@@ -2434,14 +2435,14 @@ private fun ReplyControlsPanel(
 ) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var isDetailsExpanded by remember { mutableStateOf(false) }
-    val reactiveOwnVotes by social.mycelium.android.repository.VoteRepository.ownVotes.collectAsState()
-    val reactiveUpvotes by social.mycelium.android.repository.VoteRepository.upvoteCounts.collectAsState()
-    val reactiveDownvotes by social.mycelium.android.repository.VoteRepository.downvoteCounts.collectAsState()
+    val reactiveOwnVotes by social.mycelium.android.repository.social.VoteRepository.ownVotes.collectAsState()
+    val reactiveUpvotes by social.mycelium.android.repository.social.VoteRepository.upvoteCounts.collectAsState()
+    val reactiveDownvotes by social.mycelium.android.repository.social.VoteRepository.downvoteCounts.collectAsState()
     val replyOwnVote = reactiveOwnVotes[reply.id] ?: 0
     val replyVoteScore = (reactiveUpvotes[reply.id] ?: 0) - (reactiveDownvotes[reply.id] ?: 0)
     // Derive liked state from NoteCountsRepository (reactive) so heart updates after user reacts
     val replyCounts = noteCountsByNoteId[reply.id]
-    val myPubkey = social.mycelium.android.repository.NoteCountsRepository.currentUserPubkey
+    val myPubkey = social.mycelium.android.repository.social.NoteCountsRepository.currentUserPubkey
     val isLikedFromCounts = remember(replyCounts?.reactionAuthors, myPubkey) {
         if (myPubkey == null) false
         else replyCounts?.reactionAuthors?.values?.any { myPubkey in it } == true
@@ -2532,7 +2533,7 @@ private fun ReplyControlsPanel(
                         var showReactionMenu by remember { mutableStateOf(false) }
                         var showFullPicker by remember { mutableStateOf(false) }
                         var selectedEmoji by remember(reply.id) {
-                            mutableStateOf(social.mycelium.android.repository.ReactionsRepository.getLastReaction(reply.id))
+                            mutableStateOf(social.mycelium.android.repository.social.ReactionsRepository.getLastReaction(reply.id))
                         }
                         val hasReacted = replyIsLiked || selectedEmoji != null
                         // Close reaction menu on scroll
@@ -2608,7 +2609,7 @@ private fun ReplyControlsPanel(
                             shape = androidx.compose.foundation.shape.RoundedCornerShape(24.dp)
                         ) {
                             val recentEmojis = remember {
-                                social.mycelium.android.repository.ReactionsRepository.getRecentEmojis(
+                                social.mycelium.android.repository.social.ReactionsRepository.getRecentEmojis(
                                     context,
                                     accountNpub
                                 )
@@ -2716,7 +2717,7 @@ private fun ReplyControlsPanel(
 private fun ReplyDetailsPanel(
     replyId: String,
     isDetailsExpanded: Boolean,
-    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts>,
     onProfileClick: (String) -> Unit,
 ) {
     val detailCounts = noteCountsByNoteId[replyId]
@@ -2735,7 +2736,7 @@ private fun ReplyDetailsPanel(
         enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
         exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
     ) {
-        val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+        val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2990,7 +2991,7 @@ private fun ThreadedReplyCard(
     replyKind: Int = 1111,
     commentStates: MutableMap<String, CommentState>,
     /** Counts (reactions, zaps, replies) per note ID from NoteCountsRepository. */
-    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
     /** Reply ID to persistently highlight (accent bar + background wash). Threaded through children. */
     highlightedReplyId: String? = null,
     highlightedPathIds: Set<String> = emptySet(),
@@ -3050,7 +3051,7 @@ private fun ThreadedReplyCard(
     val isZapMenuExpanded = expandedZapMenuReplyId == reply.id
 
     // Resolve author from profile cache so display name/avatar update when profiles load
-    val profileCache = social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+    val profileCache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
     // Snapshot read avoids per-reply flow collector; value only flips once at startup
     val diskCacheReady = profileCache.diskCacheRestored.value
     val authorPubkey =
@@ -3318,7 +3319,7 @@ private fun ThreadedReplyChildren(
     rootAuthorId: String?,
     replyKind: Int,
     commentStates: MutableMap<String, CommentState>,
-    noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    noteCountsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts>,
     highlightedReplyId: String? = null,
     highlightedPathIds: Set<String> = emptySet(),
     onLike: (String) -> Unit,

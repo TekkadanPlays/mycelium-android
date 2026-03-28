@@ -41,7 +41,7 @@ import coil.compose.AsyncImage
 import kotlinx.coroutines.launch
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.data.Conversation
-import social.mycelium.android.repository.DirectMessageRepository
+import social.mycelium.android.repository.messaging.DirectMessageRepository
 import social.mycelium.android.ui.components.nav.AdaptiveHeader
 
 /**

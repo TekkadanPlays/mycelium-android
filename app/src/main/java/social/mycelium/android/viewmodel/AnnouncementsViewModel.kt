@@ -11,8 +11,8 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.utils.Nip19QuoteParser
 import social.mycelium.android.utils.UrlDetector
 import kotlinx.coroutines.delay
@@ -95,7 +95,7 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
         val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(event.content)
         val quotedEventIds = quotedRefs.map { it.eventId }
         quotedRefs.forEach { ref ->
-            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.cache.QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
         }
         val tags = event.tags.map { it.toList() }
 

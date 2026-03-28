@@ -9,7 +9,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import social.mycelium.android.relay.RelayConnectionStateMachine
-import social.mycelium.android.repository.NotesRepository
+import social.mycelium.android.repository.feed.NotesRepository
 import social.mycelium.android.ui.settings.NotificationPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -99,7 +99,7 @@ class RelayForegroundService : Service() {
         serviceScope.launch {
             kotlinx.coroutines.delay(12_000L)
             // Enable push for ALL loaded accounts (active + background)
-            val scopes = social.mycelium.android.repository.AccountScopedRegistry.allScopes.value
+            val scopes = social.mycelium.android.repository.sync.AccountScopedRegistry.allScopes.value
             for ((pubkey, scope) in scopes) {
                 if (scope.initialized) {
                     scope.notificationsRepository.enableAndroidNotifications()

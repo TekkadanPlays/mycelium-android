@@ -46,6 +46,6 @@ object ZapAmountManager {
         _zapAmounts.value = amounts
         val amountsString = amounts.joinToString(",")
         sharedPreferences?.edit()?.putString("amounts", amountsString)?.apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 }

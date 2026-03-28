@@ -20,13 +20,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
-import social.mycelium.android.repository.NotesRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.TopicsRepository
-import social.mycelium.android.repository.Nip65RelayListRepository
-import social.mycelium.android.repository.ScopedModerationRepository
-import social.mycelium.android.repository.PollResponseRepository
-import social.mycelium.android.repository.ZapPollResponseRepository
+import social.mycelium.android.repository.feed.NotesRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.content.TopicsRepository
+import social.mycelium.android.repository.relay.Nip65RelayListRepository
+import social.mycelium.android.repository.social.ScopedModerationRepository
+import social.mycelium.android.repository.content.PollResponseRepository
+import social.mycelium.android.repository.content.ZapPollResponseRepository
 import social.mycelium.android.relay.NetworkConnectivityMonitor
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.services.RelayForegroundService
@@ -183,7 +183,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         ScopedModerationRepository.getInstance().init(applicationContext)
         
         // Initialize anchor subscription repository for kind:30073 events
-        social.mycelium.android.repository.AnchorSubscriptionRepository.getInstance()
+        social.mycelium.android.repository.feed.AnchorSubscriptionRepository.getInstance()
 
         // Register kind-30311 handler for NIP-53 live activities from app start
         social.mycelium.android.repository.LiveActivityRepository.getInstance()
@@ -193,13 +193,13 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
 
         // Relay discovery — always init (restores disk cache), but only prefetch from
         // network at launch if the user opted in OR an account is already signed in.
-        social.mycelium.android.repository.Nip66RelayDiscoveryRepository.init(applicationContext)
+        social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository.init(applicationContext)
         val settingsPrefs = getSharedPreferences("Mycelium_settings", MODE_PRIVATE)
         val prefetchEnabled = settingsPrefs.getBoolean("relay_discovery_prefetch", false)
         val hasAccount = getSharedPreferences("Mycelium_accounts", MODE_PRIVATE)
             .getString("all_accounts_json", null)?.isNotBlank() == true
         if (prefetchEnabled || hasAccount) {
-            social.mycelium.android.repository.Nip66RelayDiscoveryRepository.fetchRelayDiscovery()
+            social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository.fetchRelayDiscovery()
         }
 
         // Re-apply relay subscription when app is resumed (e.g. after screen lock) so connection and notes resume
@@ -222,7 +222,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                         RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
                     }
                     social.mycelium.android.ui.components.media.PipStreamManager.resumeIfActive()
-                    social.mycelium.android.repository.Nip66RelayDiscoveryRepository.refreshIfStale()
+                    social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository.refreshIfStale()
                 }
                 Lifecycle.Event.ON_STOP -> {
                     if (BuildConfig.DEBUG) {
@@ -247,10 +247,10 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         social.mycelium.android.ui.settings.MediaPreferences.init(applicationContext)
         social.mycelium.android.ui.settings.NotificationPreferences.init(applicationContext)
         social.mycelium.android.utils.ZapAmountManager.initialize(applicationContext)
-        social.mycelium.android.repository.ContactListRepository.init(applicationContext)
+        social.mycelium.android.repository.social.ContactListRepository.init(applicationContext)
 
         // Load disk caches so feed renders without relay re-fetches / HTTP re-requests
-        social.mycelium.android.repository.QuotedNoteCache.init(applicationContext)
+        social.mycelium.android.repository.cache.QuotedNoteCache.init(applicationContext)
         social.mycelium.android.services.UrlPreviewCache.init(applicationContext)
 
         // Create all notification channels (relay service, social, DMs) — idempotent
@@ -260,7 +260,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         social.mycelium.android.repository.NotificationsRepository.init(applicationContext)
 
         // Initialize DirectMessageRepository with context for DM relay persistence
-        social.mycelium.android.repository.DirectMessageRepository.init(applicationContext)
+        social.mycelium.android.repository.messaging.DirectMessageRepository.init(applicationContext)
 
         // Handle deep-link from notification tap on cold start
         handleNotificationIntent(intent)

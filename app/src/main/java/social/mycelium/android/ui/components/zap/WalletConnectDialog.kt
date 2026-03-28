@@ -20,8 +20,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.platform.LocalContext
-import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.repository.NwcConfig
+import social.mycelium.android.repository.sync.NwcConfigRepository
+import social.mycelium.android.repository.sync.NwcConfig
 
 /**
  * Dialog for configuring Nostr Wallet Connect (NWC) settings

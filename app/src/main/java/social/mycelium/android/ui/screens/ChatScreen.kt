@@ -44,8 +44,8 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.cybin.signer.NostrSigner
 import social.mycelium.android.data.DirectMessage
-import social.mycelium.android.repository.DirectMessageRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.messaging.DirectMessageRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

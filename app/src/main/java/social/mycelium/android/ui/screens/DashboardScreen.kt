@@ -76,12 +76,12 @@ import social.mycelium.android.viewmodel.HomeSortOrder
 import social.mycelium.android.viewmodel.ScrollPosition
 import social.mycelium.android.data.RelayConnectionStatus
 import social.mycelium.android.relay.RelayState
-import social.mycelium.android.repository.RelayRepository
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayRepository
+import social.mycelium.android.repository.relay.RelayStorageManager
 import androidx.compose.ui.platform.LocalContext
 import android.widget.Toast
 import social.mycelium.android.repository.LiveActivityRepository
-import social.mycelium.android.repository.FeedSessionState
+import social.mycelium.android.repository.feed.FeedSessionState
 import social.mycelium.android.utils.normalizeRelayUrl
 import social.mycelium.android.viewmodel.FeedState
 import social.mycelium.android.ui.performance.animatedYOffset
@@ -89,6 +89,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
 
+import social.mycelium.android.repository.social.NoteCounts
+import social.mycelium.android.repository.sync.ZapType
 // ✅ PERFORMANCE: Cached date formatter (Thread view pattern)
 private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault()) }
 
@@ -336,7 +338,7 @@ private fun RelayConnectionLoadingIndicator(
  */
 @Composable
 private fun IndexerDiffBanner(
-    diff: social.mycelium.android.repository.RelayCategorySyncRepository.PendingIndexerDiff,
+    diff: social.mycelium.android.repository.relay.RelayCategorySyncRepository.PendingIndexerDiff,
     onAccept: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
@@ -513,7 +515,7 @@ private fun DashboardFeedContent(
     sortedNotes: List<Note>,
     homeFeedState: FeedState,
     uiState: social.mycelium.android.viewmodel.DashboardUiState,
-    countsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    countsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts>,
     replyCountByNoteId: Map<String, Int>,
     zapInProgressNoteIds: Set<String>,
     zappedNoteIds: Set<String>,
@@ -625,7 +627,7 @@ private fun DashboardFeedContent(
             }
         }
         // Prefetch profile metadata so display names / @mentions resolve before scrolling into view
-        val profileCache = remember { social.mycelium.android.repository.ProfileMetadataCache.getInstance() }
+        val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
         LaunchedEffect(engagementFilteredNotes) {
             val prefetchCount = 20.coerceAtMost(engagementFilteredNotes.size)
             val pubkeys = mutableSetOf<String>()
@@ -671,7 +673,7 @@ private fun DashboardFeedContent(
         // Infinite scroll: detect end-of-list and load older notes.
         // Key on isLoadingOlder so the effect restarts when a load finishes — if the
         // user is still at the bottom, the next page triggers immediately.
-        val notesRepo = remember { social.mycelium.android.repository.NotesRepository.getInstance() }
+        val notesRepo = remember { social.mycelium.android.repository.feed.NotesRepository.getInstance() }
         val isLoadingOlder by notesRepo.isLoadingOlder.collectAsState()
         val paginationExhausted by notesRepo.paginationExhausted.collectAsState()
         LaunchedEffect(listState, isLoadingOlder) {
@@ -760,13 +762,13 @@ private fun DashboardFeedContent(
         val stableOnZap = remember<(Note, Long) -> Unit> {
             { n, amount ->
                 val err =
-                    accountStateViewModel.sendZap(n, amount, social.mycelium.android.repository.ZapType.PUBLIC, "")
+                    accountStateViewModel.sendZap(n, amount, social.mycelium.android.repository.sync.ZapType.PUBLIC, "")
                 if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
             }
         }
         val stableOnComment = remember<(Note) -> Unit> { { n -> onThreadClick(n, null) } }
         val stableOnSeeAllReactions = remember<(Note) -> Unit> { { n -> onSeeAllReactions(n) } }
-        val stableOnCustomZapSend = remember<(Note, Long, social.mycelium.android.repository.ZapType, String) -> Unit> {
+        val stableOnCustomZapSend = remember<(Note, Long, social.mycelium.android.repository.sync.ZapType, String) -> Unit> {
             { n, amount, zapType, msg ->
                 val err = accountStateViewModel.sendZap(n, amount, zapType, msg)
                 if (err != null) Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
@@ -786,7 +788,7 @@ private fun DashboardFeedContent(
         }
         val stableOnBlockAuthor = remember<(String) -> Unit> {
             { pubkey ->
-                social.mycelium.android.repository.MuteListRepository.blockUser(pubkey)
+                social.mycelium.android.repository.social.MuteListRepository.blockUser(pubkey)
                 Toast.makeText(context, "Blocked", Toast.LENGTH_SHORT).show()
             }
         }
@@ -795,7 +797,7 @@ private fun DashboardFeedContent(
                 val signer = accountStateViewModel.getCurrentSigner()
                 if (signer != null) {
                     val relays = accountStateViewModel.getOutboxRelayUrlSet()
-                    social.mycelium.android.repository.MuteListRepository.muteUser(pubkey, signer, relays)
+                    social.mycelium.android.repository.social.MuteListRepository.muteUser(pubkey, signer, relays)
                     Toast.makeText(context, "Muted", Toast.LENGTH_SHORT).show()
                 } else {
                     Toast.makeText(context, "Sign in to mute", Toast.LENGTH_SHORT).show()
@@ -808,10 +810,10 @@ private fun DashboardFeedContent(
                 if (signer != null) {
                     val relays = accountStateViewModel.getOutboxRelayUrlSet()
                     if (isCurrentlyBookmarked) {
-                        social.mycelium.android.repository.BookmarkRepository.removeBookmark(noteId, signer, relays)
+                        social.mycelium.android.repository.social.BookmarkRepository.removeBookmark(noteId, signer, relays)
                         Toast.makeText(context, "Bookmark removed", Toast.LENGTH_SHORT).show()
                     } else {
-                        social.mycelium.android.repository.BookmarkRepository.addBookmark(noteId, signer, relays)
+                        social.mycelium.android.repository.social.BookmarkRepository.addBookmark(noteId, signer, relays)
                         Toast.makeText(context, "Bookmarked", Toast.LENGTH_SHORT).show()
                     }
                 } else {
@@ -895,10 +897,10 @@ private fun DashboardFeedContent(
                         onMuteAuthor = stableOnMuteAuthor,
                         onBookmarkToggle = stableOnBookmarkToggle,
                         isZapInProgress = note.id in zapInProgressNoteIds,
-                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(
+                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
                             note.id
                         ),
-                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(
+                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
                             note.originalNoteId ?: note.id
                         ),
                         shouldCloseZapMenus = shouldCloseZapMenus,
@@ -941,10 +943,10 @@ private fun DashboardFeedContent(
                     ) stableOnDelete else null,
                     accountNpub = accountNpub,
                     isZapInProgress = note.id in zapInProgressNoteIds,
-                    isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.NoteCountsRepository.isOwnZap(
+                    isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
                         note.id
                     ),
-                    isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.NoteCountsRepository.isOwnBoost(
+                    isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
                         note.originalNoteId ?: note.id
                     ),
                     myZappedAmount = zappedAmountByNoteId[note.id],
@@ -1168,8 +1170,8 @@ fun DashboardScreen(
     val zappedNoteIds by accountStateViewModel.zappedNoteIds.collectAsState()
     val zappedAmountByNoteId by accountStateViewModel.zappedAmountByNoteId.collectAsState()
     val boostedNoteIds by accountStateViewModel.boostedNoteIds.collectAsState()
-    val replyCountByNoteId by social.mycelium.android.repository.ReplyCountCache.replyCountByNoteId.collectAsState()
-    val countsByNoteId by social.mycelium.android.repository.NoteCountsRepository.countsByNoteId.collectAsState()
+    val replyCountByNoteId by social.mycelium.android.repository.cache.ReplyCountCache.replyCountByNoteId.collectAsState()
+    val countsByNoteId by social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.collectAsState()
     val scope = rememberCoroutineScope()
 
     // Report drawer state to parent (for hiding bottom nav when drawer is open)
@@ -1336,8 +1338,8 @@ fun DashboardScreen(
     // Gated on userStateReady from StartupOrchestrator to ensure follow list is
     // applied before the feed renders. Waits for settingsReady up to ~9s so Phase 0
     // outbox-first kind-30078 fetch can apply before the main feed REQ.
-    val userStateReady by social.mycelium.android.repository.StartupOrchestrator.userStateReady.collectAsState()
-    val settingsReady by social.mycelium.android.repository.StartupOrchestrator.settingsReady.collectAsState()
+    val userStateReady by social.mycelium.android.repository.sync.StartupOrchestrator.userStateReady.collectAsState()
+    val settingsReady by social.mycelium.android.repository.sync.StartupOrchestrator.settingsReady.collectAsState()
     LaunchedEffect(
         currentAccount,
         subscribedCategoryRelayUrls,
@@ -1354,7 +1356,7 @@ fun DashboardScreen(
         // Returning users: skipPhase0() leaves settingsReady true immediately.
         if (!settingsReady) {
             val deadline = System.currentTimeMillis() + 9_000L
-            while (!social.mycelium.android.repository.StartupOrchestrator.settingsReady.value
+            while (!social.mycelium.android.repository.sync.StartupOrchestrator.settingsReady.value
                 && System.currentTimeMillis() < deadline) {
                 kotlinx.coroutines.delay(100)
             }
@@ -1385,11 +1387,11 @@ fun DashboardScreen(
             viewModel.loadNotesFromFavoriteCategory(relayUrlsToUse, displayUrls)
             // Signal the startup orchestrator that the feed subscription is live.
             // This gates Phase 3 (enrichment) — notifications, outbox, counts, etc.
-            social.mycelium.android.repository.StartupOrchestrator.markFeedStarted()
-            social.mycelium.android.repository.QuotedNoteCache.setRelayUrls(relayUrlsToUse)
-            social.mycelium.android.repository.ArticleEmbedCache.setRelayUrls(relayUrlsToUse)
+            social.mycelium.android.repository.sync.StartupOrchestrator.markFeedStarted()
+            social.mycelium.android.repository.cache.QuotedNoteCache.setRelayUrls(relayUrlsToUse)
+            social.mycelium.android.repository.cache.ArticleEmbedCache.setRelayUrls(relayUrlsToUse)
             currentAccount?.toHexKey()?.let { pk ->
-                social.mycelium.android.repository.QuotedNoteCache.setIndexerRelayUrls(
+                social.mycelium.android.repository.cache.QuotedNoteCache.setIndexerRelayUrls(
                     storageManager.loadIndexerRelays(pk).map { it.url }
                 )
             }
@@ -1419,11 +1421,11 @@ fun DashboardScreen(
             val followRelayUrls = (cacheUrls + outboxUrls).distinct()
             if (followRelayUrls.isNotEmpty()) {
                 viewModel.setCacheRelayUrls(cacheUrls)
-                social.mycelium.android.repository.ProfileMetadataCache.getInstance()
+                social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
                     .requestProfiles(listOf(pubkey), cacheUrls)
                 viewModel.loadFollowList(pubkey, followRelayUrls)
                 // NIP-65: fetch kind-10002 relay list for outbox model (counts use indexer relays)
-                social.mycelium.android.repository.Nip65RelayListRepository.fetchRelayList(pubkey, cacheUrls)
+                social.mycelium.android.repository.relay.Nip65RelayListRepository.fetchRelayList(pubkey, cacheUrls)
                 // NIP-66 is initialized globally in MainActivity — no per-account trigger needed
             }
         }
@@ -1437,7 +1439,7 @@ fun DashboardScreen(
     val activePeopleListPubkeys by remember(homeFeedState.activeListDTags) {
         derivedStateOf {
             if (homeFeedState.activeListDTags.isNotEmpty()) {
-                social.mycelium.android.repository.PeopleListRepository.getPubkeysForLists(homeFeedState.activeListDTags)
+                social.mycelium.android.repository.social.PeopleListRepository.getPubkeysForLists(homeFeedState.activeListDTags)
             } else null
         }
     }
@@ -1459,7 +1461,7 @@ fun DashboardScreen(
     // Update global enrichment (indexer subscriptions for hashtags + list members)
     // when the user changes these filters while in Global mode. This ensures the
     // GlobalFeedManager stays in sync with the dropdown selections.
-    val subscribedHashtags by social.mycelium.android.repository.PeopleListRepository.subscribedHashtags.collectAsState()
+    val subscribedHashtags by social.mycelium.android.repository.social.PeopleListRepository.subscribedHashtags.collectAsState()
     LaunchedEffect(
         homeFeedState.isFollowing,
         subscribedHashtags,
@@ -1473,7 +1475,7 @@ fun DashboardScreen(
                 addAll(subscribedHashtags)
                 homeFeedState.activeHashtagFilter?.let { add(it) }
             }
-            social.mycelium.android.repository.NotesRepository.getInstance().updateGlobalEnrichment(
+            social.mycelium.android.repository.feed.NotesRepository.getInstance().updateGlobalEnrichment(
                 hashtags = hashtags,
                 listDTags = homeFeedState.activeListDTags
             )
@@ -1512,7 +1514,7 @@ fun DashboardScreen(
     var avatarProfileRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(currentUserHexForAvatar) {
         val hex = currentUserHexForAvatar ?: return@LaunchedEffect
-        social.mycelium.android.repository.ProfileMetadataCache.getInstance().profileUpdated
+        social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().profileUpdated
             .filter { it == hex }
             .collect { avatarProfileRevision++ }
     }
@@ -1524,7 +1526,7 @@ fun DashboardScreen(
         // Priority: authState (latest from StateFlow) → ProfileMetadataCache → AccountInfo
         authState.userProfile?.picture?.takeIf { it.isNotBlank() }
             ?: currentUserHexForAvatar?.let {
-                social.mycelium.android.repository.ProfileMetadataCache.getInstance().getAuthor(it)?.avatarUrl
+                social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().getAuthor(it)?.avatarUrl
             }?.takeIf { it.isNotBlank() }
             ?: avatarAccount?.picture?.takeIf { it.isNotBlank() }
     }
@@ -1625,7 +1627,7 @@ fun DashboardScreen(
     val engagementFilter = homeFeedState.engagementFilter
     // Keep NoteCountsRepository in sync so it can prioritize the relevant event kind
     LaunchedEffect(engagementFilter) {
-        social.mycelium.android.repository.NoteCountsRepository.activeEngagementFilter = engagementFilter
+        social.mycelium.android.repository.social.NoteCountsRepository.activeEngagementFilter = engagementFilter
     }
 
     // Scroll-to-top trigger: incremented when filter/sort changes; LaunchedEffect
@@ -1665,9 +1667,9 @@ fun DashboardScreen(
     }
 
     // Mute/block filtering: hide notes from muted or blocked authors
-    val mutedPubkeys by social.mycelium.android.repository.MuteListRepository.mutedPubkeys.collectAsState()
-    val blockedPubkeys by social.mycelium.android.repository.MuteListRepository.blockedPubkeys.collectAsState()
-    val mutedWords by social.mycelium.android.repository.MuteListRepository.mutedWords.collectAsState()
+    val mutedPubkeys by social.mycelium.android.repository.social.MuteListRepository.mutedPubkeys.collectAsState()
+    val blockedPubkeys by social.mycelium.android.repository.social.MuteListRepository.blockedPubkeys.collectAsState()
+    val mutedWords by social.mycelium.android.repository.social.MuteListRepository.mutedWords.collectAsState()
 
     // Stage 1: mute/block/hidden filtering — only recomputes when the note list or mute lists change.
     // countsByNoteId is deliberately excluded so frequent count updates don't trigger full refilter.
@@ -1744,7 +1746,7 @@ fun DashboardScreen(
     val troubleRelayCount = remember(flaggedRelays, blockedRelays, userRelayUrls) {
         val trouble = (flaggedRelays + blockedRelays)
         trouble.count {
-            it in userRelayUrls || social.mycelium.android.repository.RelayStorageManager.normalizeRelayUrl(
+            it in userRelayUrls || social.mycelium.android.repository.relay.RelayStorageManager.normalizeRelayUrl(
                 it
             ) in userRelayUrls
         }
@@ -2085,8 +2087,8 @@ fun DashboardScreen(
                             feedStateViewModel.setHomeEngagementFilter(newFilter)
                             scrollToTopTrigger++
                         },
-                        peopleLists = remember(social.mycelium.android.repository.PeopleListRepository.peopleLists.collectAsState().value) {
-                            social.mycelium.android.repository.PeopleListRepository.peopleLists.value.map { it.dTag to it.title }
+                        peopleLists = remember(social.mycelium.android.repository.social.PeopleListRepository.peopleLists.collectAsState().value) {
+                            social.mycelium.android.repository.social.PeopleListRepository.peopleLists.value.map { it.dTag to it.title }
                         },
                         activeListDTag = homeFeedState.activeListDTag,
                         activeListDTags = homeFeedState.activeListDTags,
@@ -2145,7 +2147,7 @@ fun DashboardScreen(
         ) { paddingValues ->
             // Non-blocking banner when a remote indexer list (kind 10086) differs
             // from the user's confirmed local indexers.
-            val pendingIndexerDiff by social.mycelium.android.repository.RelayCategorySyncRepository.pendingIndexerDiff.collectAsState()
+            val pendingIndexerDiff by social.mycelium.android.repository.relay.RelayCategorySyncRepository.pendingIndexerDiff.collectAsState()
             val diffToShow = pendingIndexerDiff
             if (diffToShow != null) {
                 val pubkey = currentAccount?.toHexKey()
@@ -2153,11 +2155,11 @@ fun DashboardScreen(
                     IndexerDiffBanner(
                         diff = diffToShow,
                         onAccept = {
-                            social.mycelium.android.repository.RelayCategorySyncRepository.acceptPendingIndexerDiff(pubkey, context)
+                            social.mycelium.android.repository.relay.RelayCategorySyncRepository.acceptPendingIndexerDiff(pubkey, context)
                             relayViewModel?.loadUserRelays(pubkey)
                         },
                         onDismiss = {
-                            social.mycelium.android.repository.RelayCategorySyncRepository.dismissPendingIndexerDiff()
+                            social.mycelium.android.repository.relay.RelayCategorySyncRepository.dismissPendingIndexerDiff()
                         },
                         modifier = Modifier.padding(
                             top = paddingValues.calculateTopPadding() + 4.dp,

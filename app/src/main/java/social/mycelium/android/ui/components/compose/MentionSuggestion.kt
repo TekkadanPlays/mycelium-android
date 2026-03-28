@@ -26,8 +26,8 @@ import kotlinx.serialization.json.Json
 import social.mycelium.android.data.Author
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
-import social.mycelium.android.repository.ContactListRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.social.ContactListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import java.text.Normalizer
 
 private const val TAG = "MentionSuggestion"

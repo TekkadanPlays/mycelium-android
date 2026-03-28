@@ -7,12 +7,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayState
-import social.mycelium.android.repository.ContactListRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.TopicsRepository
-import social.mycelium.android.repository.TopicNote
-import social.mycelium.android.repository.HashtagStats
-import social.mycelium.android.repository.ScopedModerationRepository
+import social.mycelium.android.repository.social.ContactListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.content.TopicsRepository
+import social.mycelium.android.repository.content.TopicNote
+import social.mycelium.android.repository.content.HashtagStats
+import social.mycelium.android.repository.social.ScopedModerationRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -78,7 +78,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
     /** Re-sort hashtags when vote scores change and MOST_POPULAR is the active sort order. */
     private fun observeVoteScores() {
         viewModelScope.launch {
-            social.mycelium.android.repository.VoteRepository.scoreByNoteId.collect { _ ->
+            social.mycelium.android.repository.social.VoteRepository.scoreByNoteId.collect { _ ->
                 if (_uiState.value.sortOrder == HashtagSortOrder.MOST_POPULAR) {
                     val resorted = sortHashtagStats(_uiState.value.hashtagStats, HashtagSortOrder.MOST_POPULAR)
                     _uiState.update { it.copy(hashtagStats = resorted) }
@@ -155,7 +155,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
                     topic.id to relays
                 }
                 if (noteRelayMap.isNotEmpty()) {
-                    social.mycelium.android.repository.NoteCountsRepository.setTopicNoteIdsOfInterest(noteRelayMap)
+                    social.mycelium.android.repository.social.NoteCountsRepository.setTopicNoteIdsOfInterest(noteRelayMap)
                 }
             }
         }
@@ -305,7 +305,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
             HashtagSortOrder.MOST_TOPICS -> stats.sortedByDescending { it.topicCount }
             HashtagSortOrder.MOST_ACTIVE -> stats.sortedByDescending { it.latestActivity }
             HashtagSortOrder.MOST_REPLIES -> stats.sortedByDescending { it.totalReplies }
-            HashtagSortOrder.MOST_POPULAR -> stats.sortedByDescending { social.mycelium.android.repository.VoteRepository.getTotalScore(it.topicIds) }
+            HashtagSortOrder.MOST_POPULAR -> stats.sortedByDescending { social.mycelium.android.repository.social.VoteRepository.getTotalScore(it.topicIds) }
             HashtagSortOrder.ALPHABETICAL -> stats.sortedBy { it.hashtag.lowercase() }
         }
     }

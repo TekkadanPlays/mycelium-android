@@ -30,6 +30,11 @@ import social.mycelium.android.utils.extractPubkeysFromContent
 import java.util.Collections
 import java.util.concurrent.atomic.AtomicLong
 
+import social.mycelium.android.repository.relay.Nip65RelayListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.social.NoteCountsRepository
+import social.mycelium.android.repository.feed.NotesRepository
+import social.mycelium.android.repository.cache.QuotedNoteCache
 /**
  * Independent feed repository for a single author's profile page.
  *

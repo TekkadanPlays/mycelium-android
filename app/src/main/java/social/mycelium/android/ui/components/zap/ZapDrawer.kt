@@ -28,9 +28,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import social.mycelium.android.repository.NwcConfig
-import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.NwcConfig
+import social.mycelium.android.repository.sync.NwcConfigRepository
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.utils.ZapAmountManager
 import social.mycelium.android.utils.ZapUtils
 import social.mycelium.android.ui.components.emoji.EmojiDrawer

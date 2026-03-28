@@ -69,18 +69,18 @@ object ThemePreferences {
     fun setThemeMode(mode: ThemeMode) {
         _themeMode.value = mode
         prefs.edit().putString(KEY_THEME_MODE, mode.name).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setAccentColor(color: AccentColor) {
         _accentColor.value = color
         prefs.edit().putString(KEY_ACCENT_COLOR, color.name).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 
     fun setCompactMedia(enabled: Boolean) {
         _compactMedia.value = enabled
         prefs.edit().putBoolean(KEY_COMPACT_MEDIA, enabled).apply()
-        social.mycelium.android.repository.SettingsSyncManager.notifySettingChanged()
+        social.mycelium.android.repository.sync.SettingsSyncManager.notifySettingChanged()
     }
 }

@@ -15,7 +15,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
 import social.mycelium.android.data.AccountInfo
 import social.mycelium.android.relay.RelayConnectionStateMachine
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.ui.settings.ConnectionMode
 import social.mycelium.android.ui.settings.NotificationPreferences
 import java.util.concurrent.TimeUnit

@@ -40,7 +40,7 @@ import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.data.LiveActivityStatus
 import social.mycelium.android.repository.LiveActivityRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.ui.components.live.LiveActivityCard
 
 /**

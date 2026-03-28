@@ -21,10 +21,10 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
-import social.mycelium.android.repository.ContactListRepository
-import social.mycelium.android.repository.NotesRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.social.ContactListRepository
+import social.mycelium.android.repository.feed.NotesRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import kotlinx.coroutines.launch
 

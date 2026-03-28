@@ -46,8 +46,8 @@ import social.mycelium.android.lightning.SeedManager
 import social.mycelium.android.repository.CoinosRepository
 import social.mycelium.android.repository.CoinosTransaction
 import social.mycelium.android.repository.NotificationsRepository
-import social.mycelium.android.repository.NwcConfig
-import social.mycelium.android.repository.NwcConfigRepository
+import social.mycelium.android.repository.sync.NwcConfig
+import social.mycelium.android.repository.sync.NwcConfigRepository
 import social.mycelium.android.ui.components.zap.ZapBottomSheet
 import com.example.cybin.signer.NostrSigner
 import kotlinx.coroutines.launch

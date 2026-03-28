@@ -16,8 +16,8 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayHealthInfo
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.RelayDeliveryTracker
-import social.mycelium.android.repository.RelayRepository
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayRepository
+import social.mycelium.android.repository.relay.RelayStorageManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -73,7 +73,7 @@ class RelayManagementViewModel(
         val outboxUrls = _uiState.value.outboxRelays.map {
             social.mycelium.android.utils.normalizeRelayUrl(it.url)
         }.toSet()
-        social.mycelium.android.repository.RelayCategorySyncRepository.publishCategory(
+        social.mycelium.android.repository.relay.RelayCategorySyncRepository.publishCategory(
             category, signer, outboxUrls
         )
     }
@@ -87,7 +87,7 @@ class RelayManagementViewModel(
         val outboxUrls = _uiState.value.outboxRelays.map {
             social.mycelium.android.utils.normalizeRelayUrl(it.url)
         }.toSet()
-        social.mycelium.android.repository.RelayCategorySyncRepository.deleteCategory(
+        social.mycelium.android.repository.relay.RelayCategorySyncRepository.deleteCategory(
             categoryId, pubkey, signer, outboxUrls
         )
     }
@@ -197,7 +197,7 @@ class RelayManagementViewModel(
             // kind-30002 categories fetched by RelayCategorySyncRepository should
             // replace the default placeholder. For returning users, pending diffs
             // are auto-merged into the active profile's category list.
-            val pendingDiff = social.mycelium.android.repository.RelayCategorySyncRepository.pendingCategoryDiff.value
+            val pendingDiff = social.mycelium.android.repository.relay.RelayCategorySyncRepository.pendingCategoryDiff.value
             val activeProfile = profiles.find { it.isActive } ?: profiles.firstOrNull()
             if (activeProfile != null) {
                 val profileHasSubstantive = activeProfile.categories.any { it.relays.isNotEmpty() }
@@ -227,7 +227,7 @@ class RelayManagementViewModel(
                         Log.d("RelayMgmtVM", "Returning user: merged ${newCategories.size} new remote categories into active profile")
                     }
                     // Clear the diff since we auto-merged
-                    social.mycelium.android.repository.RelayCategorySyncRepository.dismissPendingCategoryDiff()
+                    social.mycelium.android.repository.relay.RelayCategorySyncRepository.dismissPendingCategoryDiff()
                 }
             }
 
@@ -394,12 +394,12 @@ class RelayManagementViewModel(
             state.inboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) } +
             state.indexerRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) } +
             // Include NIP-17 DM relays so auth challenges from DM relays are accepted
-            social.mycelium.android.repository.DirectMessageRepository.dmRelayUrls.value
+            social.mycelium.android.repository.messaging.DirectMessageRepository.dmRelayUrls.value
                 .map { social.mycelium.android.utils.normalizeRelayUrl(it) }
         ).toSet()
         authHandler.setAllowedRelayUrls(allRelayUrls)
         // Invalidate the idempotency guard so the feed re-subscribes with the new relay set
-        social.mycelium.android.repository.NotesRepository.getInstance().invalidateSubscriptionGuard()
+        social.mycelium.android.repository.feed.NotesRepository.getInstance().invalidateSubscriptionGuard()
         // Mark outbox relays as priority so they connect first (no jitter, cooldown cleared)
         RelayConnectionStateMachine.getInstance().setPriorityRelayUrls(outboxUrls.toSet())
         // Preserve the current kind-1 filter (e.g. Following authors) so relay changes
@@ -407,10 +407,10 @@ class RelayManagementViewModel(
         val currentFilter = RelayConnectionStateMachine.getInstance().getCurrentKind1Filter()
         RelayConnectionStateMachine.getInstance().requestFeedChange(relayUrls, currentFilter)
         // Also refresh TopicsRepository so kind-11 topics arrive from the new relay
-        social.mycelium.android.repository.TopicsRepository.getInstanceOrNull()?.setSubscriptionRelays(relayUrls)
+        social.mycelium.android.repository.content.TopicsRepository.getInstanceOrNull()?.setSubscriptionRelays(relayUrls)
         // Update NotesRepository relay set so NoteCountsRepository (kind-30011 votes,
         // kind-1111 replies) picks up the new relay for existing subscriptions
-        social.mycelium.android.repository.NotesRepository.getInstance().setSubscriptionRelays(relayUrls)
+        social.mycelium.android.repository.feed.NotesRepository.getInstance().setSubscriptionRelays(relayUrls)
         // Update NotificationsRepository so target-note fetches, badge resolution, and
         // poll enrichment use the updated relay set (not just the sign-in set).
         social.mycelium.android.repository.NotificationsRepository.updateSubscriptionRelayUrls(relayUrls)

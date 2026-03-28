@@ -23,9 +23,9 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
-import social.mycelium.android.repository.Nip65RelayListRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.TopicNote
+import social.mycelium.android.repository.relay.Nip65RelayListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.content.TopicNote
 import social.mycelium.android.ui.components.compose.MentionSuggestionList
 import social.mycelium.android.ui.components.compose.MentionSuggestionState
 import social.mycelium.android.viewmodel.AccountStateViewModel

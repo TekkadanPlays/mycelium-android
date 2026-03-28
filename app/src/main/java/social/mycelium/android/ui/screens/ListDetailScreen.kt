@@ -19,8 +19,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
-import social.mycelium.android.repository.PeopleListRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.social.PeopleListRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 
 /**
  * Detail screen for a single NIP-51 people list (kind 30000).

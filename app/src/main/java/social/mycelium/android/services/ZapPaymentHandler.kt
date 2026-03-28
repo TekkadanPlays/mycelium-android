@@ -3,9 +3,9 @@ package social.mycelium.android.services
 import android.content.Context
 import android.util.Log
 import social.mycelium.android.data.Note
-import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.NwcConfigRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner

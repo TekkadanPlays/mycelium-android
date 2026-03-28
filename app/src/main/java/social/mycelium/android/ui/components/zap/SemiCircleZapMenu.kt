@@ -39,8 +39,8 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.NwcConfigRepository
+import social.mycelium.android.repository.sync.ZapType
 import social.mycelium.android.utils.ZapAmountManager
 import androidx.compose.runtime.collectAsState
 

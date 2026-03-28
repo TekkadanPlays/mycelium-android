@@ -6,7 +6,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import social.mycelium.android.data.UrlPreviewInfo
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.NAddress
 import com.example.cybin.nip19.NEvent

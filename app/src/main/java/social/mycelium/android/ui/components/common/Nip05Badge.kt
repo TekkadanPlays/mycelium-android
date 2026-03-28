@@ -19,7 +19,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import social.mycelium.android.repository.Nip05Verifier
+import social.mycelium.android.repository.social.Nip05Verifier
 import social.mycelium.android.ui.icons.Nip05Verified
 import social.mycelium.android.ui.icons.Nip05VerifiedDark
 

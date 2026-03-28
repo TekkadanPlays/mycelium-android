@@ -44,7 +44,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import social.mycelium.android.repository.EmojiPackRepository
 import social.mycelium.android.repository.EmojiPackSelectionRepository
-import social.mycelium.android.repository.ReactionsRepository
+import social.mycelium.android.repository.social.ReactionsRepository
 
 private val SageGreen = Color(0xFF8FBC8F)
 

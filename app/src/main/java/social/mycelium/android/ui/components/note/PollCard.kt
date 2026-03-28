@@ -53,10 +53,10 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextDecoration
 import social.mycelium.android.data.PollData
 import social.mycelium.android.data.PollOption
-import social.mycelium.android.repository.PollResponseRepository
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.QuotedNoteCache
-import social.mycelium.android.repository.ZapPollResponseRepository
+import social.mycelium.android.repository.content.PollResponseRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.cache.QuotedNoteCache
+import social.mycelium.android.repository.content.ZapPollResponseRepository
 import social.mycelium.android.utils.NoteContentBlock
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.buildNoteContentWithInlinePreviews

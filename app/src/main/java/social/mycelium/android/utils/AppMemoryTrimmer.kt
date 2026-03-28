@@ -4,8 +4,8 @@ import android.content.Context
 import android.util.Log
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.cache.ThreadReplyCache
-import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.repository.QuotedNoteCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.cache.QuotedNoteCache
 import social.mycelium.android.services.UrlPreviewCache
 
 /**

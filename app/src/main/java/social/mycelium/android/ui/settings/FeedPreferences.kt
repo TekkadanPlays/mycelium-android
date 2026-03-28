@@ -3,7 +3,7 @@ package social.mycelium.android.ui.settings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import social.mycelium.android.repository.SettingsSyncManager
+import social.mycelium.android.repository.sync.SettingsSyncManager
 
 /**
  * Local state for feed-related preferences that sync across devices via NIP-78 (kind 30078).

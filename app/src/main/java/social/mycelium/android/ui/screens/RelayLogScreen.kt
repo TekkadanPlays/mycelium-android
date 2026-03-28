@@ -64,7 +64,7 @@ import social.mycelium.android.relay.RelayLogBuffer
 import social.mycelium.android.relay.RelayLogEntry
 import androidx.compose.ui.window.Dialog
 import com.example.cybin.nip19.toNpub
-import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
+import social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository
 
 /**
  * Default enabled log categories. Wire is off by default (verbose).

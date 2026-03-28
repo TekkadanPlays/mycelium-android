@@ -43,7 +43,7 @@ import coil.request.ImageRequest
 import androidx.activity.compose.BackHandler
 import social.mycelium.android.data.DiscoveredRelay
 import social.mycelium.android.data.RelayType
-import social.mycelium.android.repository.Nip66RelayDiscoveryRepository
+import social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository
 
 /**
  * NIP-66 Relay Discovery screen with multi-dimensional filtering.

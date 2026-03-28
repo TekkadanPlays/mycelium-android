@@ -8,8 +8,8 @@ import social.mycelium.android.data.Note
 import social.mycelium.android.data.ThreadReply
 import social.mycelium.android.data.ThreadedReply
 import social.mycelium.android.data.toThreadReplyForThread
-import social.mycelium.android.repository.Kind1RepliesRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.content.Kind1RepliesRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -193,7 +193,7 @@ class Kind1RepliesViewModel : ViewModel() {
         _uiState.update { it.copy(replies = sortedReplies, threadedReplies = threadedReplies, totalReplyCount = replies.size, isLoading = false) }
         // Cache total reply count for feed cards
         if (noteId != null) {
-            social.mycelium.android.repository.ReplyCountCache.set(noteId, replies.size)
+            social.mycelium.android.repository.cache.ReplyCountCache.set(noteId, replies.size)
         }
 
         // Thread completeness trace

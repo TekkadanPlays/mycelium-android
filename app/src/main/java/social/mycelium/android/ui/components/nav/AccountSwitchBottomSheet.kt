@@ -27,7 +27,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import social.mycelium.android.data.AccountInfo
-import social.mycelium.android.repository.RelayStorageManager
+import social.mycelium.android.repository.relay.RelayStorageManager
 import social.mycelium.android.viewmodel.AccountStateViewModel
 
 /**

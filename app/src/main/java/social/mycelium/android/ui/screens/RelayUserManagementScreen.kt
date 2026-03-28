@@ -28,7 +28,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import social.mycelium.android.data.Author
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.services.Nip86Client
 import social.mycelium.android.ui.components.common.ProfilePicture
 import com.example.cybin.nip19.toNpub

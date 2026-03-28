@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.util.Log
-import social.mycelium.android.repository.ZapType
+import social.mycelium.android.repository.sync.ZapType
 import com.example.cybin.core.Event
 import com.example.cybin.nip57.LnZapRequestEvent
 import com.example.cybin.signer.NostrSigner

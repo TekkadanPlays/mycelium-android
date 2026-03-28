@@ -43,7 +43,7 @@ import social.mycelium.android.data.MediaServer
 import social.mycelium.android.data.MediaServerType
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.ui.components.compose.ComposeToolbar
 import social.mycelium.android.ui.components.compose.MentionSuggestionList
 import social.mycelium.android.ui.components.compose.MentionSuggestionState
@@ -582,11 +582,11 @@ private fun ComposeQuotedNotePreviews(content: String) {
     ) {
         quotedIds.forEach { eventId ->
             var meta by remember(eventId) {
-                mutableStateOf(social.mycelium.android.repository.QuotedNoteCache.getCached(eventId))
+                mutableStateOf(social.mycelium.android.repository.cache.QuotedNoteCache.getCached(eventId))
             }
             LaunchedEffect(eventId) {
                 if (meta == null) {
-                    meta = social.mycelium.android.repository.QuotedNoteCache.get(eventId)
+                    meta = social.mycelium.android.repository.cache.QuotedNoteCache.get(eventId)
                 }
             }
 

@@ -25,9 +25,9 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
-import social.mycelium.android.repository.ContactListRepository
-import social.mycelium.android.repository.NotesRepository
-import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.repository.social.ContactListRepository
+import social.mycelium.android.repository.feed.NotesRepository
+import social.mycelium.android.repository.cache.ProfileMetadataCache
 import java.text.Normalizer
 import kotlin.math.min
 
@@ -645,7 +645,7 @@ class SearchViewModel : ViewModel() {
                 val rsm = RelayConnectionStateMachine.getInstance()
                 // Use indexer relays for NIP-50 search (they support it)
                 val context = appContext ?: return@launch
-                val storageManager = social.mycelium.android.repository.RelayStorageManager(context)
+                val storageManager = social.mycelium.android.repository.relay.RelayStorageManager(context)
                 val pubkey = accountPubkey
                 val indexerRelays = if (pubkey != null) {
                     storageManager.loadIndexerRelays(pubkey).map { it.url }

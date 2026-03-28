@@ -32,8 +32,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.ThreadReply
 import social.mycelium.android.data.toNote
-import social.mycelium.android.repository.TopicNote
-import social.mycelium.android.repository.TopicRepliesRepository
+import social.mycelium.android.repository.content.TopicNote
+import social.mycelium.android.repository.content.TopicRepliesRepository
 import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.ui.components.note.ActionRowSchema
 import social.mycelium.android.ui.components.common.ProfilePicture

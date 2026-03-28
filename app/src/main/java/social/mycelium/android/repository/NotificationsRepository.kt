@@ -36,6 +36,13 @@ import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
+import social.mycelium.android.repository.messaging.DirectMessageRepository
+import social.mycelium.android.repository.sync.AccountScopedRegistry
+import social.mycelium.android.repository.cache.ProfileMetadataCache
+import social.mycelium.android.repository.feed.DeepHistoryFetcher
+import social.mycelium.android.repository.social.MuteListRepository
+import social.mycelium.android.repository.feed.NotesRepository
+import social.mycelium.android.repository.cache.QuotedNoteCache
 /**
  * Repository for real Nostr notifications: events that reference the user (p tag).
  * Amethyst-style: kinds 1 (reply/mention), 7 (like), 6 (repost), 9735 (zap). No follows.
@@ -2606,7 +2613,7 @@ class NotificationsRepository(
         val quotedRefs = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventRefs(event.content)
         val quotedEventIds = quotedRefs.map { it.eventId }
         quotedRefs.forEach { ref ->
-            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.QuotedNoteCache.putRelayHints(
+            if (ref.relayHints.isNotEmpty()) social.mycelium.android.repository.cache.QuotedNoteCache.putRelayHints(
                 ref.eventId,
                 ref.relayHints
             )

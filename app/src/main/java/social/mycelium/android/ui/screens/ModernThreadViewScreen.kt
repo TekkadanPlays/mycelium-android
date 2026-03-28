@@ -83,7 +83,7 @@ import social.mycelium.android.ui.components.AdaptiveHeader
 import social.mycelium.android.ui.components.BottomNavigationBar
 import social.mycelium.android.repository.ZapType
 import social.mycelium.android.ui.components.NoteCard
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.ui.components.RelayOrbs
 import social.mycelium.android.ui.components.SingleRelayOrb
 import androidx.compose.foundation.lazy.LazyRow
@@ -2858,7 +2858,7 @@ private fun ReplyDetailsPanel(
                                     imageSize = 16.dp
                                 )
                                 Spacer(Modifier.width(6.dp))
-                                social.mycelium.android.ui.components.ProfilePicture(
+                                social.mycelium.android.ui.components.common.ProfilePicture(
                                     author = author,
                                     size = 20.dp,
                                     onClick = { onProfileClick(author.id) })
@@ -2943,7 +2943,7 @@ private fun ReplyDetailsPanel(
                                     .fillMaxWidth()
                                     .padding(vertical = 2.dp)
                             ) {
-                                social.mycelium.android.ui.components.ProfilePicture(
+                                social.mycelium.android.ui.components.common.ProfilePicture(
                                     author = author,
                                     size = 20.dp,
                                     onClick = { onProfileClick(author.id) })

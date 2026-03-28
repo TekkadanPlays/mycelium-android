@@ -1,4 +1,4 @@
-package social.mycelium.android.ui.components
+package social.mycelium.android.ui.components.common
 
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloat

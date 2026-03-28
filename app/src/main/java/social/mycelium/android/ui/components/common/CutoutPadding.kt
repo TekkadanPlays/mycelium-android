@@ -1,4 +1,4 @@
-package social.mycelium.android.ui.components
+package social.mycelium.android.ui.components.common
 
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.displayCutout

@@ -60,6 +60,7 @@ import social.mycelium.android.utils.extractEmojiUrls
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 // ✅ CRITICAL PERFORMANCE FIX: Cache SimpleDateFormat (creating it is VERY expensive)
 // SimpleDateFormat creation can take 50-100ms, causing visible lag in lists

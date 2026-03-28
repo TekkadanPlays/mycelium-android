@@ -34,7 +34,7 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.data.RelayCategory
 import social.mycelium.android.data.RelayProfile
 import social.mycelium.android.data.UserRelay
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 /**
  * Data class representing a section of relays in the selection screen.

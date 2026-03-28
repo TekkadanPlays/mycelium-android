@@ -30,7 +30,7 @@ import kotlinx.coroutines.withContext
 import social.mycelium.android.data.Author
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.services.Nip86Client
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 import com.example.cybin.nip19.toNpub
 import java.text.Normalizer
 

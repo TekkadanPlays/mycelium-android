@@ -63,10 +63,10 @@ import social.mycelium.android.ui.components.BottomNavigationBar
 import social.mycelium.android.ui.components.SmartBottomNavigationBar
 import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
 import social.mycelium.android.ui.components.BottomNavDestinations
-import social.mycelium.android.ui.components.ModernSearchBar
+import social.mycelium.android.ui.components.common.ModernSearchBar
 import social.mycelium.android.ui.components.GlobalSidebar
 import social.mycelium.android.ui.components.NoteCard
-import social.mycelium.android.ui.components.LoadingAnimation
+import social.mycelium.android.ui.components.common.LoadingAnimation
 import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.viewmodel.DashboardViewModel
 import social.mycelium.android.viewmodel.AuthViewModel

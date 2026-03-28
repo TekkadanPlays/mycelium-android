@@ -5,7 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.RectangleShape
@@ -46,7 +46,7 @@ import social.mycelium.android.data.NotificationType
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.NotificationsRepository
 import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.utils.normalizeAuthorIdForCache
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.platform.LocalUriHandler

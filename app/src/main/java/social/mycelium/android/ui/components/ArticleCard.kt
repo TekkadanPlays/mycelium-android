@@ -18,6 +18,7 @@ import coil.compose.AsyncImage
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.ZapType
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 /**
  * Card for rendering NIP-23 long-form content (kind 30023) articles in the feed.

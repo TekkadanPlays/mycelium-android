@@ -60,6 +60,7 @@ import social.mycelium.android.repository.ZapPollResponseRepository
 import social.mycelium.android.utils.NoteContentBlock
 import social.mycelium.android.utils.UrlDetector
 import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 private val MyceliumGreen = Color(0xFF8FBC8F)
 

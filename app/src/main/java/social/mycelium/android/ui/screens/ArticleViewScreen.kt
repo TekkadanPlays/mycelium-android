@@ -32,7 +32,7 @@ import com.halilibo.richtext.ui.material3.RichText
 import com.halilibo.richtext.ui.string.RichTextStringStyle
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 /**
  * Full-length article reader for NIP-23 long-form content (kind 30023).

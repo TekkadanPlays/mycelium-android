@@ -13,6 +13,7 @@ import social.mycelium.android.data.UrlPreviewState
 import social.mycelium.android.services.UrlPreviewCache
 import social.mycelium.android.services.UrlPreviewService
 import kotlinx.coroutines.launch
+import social.mycelium.android.ui.components.common.SageLoadingIndicator
 
 /**
  * Component that loads and displays URL previews

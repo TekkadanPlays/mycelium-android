@@ -2,7 +2,7 @@ package social.mycelium.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -26,7 +26,7 @@ import androidx.compose.ui.graphics.Color
 import social.mycelium.android.data.Author
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.BuildConfig
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.ui.components.SupportZapBottomSheet
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.NPub

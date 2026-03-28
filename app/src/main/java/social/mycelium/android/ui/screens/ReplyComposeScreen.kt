@@ -2,7 +2,7 @@ package social.mycelium.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -31,6 +31,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import social.mycelium.android.ui.components.MentionSuggestionList
 import social.mycelium.android.ui.components.MentionSuggestionState
+import social.mycelium.android.ui.components.common.ModernTextField
 
 /**
  * Dedicated screen for replying to a comment. Shows the note being replied to at the top,
@@ -317,7 +318,7 @@ fun ReplyComposeScreen(
                     }
                 }
             }
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = textFieldValue,
                 onValueChange = { newValue ->
                     textFieldValue = newValue

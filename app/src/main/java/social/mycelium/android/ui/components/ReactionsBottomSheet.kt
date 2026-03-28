@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Author
 import social.mycelium.android.repository.ProfileMetadataCache
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 /**
  * Bottom sheet showing full reaction/zap/boost details in a tabbed layout.

@@ -1,4 +1,4 @@
-package social.mycelium.android.ui.components
+package social.mycelium.android.ui.components.common
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -37,6 +37,7 @@ import social.mycelium.android.viewmodel.SearchResultItem
 import social.mycelium.android.viewmodel.SearchTab
 import social.mycelium.android.viewmodel.SearchUiState
 import social.mycelium.android.viewmodel.SearchViewModel
+import social.mycelium.android.ui.components.ClickableNoteContent
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

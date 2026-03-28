@@ -109,6 +109,7 @@ import androidx.compose.ui.window.Dialog
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 /**
  * Composition local that provides the feed [LazyListState] to nested composables.

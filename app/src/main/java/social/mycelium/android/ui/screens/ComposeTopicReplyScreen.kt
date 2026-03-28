@@ -2,7 +2,7 @@ package social.mycelium.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -30,6 +30,7 @@ import social.mycelium.android.ui.components.MentionSuggestionList
 import social.mycelium.android.ui.components.MentionSuggestionState
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import social.mycelium.android.ui.components.common.ModernTextField
 
 /**
  * ComposeTopicReplyScreen - Compose a kind:1 reply to a kind:11 topic
@@ -290,7 +291,7 @@ fun ComposeTopicReplyScreen(
             }
 
             // Content input
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = textFieldValue,
                 onValueChange = { newValue ->
                     textFieldValue = newValue

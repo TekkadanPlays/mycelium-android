@@ -12,7 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -51,6 +51,7 @@ import social.mycelium.android.utils.ComposeVisualTransformation
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.utils.UnicodeStylizer
 import social.mycelium.android.viewmodel.AccountStateViewModel
+import social.mycelium.android.ui.components.common.ModernTextField
 
 /**
  * Note composition screen. User types content and taps Publish to open relay selection.
@@ -265,7 +266,7 @@ fun ComposeNoteScreen(
                     .then(if (isPollMode) Modifier.verticalScroll(scrollState) else Modifier)
             ) {
                 // Text input — always at the top (question for poll mode, content for note mode)
-                social.mycelium.android.ui.components.ModernTextField(
+                social.mycelium.android.ui.components.common.ModernTextField(
                     value = textFieldValue,
                     onValueChange = { newValue ->
                         textFieldValue = newValue

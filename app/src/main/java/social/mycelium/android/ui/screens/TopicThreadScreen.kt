@@ -2,7 +2,7 @@ package social.mycelium.android.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -36,7 +36,7 @@ import social.mycelium.android.repository.TopicNote
 import social.mycelium.android.repository.TopicRepliesRepository
 import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.ui.components.ActionRowSchema
-import social.mycelium.android.ui.components.ProfilePicture
+import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import social.mycelium.android.viewmodel.ThreadRepliesViewModel
 import kotlinx.coroutines.launch

@@ -6,7 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -37,6 +37,7 @@ import social.mycelium.android.utils.ComposeVisualTransformation
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.utils.UnicodeStylizer
 import social.mycelium.android.viewmodel.AccountStateViewModel
+import social.mycelium.android.ui.components.common.ModernTextField
 
 /**
  * Dedicated screen for creating a Kind 11 topic (like compose for home feed).
@@ -212,7 +213,7 @@ fun ComposeTopicScreen(
                 .imePadding()
                 .padding(horizontal = 16.dp)
         ) {
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = title,
                 onValueChange = { title = it },
                 placeholder = "Title",
@@ -221,7 +222,7 @@ fun ComposeTopicScreen(
                     .padding(top = 16.dp),
                 singleLine = true
             )
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = textFieldValue,
                 onValueChange = { newValue ->
                     textFieldValue = newValue
@@ -254,7 +255,7 @@ fun ComposeTopicScreen(
                     textFieldValue = TextFieldValue(newText, TextRange(newCursor))
                 }
             )
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = hashtags,
                 onValueChange = { hashtags = it },
                 placeholder = "Hashtags (comma-separated)",

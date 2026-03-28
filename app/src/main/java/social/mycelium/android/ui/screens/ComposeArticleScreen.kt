@@ -6,7 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -37,6 +37,7 @@ import social.mycelium.android.ui.components.MentionSuggestionList
 import social.mycelium.android.ui.components.MentionSuggestionState
 import social.mycelium.android.utils.MarkdownVisualTransformation
 import social.mycelium.android.viewmodel.AccountStateViewModel
+import social.mycelium.android.ui.components.common.ModernTextField
 
 /**
  * Compose screen for creating NIP-23 long-form content (kind 30023) articles.
@@ -239,7 +240,7 @@ fun ComposeArticleScreen(
                 .padding(horizontal = 16.dp)
         ) {
             // Title
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = title,
                 onValueChange = { title = it },
                 placeholder = "Article Title",
@@ -250,7 +251,7 @@ fun ComposeArticleScreen(
             )
 
             // Summary (optional)
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = summary,
                 onValueChange = { summary = it },
                 placeholder = "Summary (optional — shown in feed preview)",
@@ -261,7 +262,7 @@ fun ComposeArticleScreen(
             )
 
             // Cover image URL (optional)
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = coverImageUrl,
                 onValueChange = { coverImageUrl = it },
                 placeholder = "Cover image URL (optional)",
@@ -272,7 +273,7 @@ fun ComposeArticleScreen(
             )
 
             // Article body (markdown)
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = textFieldValue,
                 onValueChange = { newValue ->
                     textFieldValue = newValue
@@ -307,7 +308,7 @@ fun ComposeArticleScreen(
             )
 
             // Hashtags
-            social.mycelium.android.ui.components.ModernTextField(
+            social.mycelium.android.ui.components.common.ModernTextField(
                 value = hashtags,
                 onValueChange = { hashtags = it },
                 placeholder = "Hashtags (comma-separated)",

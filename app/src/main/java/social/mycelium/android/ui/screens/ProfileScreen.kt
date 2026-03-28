@@ -7,7 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import social.mycelium.android.ui.components.cutoutPadding
+import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyListState
@@ -60,7 +60,7 @@ import social.mycelium.android.R
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.SampleData
-import social.mycelium.android.ui.components.ModernSearchBar
+import social.mycelium.android.ui.components.common.ModernSearchBar
 import social.mycelium.android.repository.ProfileFeedRepository
 import social.mycelium.android.repository.ZapType
 import social.mycelium.android.ui.components.NoteCard

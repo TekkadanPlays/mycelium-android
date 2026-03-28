@@ -30,6 +30,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import social.mycelium.android.ui.components.common.ProfilePicture
 
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -56,13 +57,13 @@ import social.mycelium.android.ui.components.BottomNavigationBar
 import social.mycelium.android.ui.components.SmartBottomNavigationBar
 import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
 import social.mycelium.android.ui.components.BottomNavDestinations
-import social.mycelium.android.ui.components.ModernSearchBar
+import social.mycelium.android.ui.components.common.ModernSearchBar
 import social.mycelium.android.ui.components.GlobalSidebar
 import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.ui.components.ActionRowSchema
 import social.mycelium.android.ui.components.LiveActivityCard
 import social.mycelium.android.ui.components.LiveActivityRow
-import social.mycelium.android.ui.components.LoadingAnimation
+import social.mycelium.android.ui.components.common.LoadingAnimation
 import social.mycelium.android.repository.LiveActivityRepository
 import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.viewmodel.DashboardViewModel
@@ -1551,7 +1552,7 @@ private fun Kind11TopicCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                social.mycelium.android.ui.components.ProfilePicture(
+                social.mycelium.android.ui.components.common.ProfilePicture(
                     author = topic.author,
                     size = 36.dp,
                     onClick = { /* profile click */ }

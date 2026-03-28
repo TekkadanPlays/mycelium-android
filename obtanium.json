@@ -19,6 +19,34 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.21",
+      "versionCode": 46,
+      "releaseDate": "2026-03-28",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.21-beta/Mycelium-v0.5.21-beta.apk",
+      "changelog": "Relay orb persistence, wallet NWC lander, feed stability for returning users, deep-fetch vote hydration, thread navigation fixes, profile performance, zap UI refresh, 10+ bug fixes.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Deep-fetched historical topics now persist relay source URLs for relay orb rendering",
+        "Settings publishing restricted to outbox-only (no longer targets 30002 list relays)",
+        "NWC wallet lander with zap-based transaction history",
+        "Feed stability: hasEverLoadedFeed suppresses reconnect overlay for returning users",
+        "Deep-fetch pipeline hydrates kind-30011 votes for complete topic data on sign-in",
+        "Thread drill-down navigation renders deeply nested targets at visible depth",
+        "Profile page decoupled from dashboard state; O(n) list merging",
+        "Notification tabs restructured for accurate enrichment per type",
+        "Zap drawer replaces legacy pop-up menu for consistent interaction",
+        "Thread relay filter menu gated behind debug flag",
+        "Always-on set as default connection mode",
+        "Fixes: scroll interruptions, encoded URL spaces, gif pack reactions, NIP-53 live chat, media re-compositions, indexer publishing target"
+      ]
+    },
+    {
       "version": "0.5.20",
       "versionCode": 45,
       "releaseDate": "2026-03-27",

@@ -1,6 +1,29 @@
 # Changelog
 
+## v0.5.21-beta (2026-03-28)
+- **Relay** — Deep-fetched historical topics now capture and persist relay source URLs for relay orb rendering
+- **Relay** — Settings publishing restricted to outbox-only relays (no longer incorrectly targets 30002 list relays)
+- **Relay** — Thread relay filter menu gated behind `RELAY_FILTER_DEV_MODE` debug flag
+- **Feed** — `hasEverLoadedFeed` flag suppresses full-page "Connecting to relays" overlay for returning users on resume
+- **Feed** — Deep-fetch pipeline now hydrates kind-30011 votes for complete topic data on sign-in
+- **Wallet** — NWC-based zap wallet lander replaces "Coming soon" placeholder; setup flow triggers ZapDrawer
+- **Wallet** — Zap-based history view aggregates data from existing notifications
+- **UI** — Zap pop-up menu replaced with consistent bottom sheet/drawer interaction matching new zap drawer design
+- **UI** — Thread reply indentation refactored for consistent, tight spacing with surgical drill-down highlights
+- **UI** — Thread navigation drill-down now correctly renders deeply nested target replies at visible depth
+- **Performance** — Profile page decoupled from global dashboard state; list merging optimized from O(n²) to O(n)
+- **Performance** — Repository and ViewModel audit for cleaner reactive data flow and reduced recompositions
+- **Notifications** — Restructured notification tabs for accurate enrichment and consistent layout per type
+- **Fix** — Profile header `NestedScrollConnection` refactored to eliminate scrolling interruptions
+- **Fix** — URL sanitization handles encoded spaces in link previews
+- **Fix** — Recursive gif pack reaction support
+- **Fix** — NIP-53 live chat functionality restored
+- **Fix** — "Always-on" set as default connection mode
+- **Fix** — Media rendering optimized to prevent redundant re-compositions
+- **Fix** — Publishing indexer logic corrected to target outbox only
+
 ## v0.5.20-beta (2026-03-27)
+- **Notifications** — Sign-in race fix: `NotificationsRepository.init` no longer overwrites `myPubkeyHex` with shared prefs (wrong account / null), so feed cross-pollination keeps working before `startSubscription`. Phase 3 quote/thread filters now union kind-1 ids from the feed cache and raise the relay one-shot limit to reduce missed recent quote/reply notifications.
 - **Relay transport** — Removed legacy `WebSocketClient`; relay traffic consolidated on Ktor/Cybin pool path with updates across state machine, multiplexer, health, NIP-42 auth, and connectivity monitoring
 - **Repositories & feed** — Coordinated changes in notes, outbox, NIP-65/66, relay storage, startup, DMs, and related caches for the new transport behavior
 - **Debug & diagnostics** — Session dump, verbose logging, and pipeline diagnostics helpers; relay log and debug settings wiring

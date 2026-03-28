@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.UnfoldMore
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -27,6 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -42,13 +44,17 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.core.animateFloatAsState
 
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,6 +85,8 @@ import social.mycelium.android.repository.ZapType
 import social.mycelium.android.ui.components.NoteCard
 import social.mycelium.android.ui.components.ProfilePicture
 import social.mycelium.android.ui.components.RelayOrbs
+import social.mycelium.android.ui.components.SingleRelayOrb
+import androidx.compose.foundation.lazy.LazyRow
 import social.mycelium.android.ui.components.ZapButtonWithMenu
 import social.mycelium.android.ui.components.ZapMenuRow
 import social.mycelium.android.ui.icons.ArrowDownward
@@ -99,7 +107,9 @@ private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault(
 private val standardAnimation = tween<IntSize>(durationMillis = 200, easing = FastOutSlowInEasing)
 private val fastAnimation = tween<IntSize>(durationMillis = 150, easing = FastOutSlowInEasing)
 
-/** Thread/topic reply separator line color. */
+/** Fallback Thread/topic reply separator line color (used where depth is unknown). */
+
+/** Fallback Thread/topic reply separator line color (used where depth is unknown). */
 private val ThreadLineColor = Color(0xFF8888A0)
 
 /** Max indent depth; beyond this show "Read N more replies" and open sub-thread on tap. */
@@ -140,33 +150,84 @@ private fun subtreeWithStructure(tree: List<ThreadedReply>, focusReplyId: String
 }
 
 /**
+ * Find the index in [displayList] of the top-level item whose subtree contains [targetId].
+ * Returns -1 if the target is not found. This is needed because the LazyColumn only has
+ * top-level items — children are rendered recursively inside each ThreadedReplyCard.
+ */
+private fun findContainingDisplayIndex(displayList: List<ThreadedReply>, targetId: String): Int {
+    for (i in displayList.indices) {
+        if (displayList[i].reply.id == targetId) return i
+        if (findThreadedReplyById(displayList[i].children, targetId) != null) return i
+    }
+    return -1
+}
+
+/**
  * Compute the sub-thread drill-down stack needed to make a deeply nested reply
- * visible in the display list. If the reply is at level >= MAX_THREAD_DEPTH, the
- * user needs to be routed through one or more sub-thread pivots to reach it.
+ * visible in the display list. The display list only has top-level items;
+ * children are rendered recursively inside ThreadedReplyCard. To ensure the
+ * target reply is visible:
+ *  - We need the target to be at a low enough level that it's rendered inline
+ *    (not behind "Read N more replies", which fires at MAX_THREAD_DEPTH).
+ *  - We also want it shallow enough that scrolling to its top-level ancestor
+ *    in the LazyColumn actually brings it on-screen.
  *
- * Returns the list of reply IDs to push onto [rootReplyIdStack], or empty if the
- * reply is visible without drilling down.
+ * Strategy: drill down so the target's **grandparent** (or parent for short
+ * chains) becomes the sub-thread root. This places the target at level ≤ 2,
+ * guaranteeing it's visible without any further user interaction.
+ *
+ * Returns the list of reply IDs to push onto [rootReplyIdStack], or empty if
+ * the reply is visible without drilling down.
  */
 private fun computeDrillDownStack(tree: List<ThreadedReply>, targetId: String): List<String> {
     val path = findPathToReplyId(tree, targetId) ?: return emptyList()
-    // Each sub-thread pivot resets depth to 0. We need a pivot every time
-    // the depth would reach MAX_THREAD_DEPTH, keeping the target reply visible.
-    // Walk the path: nodes at path indices 0..N correspond to tree levels 0..N.
-    // When a node would be at level >= MAX_THREAD_DEPTH, we pivot on its parent.
-    if (path.size <= MAX_THREAD_DEPTH) return emptyList() // visible without drilling
+    // path = [root-child, ..., grandparent, parent, target]
+    // path.size = 1 means the target is a level-0 reply → visible, no drill needed
+    if (path.size <= 2) return emptyList() // target at level 0 or 1 → visible
+
+    // We want the target at level ≤ 2 in the sub-thread.
+    // If we pivot on path[pivotIdx], that node becomes level 0, and the target
+    // (which is the last element) is at level (path.size - 1 - pivotIdx).
+    // Solve: path.size - 1 - pivotIdx <= 2  →  pivotIdx >= path.size - 3
+    // Pivot on the grandparent of the target (or parent if path is short)
+    val pivotIdx = (path.size - 3).coerceAtLeast(0)
+
+    // Build pivot stack — we need intermediate pivots every MAX_THREAD_DEPTH
+    // levels so the drill-down UI shows each "Back" step correctly.
     val pivots = mutableListOf<String>()
-    var currentDepthOffset = 0
-    for (i in path.indices) {
-        val effectiveLevel = i - currentDepthOffset
+    var currentOffset = 0
+    for (i in 0..pivotIdx) {
+        val effectiveLevel = i - currentOffset
         if (effectiveLevel >= MAX_THREAD_DEPTH) {
-            // Pivot on the node just before this one — it becomes the new sub-thread root
-            val pivotId = path[i - 1]
-            pivots.add(pivotId)
-            // After pivoting, the pivot node is at level 0, so this node is at level 1
-            currentDepthOffset = i - 1
+            pivots.add(path[i - 1])
+            currentOffset = i - 1
         }
     }
+    // Final pivot: the grandparent
+    pivots.add(path[pivotIdx])
     return pivots
+}
+
+/** Filter threaded replies by relay URLs. Shows entire subtree when a node matches;
+ *  shows non-matching parents as context when only a descendant matches. */
+private fun filterThreadedByRelays(
+    replies: List<ThreadedReply>,
+    relayFilter: Set<String>
+): List<ThreadedReply> {
+    if (relayFilter.isEmpty()) return replies
+    return replies.mapNotNull { node ->
+        val selfMatches = node.reply.relayUrls.any {
+            social.mycelium.android.utils.normalizeRelayUrl(it) in relayFilter
+        }
+        if (selfMatches) {
+            node // entire subtree shown
+        } else {
+            val filteredChildren = filterThreadedByRelays(node.children, relayFilter)
+            if (filteredChildren.isNotEmpty()) {
+                node.copy(children = filteredChildren)
+            } else null
+        }
+    }
 }
 
 // Data classes previously in ThreadViewScreen.kt — moved here after cleanup
@@ -321,6 +382,8 @@ fun ModernThreadViewScreen(
 
     /** Sort order: false = oldest first (chronological), true = newest first. */
     var isNewestFirst by remember { mutableStateOf(false) }
+    /** Selected relay URLs for filtering thread replies. Empty = show all (no filter active). */
+    var selectedRelayFilters by remember { mutableStateOf<Set<String>>(emptySet()) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
 
@@ -435,18 +498,18 @@ fun ModernThreadViewScreen(
         }
     }
 
-    // Enrich parent note relay URLs with outbox-discovered relays that yielded replies
-    val k1SourceRelays by kind1RepliesViewModel.replySourceRelays.collectAsState()
-    val k1111SourceRelays by threadRepliesViewModel.replySourceRelays.collectAsState()
-    val replySourceRelays = if (replyKind == 1) k1SourceRelays else k1111SourceRelays
-    val enrichedNote = remember(note, replySourceRelays) {
-        val sourceRelays = replySourceRelays[note.id] ?: emptySet()
-        if (sourceRelays.isEmpty()) note
-        else {
-            val existingUrls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-            val merged = (existingUrls + sourceRelays).distinct()
-            if (merged.size > existingUrls.size) note.copy(relayUrls = merged) else note
+    // Compute unique relay URLs and counts across all replies (for relay filter bar).
+    // Sorted by descending count so the most common relays appear first.
+    val replyRelayData = remember(repliesState.replies) {
+        val counts = mutableMapOf<String, Int>()
+        repliesState.replies.forEach { reply ->
+            reply.relayUrls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet().forEach { url ->
+                counts[url] = (counts[url] ?: 0) + 1
+            }
         }
+        counts.entries
+            .sortedByDescending { it.value }
+            .map { (url, count) -> url to count }
     }
 
     // Subscribe to kind-7/9735 counts for root + reply note IDs so reactions/zaps show on thread replies
@@ -561,16 +624,26 @@ fun ModernThreadViewScreen(
     // Persistent highlight: stays visible until user leaves the thread view entirely.
     // Set once when we scroll to the target reply; never auto-cleared.
     var highlightedReplyId by remember { mutableStateOf<String?>(null) }
+    var highlightedPathIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var haveScrolledToHighlight by remember(highlightReplyId) { mutableStateOf(false) }
 
     // When opened from notification / reply tap with highlightReplyId, expand path to
     // that reply, drill into sub-threads if needed, and scroll to it.
-    // Uses snapshotFlow to retry until the reply actually appears in the rendered list.
+    // Triggers a targeted fetch for the specific reply + ancestors to avoid relying
+    // solely on generic deep-fetch rounds (which may not discover deeply nested replies).
     LaunchedEffect(highlightReplyId) {
         if (highlightReplyId == null) return@LaunchedEffect
         android.util.Log.d("ThreadHighlight", "Attempting to scroll to reply $highlightReplyId")
-        // Wait for replies to load (retry up to 10s)
-        val deadline = System.currentTimeMillis() + 10_000
+
+        // Proactively fetch the target reply and its ancestor chain.
+        // This runs concurrently with the polling loop below — whichever path
+        // makes the reply appear in the threaded list first wins.
+        if (replyKind == 1) {
+            kind1RepliesViewModel.fetchSpecificReply(note.id, highlightReplyId!!, relayUrls)
+        }
+
+        // Wait for replies to load (retry up to 12s — extra 2s for targeted fetch latency)
+        val deadline = System.currentTimeMillis() + 12_000
         while (System.currentTimeMillis() < deadline) {
             val threaded = if (repliesState.threadedReplies.isNotEmpty()) {
                 repliesState.threadedReplies
@@ -604,7 +677,10 @@ fun ModernThreadViewScreen(
                     activeRoot != null -> subtreeWithStructure(activeThreaded, activeRoot) ?: activeThreaded
                     else -> activeThreaded
                 }
-                val listIndex = activeDisplayList.indexOfFirst { it.reply.id == highlightReplyId }
+                // The displayList only has top-level items; nested replies are
+                // rendered inside each ThreadedReplyCard. Use findContainingDisplayIndex
+                // to locate the top-level ancestor that contains our target.
+                val listIndex = findContainingDisplayIndex(activeDisplayList, highlightReplyId!!)
                 if (listIndex >= 0) {
                     // LazyColumn: item(main_note)=0, item(replies_section)=1, then itemsIndexed(displayList)
                     // When in sub-thread mode, item(back_to_subthread)=2 shifts indices by 1
@@ -613,13 +689,14 @@ fun ModernThreadViewScreen(
                     android.util.Log.d("ThreadHighlight", "Scrolling to index $scrollIndex (listIndex=$listIndex, headers=$headerItems)")
                     listState.animateScrollToItem(scrollIndex)
                     highlightedReplyId = highlightReplyId
+                    highlightedPathIds = path.toSet()
                     haveScrolledToHighlight = true
 
                     // Secondary scroll: the LazyColumn may compose new items
                     // after the first scroll, shifting indices. Retry once
                     // after a brief layout settle.
                     kotlinx.coroutines.delay(300)
-                    val retryIndex = activeDisplayList.indexOfFirst { it.reply.id == highlightReplyId }
+                    val retryIndex = findContainingDisplayIndex(activeDisplayList, highlightReplyId!!)
                     if (retryIndex >= 0) {
                         val retryScroll = headerItems + retryIndex
                         if (retryScroll != scrollIndex || !listState.isScrollInProgress) {
@@ -636,7 +713,7 @@ fun ModernThreadViewScreen(
             kotlinx.coroutines.delay(500)
         }
         if (!haveScrolledToHighlight) {
-            android.util.Log.w("ThreadHighlight", "Failed to scroll to reply $highlightReplyId after 10s")
+            android.util.Log.w("ThreadHighlight", "Failed to scroll to reply $highlightReplyId after 12s")
         }
     }
 
@@ -738,7 +815,7 @@ fun ModernThreadViewScreen(
                 item(key = "main_note") {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         NoteCard(
-                            note = enrichedNote,
+                            note = note,
                             onLike = onLike,
                             onShare = onShare,
                             onComment = effectiveOnComment,
@@ -854,13 +931,15 @@ fun ModernThreadViewScreen(
 
                         // Reply count header (no loader; fallback message for no replies only)
                         if (repliesState.totalReplyCount > 0 || totalNewCount > 0) {
+                            val filterActive = selectedRelayFilters.isNotEmpty()
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 16.dp, vertical = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                // Left: reply count text
                                 val directCount = repliesState.replies.size
                                 val totalCount = repliesState.totalReplyCount
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -884,7 +963,78 @@ fun ModernThreadViewScreen(
                                     }
                                 }
 
-                                // Sort button
+                                // Middle: relay filter orbs (scrollable, fills available space)
+                                // Debug-only: relay filter is experimental; hidden in release builds
+                                if (social.mycelium.android.BuildConfig.RELAY_FILTER_DEV_MODE &&
+                                    replyRelayData.size > 1 && repliesState.replies.isNotEmpty()
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .horizontalScroll(rememberScrollState()),
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        // Clear button
+                                        if (filterActive) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(22.dp)
+                                                    .clip(CircleShape)
+                                                    .background(MaterialTheme.colorScheme.errorContainer)
+                                                    .clickable { selectedRelayFilters = emptySet() },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Close,
+                                                    contentDescription = "Clear relay filter",
+                                                    modifier = Modifier.size(12.dp),
+                                                    tint = MaterialTheme.colorScheme.onErrorContainer
+                                                )
+                                            }
+                                        }
+                                        replyRelayData.forEach { (relayUrl, _) ->
+                                            val isSelected = relayUrl in selectedRelayFilters
+                                            val orbAlpha = when {
+                                                !filterActive -> 1f
+                                                isSelected -> 1f
+                                                else -> 0.35f
+                                            }
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(22.dp)
+                                                    .then(
+                                                        if (isSelected) Modifier.border(
+                                                            2.dp,
+                                                            MaterialTheme.colorScheme.primary,
+                                                            CircleShape
+                                                        )
+                                                        else Modifier
+                                                    )
+                                                    .clip(CircleShape)
+                                                    .clickable {
+                                                        selectedRelayFilters = if (isSelected) {
+                                                            selectedRelayFilters - relayUrl
+                                                        } else {
+                                                            selectedRelayFilters + relayUrl
+                                                        }
+                                                    },
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                SingleRelayOrb(
+                                                    relayUrl = relayUrl,
+                                                    size = 22.dp,
+                                                    modifier = Modifier.graphicsLayer { alpha = orbAlpha }
+                                                )
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // No relay data or feature gated — spacer to push sort button right
+                                    Spacer(modifier = Modifier.weight(1f))
+                                }
+
+                                // Right: sort button
                                 if (repliesState.totalReplyCount > 0) {
                                     var showSortMenu by remember { mutableStateOf(false) }
                                     Box {
@@ -980,13 +1130,14 @@ fun ModernThreadViewScreen(
                             displayThreaded.filter { it.level == 0 && it.children.isNotEmpty() }
                                 .associate { it.reply.id to countDescendants(it.children) }
                         } else emptyMap()
-                    val displayList = when {
+                    val preFilterList = when {
                         currentRootReplyId != null -> subtreeWithStructure(displayThreaded, currentRootReplyId!!)
                             ?: displayThreaded
 
                         showRootOnly -> displayThreaded.filter { it.level == 0 }
                         else -> displayThreaded
                     }
+                    val displayList = filterThreadedByRelays(preFilterList, selectedRelayFilters)
                     if (currentRootReplyId != null) {
                         item(key = "back_to_subthread") {
                             Surface(
@@ -1020,115 +1171,99 @@ fun ModernThreadViewScreen(
                         items = displayList,
                         key = { _, it -> logicalReplyKey(it.reply) }
                     ) { index, threadedReply ->
-                        val isHighlighted = highlightedReplyId == threadedReply.reply.id
-                        val highlightAlpha by animateFloatAsState(
-                            targetValue = if (isHighlighted) 0.10f else 0f,
-                            animationSpec = tween(400),
-                            label = "persistentHighlight"
+                        ThreadedReplyCard(
+                            threadedReply = threadedReply,
+                            isLastRootReply = index == displayList.size - 1,
+                            rootAuthorId = note.author.id,
+                            parentAuthorId = note.author.id,
+                            replyKind = replyKind,
+                            commentStates = commentStates,
+                            noteCountsByNoteId = noteCountsByNoteId,
+                            highlightedReplyId = highlightedReplyId,
+                            highlightedPathIds = highlightedPathIds,
+                            onLike = { replyId ->
+                                if (replyKind == 1) kind1RepliesViewModel.likeReply(replyId)
+                                else threadRepliesViewModel.likeReply(replyId)
+                            },
+                            onReply = effectiveOnCommentReply,
+                            onProfileClick = onProfileClick,
+                            onRelayClick = onRelayNavigate,
+                            onNavigateToRelayList = onNavigateToRelayList,
+                            shouldCloseZapMenus = shouldCloseZapMenus,
+                            expandedZapMenuReplyId = expandedZapMenuCommentId,
+                            onExpandZapMenu = { replyId ->
+                                expandedZapMenuCommentId =
+                                    if (expandedZapMenuCommentId == replyId) null else replyId
+                            },
+                            onZap = effectiveOnZap,
+                            onZapSettings = { onNavigateToZapSettings() },
+                            expandedControlsReplyId = expandedControlsReplyId,
+                            onExpandedControlsReplyChange = onExpandedControlsReplyChange,
+                            onReadMoreReplies = { replyId ->
+                                // Save current scroll position before drilling down
+                                savedScrollByDepth[rootReplyIdStack.size] = Pair(
+                                    listState.firstVisibleItemIndex,
+                                    listState.firstVisibleItemScrollOffset
+                                )
+                                rootReplyIdStack = rootReplyIdStack + replyId
+                                scope.launch { listState.scrollToItem(0) }
+                            },
+                            onNoteClick = { clickedNote -> if (clickedNote.id != note.id) onNoteClick(clickedNote) },
+                            onReact = onReact,
+                            onVote = onVote,
+                            onImageTap = { urls, idx -> onImageTap(note, urls, idx) },
+                            onVideoClick = onVideoClick,
+                            collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
+                            isScrolling = listState.isScrollInProgress,
+                            compactMedia = compactMedia,
+                            accountNpub = accountNpub,
+                            onDeleteReaction = onDeleteReaction,
+                            modifier = Modifier.fillMaxWidth()
                         )
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .drawBehind {
-                                    if (highlightAlpha > 0f) {
-                                        drawRect(
-                                            color = androidx.compose.ui.graphics.Color(0xFF6750A4),
-                                            alpha = highlightAlpha
-                                        )
-                                    }
-                                }
-                        ) {
-                            ThreadedReplyCard(
-                                threadedReply = threadedReply,
-                                isLastRootReply = index == displayList.size - 1,
-                                rootAuthorId = note.author.id,
-                                replyKind = replyKind,
-                                commentStates = commentStates,
-                                noteCountsByNoteId = noteCountsByNoteId,
-                                onLike = { replyId ->
-                                    if (replyKind == 1) kind1RepliesViewModel.likeReply(replyId)
-                                    else threadRepliesViewModel.likeReply(replyId)
-                                },
-                                onReply = effectiveOnCommentReply,
-                                onProfileClick = onProfileClick,
-                                onRelayClick = onRelayNavigate,
-                                onNavigateToRelayList = onNavigateToRelayList,
-                                shouldCloseZapMenus = shouldCloseZapMenus,
-                                expandedZapMenuReplyId = expandedZapMenuCommentId,
-                                onExpandZapMenu = { replyId ->
-                                    expandedZapMenuCommentId =
-                                        if (expandedZapMenuCommentId == replyId) null else replyId
-                                },
-                                onZap = effectiveOnZap,
-                                onZapSettings = { onNavigateToZapSettings() },
-                                expandedControlsReplyId = expandedControlsReplyId,
-                                onExpandedControlsReplyChange = onExpandedControlsReplyChange,
-                                onReadMoreReplies = { replyId ->
-                                    // Save current scroll position before drilling down
-                                    savedScrollByDepth[rootReplyIdStack.size] = Pair(
-                                        listState.firstVisibleItemIndex,
-                                        listState.firstVisibleItemScrollOffset
-                                    )
-                                    rootReplyIdStack = rootReplyIdStack + replyId
-                                    scope.launch { listState.scrollToItem(0) }
-                                },
-                                onNoteClick = { clickedNote -> if (clickedNote.id != note.id) onNoteClick(clickedNote) },
-                                onReact = onReact,
-                                onVote = onVote,
-                                onImageTap = { urls, idx -> onImageTap(note, urls, idx) },
-                                onVideoClick = onVideoClick,
-                                collapsedChildCount = if (showRootOnly) descendantCountByReplyId[threadedReply.reply.id] else null,
-                                isScrolling = listState.isScrollInProgress,
-                                compactMedia = compactMedia,
-                                accountNpub = accountNpub,
-                                onDeleteReaction = onDeleteReaction,
-                                modifier = Modifier.fillMaxWidth()
-                            )
 
-                            // Per-reply "x new replies" inline indicator
-                            val pendingForThisReply = repliesState.newRepliesByParent[threadedReply.reply.id] ?: 0
-                            if (pendingForThisReply > 0) {
-                                Surface(
-                                    onClick = {
-                                        if (replyKind != 1) {
-                                            threadRepliesViewModel.applyPendingRepliesForParent(threadedReply.reply.id)
-                                        }
-                                    },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(
-                                            start = (16 + (threadedReply.level * 24)).dp,
-                                            end = 16.dp,
-                                            top = 2.dp,
-                                            bottom = 2.dp
-                                        ),
-                                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
-                                    shape = MaterialTheme.shapes.extraSmall
+                        // Per-reply "x new replies" inline indicator
+                        val pendingForThisReply = repliesState.newRepliesByParent[threadedReply.reply.id] ?: 0
+                        if (pendingForThisReply > 0) {
+                            Surface(
+                                onClick = {
+                                    if (replyKind != 1) {
+                                        threadRepliesViewModel.applyPendingRepliesForParent(threadedReply.reply.id)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(
+                                        start = (16 + (threadedReply.level * 12)).dp,
+                                        end = 16.dp,
+                                        top = 2.dp,
+                                        bottom = 2.dp
+                                    ),
+                                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                                shape = MaterialTheme.shapes.extraSmall
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.SubdirectoryArrowRight,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(14.dp),
-                                            tint = MaterialTheme.colorScheme.onSecondaryContainer
-                                        )
-                                        Spacer(Modifier.width(4.dp))
-                                        Text(
-                                            text = "$pendingForThisReply new ${if (pendingForThisReply == 1) "reply" else "replies"}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.Medium,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                                        )
-                                    }
+                                    Icon(
+                                        imageVector = Icons.Default.SubdirectoryArrowRight,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp),
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        text = "$pendingForThisReply new ${if (pendingForThisReply == 1) "reply" else "replies"}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
                                 }
                             }
+                        }
 
-                            if (index < displayList.size - 1) {
-                                Spacer(modifier = Modifier.height(4.dp))
-                            }
+                        if (index < displayList.size - 1) {
+                            Spacer(modifier = Modifier.height(4.dp))
                         }
                     }
 
@@ -2846,11 +2981,16 @@ private fun ThreadedReplyCard(
     isLastRootReply: Boolean = true,
     /** Root note author id; when reply.author matches, show OP highlight and "OP" label. */
     rootAuthorId: String? = null,
+    /** Parent card's author id — used for "replying to @name" context label. */
+    parentAuthorId: String? = null,
     /** 1 = kind-1 thread (no voting on replies), 1111 = kind-1111 thread (voting on replies). */
     replyKind: Int = 1111,
     commentStates: MutableMap<String, CommentState>,
     /** Counts (reactions, zaps, replies) per note ID from NoteCountsRepository. */
     noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts> = emptyMap(),
+    /** Reply ID to persistently highlight (accent bar + background wash). Threaded through children. */
+    highlightedReplyId: String? = null,
+    highlightedPathIds: Set<String> = emptySet(),
     onLike: (String) -> Unit,
     onReply: (String) -> Unit,
     onProfileClick: (String) -> Unit,
@@ -2895,8 +3035,15 @@ private fun ThreadedReplyCard(
     val level = threadedReply.level
     val state = commentStates.getOrPut(replyKey) { CommentState() }
     val canCollapse = true // allow collapsing single/leaf replies as well as branches
-    val threadLineWidth = 2.dp
-    val indentPerLevel = 1.dp
+    val threadLineWidth = 1.5.dp
+    // Fixed indent step per nesting level. Since children are rendered recursively
+    // inside the parent's Column, each level only needs ONE step of indent — not
+    // level * N (which would compound and grow quadratically).
+    val singleIndentStep = 4.dp
+    val isHighlightedTarget = highlightedReplyId == reply.id
+    val isInHighlightPath = reply.id in highlightedPathIds
+    val isHighlighted = isHighlightedTarget || isInHighlightPath
+    val railColor = ThreadLineColor
     val isZapMenuExpanded = expandedZapMenuReplyId == reply.id
 
     // Resolve author from profile cache so display name/avatar update when profiles load
@@ -2932,16 +3079,19 @@ private fun ThreadedReplyCard(
         if (shouldCloseZapMenus && isZapMenuExpanded) onExpandZapMenu(reply.id)
     }
 
-    // Fixed gutter so content never sprawls: all cards start at the same horizontal position.
-    // Line position still varies by level (0, 1, 2, 3, 4 dp) so depth is visible.
-    val fixedGutter = indentPerLevel * MAX_THREAD_DEPTH + threadLineWidth
-    val lineX = indentPerLevel * level
+    // Content shifts right by one indent step (parent already indented for prior levels).
+    // Level 0 = no indent (top-level reply). Level >= 1 = one fixed step.
+    val contentStartPad = if (level > 0) singleIndentStep else 0.dp
+    val lineX = contentStartPad
+    
+    val highlightColor = MaterialTheme.colorScheme.primary
+
     Box(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Top
         ) {
-            Spacer(modifier = Modifier.width(fixedGutter))
+            Spacer(modifier = Modifier.width(contentStartPad + threadLineWidth + 3.dp))
             Column(modifier = Modifier.weight(1f)) {
                 // Show "event not found" indicator for orphan replies whose parent wasn't fetched
                 if (threadedReply.isOrphan) {
@@ -2968,6 +3118,14 @@ private fun ThreadedReplyCard(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .drawWithContent {
+                            drawContent()
+                            if (isHighlightedTarget) {
+                                drawRect(color = highlightColor, alpha = 0.12f)
+                            } else if (isInHighlightPath) {
+                                drawRect(color = highlightColor, alpha = 0.05f)
+                            }
+                        }
                         .combinedClickable(
                             interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
                             indication = null,
@@ -3004,7 +3162,7 @@ private fun ThreadedReplyCard(
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
@@ -3012,7 +3170,7 @@ private fun ThreadedReplyCard(
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
                                 text = label,
                                 style = MaterialTheme.typography.bodySmall,
@@ -3027,7 +3185,7 @@ private fun ThreadedReplyCard(
                             Column(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 // ── Header — extracted into ReplyHeader ──
                                 ReplyHeader(
@@ -3040,7 +3198,7 @@ private fun ThreadedReplyCard(
                                     onNavigateToRelayList = onNavigateToRelayList,
                                 )
 
-                                Spacer(modifier = Modifier.height(4.dp))
+                                Spacer(modifier = Modifier.height(2.dp))
 
                                 // ── Rich content — extracted into ReplyContentBody ──
                                 ReplyContentBody(
@@ -3089,12 +3247,15 @@ private fun ThreadedReplyCard(
                 // Children rendering extracted to reduce JIT size
                 ThreadedReplyChildren(
                     threadedReply = threadedReply,
+                    parentAuthorId = reply.author.id,
                     isCollapsed = state.isCollapsed,
                     collapsedChildCount = collapsedChildCount,
                     rootAuthorId = rootAuthorId,
                     replyKind = replyKind,
                     commentStates = commentStates,
                     noteCountsByNoteId = noteCountsByNoteId,
+                    highlightedReplyId = highlightedReplyId,
+                    highlightedPathIds = highlightedPathIds,
                     onLike = onLike,
                     onReply = onReply,
                     onProfileClick = onProfileClick,
@@ -3123,7 +3284,7 @@ private fun ThreadedReplyCard(
 
             }
         }
-        // Thread line: full height of this block (card + children)
+        // Thread rail: full height, color-coded by depth level (Reddit-style)
         Box(
             modifier = Modifier
                 .matchParentSize()
@@ -3134,7 +3295,7 @@ private fun ThreadedReplyCard(
                     .width(threadLineWidth)
                     .offset(x = lineX)
                     .fillMaxHeight()
-                    .background(ThreadLineColor, RectangleShape)
+                    .background(railColor, RoundedCornerShape(1.dp))
             )
         }
     }
@@ -3147,12 +3308,16 @@ private fun ThreadedReplyCard(
 @Composable
 private fun ThreadedReplyChildren(
     threadedReply: ThreadedReply,
+    /** This card's parent author id — passed to child ThreadedReplyCards for "replying to" label. */
+    parentAuthorId: String? = null,
     isCollapsed: Boolean,
     collapsedChildCount: Int?,
     rootAuthorId: String?,
     replyKind: Int,
     commentStates: MutableMap<String, CommentState>,
     noteCountsByNoteId: Map<String, social.mycelium.android.repository.NoteCounts>,
+    highlightedReplyId: String? = null,
+    highlightedPathIds: Set<String> = emptySet(),
     onLike: (String) -> Unit,
     onReply: (String) -> Unit,
     onProfileClick: (String) -> Unit,
@@ -3242,9 +3407,12 @@ private fun ThreadedReplyChildren(
                     threadedReply = childReply,
                     isLastRootReply = true,
                     rootAuthorId = rootAuthorId,
+                    parentAuthorId = threadedReply.reply.author.id,
                     replyKind = replyKind,
                     commentStates = commentStates,
                     noteCountsByNoteId = noteCountsByNoteId,
+                    highlightedReplyId = highlightedReplyId,
+                    highlightedPathIds = highlightedPathIds,
                     onLike = onLike,
                     onReply = onReply,
                     onProfileClick = onProfileClick,

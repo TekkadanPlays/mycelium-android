@@ -124,6 +124,7 @@ fun RelayLogScreen(
             .sortedByDescending { it.timestamp }
     }
     val listState = rememberLazyListState()
+    var showActivityLog by remember { mutableStateOf(false) }
 
     // ── Live subscription slot snapshot (refreshes every 1s) ──
     val relayStateMachine = remember { RelayConnectionStateMachine.getInstance() }
@@ -309,7 +310,7 @@ fun RelayLogScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .background(MaterialTheme.colorScheme.surface),
-            contentPadding = PaddingValues(vertical = 8.dp),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             // ── Relay Info Header ──
@@ -551,99 +552,303 @@ fun RelayLogScreen(
                 }
             }
 
-            // ── Activity Log ──
-            item(key = "activity_header") {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+            // ── Recent Activity (compact preview) ──
+            item(key = "activity_preview") {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.surfaceContainerLow
                 ) {
-                    Text(
-                        text = "Activity",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "${filteredLogs.size} entries",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
-                // Category filter chips
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    data class CategoryChip(val category: LogCategory, val label: String)
-                    val chips = listOf(
-                        CategoryChip(LogCategory.WIRE, "Traffic"),
-                        CategoryChip(LogCategory.AUTH, "Auth"),
-                        CategoryChip(LogCategory.ERROR, "Errors"),
-                        CategoryChip(LogCategory.DIAGNOSTIC, "Diagnostics"),
-                        CategoryChip(LogCategory.LIFECYCLE, "Connects"),
-                        CategoryChip(LogCategory.SUBSCRIPTION, "Subs"),
-                    )
-                    chips.forEach { chip ->
-                        FilterChip(
-                            selected = chip.category in enabledCategories,
-                            onClick = {
-                                enabledCategories = if (chip.category in enabledCategories)
-                                    enabledCategories - chip.category
-                                else
-                                    enabledCategories + chip.category
-                            },
-                            label = { Text(chip.label, style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.height(28.dp)
-                        )
-                    }
-                }
-            }
-
-            if (filteredLogs.isEmpty()) {
-                item(key = "empty") {
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = MaterialTheme.shapes.medium,
-                        color = MaterialTheme.colorScheme.surfaceContainerLow
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(24.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                Icons.Outlined.History, null,
-                                Modifier.size(32.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                            )
-                            Spacer(Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Outlined.History, null,
+                                    Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Recent Activity",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                             Text(
-                                text = when {
-                                    allLogs.isEmpty() -> "No activity yet \u2014 connect or publish to this relay to populate logs."
-                                    else -> "No entries match the active filters. Tap \u201cWire\u201d to see raw send/receive traffic."
-                                },
-                                style = MaterialTheme.typography.bodyMedium,
+                                "${allLogs.size} total",
+                                style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        Spacer(Modifier.height(10.dp))
+
+                        val recentLogs = remember(allLogs) {
+                            allLogs.sortedByDescending { it.timestamp }.take(3)
+                        }
+                        if (recentLogs.isEmpty()) {
+                            Text(
+                                "No activity yet — interact with this relay to see what happens.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            recentLogs.forEach { entry ->
+                                CompactLogRow(entry)
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+                        Surface(
+                            onClick = { showActivityLog = true },
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Terminal, null,
+                                    Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "View Full Activity Log",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
                     }
                 }
-            } else {
-                itemsIndexed(filteredLogs, key = { index, it -> "$index-${it.timestamp}-${it.type}" }) { _, entry ->
-                    LogEntryRow(entry)
-                }
             }
+        }
+
+        // ── Full Activity Log Dialog ──
+        if (showActivityLog) {
+            FullActivityLogDialog(
+                allLogs = allLogs,
+                enabledCategories = enabledCategories,
+                onCategoriesChange = { enabledCategories = it },
+                filteredLogs = filteredLogs,
+                onDismiss = { showActivityLog = false },
+                relayUrl = relayUrl
+            )
         }
     }
 }
 
 private fun String.takeAfterLastSlash(): String = substringAfterLast('/')
 
-// ── Live Status Bar — compact real-time connection indicator ──
+// ── Compact Log Row — used in the preview card on the info page ──
+
+@Composable
+private fun CompactLogRow(entry: RelayLogEntry) {
+    val tint = when (entry.type) {
+        LogType.CONNECTING -> MaterialTheme.colorScheme.primary
+        LogType.CONNECTED -> Color(0xFF66BB6A)
+        LogType.DISCONNECTED -> MaterialTheme.colorScheme.outline
+        LogType.ERROR -> MaterialTheme.colorScheme.error
+        LogType.NOTICE -> MaterialTheme.colorScheme.tertiary
+        LogType.SENT -> Color(0xFF42A5F5)
+        LogType.RECEIVED -> Color(0xFF66BB6A)
+        LogType.EOSE -> MaterialTheme.colorScheme.onSurfaceVariant
+        LogType.DIAG -> Color(0xFFAB47BC)
+    }
+    val displayMessage = remember(entry) {
+        when (entry.type) {
+            LogType.SENT -> summarizeSentMessage(entry.message)
+            LogType.RECEIVED -> summarizeReceivedMessage(entry.message)
+            else -> entry.message
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .clip(CircleShape)
+                .background(tint.copy(alpha = 0.7f))
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = displayMessage,
+            style = MaterialTheme.typography.bodySmall,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = entry.formattedTime(),
+            style = MaterialTheme.typography.labelSmall,
+            fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        )
+    }
+}
+
+// ── Full Activity Log Dialog — dedicated log screen ──
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FullActivityLogDialog(
+    allLogs: List<RelayLogEntry>,
+    enabledCategories: Set<LogCategory>,
+    onCategoriesChange: (Set<LogCategory>) -> Unit,
+    filteredLogs: List<RelayLogEntry>,
+    onDismiss: () -> Unit,
+    relayUrl: String
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Scaffold(
+            modifier = Modifier.fillMaxSize(),
+            containerColor = MaterialTheme.colorScheme.surface,
+            topBar = {
+                Column(Modifier.background(MaterialTheme.colorScheme.surface).statusBarsPadding()) {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text(
+                                    "Activity Log",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    relayUrl.removePrefix("wss://").removePrefix("ws://"),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = onDismiss) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Close")
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { RelayLogBuffer.clearLogsForRelay(relayUrl) }) {
+                                Icon(Icons.Outlined.DeleteSweep, contentDescription = "Clear logs")
+                            }
+                        },
+                        windowInsets = WindowInsets(0),
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    )
+                    // Filter chips
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        data class CategoryChip(val category: LogCategory, val label: String)
+                        val chips = listOf(
+                            CategoryChip(LogCategory.WIRE, "Traffic"),
+                            CategoryChip(LogCategory.AUTH, "Auth"),
+                            CategoryChip(LogCategory.ERROR, "Errors"),
+                            CategoryChip(LogCategory.DIAGNOSTIC, "Diagnostics"),
+                            CategoryChip(LogCategory.LIFECYCLE, "Connects"),
+                            CategoryChip(LogCategory.SUBSCRIPTION, "Subs"),
+                        )
+                        chips.forEach { chip ->
+                            FilterChip(
+                                selected = chip.category in enabledCategories,
+                                onClick = {
+                                    onCategoriesChange(
+                                        if (chip.category in enabledCategories)
+                                            enabledCategories - chip.category
+                                        else
+                                            enabledCategories + chip.category
+                                    )
+                                },
+                                label = { Text(chip.label, style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier.height(28.dp)
+                            )
+                        }
+                    }
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+                    )
+                }
+            }
+        ) { padding ->
+            val logListState = rememberLazyListState()
+            if (filteredLogs.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Outlined.History, null,
+                            Modifier.size(40.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            text = if (allLogs.isEmpty())
+                                "No activity yet \u2014 connect or publish to this relay."
+                            else
+                                "No entries match the active filters.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    state = logListState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding),
+                    contentPadding = PaddingValues(vertical = 4.dp)
+                ) {
+                    // Entry count header
+                    item(key = "log_count") {
+                        Text(
+                            "${filteredLogs.size} entries",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                        )
+                    }
+                    itemsIndexed(
+                        filteredLogs,
+                        key = { index, it -> "log-$index-${it.timestamp}-${it.type}" }
+                    ) { _, entry ->
+                        LogEntryRow(entry)
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 @Composable
 private fun LiveStatusBar(
@@ -682,50 +887,80 @@ private fun LiveStatusBar(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f)
     ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Text(
-                "Summary (outbox delivery when known, else socket)",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
-                modifier = Modifier.padding(bottom = 6.dp)
-            )
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            // Primary status row: indicator left, delivery badge right
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(statusColor)
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(statusLabel, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold, color = statusColor)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(statusColor)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        statusLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = statusColor
+                    )
+                }
+                if (hasDelivery && deliveryStats != null) {
+                    val pct = (rate * 100).toInt()
+                    Surface(
+                        shape = MaterialTheme.shapes.small,
+                        color = statusColor.copy(alpha = 0.12f)
+                    ) {
+                        Text(
+                            "$pct%",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = statusColor,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
             }
-            if (hasDelivery && deliveryStats != null) {
-                val pct = (rate * 100).toInt()
-                val d = kotlin.math.round(deliveryStats.delivered).toInt()
-                val e = kotlin.math.round(deliveryStats.expected).toInt()
-                Text(
-                    "Outbox delivery ~$pct% ($d/$e)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else if (health != null) {
-                val uptimePct = if (health.connectionAttempts > 0) ((1.0 - health.failureRate) * 100).toInt() else 0
-                Text(
-                    "Handshake $uptimePct% OK (no outbox trials yet)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            if (eventsReceived > 0) {
-                Text("${eventsReceived} events seen", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (health?.connectTimeMs != null && health.connectTimeMs > 0) {
-                Text("${health.connectTimeMs}ms connect", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
+            // Secondary metrics row
+            Spacer(Modifier.height(6.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (hasDelivery && deliveryStats != null) {
+                    val d = kotlin.math.round(deliveryStats.delivered).toInt()
+                    val e = kotlin.math.round(deliveryStats.expected).toInt()
+                    Text(
+                        "$d/$e delivered",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else if (health != null) {
+                    val uptimePct = if (health.connectionAttempts > 0) ((1.0 - health.failureRate) * 100).toInt() else 0
+                    Text(
+                        "Handshake $uptimePct% OK",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (eventsReceived > 0) {
+                    Text(
+                        "$eventsReceived events",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (health?.connectTimeMs != null && health.connectTimeMs > 0) {
+                    Text(
+                        "${health.connectTimeMs}ms",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }
@@ -785,10 +1020,23 @@ private fun ExtraMetadataCard(
 private fun MetadataRow(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.widthIn(min = 80.dp))
-        Text(value, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(90.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.weight(1f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1208,7 +1456,7 @@ private fun RelayPoolDiagnosticsCard(diag: RelayConnectionDiag) {
                 Text("Pool & socket", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             }
             Text(
-                "Live CybinRelayPool state (~1s refresh). Explains reconnects: transport drop, backoff, blacklist, scheduler.",
+                "Live transport and scheduler state.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
@@ -1646,7 +1894,7 @@ private fun HealthCard(
                 Text("Health", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             }
             Text(
-                "One WebSocket per relay; REQs multiplex. Handshakes = lifetime TCP/WS connects. Activity log adds DIAG lines (why reconnect, CLOSED, notices).",
+                "Connection health and handshake reliability.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 4.dp)
@@ -1818,7 +2066,6 @@ private fun summarizeSentMessage(raw: String): String {
         when {
             trimmed.startsWith("[\"REQ\"") -> {
                 val parts = org.json.JSONArray(trimmed)
-                val subId = parts.optString(1, "?").take(8)
                 if (parts.length() > 2) {
                     val filter = parts.optJSONObject(2)
                     val kinds = filter?.optJSONArray("kinds")?.let { arr ->
@@ -1829,26 +2076,25 @@ private fun summarizeSentMessage(raw: String): String {
                     val ids = filter?.optJSONArray("ids")?.length()
                     val kindStr = kinds?.joinToString(", ") { kindName(it) } ?: "data"
                     val details = buildList {
-                        authors?.let { add("from $it authors") }
-                        ids?.let { add("for $it specific events") }
-                        limit?.let { add("limit $it") }
+                        authors?.let { add("from $it people") }
+                        ids?.let { add("$it specific items") }
+                        limit?.let { add("up to $it") }
                     }.joinToString(", ")
                     
-                    if (details.isNotBlank()) "Device requested '$kindStr' ($details)"
-                    else "Device requested '$kindStr'"
-                } else "Device requested data stream ($subId)"
+                    if (details.isNotBlank()) "\uD83D\uDCE4 Asked relay for $kindStr ($details)"
+                    else "\uD83D\uDCE4 Asked relay for $kindStr"
+                } else "\uD83D\uDCE4 Opened a data stream"
             }
             trimmed.startsWith("[\"EVENT\"") -> {
                 val parts = org.json.JSONArray(trimmed)
                 val event = parts.optJSONObject(1)
                 val kind = event?.optInt("kind", -1) ?: -1
-                "Device published a ${kindName(kind)}"
+                "\uD83D\uDCE4 Published a ${kindName(kind)} to relay"
             }
             trimmed.startsWith("[\"CLOSE\"") -> {
-                val parts = org.json.JSONArray(trimmed)
-                "Device closed request ${parts.optString(1, "?").take(8)}"
+                "\uD83D\uDCE4 Closed a data stream"
             }
-            trimmed.startsWith("[\"AUTH\"") -> "Device replied to authentication challenge (NIP-42)"
+            trimmed.startsWith("[\"AUTH\"") -> "\uD83D\uDD10 Sent identity proof to relay"
             else -> raw.take(120)
         }
     } catch (_: Exception) {
@@ -1862,31 +2108,31 @@ private fun summarizeReceivedMessage(raw: String): String {
         val trimmed = raw.trim()
         when {
             trimmed.startsWith("[\"EOSE\"") -> {
-                val parts = org.json.JSONArray(trimmed)
-                "Relay finished sending older data for request (${parts.optString(1, "?").take(8)})"
+                "\uD83D\uDCE5 Relay finished sending historical data"
             }
             trimmed.startsWith("[\"OK\"") -> {
                 val parts = org.json.JSONArray(trimmed)
                 val success = parts.optBoolean(2, false)
                 val msg = parts.optString(3, "")
-                if (success) "Relay successfully received your published event" + if (msg.isNotBlank()) " ($msg)" else ""
-                else "Relay rejected event: $msg"
+                if (success) "\u2705 Relay accepted your published event" + if (msg.isNotBlank()) " ($msg)" else ""
+                else "\u274C Relay rejected: ${msg.take(80)}"
             }
             trimmed.startsWith("[\"NOTICE\"") -> {
                 val parts = org.json.JSONArray(trimmed)
-                "Relay sent a notice: ${parts.optString(1, "").take(100)}"
+                "\u26A0\uFE0F Relay notice: ${parts.optString(1, "").take(80)}"
             }
             trimmed.startsWith("[\"CLOSED\"") -> {
                 val parts = org.json.JSONArray(trimmed)
-                "Relay terminated the request: \"${parts.optString(2, "").take(80)}\""
+                val reason = parts.optString(2, "").take(60)
+                if (reason.isNotBlank()) "\uD83D\uDED1 Relay closed your request: \"$reason\""
+                else "\uD83D\uDED1 Relay closed your data stream"
             }
-            trimmed.startsWith("[\"AUTH\"") -> "Relay requested authentication (NIP-42)"
+            trimmed.startsWith("[\"AUTH\"") -> "\uD83D\uDD10 Relay is asking you to verify your identity"
             trimmed.startsWith("[\"EVENT\"") -> {
-                // Shouldn't normally appear (filtered in listener), but handle gracefully
                 val parts = org.json.JSONArray(trimmed)
                 val event = parts.optJSONObject(2)
                 val kind = event?.optInt("kind", -1) ?: -1
-                "Relay sent a ${kindName(kind)}"
+                "\uD83D\uDCE5 Received a ${kindName(kind)} from relay"
             }
             else -> raw.take(120)
         }

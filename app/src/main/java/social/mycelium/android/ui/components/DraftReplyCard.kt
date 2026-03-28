@@ -33,6 +33,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.Draft
 
+/** Fallback Thread/topic reply separator line color. */
+private val ThreadLineColor = androidx.compose.ui.graphics.Color(0xFF8888A0)
+
 /**
  * Inline draft placeholder card for thread views.
  * Shows where the user's draft reply will land in the conversation,
@@ -48,7 +51,7 @@ fun DraftReplyCard(
     onDeleteClick: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val indentDp = (level.coerceAtMost(4) * 16).dp
+    val indentDp = (level.coerceAtMost(4) * 2).dp
 
     Row(
         modifier = modifier
@@ -59,11 +62,14 @@ fun DraftReplyCard(
         if (level > 0) {
             Box(
                 modifier = Modifier
-                    .width(2.dp)
+                    .width(1.5.dp)
                     .height(72.dp)
-                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                    .background(
+                        ThreadLineColor,
+                        RoundedCornerShape(1.dp)
+                    )
             )
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(6.dp))
         }
 
         Surface(

@@ -963,6 +963,19 @@ class NotesRepository private constructor() {
     private val _feedCacheChecked = MutableStateFlow(false)
     val feedCacheChecked: StateFlow<Boolean> = _feedCacheChecked.asStateFlow()
 
+    /**
+     * True once the feed has been successfully loaded at least once in this session.
+     * Set when feedSessionState first reaches Live OR when notes are restored from
+     * the Room cache. Persists across relay reconnections and app backgrounding,
+     * but is reset on account switch (clearNotes).
+     *
+     * The UI uses this to suppress the full-page "Connecting to relays" overlay
+     * during transient disconnections. After the user has seen their feed once,
+     * reconnection status is shown only via the subtle top-bar relay orbs.
+     */
+    private val _hasEverLoadedFeed = MutableStateFlow(false)
+    val hasEverLoadedFeed: StateFlow<Boolean> = _hasEverLoadedFeed.asStateFlow()
+
     /** Optional context for feed cache persistence so notes survive process death. Set from MainActivity. */
     @Volatile private var appContext: Context? = null
 
@@ -1194,6 +1207,7 @@ class NotesRepository private constructor() {
                     feedCutoffTimestampMs = now
                     latestNoteTimestampAtOpen = notes.maxOfOrNull { it.timestamp } ?: now
                     _feedSessionState.value = FeedSessionState.Live
+                    _hasEverLoadedFeed.value = true
                     Log.d(TAG, "Restored ${notes.size} notes from Room event store")
                     // Prefetch quoted notes for restored feed so cards render without spinners
                     QuotedNoteCache.prefetchForNotes(notes)
@@ -1673,6 +1687,7 @@ class NotesRepository private constructor() {
             if (_feedSessionState.value != FeedSessionState.Live) {
                 _feedSessionState.value = FeedSessionState.Live
             }
+            _hasEverLoadedFeed.value = true
             // Re-trigger counts now that the main feed subscription is active (counts may have
             // fired too early when notes were restored from cache before relay connected)
             NoteCountsRepository.retrigger()
@@ -1738,6 +1753,7 @@ class NotesRepository private constructor() {
                 initialLoadComplete = true
                 _isLoading.value = false
                 _feedSessionState.value = FeedSessionState.Live
+                _hasEverLoadedFeed.value = true
                 updateDisplayedNotes()
                 Log.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded in ${waited}ms (feed cutoff at $feedCutoffTimestampMs)")
             }
@@ -1747,6 +1763,7 @@ class NotesRepository private constructor() {
             _isLoading.value = false
             initialLoadComplete = true
             _feedSessionState.value = FeedSessionState.Live
+            _hasEverLoadedFeed.value = true
             updateDisplayedNotes()
         }
     }
@@ -2902,6 +2919,7 @@ class NotesRepository private constructor() {
         paginationExtraCap = 0
         _paginationExhausted.value = false
         _feedSessionState.value = FeedSessionState.Idle
+        _hasEverLoadedFeed.value = false
         // Reset subscription guard so ensureSubscriptionToNotes re-applies after account switch
         lastEnsuredRelaySet = emptySet()
         // Clear relay tracker so old account's relay data doesn't leak

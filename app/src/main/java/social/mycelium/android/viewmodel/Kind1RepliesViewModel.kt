@@ -380,6 +380,14 @@ class Kind1RepliesViewModel : ViewModel() {
         }
     }
 
+    /**
+     * Targeted fetch for a specific reply ID and its ancestor chain.
+     * Called when navigating to a deeply nested reply (notifications, quoted note tap).
+     */
+    fun fetchSpecificReply(rootNoteId: String, targetReplyId: String, relayUrls: List<String>) {
+        repository.fetchSpecificReply(rootNoteId, targetReplyId, relayUrls)
+    }
+
     override fun onCleared() {
         super.onCleared()
         repository.disconnectAll()

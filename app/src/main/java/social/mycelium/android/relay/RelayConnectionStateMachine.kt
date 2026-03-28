@@ -1203,6 +1203,24 @@ class RelayConnectionStateMachine {
         mux.awaitOneShotSubscription(usable, listOf(filter), priority, settleMs, maxWaitMs, onEvent)
     }
 
+    /**
+     * Suspending one-shot with relay URL passthrough.
+     * Same lifecycle as [awaitOneShotSubscription] but the callback receives
+     * (Event, relayUrl) so callers know which relay delivered each event.
+     */
+    suspend fun awaitOneShotSubscriptionWithRelay(
+        relayUrls: List<String>,
+        filter: Filter,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event, String) -> Unit,
+    ) {
+        val usable = filterUsableRelays(relayUrls)
+        if (usable.isEmpty()) return
+        mux.awaitOneShotSubscriptionWithRelay(usable, listOf(filter), priority, settleMs, maxWaitMs, onEvent)
+    }
+
     companion object {
         private const val TAG = "RelayConnectionStateMachine"
         /** Default kind-1 limit for global feed; higher = more notes, slightly slower first load. */

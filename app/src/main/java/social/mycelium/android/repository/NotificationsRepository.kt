@@ -303,9 +303,12 @@ class NotificationsRepository(
     fun init(context: Context) {
         appContext = context.applicationContext
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        // Restore last-known pubkey so cold-start of the same user isn't treated as "new user"
-        myPubkeyHex = prefs?.getString(PREFS_KEY_PUBKEY, null)
-        if (myPubkeyHex != null) Log.d(TAG, "init: restored myPubkeyHex=${myPubkeyHex?.take(8)}")
+        // Keep filtering pubkey aligned with this instance's account. Shared PREFS_KEY_PUBKEY is
+        // written by whichever account last ran startSubscription — it must not override ownerPubkeyHex
+        // (multi-account) or become null when the key is absent (drops all feed cross-pollination
+        // until startSubscription runs).
+        myPubkeyHex = ownerPubkeyHex
+        Log.d(TAG, "init: myPubkeyHex bound to owner ${ownerPubkeyHex.take(8)}")
         // Restore "Read All" watermark so historical events stay seen across restarts
         markAllSeenEpochMs = prefs?.getLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, 0L) ?: 0L
         if (markAllSeenEpochMs > 0) Log.d(TAG, "init: restored markAllSeenEpochMs=$markAllSeenEpochMs")
@@ -789,7 +792,8 @@ class NotificationsRepository(
             kotlinx.coroutines.withTimeoutOrNull(SWEEP_FALLBACK_DELAY_MS) { phase1Eose.await() }
             val topicIds = fetchUserTopicIds(pubkey, allRelays, null)
             myTopicIds.addAll(topicIds)
-            val noteIds = fetchUserNoteIds(pubkey, allRelays, null)
+            val noteIdsFromRelays = fetchUserNoteIds(pubkey, allRelays, null)
+            val noteIds = mergeNoteIdsWithFeedCache(pubkey, noteIdsFromRelays)
             myNoteIds.addAll(noteIds)
             // Reclassify Phase 1 replies that are actually quotes (q-tag couldn't be
             // checked during Phase 1 because myNoteIds was empty at that point)
@@ -1880,6 +1884,21 @@ class NotificationsRepository(
         return topicIds.distinct()
     }
 
+    /**
+     * Bounded relay REQs may omit some of the user's newest kind-1 ids. Union in kind-1 note ids
+     * already present in the main feed cache (populated before Phase 3) so quote / thread-reply
+     * filters still match recent posts.
+     */
+    private fun mergeNoteIdsWithFeedCache(pubkey: String, relayNoteIds: List<String>): List<String> {
+        val self = normalizeAuthorIdForCache(pubkey)
+        val fromFeed = NotesRepository.getInstance().allNotes.value.asSequence()
+            .filter { it.kind == 1 && normalizeAuthorIdForCache(it.author.id) == self }
+            .map { it.id }
+            .toSet()
+        if (fromFeed.isEmpty()) return relayNoteIds.distinct()
+        return (relayNoteIds.asSequence() + fromFeed.asSequence()).distinct().toList()
+    }
+
     /** Fetch user's kind-1 note IDs for quote detection (q-tag subscriptions). */
     private suspend fun fetchUserNoteIds(pubkey: String, relayUrls: List<String>, since: Long?): List<String> {
         val noteIds = mutableListOf<String>()
@@ -1891,7 +1910,7 @@ class NotificationsRepository(
             kinds = listOf(1),
             authors = listOf(pubkey),
             since = since,
-            limit = 2000
+            limit = 5000
         )
         stateMachine.awaitOneShotSubscription(
             allRelays, filter,

@@ -127,7 +127,9 @@ import social.mycelium.android.viewmodel.rememberThreadStateHolder
 import social.mycelium.android.viewmodel.DashboardViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
 import social.mycelium.android.auth.AmberState
 import com.example.cybin.nip55.IActivityLauncher
 import kotlinx.coroutines.Dispatchers
@@ -565,12 +567,15 @@ private fun OverlayProfilePanel(
     }
 
     val authorIdLower = remember(author.id) { author.id.lowercase() }
-    // Dashboard notes for this author
+    // Dashboard notes for this author — derive via mapped flow so profile only
+    // recomposes when notes for THIS specific author change, not when unrelated
+    // dashboard notes arrive (which would be 99%+ of incoming notes).
     val dashboardViewModel: DashboardViewModel = viewModel()
-    val dashboardState by dashboardViewModel.uiState.collectAsState()
-    val dashboardAuthorNotes = remember(dashboardState.notes, authorIdLower) {
-        dashboardState.notes.filter { it.author.id.lowercase() == authorIdLower }
-    }
+    val dashboardAuthorNotes by remember(authorIdLower) {
+        dashboardViewModel.uiState
+            .map { state -> state.notes.filter { it.author.id.lowercase() == authorIdLower } }
+            .distinctUntilChanged()
+    }.collectAsState(emptyList())
     // Relay URLs
     val userRelayUrls = remember(currentAccount) {
         currentAccount?.toHexKey()?.let { pk ->
@@ -687,14 +692,22 @@ private fun OverlayProfilePanel(
     // Parent notes for reply context (resolve replyToId with rootNoteId fallback)
     val parentNotesMap =
         remember { androidx.compose.runtime.mutableStateMapOf<String, social.mycelium.android.data.Note>() }
-    LaunchedEffect(authorNotes) {
-        val replies = authorNotes.filter { it.isReply }
-        val parentIds = replies.flatMap { listOfNotNull(it.replyToId, it.rootNoteId) }.distinct()
-        val missingIds = parentIds.filter { id -> id !in parentNotesMap }
-        if (missingIds.isEmpty()) return@LaunchedEffect
+    // Derive a stable key: set of reply parent IDs not yet resolved.
+    // This prevents re-firing the effect on every authorNotes identity change
+    // when no new parent IDs actually need fetching.
+    val replyParentIds = remember(authorNotes) {
+        authorNotes.filter { it.isReply }
+            .flatMap { listOfNotNull(it.replyToId, it.rootNoteId) }
+            .distinct()
+    }
+    val unresolvedParentIds = remember(replyParentIds, parentNotesMap.size) {
+        replyParentIds.filter { id -> id !in parentNotesMap }
+    }
+    LaunchedEffect(unresolvedParentIds) {
+        if (unresolvedParentIds.isEmpty()) return@LaunchedEffect
         val notesRepo = NotesRepository.getInstance()
         val stillMissing = mutableListOf<String>()
-        for (parentId in missingIds) {
+        for (parentId in unresolvedParentIds) {
             val cached = notesRepo.getNoteFromCache(parentId)
             if (cached != null) parentNotesMap[parentId] = cached
             else stillMissing.add(parentId)
@@ -705,7 +718,9 @@ private fun OverlayProfilePanel(
     }
     val profileTimeGapIndex by profileFeedRepo.timeGapIndex.collectAsState()
     val profilePerTabHasMore by profileFeedRepo.perTabHasMore.collectAsState()
-    val followList = dashboardState.followList
+    val followList by remember {
+        dashboardViewModel.uiState.map { it.followList }.distinctUntilChanged()
+    }.collectAsState(emptySet())
     val followSetLower = remember(followList) { followList.map { it.lowercase() }.toSet() }
     val isFollowing = followSetLower.isNotEmpty() && authorIdLower in followSetLower
     val zapInProgressIds by accountStateViewModel.zapInProgressNoteIds.collectAsState()
@@ -2978,7 +2993,6 @@ fun MyceliumNavigation(
                         backStackEntry.arguments?.getString("authorId") ?: return@composable
 
                     val dashboardViewModel: DashboardViewModel = viewModel()
-                    val dashboardState by dashboardViewModel.uiState.collectAsState()
                     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
                     val storageManager = remember(context) { RelayStorageManager(context) }
                     val cacheUrls = remember(currentAccount) {
@@ -3005,10 +3019,17 @@ fun MyceliumNavigation(
                     }
 
                     val authorIdLower = remember(author.id) { author.id.lowercase() }
-                    // Dashboard notes for this author (already in home feed cache)
-                    val dashboardAuthorNotes = remember(dashboardState.notes, authorIdLower) {
-                        dashboardState.notes.filter { it.author.id.lowercase() == authorIdLower }
-                    }
+                    // Dashboard notes for this author — derive via mapped flow so profile only
+                    // recomposes when notes for THIS specific author change.
+                    val dashboardAuthorNotes by remember(authorIdLower) {
+                        dashboardViewModel.uiState
+                            .map { state -> state.notes.filter { it.author.id.lowercase() == authorIdLower } }
+                            .distinctUntilChanged()
+                    }.collectAsState(emptyList())
+                    // Follow list from dashboard state (separate collection to avoid coupling notes → followList)
+                    val dashboardFollowList by remember {
+                        dashboardViewModel.uiState.map { it.followList }.distinctUntilChanged()
+                    }.collectAsState(emptySet())
                     // Dedicated profile feed subscription (independent of home feed)
                     // Start with current user's relays, then merge viewed profile's NIP-65 outbox relays
                     val userRelayUrls = remember(currentAccount) {
@@ -3088,7 +3109,7 @@ fun MyceliumNavigation(
                     val authorNotes = remember(profileFeedNotes, dashboardAuthorNotes) {
                         (dashboardAuthorNotes + profileFeedNotes)
                             .distinctBy { it.id }
-                            .sortedByDescending { it.repostTimestamp ?: it.timestamp }
+                            .sortedByDescending { it.timestamp } // NO boost hoisting on profile feed
                     }
                     // Fetch profile counts (following/followers) from indexer relays
                     LaunchedEffect(cacheKey, profileRelayUrls) {
@@ -3108,16 +3129,21 @@ fun MyceliumNavigation(
                     // ── Parent note fetching for reply context (batch via indexer relays) ──
                     val parentNotesMap =
                         remember { androidx.compose.runtime.mutableStateMapOf<String, social.mycelium.android.data.Note>() }
-                    LaunchedEffect(authorNotes) {
-                        val replies = authorNotes.filter { it.isReply && it.replyToId != null }
-                        val missingIds = replies.mapNotNull { it.replyToId }
+                    // Derive stable key: only re-fires when genuinely new parent IDs appear
+                    val routeReplyParentIds = remember(authorNotes) {
+                        authorNotes.filter { it.isReply && it.replyToId != null }
+                            .mapNotNull { it.replyToId }
                             .distinct()
-                            .filter { id -> id !in parentNotesMap }
-                        if (missingIds.isEmpty()) return@LaunchedEffect
+                    }
+                    val routeUnresolvedIds = remember(routeReplyParentIds, parentNotesMap.size) {
+                        routeReplyParentIds.filter { id -> id !in parentNotesMap }
+                    }
+                    LaunchedEffect(routeUnresolvedIds) {
+                        if (routeUnresolvedIds.isEmpty()) return@LaunchedEffect
                         val notesRepo = NotesRepository.getInstance()
                         // Resolve from local cache first
                         val stillMissing = mutableListOf<String>()
-                        for (parentId in missingIds) {
+                        for (parentId in routeUnresolvedIds) {
                             val cached = notesRepo.getNoteFromCache(parentId)
                             if (cached != null) {
                                 parentNotesMap[parentId] = cached
@@ -3137,7 +3163,7 @@ fun MyceliumNavigation(
 
                     val profileTimeGapIndex by profileFeedRepo.timeGapIndex.collectAsState()
                     val profilePerTabHasMore by profileFeedRepo.perTabHasMore.collectAsState()
-                    val followList = dashboardState.followList
+                    val followList = dashboardFollowList
                     val followSetLower = remember(followList) { followList.map { it.lowercase() }.toSet() }
                     val isFollowing = followSetLower.isNotEmpty() && authorIdLower in followSetLower
                     // Relay orb tap navigates to relay_log page via onRelayClick callback
@@ -3656,13 +3682,18 @@ fun MyceliumNavigation(
                         onDispose { userProfileFeedRepo?.dispose() }
                     }
                     // Merge: profile feed notes + dashboard notes for this author
+                    // Derive via mapped flow so profile only recomposes when own notes change
                     val dashboardVm: DashboardViewModel = viewModel()
-                    val dashState by dashboardVm.uiState.collectAsState()
                     val userIdLower = remember(userCacheKey) { userCacheKey?.lowercase() }
-                    val dashboardUserNotes = remember(dashState.notes, userIdLower) {
-                        if (userIdLower != null) dashState.notes.filter { it.author.id.lowercase() == userIdLower }
-                        else emptyList()
-                    }
+                    val dashboardUserNotes by remember(userIdLower) {
+                        if (userIdLower != null) {
+                            dashboardVm.uiState
+                                .map { state -> state.notes.filter { it.author.id.lowercase() == userIdLower } }
+                                .distinctUntilChanged()
+                        } else {
+                            kotlinx.coroutines.flow.MutableStateFlow(emptyList<social.mycelium.android.data.Note>())
+                        }
+                    }.collectAsState(emptyList())
                     val userNotes = remember(userProfileFeedNotes, dashboardUserNotes) {
                         val combined = (userProfileFeedNotes + dashboardUserNotes).distinctBy { it.id }
                         val byId = combined.associateBy { it.id }.toMutableMap()

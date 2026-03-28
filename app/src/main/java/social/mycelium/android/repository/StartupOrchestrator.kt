@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.debug.DebugVerboseLog
+import social.mycelium.android.debug.DiagnosticLog
 
 /**
  * Coordinates phased startup so relay subscriptions don't all fire at once.
@@ -315,6 +316,7 @@ object StartupOrchestrator {
                         RelayCategorySyncRepository.fetchRelaySets(userPubkey, allUserRelayUrls, context)
                         RelayCategorySyncRepository.fetchIndexerList(userPubkey, allUserRelayUrls, context)
                         logD( "Phase 1: relay sets + indexer list fetched")
+                        DiagnosticLog.startup(TAG, "Phase 1: fetchRelaySets + fetchIndexerList completed (${allUserRelayUrls.size} relays)")
                     } catch (e: Exception) {
                         logE("Phase 1: relay sync failed: ${e.message}")
                     }
@@ -403,6 +405,13 @@ object StartupOrchestrator {
         val stateMachine = RelayConnectionStateMachine.getInstance()
         stateMachine.startTopicsSubscription(allUserRelayUrls)
         logD( "Phase 3: topics subscription started (separate slot)")
+
+        // Hydrate topics from Room (recovers deep-fetched kind-11 events from previous sessions)
+        val topicsRepo = TopicsRepository.getInstanceOrNull()
+        if (topicsRepo != null) {
+            topicsRepo.hydrateFromRoom(context)
+            logD( "Phase 3: topics Room hydration launched")
+        }
 
         // Bookmarks, emoji packs, anchor subs
         BookmarkRepository.fetchBookmarks(userPubkey, allUserRelayUrls)

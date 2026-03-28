@@ -42,6 +42,7 @@ object QuotedNoteCache {
     private fun buildMetaFromEvent(event: Event, relayUrl: String?): QuotedNoteMeta {
         val snippet = buildSmartSnippet(event.content, SNIPPET_MAX_LEN)
         val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
+        val replyToId = social.mycelium.android.utils.Nip10ReplyDetector.getReplyToId(event)
         val tags = if (event.kind == 1068 || event.kind == 6969) {
             event.tags.map { it.toList() }
         } else emptyList()
@@ -65,6 +66,7 @@ object QuotedNoteCache {
             createdAt = event.createdAt,
             relayUrl = relayUrl,
             rootNoteId = rootId,
+            replyToId = replyToId,
             kind = event.kind,
             tags = tags
         )

@@ -399,6 +399,7 @@ private fun FeedOverlay(
     onboardingComplete: Boolean,
     feedSession: FeedSessionState,
     feedCacheChecked: Boolean,
+    hasEverLoadedFeed: Boolean,
     perRelayState: Map<String, social.mycelium.android.relay.RelayEndpointStatus>,
     onNavigateTo: (String) -> Unit,
 ) {
@@ -412,12 +413,19 @@ private fun FeedOverlay(
     // Gate on feedCacheChecked: relay state starts empty while SharedPreferences loads
     // asynchronously. Without this, the overlay flashes the "Connect to Relays" onboarding
     // screen for ~100ms on every cold start before the relay config is read from disk.
-    val showOnboarding = feedCacheChecked && feedIsEmpty && noRelaysAtAll && onboardingComplete && feedSession != FeedSessionState.Loading
+    //
+    // CRITICAL: When hasEverLoadedFeed is true, suppress BOTH onboarding and loading overlays.
+    // After the user has successfully loaded their feed at least once, transient relay
+    // disconnections (app backgrounded, relay restart, network switch) should NOT visually
+    // interrupt the feed. Reconnection status is shown via the subtle top-bar relay orbs only.
+    val showOnboarding = !hasEverLoadedFeed && feedCacheChecked && feedIsEmpty && noRelaysAtAll && onboardingComplete && feedSession != FeedSessionState.Loading
     // Never show loading overlay when feed is Live or Refreshing — notes may be briefly empty
     // during recomposition on resume but the subscription is active and will deliver notes.
     // Also suppress until feedCacheChecked — prevents flash on resume after process death
     // while the disk cache is still being loaded asynchronously.
-    val showLoading = feedCacheChecked && feedIsEmpty && !showOnboarding &&
+    // Also suppress when hasEverLoadedFeed — prevents the "Connecting to relays" animation
+    // from appearing when the app resumes from background with transient relay state changes.
+    val showLoading = !hasEverLoadedFeed && feedCacheChecked && feedIsEmpty && !showOnboarding &&
             feedSession != FeedSessionState.Live && feedSession != FeedSessionState.Refreshing
 
     val overlayAlpha by animateFloatAsState(
@@ -519,6 +527,7 @@ private fun DashboardFeedContent(
     onboardingComplete: Boolean,
     feedSession: FeedSessionState,
     feedCacheChecked: Boolean,
+    hasEverLoadedFeed: Boolean,
     perRelayState: Map<String, social.mycelium.android.relay.RelayEndpointStatus>,
     failedUserRelayCount: Int,
     viewModel: DashboardViewModel,
@@ -1012,6 +1021,7 @@ private fun DashboardFeedContent(
             onboardingComplete = onboardingComplete,
             feedSession = feedSession,
             feedCacheChecked = feedCacheChecked,
+            hasEverLoadedFeed = hasEverLoadedFeed,
             perRelayState = perRelayState,
             onNavigateTo = onNavigateTo,
         )
@@ -1174,6 +1184,8 @@ fun DashboardScreen(
     val feedSession by viewModel.feedSessionState.collectAsState()
     // True after disk feed cache has been checked — suppresses loading overlay flash on process death resume
     val feedCacheChecked by viewModel.feedCacheChecked.collectAsState()
+    // True once feed has been successfully loaded at least once — suppresses overlay on transient disconnections
+    val hasEverLoadedFeed by viewModel.hasEverLoadedFeed.collectAsState()
 
     // Real per-relay connection status from RelayConnectionStateMachine
     // Debounced: perRelayState can emit rapidly during connection bursts.
@@ -2195,6 +2207,7 @@ fun DashboardScreen(
                 onboardingComplete = onboardingComplete,
                 feedSession = feedSession,
                 feedCacheChecked = feedCacheChecked,
+                hasEverLoadedFeed = hasEverLoadedFeed,
                 perRelayState = perRelayState,
                 failedUserRelayCount = failedUserRelayCount,
                 viewModel = viewModel,

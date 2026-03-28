@@ -631,8 +631,11 @@ class Kind1RepliesRepository {
             m != null
         }
         return if (hasAnyMarker) {
-            // Marked style: only include root/reply markers, exclude mention
-            eTags.filter { tag -> !isMentionTag(tag) && (pickETagMarker(tag) != null || tag.size <= 3) }
+            // Marked style: ONLY include tags with explicit "root" or "reply" markers.
+            // Tags without any recognized marker in a mixed-marker event are ambiguous
+            // (likely quote references or non-compliant client tags) — exclude them
+            // to prevent false thread membership.
+            eTags.filter { tag -> pickETagMarker(tag) != null }
                 .mapNotNull { it.getOrNull(1) }
         } else {
             // Pure positional (no markers at all): all e-tags are thread parents
@@ -847,6 +850,86 @@ class Kind1RepliesRepository {
             kind = event.kind,
             tags = tags,
         )
+    }
+
+    /**
+     * Targeted fetch for a specific reply and its ancestor chain.
+     * Called when highlightReplyId is set (notification / quoted note tap) to guarantee
+     * the target reply appears without waiting for generic deep-fetch rounds.
+     *
+     * Strategy:
+     * 1. Fetch the target reply by ID
+     * 2. Walk its replyToId chain up to the root, fetching any missing ancestors
+     * 3. Inject each into the thread via handleReplyEvent
+     *
+     * Non-blocking: fires on the repo's IO scope. A no-op if the target is already cached.
+     */
+    fun fetchSpecificReply(rootNoteId: String, targetReplyId: String, relayUrls: List<String>) {
+        // Already in thread cache — nothing to do
+        if (threadReplyCache[rootNoteId]?.containsKey(targetReplyId) == true) return
+
+        scope.launch {
+            val allRelays = (relayUrls + connectedRelays).distinct()
+            if (allRelays.isEmpty()) return@launch
+
+            Log.d(TAG, "Targeted fetch: reply ${targetReplyId.take(8)} for thread ${rootNoteId.take(8)}")
+
+            val rsm = RelayConnectionStateMachine.getInstance()
+            val visited = mutableSetOf<String>()
+            var currentId: String? = targetReplyId
+            var hops = 0
+            val MAX_ANCESTOR_HOPS = 15
+
+            while (currentId != null && currentId != rootNoteId && hops < MAX_ANCESTOR_HOPS) {
+                if (currentId in visited) break
+                visited.add(currentId)
+                hops++
+
+                // Skip if already in thread
+                if (threadReplyCache[rootNoteId]?.containsKey(currentId) == true) {
+                    // Already have this ancestor — but we still need to check its parent
+                    val existing = threadReplyCache[rootNoteId]?.get(currentId)
+                    currentId = existing?.replyToId?.takeIf { it != rootNoteId && it.isNotBlank() }
+                    continue
+                }
+
+                // Fetch this specific event
+                val fetchId = currentId
+                var fetchedNote: Note? = null
+                try {
+                    rsm.awaitOneShotSubscription(
+                        relayUrls = allRelays,
+                        filter = Filter(kinds = listOf(1), ids = listOf(fetchId), limit = 1),
+                        priority = SubscriptionPriority.HIGH,
+                        settleMs = 800,
+                        maxWaitMs = 4000,
+                    ) { event ->
+                        if (event.kind == 1 && event.id == fetchId) {
+                            val note = convertEventToNote(event, "")
+                            fetchedNote = note
+                            // Inject into thread
+                            handleReplyEvent(rootNoteId, event, "")
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Targeted fetch failed for ${fetchId.take(8)}: ${e.message}")
+                }
+
+                val resolved = fetchedNote
+                if (resolved != null) {
+                    Log.d(TAG, "Targeted fetch: got ${fetchId.take(8)} (replyTo=${resolved.replyToId?.take(8)}, root=${resolved.rootNoteId?.take(8)})")
+                    // Walk to parent
+                    currentId = resolved.replyToId?.takeIf { it != rootNoteId && it.isNotBlank() }
+                } else {
+                    Log.w(TAG, "Targeted fetch: ${fetchId.take(8)} not found after 4s")
+                    break
+                }
+            }
+
+            // Force a flush so any injected events are emitted immediately
+            flushPendingEvents()
+            Log.d(TAG, "Targeted fetch complete: $hops hops, ${visited.size} events resolved")
+        }
     }
 
     /**

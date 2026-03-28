@@ -306,6 +306,8 @@ data class QuotedNoteMeta(
     val relayUrl: String? = null,
     /** NIP-10 root note id — set when this quoted event is a kind-1 reply, so navigation can open the full thread. */
     val rootNoteId: String? = null,
+    /** NIP-10 direct parent reply id — set when this quoted event replies to a specific note in a thread chain. */
+    val replyToId: String? = null,
     /** Event kind (1 = text note, 11 = topic, 1111 = thread reply, 1068 = poll, 6969 = zap poll). */
     val kind: Int = 1,
     /** Raw event tags — needed to parse poll data for kind-1068/6969 quoted events. */

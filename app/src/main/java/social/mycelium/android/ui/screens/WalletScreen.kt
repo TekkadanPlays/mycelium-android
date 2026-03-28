@@ -46,6 +46,9 @@ import social.mycelium.android.lightning.SeedManager
 import social.mycelium.android.repository.CoinosRepository
 import social.mycelium.android.repository.CoinosTransaction
 import social.mycelium.android.repository.NotificationsRepository
+import social.mycelium.android.repository.NwcConfig
+import social.mycelium.android.repository.NwcConfigRepository
+import social.mycelium.android.ui.components.ZapBottomSheet
 import com.example.cybin.signer.NostrSigner
 import kotlinx.coroutines.launch
 import social.mycelium.android.BuildConfig
@@ -69,9 +72,9 @@ fun WalletScreen(
     pubkey: String?,
     modifier: Modifier = Modifier
 ) {
-    // Feature gate: release builds show Coming Soon; debug builds show Phoenix wallet
+    // Feature gate: release builds show NWC-based zap wallet; debug builds show Phoenix wallet
     if (!BuildConfig.WALLET_DEV_MODE) {
-        ComingSoonLander()
+        NwcWalletLander()
         return
     }
 
@@ -374,6 +377,311 @@ private fun WalletOnboardingScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NwcWalletLander() {
+    val context = LocalContext.current
+    var nwcConfig by remember { mutableStateOf(NwcConfigRepository.getConfig(context)) }
+    val isNwcConfigured = nwcConfig.pubkey.isNotBlank() &&
+            nwcConfig.relay.isNotBlank() &&
+            nwcConfig.secret.isNotBlank()
+
+    var showZapSetupSheet by remember { mutableStateOf(false) }
+
+    // Zap data from notifications
+    val allNotifications by NotificationsRepository.notifications.collectAsState()
+    val zapTransactions = remember(allNotifications) {
+        allNotifications
+            .filter { it.type == NotificationType.ZAP && it.zapAmountSats > 0 }
+            .sortedByDescending { it.sortTimestamp }
+            .map { notif ->
+                val senderName = notif.author?.displayName
+                    ?: notif.author?.username
+                    ?: notif.actorPubkeys.firstOrNull()?.take(8)?.let { "nostr:$it…" }
+                CoinosTransaction(
+                    id = notif.id,
+                    amount = notif.zapAmountSats,
+                    memo = senderName?.let { "Zap from $it" } ?: "Zap received",
+                    createdAt = java.time.Instant.ofEpochSecond(notif.sortTimestamp).toString(),
+                    confirmed = true,
+                    type = "zap"
+                )
+            }
+    }
+    val totalZapSats = remember(zapTransactions) { zapTransactions.sumOf { it.amount } }
+
+    if (!isNwcConfigured) {
+        // ── Not configured: Setup CTA ──
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(32.dp)
+            ) {
+                // Subtle orange radial glow behind the icon
+                Box(contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .size(180.dp)
+                            .background(
+                                Brush.radialGradient(
+                                    colors = listOf(
+                                        BitcoinOrange.copy(alpha = 0.10f),
+                                        Color.Transparent
+                                    )
+                                )
+                            )
+                    )
+                    Icon(
+                        painter = androidx.compose.ui.res.painterResource(
+                            id = social.mycelium.android.R.drawable.ic_coinos_lightning
+                        ),
+                        contentDescription = "Lightning",
+                        modifier = Modifier.size(80.dp),
+                        tint = BitcoinOrange
+                    )
+                }
+
+                Spacer(Modifier.height(24.dp))
+
+                Text(
+                    text = "Zap Wallet",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    text = "Connect your wallet via Nostr Wallet Connect\nto send and receive zaps directly.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    lineHeight = 20.sp
+                )
+
+                Spacer(Modifier.height(32.dp))
+
+                // Primary CTA
+                Button(
+                    onClick = { showZapSetupSheet = true },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = BitcoinOrange),
+                    contentPadding = PaddingValues(horizontal = 32.dp, vertical = 14.dp),
+                    modifier = Modifier.fillMaxWidth(0.8f)
+                ) {
+                    Icon(
+                        Icons.Filled.Bolt,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Set up Nostr Wallet Connect",
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    text = "Works with Alby, Mutiny, Primal,\nand any NWC-compatible wallet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    textAlign = TextAlign.Center,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+    } else {
+        // ── NWC configured: Zap history wallet view ──
+        val surfaceColor = MaterialTheme.colorScheme.surface
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 100.dp)
+        ) {
+            // ── Balance Hero ──
+            item(key = "nwc_balance") {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    BitcoinOrange.copy(alpha = 0.06f),
+                                    surfaceColor
+                                )
+                            )
+                        )
+                        .padding(top = 28.dp, bottom = 20.dp, start = 24.dp, end = 24.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        // NWC connected badge
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = Color(0xFF4CAF50).copy(alpha = 0.10f),
+                            modifier = Modifier.padding(bottom = 12.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
+                            ) {
+                                Icon(
+                                    Icons.Outlined.CheckCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = Color(0xFF4CAF50)
+                                )
+                                Spacer(Modifier.width(5.dp))
+                                Text(
+                                    text = "NWC CONNECTED",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color(0xFF4CAF50),
+                                    letterSpacing = 1.sp
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // Total sats received
+                        Text(
+                            text = formatSats(totalZapSats),
+                            style = MaterialTheme.typography.displayMedium.copy(
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = (-1).sp
+                            ),
+                            color = BitcoinOrange
+                        )
+                        Text(
+                            text = "sats received",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            letterSpacing = 2.sp
+                        )
+
+                        // Zap count summary
+                        if (zapTransactions.isNotEmpty()) {
+                            Spacer(Modifier.height(6.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Filled.Bolt,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = LightningYellow.copy(alpha = 0.8f)
+                                )
+                                Spacer(Modifier.width(3.dp))
+                                Text(
+                                    text = "${zapTransactions.size} zap${if (zapTransactions.size != 1) "s" else ""}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                                )
+                            }
+                        }
+
+                        Spacer(Modifier.height(28.dp))
+
+                        // ── Action buttons ──
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            WalletActionButton(
+                                icon = Icons.Outlined.Settings,
+                                label = "NWC Setup",
+                                color = BitcoinOrange,
+                                isActive = false,
+                                onClick = { showZapSetupSheet = true }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── Section header ──
+            item(key = "nwc_tx_header") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Zap History",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    if (zapTransactions.isNotEmpty()) {
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            text = "${zapTransactions.size} zaps",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        )
+                    }
+                }
+            }
+
+            if (zapTransactions.isEmpty()) {
+                item(key = "nwc_tx_empty") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 40.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Filled.Bolt,
+                            contentDescription = null,
+                            modifier = Modifier.size(36.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.20f)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            text = "No zaps yet",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Zaps you receive will appear here.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                        )
+                    }
+                }
+            } else {
+                items(items = zapTransactions.take(200), key = { it.id }) { tx ->
+                    TransactionRow(tx)
+                }
+            }
+        }
+    }
+
+    // ── ZapBottomSheet for NWC setup ──
+    if (showZapSetupSheet) {
+        ZapBottomSheet(
+            onDismiss = {
+                showZapSetupSheet = false
+                // Refresh config after closing — user may have saved new NWC settings
+                nwcConfig = NwcConfigRepository.getConfig(context)
+            },
+            onZap = { /* No-op: this is setup-only */ },
+            startOnSetup = true
+        )
+    }
+}
+
+/** Legacy "Coming soon" lander — kept as fallback but no longer wired in production. */
 @Composable
 private fun ComingSoonLander() {
     Box(
@@ -384,7 +692,6 @@ private fun ComingSoonLander() {
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(32.dp)
         ) {
-            // Subtle orange radial glow behind the icon
             Box(contentAlignment = Alignment.Center) {
                 Box(
                     modifier = Modifier
@@ -399,7 +706,9 @@ private fun ComingSoonLander() {
                         )
                 )
                 Icon(
-                    painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_coinos_lightning),
+                    painter = androidx.compose.ui.res.painterResource(
+                        id = social.mycelium.android.R.drawable.ic_coinos_lightning
+                    ),
                     contentDescription = "Lightning",
                     modifier = Modifier.size(80.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)

@@ -2,6 +2,7 @@ package social.mycelium.android.viewmodel
 
 import android.content.Context
 import android.util.Log
+import social.mycelium.android.debug.DiagnosticLog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import social.mycelium.android.data.UserRelay
@@ -92,18 +93,15 @@ class RelayManagementViewModel(
     }
 
     /**
-     * Publish ALL relay categories to the user's outbox relays at once.
-     * Called from the FAB "Publish Categories" action.
+     * Publish a single category from a relay profile as a kind-30002 event.
+     * Called from the Edit Category dialog's "Publish" action.
      */
-    fun publishAllCategoriesToRelays() {
+    fun publishProfileCategory(profileId: String, categoryId: String) {
         val signer = cachedSigner ?: return
-        val categories = _uiState.value.relayCategories
-        val outboxUrls = _uiState.value.outboxRelays.map {
-            social.mycelium.android.utils.normalizeRelayUrl(it.url)
-        }.toSet()
-        social.mycelium.android.repository.RelayCategorySyncRepository.publishAllCategories(
-            categories, signer, outboxUrls
-        )
+        val profile = _uiState.value.relayProfiles.find { it.id == profileId } ?: return
+        val category = profile.categories.find { it.id == categoryId } ?: return
+        publishCategoryToRelays(category)
+        Log.d("RelayMgmtVM", "Publishing profile category '${category.name}' (${category.relays.size} relays)")
     }
 
     // Expose categories separately for easy access from other screens
@@ -176,8 +174,12 @@ class RelayManagementViewModel(
 
         viewModelScope.launch {
             // Load categories + profiles
-            val categories = storageManager.loadCategories(pubkey)
-            val profiles = storageManager.loadProfiles(pubkey)
+            var categories = storageManager.loadCategories(pubkey)
+            var profiles = storageManager.loadProfiles(pubkey)
+
+            DiagnosticLog.state("RelayMgmtVM", "loadUserRelays(${ pubkey.take(8) }): " +
+                "${categories.size} categories from storage: " +
+                categories.joinToString { "'${it.name}'(${it.relays.size} relays, id=${it.id.take(8)})" })
 
             // Load personal relays
             val outbox = storageManager.loadOutboxRelays(pubkey)
@@ -189,6 +191,45 @@ class RelayManagementViewModel(
             val drafts = storageManager.loadDraftsRelays(pubkey)
             val blossom = storageManager.loadBlossomServers(pubkey)
             val nip96 = storageManager.loadNip96Servers(pubkey)
+
+            // ── Merge fetched remote categories into active profile ──
+            // On first sign-in (or when local profile categories are empty), remote
+            // kind-30002 categories fetched by RelayCategorySyncRepository should
+            // replace the default placeholder. For returning users, pending diffs
+            // are auto-merged into the active profile's category list.
+            val pendingDiff = social.mycelium.android.repository.RelayCategorySyncRepository.pendingCategoryDiff.value
+            val activeProfile = profiles.find { it.isActive } ?: profiles.firstOrNull()
+            if (activeProfile != null) {
+                val profileHasSubstantive = activeProfile.categories.any { it.relays.isNotEmpty() }
+                if (!profileHasSubstantive && categories.any { it.relays.isNotEmpty() }) {
+                    // First sign-in: standalone categories have data (from fetchRelaySets auto-apply)
+                    // but the active profile is empty — populate profile with the fetched categories
+                    val substantiveCategories = categories.filter { it.relays.isNotEmpty() }
+                    profiles = profiles.map { p ->
+                        if (p.id == activeProfile.id) p.copy(categories = substantiveCategories) else p
+                    }
+                    storageManager.saveProfiles(pubkey, profiles)
+                    DiagnosticLog.state("RelayMgmtVM", "First sign-in: populated active profile with ${substantiveCategories.size} fetched categories")
+                    Log.d("RelayMgmtVM", "First sign-in: populated active profile with ${substantiveCategories.size} fetched categories")
+                } else if (pendingDiff != null && pendingDiff.newFromRemote.isNotEmpty()) {
+                    // Returning user with pending remote diff — merge new-from-remote into profile
+                    val existingIds = activeProfile.categories.map { it.id }.toSet()
+                    val newCategories = pendingDiff.newFromRemote.filter { it.id !in existingIds && it.relays.isNotEmpty() }
+                    if (newCategories.isNotEmpty()) {
+                        profiles = profiles.map { p ->
+                            if (p.id == activeProfile.id) p.copy(categories = p.categories + newCategories) else p
+                        }
+                        // Also merge into standalone categories for consistency
+                        val standalonIds = categories.map { it.id }.toSet()
+                        categories = categories + newCategories.filter { it.id !in standalonIds }
+                        storageManager.saveProfiles(pubkey, profiles)
+                        storageManager.saveCategories(pubkey, categories)
+                        Log.d("RelayMgmtVM", "Returning user: merged ${newCategories.size} new remote categories into active profile")
+                    }
+                    // Clear the diff since we auto-merged
+                    social.mycelium.android.repository.RelayCategorySyncRepository.dismissPendingCategoryDiff()
+                }
+            }
 
             // For same-user reload (e.g. returning from onboarding), only update if
             // the data actually changed — avoids triggering downstream recomposition
@@ -465,7 +506,6 @@ class RelayManagementViewModel(
     fun addCategory(category: RelayCategory) {
         _uiState.update { it.copy(relayCategories = it.relayCategories + category) }
         saveToStorage()
-        publishCategoryToRelays(category)
     }
 
     fun updateCategory(categoryId: String, updatedCategory: RelayCategory) {
@@ -473,13 +513,15 @@ class RelayManagementViewModel(
             state.copy(relayCategories = state.relayCategories.map { if (it.id == categoryId) updatedCategory else it })
         }
         saveToStorage()
-        publishCategoryToRelays(updatedCategory)
     }
 
     fun deleteCategory(categoryId: String) {
+        val deleted = _uiState.value.relayCategories.find { it.id == categoryId }
         _uiState.update { it.copy(relayCategories = it.relayCategories.filter { cat -> cat.id != categoryId }) }
         saveToStorage()
         deleteCategoryFromRelays(categoryId)
+        DiagnosticLog.state("RelayMgmtVM", "deleteCategory id=${categoryId.take(8)} name='${deleted?.name}' " +
+            "(had ${deleted?.relays?.size ?: 0} relays) — removed from UI + storage + relays")
     }
 
     fun addRelayToCategory(categoryId: String, relay: UserRelay) {
@@ -491,8 +533,6 @@ class RelayManagementViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()
             refreshActiveSubscription()
-            // Publish the updated category to relays
-            _uiState.value.relayCategories.find { it.id == categoryId }?.let { publishCategoryToRelays(it) }
         }
         fetchAndApplyNip11(relay.url)
     }
@@ -506,7 +546,6 @@ class RelayManagementViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()
             refreshActiveSubscription()
-            _uiState.value.relayCategories.find { it.id == categoryId }?.let { publishCategoryToRelays(it) }
         }
     }
 
@@ -620,8 +659,6 @@ class RelayManagementViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()
             refreshActiveSubscription()
-            // Publish updated subscription state for the toggled category
-            _uiState.value.relayCategories.find { it.id == categoryId }?.let { publishCategoryToRelays(it) }
         }
     }
 
@@ -681,6 +718,18 @@ class RelayManagementViewModel(
         refreshActiveSubscription()
     }
 
+    /**
+     * Publish a specific category from a profile after it has been updated
+     * (e.g. name change, subscription toggle). This ensures the remote
+     * kind-30002 event reflects the latest local state.
+     */
+    fun publishProfileCategoryById(profileId: String, categoryId: String) {
+        val profile = _uiState.value.relayProfiles.find { it.id == profileId } ?: return
+        val category = profile.categories.find { it.id == categoryId } ?: return
+        publishCategoryToRelays(category)
+        Log.d("RelayMgmtVM", "Publishing updated profile category '${category.name}' (${category.relays.size} relays)")
+    }
+
     fun addCategoryToProfile(profileId: String, category: RelayCategory) {
         _uiState.update { state ->
             state.copy(relayProfiles = state.relayProfiles.map { profile ->
@@ -697,6 +746,8 @@ class RelayManagementViewModel(
             })
         }
         saveToStorage()
+        // Also publish the deletion to relays so remote state stays in sync
+        deleteCategoryFromRelays(categoryId)
     }
 
     fun addRelayToProfileCategory(profileId: String, categoryId: String, relay: UserRelay) {
@@ -751,19 +802,17 @@ class RelayManagementViewModel(
                     val outbox = normalized.filter { it.write }
                     val inbox = normalized.filter { it.read }
                     val current = _uiState.value
-                    // Only populate when outbox and inbox are empty so we don't overwrite user edits
+                    // Only populate outbox/inbox when they are empty so we don't overwrite user edits.
+                    // NOTE: We intentionally do NOT inject outbox relays into the Home Relays
+                    // category here. That seeding is handled by the onboarding flow
+                    // (OnboardingScreen) and kind-30002 sync (RelayCategorySyncRepository).
+                    // Injecting NIP-65 outbox relays into categories here would bypass
+                    // kind-30002 deletion state and resurrect relays the user deleted.
                     if (current.outboxRelays.isEmpty() && current.inboxRelays.isEmpty() && (outbox.isNotEmpty() || inbox.isNotEmpty())) {
-                        // Add outbox relays to the default (empty) category so user sees notes from outbox on first sign-in
-                        val defaultId = DefaultRelayCategories.getDefaultCategory().id
-                        val updatedCategories = current.relayCategories.map { cat ->
-                            if (cat.id == defaultId && cat.relays.isEmpty() && outbox.isNotEmpty()) {
-                                cat.copy(relays = outbox)
-                            } else {
-                                cat
-                            }
-                        }
+                        DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: populating outbox=${outbox.size} inbox=${inbox.size} " +
+                            "(outbox was empty, inbox was empty) — NOT touching categories")
                         _uiState.update {
-                            it.copy(relayCategories = updatedCategories, outboxRelays = outbox, inboxRelays = inbox, isLoading = false)
+                            it.copy(outboxRelays = outbox, inboxRelays = inbox, isLoading = false)
                         }
                         saveToStorage()
 
@@ -780,6 +829,8 @@ class RelayManagementViewModel(
                             }
                         }
                     } else {
+                        DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: SKIPPED — " +
+                            "outbox=${current.outboxRelays.size} inbox=${current.inboxRelays.size} already populated")
                         _uiState.update { it.copy(isLoading = false) }
                     }
                 }

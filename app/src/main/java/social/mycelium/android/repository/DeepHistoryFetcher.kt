@@ -71,6 +71,10 @@ object DeepHistoryFetcher {
      *  (replies TO us, reposts OF us). */
     private val NOTIFICATION_KINDS = setOf(1, 6, 7, 8, 16, 1068, 1018, 1111, 1984, 9735, 9802)
 
+    /** Kind-11 topic events should be replayed to TopicsRepository so the
+     *  Topics screen is pre-populated with historical data. */
+    private val TOPIC_KINDS = setOf(11)
+
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /** True while the fetcher is actively running batches. */
@@ -201,6 +205,7 @@ object DeepHistoryFetcher {
         KindGroup("feed",       listOf(1, 6, 30023)),           // Notes, reposts, long-form articles
         KindGroup("topics",     listOf(11)),                     // NIP-22 topic roots
         KindGroup("comments",   listOf(1111)),                   // NIP-22 thread comments
+        KindGroup("votes",      listOf(30011)),                  // In-house votes on topics/comments
         KindGroup("polls",      listOf(1068, 6969)),             // NIP-88 polls + zap polls
 
         // ── Notification groups (p-tag = user → notifications) ─────────
@@ -219,6 +224,10 @@ object DeepHistoryFetcher {
 
         // ── Metadata groups (by followed authors) ──────────────────────
         KindGroup("badges-defs", listOf(30009)),                 // NIP-58 badge definitions
+
+        // ── DM group (gift wraps addressed to user) ──────────────────────
+        KindGroup("dms",         listOf(1059),                   // NIP-17 gift-wrapped DMs TO the user
+            useFollowedAuthors = false, useUserAsPTag = true),
     )
 
     private suspend fun runFetchLoop(
@@ -285,14 +294,18 @@ object DeepHistoryFetcher {
 
                 val events = mutableListOf<Pair<Event, String>>()
                 try {
-                    stateMachine.awaitOneShotSubscription(
+                    stateMachine.awaitOneShotSubscriptionWithRelay(
                         relayUrls = relayUrls,
                         filter = filter,
                         priority = SubscriptionPriority.LOW,
                         settleMs = BATCH_SETTLE_MS,
                         maxWaitMs = BATCH_TIMEOUT_MS,
-                    ) { event ->
-                        events.add(event to "")
+                    ) { event, relayUrl ->
+                        // Seed EventRelayTracker so relay orbs populate for deep-fetched events
+                        if (relayUrl.isNotBlank()) {
+                            social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
+                        }
+                        events.add(event to relayUrl)
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "${group.label}: subscription failed: ${e.message}")
@@ -300,6 +313,10 @@ object DeepHistoryFetcher {
 
                 if (events.isNotEmpty()) {
                     val entities = events.map { (event, relayUrl) ->
+                        // Collect all relay URLs the tracker knows about (may be >1 if
+                        // the same event arrived from multiple relays in this batch)
+                        val allRelays = social.mycelium.android.utils.EventRelayTracker.getRelays(event.id)
+                        val relayUrlsCsv = allRelays.joinToString(",").ifEmpty { null }
                         CachedEventEntity(
                             eventId = event.id,
                             kind = event.kind,
@@ -307,6 +324,7 @@ object DeepHistoryFetcher {
                             createdAt = event.createdAt,
                             eventJson = event.toJson(),
                             relayUrl = relayUrl.ifEmpty { null },
+                            relayUrls = relayUrlsCsv,
                         )
                     }
                     try {
@@ -326,6 +344,7 @@ object DeepHistoryFetcher {
                     // them is pure CPU waste (hundreds of events checked and immediately dropped).
                     if (group.useUserAsPTag) {
                         var notifCount = 0
+                        var dmCount = 0
                         for ((event, _) in events) {
                             if (event.kind in NOTIFICATION_KINDS) {
                                 try {
@@ -335,9 +354,64 @@ object DeepHistoryFetcher {
                                     // Don't let a single bad event kill the whole batch
                                 }
                             }
+                            // Replay kind-1059 gift wraps into DirectMessageRepository buffer
+                            // so DM conversations are pre-populated. They remain encrypted
+                            // until the user visits the DM page and triggers decryption.
+                            if (event.kind == 1059) {
+                                try {
+                                    DirectMessageRepository.bufferDeepFetchedGiftWrap(event)
+                                    dmCount++
+                                } catch (e: Exception) {
+                                    // Don't let a single bad event kill the whole batch
+                                }
+                            }
                         }
                         if (notifCount > 0) {
                             Log.d(TAG, "  ${group.label}: replayed $notifCount events to notifications")
+                        }
+                        if (dmCount > 0) {
+                            Log.d(TAG, "  ${group.label}: buffered $dmCount gift wraps for DMs")
+                        }
+                    }
+
+                    // Replay kind-11 topic events into TopicsRepository so the Topics
+                    // screen shows historical data even before the live subscription EOSE.
+                    if (group.kinds.contains(11)) {
+                        var topicCount = 0
+                        val topicsRepo = TopicsRepository.getInstanceOrNull()
+                        for ((event, _) in events) {
+                            if (event.kind == 11 && topicsRepo != null) {
+                                try {
+                                    topicsRepo.ingestDeepFetchedTopic(event)
+                                    topicCount++
+                                } catch (e: Exception) {
+                                    // Don't let a single bad event kill the whole batch
+                                }
+                            }
+                        }
+                        if (topicCount > 0) {
+                            Log.d(TAG, "  ${group.label}: replayed $topicCount topics to TopicsRepository")
+                        }
+                    }
+
+                    // Replay kind-30011 vote events through NoteCountsRepository so
+                    // VoteRepository aggregates historical up/down votes on topics
+                    // and kind-1111 replies. Without this, vote scores appear as 0
+                    // until the user scrolls to each topic and triggers a live fetch.
+                    if (group.kinds.contains(30011)) {
+                        var voteCount = 0
+                        for ((event, _) in events) {
+                            if (event.kind == 30011) {
+                                try {
+                                    NoteCountsRepository.onCountsEvent(event)
+                                    voteCount++
+                                } catch (e: Exception) {
+                                    // Don't let a single bad event kill the whole batch
+                                }
+                            }
+                        }
+                        if (voteCount > 0) {
+                            Log.d(TAG, "  ${group.label}: replayed $voteCount votes to VoteRepository")
                         }
                     }
 

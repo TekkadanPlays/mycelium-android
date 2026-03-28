@@ -497,6 +497,22 @@ object DirectMessageRepository {
     }
 
     /**
+     * Buffer a deep-fetched gift wrap event without triggering DM notifications.
+     * Called by [DeepHistoryFetcher] as kind-1059 events are recovered from relay history.
+     * Unlike the live [bufferGiftWrap], this never emits to [newDmSignal] — historical
+     * DMs should populate the conversation list silently, not fire push notifications.
+     * Decryption happens later when the user visits the DM page.
+     */
+    fun bufferDeepFetchedGiftWrap(event: Event) {
+        if (event.kind != KIND_GIFT_WRAP) return
+        if (decryptedIds.contains(event.id)) return
+        if (pendingGiftWraps.putIfAbsent(event.id, event) == null) {
+            _pendingGiftWrapCount.value = pendingGiftWraps.size
+            Log.d(TAG, "Deep-fetch buffered gift wrap ${event.id.take(8)} (${pendingGiftWraps.size} pending)")
+        }
+    }
+
+    /**
      * Decrypt all pending gift wraps. Called when the user visits the DM page.
      *
      * Uses the full `nip44Decrypt` path which may launch Amber's foreground Activity

@@ -1,6 +1,7 @@
 package social.mycelium.android.repository
 
 import android.util.Log
+import social.mycelium.android.debug.DiagnosticLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -157,8 +158,10 @@ object RelayCategorySyncRepository {
                     delay(10_000L)
                     RelayHealthTracker.finalizePendingPublish(signed.id)
                 }
-                Log.d(TAG, "Published category '${category.name}' (d=${category.id.take(8)}) " +
-                    "with ${category.relays.size} relays → ${normalized.size} outbox relays")
+                val msg = "Published category '${category.name}' (d=${category.id.take(8)}) " +
+                    "with ${category.relays.size} relays → ${normalized.size} outbox relays"
+                Log.d(TAG, msg)
+                DiagnosticLog.sync(TAG, msg)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to publish category '${category.name}': ${e.message}", e)
             }
@@ -212,6 +215,7 @@ object RelayCategorySyncRepository {
                 }
 
                 Log.d(TAG, "Deleted category $categoryId (kind-5 + empty replacement)")
+                DiagnosticLog.sync(TAG, "DELETE category=$categoryId (kind-5 + empty replacement) → ${normalized.size} relays")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to delete category $categoryId: ${e.message}", e)
             }
@@ -255,6 +259,7 @@ object RelayCategorySyncRepository {
         fetchHandle?.cancel()
         val stateMachine = RelayConnectionStateMachine.getInstance()
         val collected = mutableMapOf<String, Event>()
+        val deletedDTags = mutableSetOf<String>() // Track d-tags explicitly deleted remotely
 
         // Use blocking await so we process results reliably after EOSE/timeout
         scope.launch {
@@ -267,7 +272,13 @@ object RelayCategorySyncRepository {
                         val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1)
                             ?: return@awaitOneShotSubscription
                         val isDeleted = event.tags.any { it.size >= 2 && it[0] == "deleted" }
-                        if (isDeleted) return@awaitOneShotSubscription
+                        val relayCount = event.tags.count { it.size >= 2 && it[0] == "relay" }
+                        val title = event.tags.firstOrNull { it.size >= 2 && it[0] == "title" }?.get(1) ?: dTag.take(8)
+                        DiagnosticLog.sync(TAG, "RECV kind-30002 d=${dTag.take(8)} title='$title' relays=$relayCount deleted=$isDeleted ts=${event.createdAt}")
+                        if (isDeleted) {
+                            deletedDTags.add(dTag)
+                            return@awaitOneShotSubscription
+                        }
                         val existing = collected[dTag]
                         if (existing == null || event.createdAt > existing.createdAt) {
                             collected[dTag] = event
@@ -275,15 +286,33 @@ object RelayCategorySyncRepository {
                     }
                 }
 
+                // Purge local categories whose remote counterpart was explicitly deleted.
+                // Without this, a local category persists forever after the user deletes
+                // it remotely — the deleted event is skipped in collection, but the local
+                // copy is never cleaned up.
+                if (deletedDTags.isNotEmpty()) {
+                    val localCategories = storageManager.loadCategories(userPubkey)
+                    val purged = localCategories.filter { it.id !in deletedDTags }
+                    if (purged.size < localCategories.size) {
+                        val removedNames = localCategories.filter { it.id in deletedDTags }.joinToString { "'${it.name}'" }
+                        storageManager.saveCategories(userPubkey, purged)
+                        Log.d(TAG, "Purged ${localCategories.size - purged.size} locally-cached categories that were deleted remotely: $removedNames")
+                        DiagnosticLog.sync(TAG, "PURGE: removed ${localCategories.size - purged.size} deleted categories from local: $removedNames")
+                    }
+                }
+
                 if (collected.isEmpty()) {
                     Log.d(TAG, "No relay sets found for ${userPubkey.take(8)}")
+                    DiagnosticLog.sync(TAG, "FETCH RESULT: 0 relay sets for ${userPubkey.take(8)}")
                     return@launch
                 }
 
                 val remoteCategories = collected.values.mapNotNull { parseRelaySet(it) }
                     .filter { it.relays.isNotEmpty() } // Skip empty/pruned categories
-                Log.d(TAG, "Fetched ${remoteCategories.size} relay sets for ${userPubkey.take(8)}: " +
-                    remoteCategories.joinToString { "'${it.name}'(${it.relays.size})" })
+                val fetchSummary = "Fetched ${remoteCategories.size} relay sets for ${userPubkey.take(8)}: " +
+                    remoteCategories.joinToString { "'${it.name}'(${it.relays.size} relays: ${it.relays.joinToString(",") { r -> r.url.removePrefix("wss://").removeSuffix("/") }})" }
+                Log.d(TAG, fetchSummary)
+                DiagnosticLog.sync(TAG, "FETCH RESULT: $fetchSummary")
 
                 if (remoteCategories.isEmpty()) {
                     Log.d(TAG, "All fetched relay sets were empty after filtering — nothing to merge")
@@ -291,6 +320,8 @@ object RelayCategorySyncRepository {
                 }
 
                 val localCategories = storageManager.loadCategories(userPubkey)
+                DiagnosticLog.sync(TAG, "LOCAL categories: ${localCategories.size} total, " +
+                    localCategories.joinToString { "'${it.name}'(${it.relays.size} relays, id=${it.id.take(8)})" })
 
                 // On first sign-in (no local categories or only the empty default),
                 // auto-apply remote categories since there's nothing to conflict with.
@@ -299,6 +330,7 @@ object RelayCategorySyncRepository {
                     val merged = mergeCategories(localCategories, remoteCategories)
                     storageManager.saveCategories(userPubkey, merged)
                     Log.d(TAG, "First sign-in: auto-applied ${remoteCategories.size} remote categories")
+                    DiagnosticLog.sync(TAG, "MERGE (first sign-in): auto-applied ${remoteCategories.size} remote → ${merged.size} total")
                     return@launch
                 }
 
@@ -314,6 +346,7 @@ object RelayCategorySyncRepository {
 
                 if (newFromRemote.isEmpty() && updatedFromRemote.isEmpty()) {
                     Log.d(TAG, "Remote relay sets match local — no merge needed")
+                    DiagnosticLog.sync(TAG, "MERGE: remote matches local — no changes")
                     return@launch
                 }
 
@@ -324,13 +357,17 @@ object RelayCategorySyncRepository {
                     newFromRemote = newFromRemote,
                     updatedFromRemote = updatedFromRemote,
                 )
-                Log.d(TAG, "Relay sets differ: ${newFromRemote.size} new, ${updatedFromRemote.size} updated — pending user confirmation")
+                val diffMsg = "DIFF: ${newFromRemote.size} new [${newFromRemote.joinToString { it.name }}], " +
+                    "${updatedFromRemote.size} updated [${updatedFromRemote.joinToString { it.name }}] — pending user confirmation"
+                Log.d(TAG, diffMsg)
+                DiagnosticLog.sync(TAG, diffMsg)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch relay sets: ${e.message}", e)
             }
         }
 
         Log.d(TAG, "Fetching relay sets for ${userPubkey.take(8)} from ${relayUrls.size} relays")
+        DiagnosticLog.sync(TAG, "FETCH START: kind-30002 for ${userPubkey.take(8)} from ${relayUrls.size} relays: ${relayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") }}")
     }
 
     // ── Parsing ──────────────────────────────────────────────────────────────

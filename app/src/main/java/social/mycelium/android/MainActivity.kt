@@ -91,6 +91,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // Detect main-thread disk/network violations in debug to avoid ANR regressions
         if (BuildConfig.DEBUG) {
             DebugVerboseLog.init(applicationContext)
+            social.mycelium.android.debug.DiagnosticLog.init(applicationContext)
             StrictMode.setThreadPolicy(
                 StrictMode.ThreadPolicy.Builder()
                     .detectAll()

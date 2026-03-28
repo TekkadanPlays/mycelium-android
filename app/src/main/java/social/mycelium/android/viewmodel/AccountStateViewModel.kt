@@ -698,17 +698,21 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val signer = getCurrentSigner() ?: return
         val context = getApplication<android.app.Application>()
 
-        // Register callback — evaluate relay URLs lazily so we always publish
-        // to the current set, not a stale snapshot captured at login time.
+        // Register callback — use OUTBOX-ONLY relays. App settings (kind 30078) are private
+        // NIP-78 data that only need to live on the user's outbox relays; publishing them to
+        // all subscribed category relays (kind-30002 collections) wastes bandwidth and inflates
+        // the relay confirmation counter with irrelevant relays.
         social.mycelium.android.repository.SettingsSyncManager.registerPublishCallback {
-            val freshRelays = getPublishRelayUrlSet()
-            if (freshRelays.isNotEmpty()) {
+            val outboxOnly = relayStorageManager.loadOutboxRelays(hexPubkey)
+                .map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
+                .toSet()
+            if (outboxOnly.isNotEmpty()) {
                 social.mycelium.android.repository.SettingsSyncManager.publishSettings(
-                    context, signer, hexPubkey, freshRelays
+                    context, signer, hexPubkey, outboxOnly
                 )
             }
         }
-        Log.d("AccountStateViewModel", "Settings sync: publish callback registered (fetch handled by StartupOrchestrator)")
+        Log.d("AccountStateViewModel", "Settings sync: publish callback registered (outbox-only, fetch handled by StartupOrchestrator)")
     }
 
     /** Check if settings have already been applied for this account (first-login flag). */
@@ -2280,8 +2284,8 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val outboxRelays = relayStorageManager.loadOutboxRelays(accountHex)
             .mapNotNull { RelayUrlNormalizer.normalizeOrNull(it.url)?.url }
             .toSet()
-        val publishTo = (outboxRelays + indexerRelays).toSet()
-        if (publishTo.isEmpty()) return "No relays to publish to"
+        val publishTo = outboxRelays
+        if (publishTo.isEmpty()) return "No outbox relays to publish to"
 
         viewModelScope.launch {
             val result = EventPublisher.publish(

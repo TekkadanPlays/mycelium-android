@@ -441,6 +441,118 @@ class TopicsRepository private constructor(context: Context) {
     }
 
     /**
+     * Ingest a deep-fetched kind-11 event into the topics map. Unlike [handleTopicEvent],
+     * this bypasses the pending-new-topics gate (cutoff check) and always adds directly
+     * to the visible topics map — historical events should appear immediately, not as
+     * "new" topics requiring a refresh. Called by [DeepHistoryFetcher] as batches complete.
+     */
+    fun ingestDeepFetchedTopic(event: com.example.cybin.core.Event) {
+        if (event.kind != 11) return
+        val current = _topics.value
+        if (current.containsKey(event.id)) return // Already known
+
+        // Enrich relay URLs from EventRelayTracker (deep fetch may not know
+        // relay URLs directly, but the tracker accumulates them from all sources)
+        val trackedRelays = social.mycelium.android.utils.EventRelayTracker.getRelays(event.id)
+        val relayStr = trackedRelays.joinToString(",")
+        val topic = convertEventToTopicNote(event, relayStr)
+        topicsCache.put(topic.id, topic)
+        val updated = current.toMutableMap()
+        updated[topic.id] = topic
+        _topics.value = updated
+        cacheDirty = true
+        // Defer statistics recomputation — deep fetch delivers many events in rapid
+        // succession. The periodic cache saver will trigger a recompute anyway.
+    }
+
+    /**
+     * Hydrate the in-memory topics map from Room's cached_events table (kind-11).
+     * Called during Phase 3 (enrichment) so previously deep-fetched topics that
+     * survived in Room but not in the SharedPreferences cache are recovered.
+     *
+     * Safe to call multiple times (additive merge — never removes existing topics).
+     */
+    fun hydrateFromRoom(context: Context) {
+        scope.launch {
+            try {
+                val eventDao = social.mycelium.android.db.AppDatabase.getInstance(context.applicationContext).eventDao()
+                val entities = eventDao.getTopicEvents(limit = 1000)
+                if (entities.isEmpty()) {
+                    Log.d(TAG, "hydrateFromRoom: no kind-11 events in Room")
+                    return@launch
+                }
+
+                var addedCount = 0
+                val current = _topics.value.toMutableMap()
+                for (entity in entities) {
+                    if (current.containsKey(entity.eventId)) continue
+                    val event = com.example.cybin.core.Event.fromJsonOrNull(entity.eventJson) ?: continue
+                    if (event.kind != 11) continue
+
+                    // Restore relay URLs from the dedicated relayUrls column (comma-separated,
+                    // matching the pattern in NotesRepository.loadFeedCacheFromRoom)
+                    val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+                    // Seed EventRelayTracker so relay orbs survive cold starts
+                    if (allUrls.isNotEmpty()) {
+                        allUrls.forEach { url -> social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, url) }
+                    } else if (!entity.relayUrl.isNullOrBlank()) {
+                        social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, entity.relayUrl)
+                    }
+
+                    val relayStr = if (allUrls.isNotEmpty()) allUrls.joinToString(",") else (entity.relayUrl ?: "")
+                    val topic = convertEventToTopicNote(event, relayStr)
+                    topicsCache.put(topic.id, topic)
+                    current[topic.id] = topic
+                    addedCount++
+                }
+                if (addedCount > 0) {
+                    _topics.value = current
+                    cacheDirty = true
+                    computeHashtagStatistics()
+                    // Enrich from EventRelayTracker so orbs reflect all known relay deliveries
+                    enrichTopicRelayOrbs()
+                    Log.d(TAG, "hydrateFromRoom: loaded $addedCount topics from Room (total: ${current.size})")
+                } else {
+                    Log.d(TAG, "hydrateFromRoom: all ${entities.size} Room topics already in memory")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "hydrateFromRoom failed: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * Enrich all in-memory topics with accumulated relay URLs from [EventRelayTracker].
+     * Mirrors the relay enrichment in `NotesRepository.updateDisplayedNotes()` so topic
+     * relay orbs grow as the same event arrives from additional relays over time.
+     *
+     * Called after EOSE (topics subscription), after Room hydration, and periodically
+     * when topics are displayed.
+     */
+    fun enrichTopicRelayOrbs() {
+        val current = _topics.value
+        if (current.isEmpty()) return
+        var enrichedCount = 0
+        val updated = current.toMutableMap()
+        for ((id, topic) in current) {
+            val existing = topic.relayUrls.ifEmpty { listOfNotNull(topic.relayUrl).filter { it.isNotEmpty() } }
+            val enriched = social.mycelium.android.utils.EventRelayTracker.enrichRelayUrls(id, existing)
+            if (enriched.size > existing.size || (existing.isEmpty() && enriched.isNotEmpty())) {
+                updated[id] = topic.copy(
+                    relayUrls = enriched,
+                    relayUrl = enriched.firstOrNull() ?: topic.relayUrl
+                )
+                enrichedCount++
+            }
+        }
+        if (enrichedCount > 0) {
+            _topics.value = updated
+            cacheDirty = true
+            Log.d(TAG, "enrichTopicRelayOrbs: enriched $enrichedCount topics with additional relay URLs")
+        }
+    }
+
+    /**
      * Merge pending new topics into the main list (call from pull-to-refresh or when user taps "x new topics").
      */
     fun applyPendingTopics() {

@@ -1,4 +1,4 @@
-﻿package social.mycelium.android.viewmodel
+package social.mycelium.android.viewmodel
 
 import android.util.Log
 import androidx.compose.runtime.Immutable
@@ -71,6 +71,10 @@ class DashboardViewModel : ViewModel() {
 
     /** True after the on-disk feed cache has been checked. UI waits for this before showing the loading overlay. */
     val feedCacheChecked: StateFlow<Boolean> = notesRepository.feedCacheChecked
+
+    /** True once the feed has been successfully loaded at least once. Suppresses the full-page
+     *  "Connecting to relays" overlay on transient disconnections (e.g. app backgrounded then resumed). */
+    val hasEverLoadedFeed: StateFlow<Boolean> = notesRepository.hasEverLoadedFeed
 
     companion object {
         private const val TAG = "DashboardViewModel"

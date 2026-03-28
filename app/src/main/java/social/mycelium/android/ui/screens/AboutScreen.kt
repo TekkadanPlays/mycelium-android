@@ -27,7 +27,7 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.ui.components.ProfilePicture
-import social.mycelium.android.ui.components.SupportMyceliumZapDialog
+import social.mycelium.android.ui.components.SupportZapBottomSheet
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.NPub
 import kotlinx.coroutines.Dispatchers
@@ -206,17 +206,16 @@ fun AboutScreen(
                     )
                 }
 
-                // Bio
+                // Bio (rich rendering with markdown, links, nip-19 entities)
                 author.about?.let { bio ->
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = bio,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        maxLines = 4,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(horizontal = 8.dp)
+                    social.mycelium.android.ui.components.MarkdownNoteContent(
+                        content = bio,
+                        style = MaterialTheme.typography.bodyMedium.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.padding(horizontal = 8.dp),
+                        onProfileClick = { pubkey -> onProfileClick(pubkey) }
                     )
                 }
             } else {
@@ -287,7 +286,7 @@ fun AboutScreen(
             }
 
             if (showSupportZapDialog) {
-                SupportMyceliumZapDialog(onDismiss = { showSupportZapDialog = false })
+                SupportZapBottomSheet(onDismiss = { showSupportZapDialog = false })
             }
 
             Spacer(modifier = Modifier.height(48.dp))

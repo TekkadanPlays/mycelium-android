@@ -213,10 +213,18 @@ fun ProfileScreen(
             .collect { (idx, offset) -> repliesScrollIndex = idx; repliesScrollOffset = offset }
     }
 
-    // Per-tab filtered notes
-    val notesOnly = remember(authorNotes) { authorNotes.filter { !it.isReply } }
-    val repliesOnly = remember(authorNotes) { authorNotes.filter { it.isReply } }
-    val mediaOnly = remember(authorNotes) { authorNotes.filter { it.mediaUrls.isNotEmpty() } }
+    // Per-tab filtered notes — single-pass partition (avoids 3× O(n) filter)
+    val (notesOnly, repliesOnly, mediaOnly) = remember(authorNotes) {
+        val notes = mutableListOf<Note>()
+        val replies = mutableListOf<Note>()
+        val media = mutableListOf<Note>()
+        for (note in authorNotes) {
+            if (note.isReply) replies.add(note)
+            else notes.add(note)
+            if (note.mediaUrls.isNotEmpty()) media.add(note)
+        }
+        Triple(notes as List<Note>, replies as List<Note>, media as List<Note>)
+    }
 
     // Per-tab hasMore (fallback to global hasMore)
     val notesHasMore = perTabHasMore[ProfileFeedRepository.TAB_NOTES] ?: hasMore

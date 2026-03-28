@@ -25,7 +25,7 @@ import androidx.compose.ui.unit.dp
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.repository.DebugEventStatsSnapshot
 import social.mycelium.android.repository.NotesRepository
-import social.mycelium.android.ui.components.SupportMyceliumZapDialog
+import social.mycelium.android.ui.components.SupportZapBottomSheet
 import androidx.compose.runtime.collectAsState
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -128,12 +128,12 @@ fun SettingsScreen(
         }
 
         if (showSupportZapDialog) {
-            SupportMyceliumZapDialog(onDismiss = { showSupportZapDialog = false })
+            SupportZapBottomSheet(onDismiss = { showSupportZapDialog = false })
         }
     }
 }
 
-// SupportMyceliumZapDialog is in social.mycelium.android.ui.components.SupportMyceliumZapDialog
+
 
 @Composable
 private fun DebugEventStatsCard() {

@@ -364,6 +364,9 @@ class ProfileFeedRepository(
         if (batch.isEmpty()) return
 
         val newNotes = mutableListOf<Note>()
+        // O(1) index maps for batch-internal merging — eliminates O(n) indexOfFirst scans
+        val batchIdIndex = HashMap<String, Int>()          // note.id → index in newNotes
+        val batchOrigIdIndex = HashMap<String, Int>()      // note.originalNoteId → index in newNotes
         for ((event, sourceRelayUrl) in batch) {
             if (event.id in seenIds) continue
             seenIds.add(event.id)
@@ -373,7 +376,7 @@ class ProfileFeedRepository(
                 if (repostNote != null) {
                     val origId = repostNote.originalNoteId
                     // First: try to merge onto the original kind-1 already in this batch
-                    val origIdx = if (origId != null) newNotes.indexOfFirst { it.id == origId } else -1
+                    val origIdx = if (origId != null) batchIdIndex[origId] ?: -1 else -1
                     if (origIdx >= 0) {
                         val orig = newNotes[origIdx]
                         val mergedAuthors = (orig.repostedByAuthors + repostNote.repostedByAuthors).distinctBy { it.id }
@@ -383,7 +386,7 @@ class ProfileFeedRepository(
                         )
                     } else {
                         // Second: merge with existing repost of same original note
-                        val existingIdx = newNotes.indexOfFirst { it.id == repostNote.id }
+                        val existingIdx = batchIdIndex[repostNote.id] ?: -1
                         if (existingIdx >= 0) {
                             val existing = newNotes[existingIdx]
                             val mergedAuthors = (repostNote.repostedByAuthors + existing.repostedByAuthors).distinctBy { it.id }
@@ -392,7 +395,10 @@ class ProfileFeedRepository(
                                 repostTimestamp = maxOf(repostNote.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
                             )
                         } else {
+                            val idx = newNotes.size
                             newNotes.add(repostNote)
+                            batchIdIndex[repostNote.id] = idx
+                            if (origId != null) batchOrigIdIndex[origId] = idx
                         }
                     }
                 }
@@ -401,24 +407,44 @@ class ProfileFeedRepository(
 
             val note = convertEventToNote(event, sourceRelayUrl)
             // If a repost:id of this note already exists in the batch, absorb its boost authors
-            val repostIdx = newNotes.indexOfFirst { it.originalNoteId == note.id }
+            val repostIdx = batchOrigIdIndex[note.id] ?: -1
             if (repostIdx >= 0) {
-                val repostEntry = newNotes.removeAt(repostIdx)
-                newNotes.add(note.copy(
+                val repostEntry = newNotes[repostIdx]
+                // Invalidate the repost entry's index (mark as absorbed)
+                batchIdIndex.remove(repostEntry.id)
+                batchOrigIdIndex.remove(note.id)
+                // Replace in-place with the merged original note
+                val merged = note.copy(
                     repostedByAuthors = (note.repostedByAuthors + repostEntry.repostedByAuthors).distinctBy { it.id },
                     repostTimestamp = repostEntry.repostTimestamp
-                ))
+                )
+                newNotes[repostIdx] = merged
+                batchIdIndex[merged.id] = repostIdx
             } else {
+                val idx = newNotes.size
                 newNotes.add(note)
+                batchIdIndex[note.id] = idx
             }
         }
+
+        // Filter out absorbed entries (replaced in-place but index maps cleaned up)
+        // No filtering needed — in-place replacement means all entries are valid
 
         if (newNotes.isEmpty()) return
 
         // Merge with existing, dedup reposts with originals
+        // Build O(1) lookup maps from current notes
         val currentNotes = _notes.value.toMutableList()
+        val currentIdIndex = HashMap<String, Int>(currentNotes.size)
+        val currentOrigIdIndex = HashMap<String, Int>(currentNotes.size)
+        for (i in currentNotes.indices) {
+            currentIdIndex[currentNotes[i].id] = i
+            val oid = currentNotes[i].originalNoteId
+            if (oid != null) currentOrigIdIndex[oid] = i
+        }
+
         for (note in newNotes) {
-            val existingIdx = currentNotes.indexOfFirst { it.id == note.id }
+            val existingIdx = currentIdIndex[note.id] ?: -1
             if (existingIdx >= 0) {
                 // Merge repost authors if both are reposts of the same note
                 val existing = currentNotes[existingIdx]
@@ -431,12 +457,15 @@ class ProfileFeedRepository(
                 }
                 // If this is an original kind-1 and there's a stale repost:id entry, remove it
                 if (note.originalNoteId == null) {
-                    val staleRepostIdx = currentNotes.indexOfFirst { it.originalNoteId == note.id }
+                    val staleRepostIdx = currentOrigIdIndex[note.id] ?: -1
                     if (staleRepostIdx >= 0) {
-                        val stale = currentNotes.removeAt(staleRepostIdx)
-                        // Re-find existingIdx since removal may have shifted it
-                        val refreshedIdx = currentNotes.indexOfFirst { it.id == note.id }
-                        if (refreshedIdx >= 0) {
+                        val stale = currentNotes[staleRepostIdx]
+                        // Mark stale entry for removal (set to null-id sentinel) — we'll filter later
+                        currentNotes[staleRepostIdx] = stale.copy(id = "")
+                        currentOrigIdIndex.remove(note.id)
+                        // Merge boost authors from stale onto the original
+                        val refreshedIdx = currentIdIndex[note.id] ?: -1
+                        if (refreshedIdx >= 0 && refreshedIdx != staleRepostIdx) {
                             val merged2 = (currentNotes[refreshedIdx].repostedByAuthors + stale.repostedByAuthors).distinctBy { it.id }
                             currentNotes[refreshedIdx] = currentNotes[refreshedIdx].copy(
                                 repostedByAuthors = merged2,
@@ -450,7 +479,7 @@ class ProfileFeedRepository(
                 // merge boost authors onto the original instead of adding a duplicate
                 val origId = note.originalNoteId
                 if (origId != null) {
-                    val origIdx = currentNotes.indexOfFirst { it.id == origId }
+                    val origIdx = currentIdIndex[origId] ?: -1
                     if (origIdx >= 0) {
                         val orig = currentNotes[origIdx]
                         val mergedAuthors = (orig.repostedByAuthors + note.repostedByAuthors).distinctBy { it.id }
@@ -463,7 +492,10 @@ class ProfileFeedRepository(
                 }
                 // If the repost arrives first (before the original kind-1), check if we
                 // already have a repost:id entry that should absorb it
-                val repostOfSameIdx = if (origId != null) currentNotes.indexOfFirst { it.originalNoteId == origId && it.id != note.id } else -1
+                val repostOfSameIdx = if (origId != null) {
+                    val idx = currentOrigIdIndex[origId] ?: -1
+                    if (idx >= 0 && currentNotes[idx].id != note.id) idx else -1
+                } else -1
                 if (repostOfSameIdx >= 0) {
                     val existing = currentNotes[repostOfSameIdx]
                     val mergedAuthors = (existing.repostedByAuthors + note.repostedByAuthors).distinctBy { it.id }
@@ -472,20 +504,26 @@ class ProfileFeedRepository(
                         repostTimestamp = maxOf(note.repostTimestamp ?: 0L, existing.repostTimestamp ?: 0L)
                     )
                 } else {
+                    val idx = currentNotes.size
                     currentNotes.add(note)
+                    currentIdIndex[note.id] = idx
+                    if (origId != null) currentOrigIdIndex[origId] = idx
                 }
             }
         }
+        // Remove sentinel entries from stale repost cleanup
+        val hasRemovals = currentNotes.any { it.id.isEmpty() }
+        val cleanedNotes = if (hasRemovals) currentNotes.filter { it.id.isNotEmpty() } else currentNotes
 
         // Final dedup: collapse repost entries whose original note is the profile user's
         // own note (others boosted MY note → show original + boost info). Reposts of
         // OTHER people's notes stay as separate entries (I boosted THEIR note → show as boost).
-        val ownOriginalIds = currentNotes.mapNotNullTo(HashSet()) {
+        val ownOriginalIds = cleanedNotes.mapNotNullTo(HashSet()) {
             if (it.originalNoteId == null && it.author.id.lowercase() == authorPubkey.lowercase()) it.id else null
         }
         // Pass 1: collect boost info from repost entries of the user's own notes
         val boostInfoByOrigId = HashMap<String, Pair<List<Author>, Long>>()
-        for (note in currentNotes) {
+        for (note in cleanedNotes) {
             val origId = note.originalNoteId ?: continue
             if (origId !in ownOriginalIds) continue
             val (prevAuthors, prevTs) = boostInfoByOrigId[origId] ?: (emptyList<Author>() to 0L)
@@ -494,7 +532,7 @@ class ProfileFeedRepository(
         // Pass 2: build deduped list — skip repost entries of own notes, apply boost info
         val deduped = mutableListOf<Note>()
         val seenDedupIds = HashSet<String>()
-        for (note in currentNotes) {
+        for (note in cleanedNotes) {
             // Skip repost entries only when the original is the profile user's own note
             if (note.originalNoteId != null && note.originalNoteId in ownOriginalIds) continue
             if (!seenDedupIds.add(note.id)) continue // skip exact id dupes

@@ -453,10 +453,32 @@ class SubscriptionMultiplexer private constructor(
         maxWaitMs: Long = 8_000L,
         onEvent: (Event) -> Unit,
     ) {
+        awaitOneShotSubscriptionWithRelay(relayUrls, filters, priority, settleMs, maxWaitMs) { event, _ -> onEvent(event) }
+    }
+
+    /**
+     * Suspending one-shot with relay URL passthrough: same lifecycle as
+     * [awaitOneShotSubscription] but the callback receives (Event, relayUrl)
+     * so callers know which relay delivered each event.
+     */
+    suspend fun awaitOneShotSubscriptionWithRelay(
+        relayUrls: List<String>,
+        filters: List<Filter>,
+        priority: SubscriptionPriority = SubscriptionPriority.LOW,
+        settleMs: Long = 500L,
+        maxWaitMs: Long = 8_000L,
+        onEvent: (Event, String) -> Unit,
+    ) {
         if (relayUrls.isEmpty() || filters.isEmpty()) return
+        val filterKey = FilterKey.of(relayUrls, filters)
         val h = subscribe(relayUrls, filters, priority, isOneShot = true)
 
-        val eventJob = scope.launch { h.events.collect { onEvent(it) } }
+        // Collect from the full MultiplexedEvent flow to get relay URL
+        val eventJob = scope.launch {
+            _events
+                .filter { it.filterKey == filterKey }
+                .collect { onEvent(it.event, it.relayUrl) }
+        }
 
         val eoseJob = scope.launch {
             h.eose.first { it }

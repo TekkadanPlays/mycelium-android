@@ -65,13 +65,18 @@ fun ComposeTopicScreen(
     val initialText = loadedDraft?.content ?: ""
     var textFieldValue by remember { mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length))) }
     val content by remember { derivedStateOf { textFieldValue.text } }
+    var lastSavedContent by remember { mutableStateOf(initialText) }
+    var lastSavedTitle by remember { mutableStateOf(loadedDraft?.title ?: "") }
     val coroutineScope = rememberCoroutineScope()
     val mentionState = remember(myAuthor?.id) { MentionSuggestionState(coroutineScope, myAuthor?.id) }
     DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
     val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
     DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
     val onBackWithDraft = {
-        if (title.isNotBlank() || content.isNotBlank()) {
+        if (title.isBlank() && content.isBlank()) {
+            // User erased everything — delete any existing draft
+            loadedDraft?.let { social.mycelium.android.repository.DraftsRepository.deleteDraft(it.id) }
+        } else if (content != lastSavedContent || title != lastSavedTitle) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
                 social.mycelium.android.data.Draft(
                     id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
@@ -86,14 +91,14 @@ fun ComposeTopicScreen(
     // Intercept system back gesture to save draft before leaving
     androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
 
-    // Auto-save draft every 10 seconds while editing (if enabled in settings)
+    // Auto-save draft every 30 seconds while editing (if enabled in settings)
     val autoSaveEnabled by social.mycelium.android.ui.settings.FeedPreferences.autoSaveDrafts.collectAsState()
     val draftIdForAutoSave = remember { loadedDraft?.id ?: java.util.UUID.randomUUID().toString() }
     LaunchedEffect(autoSaveEnabled) {
         if (!autoSaveEnabled) return@LaunchedEffect
         while (true) {
-            kotlinx.coroutines.delay(10_000L)
-            if (title.isNotBlank() || content.isNotBlank()) {
+            kotlinx.coroutines.delay(30_000L)
+            if ((content.isNotBlank() || title.isNotBlank()) && (content != lastSavedContent || title != lastSavedTitle)) {
                 social.mycelium.android.repository.DraftsRepository.saveDraft(
                     social.mycelium.android.data.Draft(
                         id = draftIdForAutoSave,
@@ -102,6 +107,8 @@ fun ComposeTopicScreen(
                         title = title
                     )
                 )
+                lastSavedContent = content
+                lastSavedTitle = title
             }
         }
     }

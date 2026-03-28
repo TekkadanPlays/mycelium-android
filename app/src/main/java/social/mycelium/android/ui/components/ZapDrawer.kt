@@ -224,6 +224,8 @@ fun ZapBottomSheet(
     onZap: (Long) -> Unit,
     onCustomZapSend: ((Long, ZapType, String) -> Unit)? = null,
     onSettingsClick: () -> Unit = {},
+    /** When true, opens directly on the NWC Setup tab instead of the Zap tab. */
+    startOnSetup: Boolean = false,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
@@ -232,7 +234,7 @@ fun ZapBottomSheet(
     }
     val zapAmounts by ZapAmountManager.zapAmounts.collectAsState()
 
-    var currentTab by remember { mutableStateOf(ZapDrawerTab.Zap) }
+    var currentTab by remember { mutableStateOf(if (startOnSetup) ZapDrawerTab.Setup else ZapDrawerTab.Zap) }
     var customAmount by remember { mutableStateOf("") }
     var customMessage by remember { mutableStateOf("") }
     var selectedZapType by remember { mutableStateOf(ZapType.PUBLIC) }

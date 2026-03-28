@@ -1,4 +1,4 @@
-﻿package social.mycelium.android.ui.components
+package social.mycelium.android.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -277,6 +277,7 @@ internal fun QuotedNoteBody(
                                             ),
                                             isReply = meta.rootNoteId != null,
                                             rootNoteId = meta.rootNoteId,
+                                            replyToId = meta.replyToId,
                                             relayUrl = meta.relayUrl,
                                             relayUrls = listOfNotNull(meta.relayUrl),
                                             kind = meta.kind,
@@ -578,6 +579,7 @@ internal fun QuotedNoteBody(
                                             ),
                                             isReply = cached.rootNoteId != null,
                                             rootNoteId = cached.rootNoteId,
+                                            replyToId = cached.replyToId,
                                             relayUrl = cached.relayUrl,
                                             relayUrls = listOfNotNull(cached.relayUrl),
                                             kind = cached.kind,

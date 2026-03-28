@@ -2536,17 +2536,17 @@ private fun NotificationSetupUI(
         Spacer(Modifier.height(8.dp))
 
         OnboardingConnectionModeOption(
-            title = "Adaptive",
-            description = "Periodic inbox checks. Good battery life.",
-            selected = connectionMode == ConnectionMode.ADAPTIVE,
-            onClick = { NotificationPreferences.setConnectionMode(ConnectionMode.ADAPTIVE) },
+            title = "Always On",
+            description = "Real-time notifications. Mycelium is already battery-efficient.",
+            selected = connectionMode == ConnectionMode.ALWAYS_ON,
+            onClick = { NotificationPreferences.setConnectionMode(ConnectionMode.ALWAYS_ON) },
             recommended = true
         )
         OnboardingConnectionModeOption(
-            title = "Always On",
-            description = "Real-time notifications. Higher battery usage.",
-            selected = connectionMode == ConnectionMode.ALWAYS_ON,
-            onClick = { NotificationPreferences.setConnectionMode(ConnectionMode.ALWAYS_ON) }
+            title = "Adaptive",
+            description = "Periodic inbox checks. May miss real-time events.",
+            selected = connectionMode == ConnectionMode.ADAPTIVE,
+            onClick = { NotificationPreferences.setConnectionMode(ConnectionMode.ADAPTIVE) }
         )
         OnboardingConnectionModeOption(
             title = "When Active",

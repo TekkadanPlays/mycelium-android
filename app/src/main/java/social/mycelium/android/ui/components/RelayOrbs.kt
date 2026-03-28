@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.window.Dialog
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
@@ -120,6 +121,28 @@ fun RelayOrbs(
         }
     }
 
+}
+
+/**
+ * Single relay orb icon with configurable size — for use in filter chips, badges, etc.
+ * Handles NIP-11 cache lookup internally.
+ */
+@Composable
+fun SingleRelayOrb(
+    relayUrl: String,
+    size: Dp = ORB_SIZE,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val nip11 = remember(context) { Nip11CacheManager.getInstance(context) }
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        RelayOrbIcon(relayUrl = relayUrl, nip11 = nip11, context = context)
+    }
 }
 
 /** Resolve the best icon URL for a relay: NIP-11 icon → NIP-11 image → favicon.ico */

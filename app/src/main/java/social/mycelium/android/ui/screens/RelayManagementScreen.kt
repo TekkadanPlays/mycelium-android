@@ -454,20 +454,7 @@ fun RelayManagementScreen(
                         }
                     }
 
-                    // Secondary: Publish All Categories (Profile tabs)
-                    AnimatedVisibility(
-                        visible = fabExpanded && isProfileTab,
-                        enter = fadeIn() + slideInVertically { it / 2 },
-                        exit = fadeOut() + slideOutVertically { it / 2 }
-                    ) {
-                        FabMenuItem(label = "Publish All Categories", icon = Icons.Outlined.CloudUpload) {
-                            fabExpanded = false
-                            viewModel.publishAllCategoriesToRelays()
-                            scope.launch {
-                                snackbarHostState.showSnackbar("Publishing ${relayCategories.size} categories to outbox")
-                            }
-                        }
-                    }
+
 
                     // Secondary: Create New Profile (always available)
                     AnimatedVisibility(
@@ -828,6 +815,12 @@ fun RelayManagementScreen(
                                 editCategoryName = cat.name
                                 showEditCategoryDialog = true
                             },
+                            onPublishCategory = { cat ->
+                                viewModel.publishProfileCategory(profile.id, cat.id)
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Publishing \"${cat.name}\" to outbox")
+                                }
+                            },
                             onEditRelay = { catId, relay ->
                                 editRelayTarget = relay
                                 editRelayCategoryId = catId
@@ -915,6 +908,39 @@ fun RelayManagementScreen(
                             )
                         }
                     }
+                    // Publish Category action
+                    Surface(
+                        shape = RectangleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth().clickable {
+                            val profId = editCategoryProfileId
+                            if (profId != null) {
+                                viewModel.publishProfileCategory(profId, category.id)
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Publishing \"${editCategoryName.ifBlank { category.name }}\" to outbox")
+                                }
+                            }
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Outlined.CloudUpload, "Publish category",
+                                Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text("Publish Category",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Medium)
+                                Text("Publish this relay set to your outbox",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
                     Surface(
                         shape = RectangleShape,
                         color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
@@ -954,6 +980,7 @@ fun RelayManagementScreen(
                                         }
                                     ))
                                 }
+
                             }
                             showEditCategoryDialog = false; editCategoryTarget = null
                         }
@@ -992,9 +1019,11 @@ fun RelayManagementScreen(
         )
     }
 
-    // Edit Profile dialog — name, active toggle, delete
+    // Edit Profile dialog — name, summary, active toggle, delete
     if (showEditProfileDialog && editProfileTarget != null) {
         val profile = editProfileTarget!!
+        val profileCatCount = profile.categories.size
+        val profileRelayCount = profile.categories.sumOf { it.relays.size }
         AlertDialog(
             onDismissRequest = { showEditProfileDialog = false; editProfileTarget = null },
             containerColor = MaterialTheme.colorScheme.surface,
@@ -1012,9 +1041,34 @@ fun RelayManagementScreen(
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                         modifier = Modifier.fillMaxWidth()
                     )
+                    // Profile summary — category and relay counts
+                    if (profileCatCount > 0 || profileRelayCount > 0) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Outlined.Folder, null, Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("$profileCatCount ${if (profileCatCount == 1) "category" else "categories"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Icon(Icons.Outlined.Router, null, Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("$profileRelayCount ${if (profileRelayCount == 1) "relay" else "relays"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     Surface(
                         shape = RectangleShape,
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
@@ -1024,7 +1078,7 @@ fun RelayManagementScreen(
                                 Text("Active", style = MaterialTheme.typography.bodyMedium,
                                     fontWeight = FontWeight.Medium)
                                 Text(
-                                    "Use this profile for your feed",
+                                    "Subscribed categories in this profile will contribute relays to your feed",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1039,6 +1093,7 @@ fun RelayManagementScreen(
                             )
                         }
                     }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     Surface(
                         shape = RectangleShape,
                         color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f),
@@ -1218,6 +1273,65 @@ fun RelayManagementScreen(
                                     editRelayTarget = relay.copy(read = checked)
                                 }
                             )
+                        }
+                    }
+                    // Category context + Publish action (profile category relays only)
+                    if (editRelayProfileId != null) {
+                        val containingCategory = editRelayProfileId?.let { pId ->
+                            relayProfiles.find { it.id == pId }?.categories?.find { it.id == editRelayCategoryId }
+                        }
+                        if (containingCategory != null) {
+                            // Category context label
+                            Surface(
+                                shape = RectangleShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Outlined.Folder, null, Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("In category: ${containingCategory.name}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            // Publish Category action
+                            Surface(
+                                shape = RectangleShape,
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    val profId = editRelayProfileId
+                                    val catId = editRelayCategoryId
+                                    if (profId != null && catId != null) {
+                                        viewModel.publishProfileCategory(profId, catId)
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("Publishing \"${containingCategory.name}\" to outbox")
+                                        }
+                                    }
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Outlined.CloudUpload, "Publish category",
+                                        Modifier.size(18.dp),
+                                        tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(Modifier.width(8.dp))
+                                    Column {
+                                        Text("Publish Category",
+                                            color = MaterialTheme.colorScheme.primary,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Medium)
+                                        Text("Publish \"${containingCategory.name}\" to your outbox",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
                         }
                     }
                     Surface(
@@ -1562,8 +1676,8 @@ private fun SystemTabContent(
     var announcementsExpanded by remember { mutableStateOf(true) }
     var dmExpanded by remember { mutableStateOf(true) }
     var draftsExpanded by remember { mutableStateOf(true) }
-    var blossomExpanded by remember { mutableStateOf(true) }
-    var nip96Expanded by remember { mutableStateOf(true) }
+    var blossomExpanded by remember { mutableStateOf(false) }
+    var nip96Expanded by remember { mutableStateOf(false) }
     var announcementInput by remember { mutableStateOf("") }
     var dmInput by remember { mutableStateOf("") }
     var draftsInput by remember { mutableStateOf("") }
@@ -2340,6 +2454,7 @@ private fun CategoriesTab(
     onAddCategory: () -> Unit,
     onAddRelay: (String, String) -> Unit,
     onEditCategory: (RelayCategory) -> Unit,
+    onPublishCategory: (RelayCategory) -> Unit,
     onEditRelay: (String, UserRelay) -> Unit,
     onOpenRelayLog: (String) -> Unit,
     nip65OutboxUrls: Set<String> = emptySet(),
@@ -2414,6 +2529,7 @@ private fun CategoriesTab(
                         onCategoryExpandedChange(categoryExpanded + (category.id to !(categoryExpanded[category.id] ?: false)))
                     },
                     onEditCategory = { onEditCategory(category) },
+                    onPublishCategory = { onPublishCategory(category) },
                     onAddRelay = { url -> onAddRelay(category.id, url) },
                     onEditRelay = { relay -> onEditRelay(category.id, relay) },
                     onOpenRelayLog = onOpenRelayLog,
@@ -2530,6 +2646,7 @@ private fun FeedCategorySection(
     isExpanded: Boolean,
     onExpandToggle: () -> Unit,
     onEditCategory: () -> Unit,
+    onPublishCategory: () -> Unit,
     onAddRelay: (String) -> Unit,
     onEditRelay: (UserRelay) -> Unit,
     onOpenRelayLog: (String) -> Unit,
@@ -2574,6 +2691,10 @@ private fun FeedCategorySection(
                 IconButton(onClick = onEditCategory, modifier = Modifier.size(24.dp)) {
                     Icon(Icons.Outlined.Edit, "Edit category", Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
+                }
+                IconButton(onClick = onPublishCategory, modifier = Modifier.size(24.dp)) {
+                    Icon(Icons.Outlined.CloudUpload, "Publish category", Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f))
                 }
                 if (category.relays.isNotEmpty()) {
                     Spacer(Modifier.width(2.dp))

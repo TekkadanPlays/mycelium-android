@@ -77,6 +77,7 @@ fun ComposeNoteScreen(
     val initialText = loadedDraft?.content ?: initialContent
     var textFieldValue by remember { mutableStateOf(TextFieldValue(initialText, TextRange(initialText.length))) }
     val content by remember { derivedStateOf { textFieldValue.text } }
+    var lastSavedContent by remember { mutableStateOf(initialText) }
     val coroutineScope = rememberCoroutineScope()
     val myPubkeyHex = currentAccount?.toHexKey()
     val mentionState = remember(myPubkeyHex) { MentionSuggestionState(coroutineScope, myPubkeyHex) }
@@ -84,10 +85,14 @@ fun ComposeNoteScreen(
     val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
     DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
     val onBackWithDraft = {
-        if (content.isNotBlank() && content != initialContent) {
+        val draftIdForSave = loadedDraft?.id ?: draftId ?: java.util.UUID.randomUUID().toString()
+        if (content.isBlank()) {
+            // User erased everything — delete any existing draft
+            loadedDraft?.let { social.mycelium.android.repository.DraftsRepository.deleteDraft(it.id) }
+        } else if (content != lastSavedContent && content != initialContent) {
             social.mycelium.android.repository.DraftsRepository.saveDraft(
                 social.mycelium.android.data.Draft(
-                    id = loadedDraft?.id ?: java.util.UUID.randomUUID().toString(),
+                    id = draftIdForSave,
                     type = social.mycelium.android.data.DraftType.NOTE,
                     content = content
                 )
@@ -98,14 +103,14 @@ fun ComposeNoteScreen(
     // Intercept system back gesture to save draft before leaving
     androidx.activity.compose.BackHandler(onBack = onBackWithDraft)
 
-    // Auto-save draft every 10 seconds while editing (if enabled in settings)
+    // Auto-save draft every 30 seconds while editing (if enabled in settings)
     val autoSaveEnabled by social.mycelium.android.ui.settings.FeedPreferences.autoSaveDrafts.collectAsState()
     val draftIdForAutoSave = remember { loadedDraft?.id ?: java.util.UUID.randomUUID().toString() }
     LaunchedEffect(autoSaveEnabled) {
         if (!autoSaveEnabled) return@LaunchedEffect
         while (true) {
-            kotlinx.coroutines.delay(10_000L)
-            if (content.isNotBlank() && content != initialContent) {
+            kotlinx.coroutines.delay(30_000L)
+            if (content.isNotBlank() && content != lastSavedContent) {
                 social.mycelium.android.repository.DraftsRepository.saveDraft(
                     social.mycelium.android.data.Draft(
                         id = draftIdForAutoSave,
@@ -113,6 +118,7 @@ fun ComposeNoteScreen(
                         content = content
                     )
                 )
+                lastSavedContent = content
             }
         }
     }

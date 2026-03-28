@@ -5,10 +5,16 @@ import android.content.SharedPreferences
 import android.util.Log
 import social.mycelium.android.data.Draft
 import social.mycelium.android.data.DraftType
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -16,12 +22,16 @@ import kotlinx.serialization.json.Json
 /**
  * Singleton repository for managing NIP-37 drafts.
  * Stores drafts locally via SharedPreferences and syncs to drafts relays.
+ *
+ * Persistence is debounced (300ms) and runs on Dispatchers.IO to avoid
+ * blocking the main thread during typing.
  */
 object DraftsRepository {
 
     private const val TAG = "DraftsRepository"
     private const val PREFS_NAME = "drafts_storage"
     private const val KEY_PREFIX = "drafts_"
+    private const val PERSIST_DEBOUNCE_MS = 300L
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -30,6 +40,9 @@ object DraftsRepository {
 
     private var prefs: SharedPreferences? = null
     private var currentPubkey: String? = null
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var persistJob: Job? = null
 
     private val _drafts = MutableStateFlow<List<Draft>>(emptyList())
     val drafts: StateFlow<List<Draft>> = _drafts.asStateFlow()
@@ -57,9 +70,33 @@ object DraftsRepository {
         _drafts.value = loaded.sortedByDescending { it.updatedAt }
     }
 
+    /**
+     * Save or update a draft. Automatically deletes the draft if its content
+     * (and title, where applicable) is blank — preventing phantom empty drafts.
+     * Short-circuits if the content hasn't actually changed from what's stored.
+     */
     fun saveDraft(draft: Draft) {
         val pubkey = currentPubkey ?: return
-        // Check for existing draft with same ID (update) or same context (replace)
+
+        // Auto-delete empty drafts instead of persisting them
+        val hasContent = draft.content.isNotBlank() || !draft.title.isNullOrBlank()
+        if (!hasContent) {
+            // If there's an existing draft with this ID, remove it
+            if (_drafts.value.any { it.id == draft.id }) {
+                deleteDraft(draft.id)
+            }
+            return
+        }
+
+        // Short-circuit: skip save if content hasn't changed
+        val existingDraft = _drafts.value.find { it.id == draft.id }
+        if (existingDraft != null &&
+            existingDraft.content == draft.content &&
+            existingDraft.title == draft.title
+        ) {
+            return
+        }
+
         val existing = _drafts.value.toMutableList()
         val idx = existing.indexOfFirst { it.id == draft.id }
         if (idx >= 0) {
@@ -68,14 +105,14 @@ object DraftsRepository {
             existing.add(0, draft)
         }
         _drafts.value = existing.sortedByDescending { it.updatedAt }
-        persistLocally(pubkey)
+        schedulePersist(pubkey)
         Log.d(TAG, "Draft saved: ${draft.type} (${draft.id.take(8)})")
     }
 
     fun deleteDraft(draftId: String) {
         val pubkey = currentPubkey ?: return
         _drafts.update { it.filter { d -> d.id != draftId } }
-        persistLocally(pubkey)
+        schedulePersist(pubkey)
         Log.d(TAG, "Draft deleted: ${draftId.take(8)}")
     }
 
@@ -134,7 +171,7 @@ object DraftsRepository {
         if (idx >= 0) {
             existing[idx] = existing[idx].copy(isCompleted = true, publishError = null, updatedAt = System.currentTimeMillis())
             _drafts.value = existing
-            persistLocally(pubkey)
+            schedulePersist(pubkey)
             Log.d(TAG, "Draft marked completed: ${draftId.take(8)}")
         }
     }
@@ -147,7 +184,7 @@ object DraftsRepository {
         if (idx >= 0) {
             existing[idx] = existing[idx].copy(publishError = error, updatedAt = System.currentTimeMillis())
             _drafts.value = existing
-            persistLocally(pubkey)
+            schedulePersist(pubkey)
             Log.w(TAG, "Draft marked failed: ${draftId.take(8)} — $error")
         }
     }
@@ -156,13 +193,22 @@ object DraftsRepository {
     fun clearCompletedScheduled() {
         val pubkey = currentPubkey ?: return
         _drafts.update { it.filter { d -> !(d.isScheduled && d.isCompleted) } }
-        persistLocally(pubkey)
+        schedulePersist(pubkey)
         Log.d(TAG, "Cleared completed scheduled drafts")
     }
 
-    private fun persistLocally(pubkey: String) {
-        val key = "$KEY_PREFIX$pubkey"
-        val jsonString = json.encodeToString(_drafts.value)
-        prefs?.edit()?.putString(key, jsonString)?.apply()
+    /**
+     * Debounced persistence — coalesces rapid successive saves into a single
+     * SharedPreferences write after [PERSIST_DEBOUNCE_MS]. Runs on IO thread
+     * to avoid blocking the main/UI thread during typing.
+     */
+    private fun schedulePersist(pubkey: String) {
+        persistJob?.cancel()
+        persistJob = scope.launch {
+            delay(PERSIST_DEBOUNCE_MS)
+            val key = "$KEY_PREFIX$pubkey"
+            val jsonString = json.encodeToString(_drafts.value)
+            prefs?.edit()?.putString(key, jsonString)?.apply()
+        }
     }
 }

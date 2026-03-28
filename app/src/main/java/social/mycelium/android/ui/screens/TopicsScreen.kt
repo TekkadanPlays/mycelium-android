@@ -52,20 +52,20 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.TopicNote
-import social.mycelium.android.ui.components.AdaptiveHeader
-import social.mycelium.android.ui.components.BottomNavigationBar
-import social.mycelium.android.ui.components.SmartBottomNavigationBar
-import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
-import social.mycelium.android.ui.components.BottomNavDestinations
+import social.mycelium.android.ui.components.nav.AdaptiveHeader
+import social.mycelium.android.ui.components.nav.BottomNavigationBar
+import social.mycelium.android.ui.components.nav.SmartBottomNavigationBar
+import social.mycelium.android.ui.components.nav.ScrollAwareBottomNavigationBar
+import social.mycelium.android.ui.components.nav.BottomNavDestinations
 import social.mycelium.android.ui.components.common.ModernSearchBar
-import social.mycelium.android.ui.components.GlobalSidebar
-import social.mycelium.android.ui.components.NoteCard
-import social.mycelium.android.ui.components.ActionRowSchema
-import social.mycelium.android.ui.components.LiveActivityCard
-import social.mycelium.android.ui.components.LiveActivityRow
+import social.mycelium.android.ui.components.nav.GlobalSidebar
+import social.mycelium.android.ui.components.note.NoteCard
+import social.mycelium.android.ui.components.note.ActionRowSchema
+import social.mycelium.android.ui.components.live.LiveActivityCard
+import social.mycelium.android.ui.components.live.LiveActivityRow
 import social.mycelium.android.ui.components.common.LoadingAnimation
 import social.mycelium.android.repository.LiveActivityRepository
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.viewmodel.DashboardViewModel
 import social.mycelium.android.viewmodel.AuthViewModel
 import social.mycelium.android.viewmodel.RelayManagementViewModel
@@ -684,7 +684,7 @@ fun TopicsScreen(
                             social.mycelium.android.repository.DraftsRepository.topicRootDrafts().size
                         }
                     }
-                    social.mycelium.android.ui.components.HomeFab(
+                    social.mycelium.android.ui.components.nav.HomeFab(
                         onScrollToTop = {
                             scope.launch { listState.scrollToItem(0) }
                         },
@@ -1280,7 +1280,7 @@ fun TopicsScreen(
     // ✅ ZAP CONFIGURATION: Dialogs for editing zap amounts
     // Account switcher bottom sheet
     if (showAccountSwitcher) {
-        social.mycelium.android.ui.components.AccountSwitchBottomSheet(
+        social.mycelium.android.ui.components.nav.AccountSwitchBottomSheet(
             accountStateViewModel = accountStateViewModel,
             onDismiss = { showAccountSwitcher = false },
             onAddAccount = {
@@ -1294,7 +1294,7 @@ fun TopicsScreen(
 
     // Wallet Connect dialog
     if (showWalletConnectDialog) {
-        social.mycelium.android.ui.components.WalletConnectDialog(
+        social.mycelium.android.ui.components.zap.WalletConnectDialog(
             onDismiss = { showWalletConnectDialog = false }
         )
     }
@@ -1451,7 +1451,7 @@ private fun HashtagCard(
                 // Middle: relay orbs (expand to fill available space)
                 if (stats.relayUrls.isNotEmpty()) {
                     Spacer(Modifier.width(8.dp))
-                    social.mycelium.android.ui.components.RelayOrbs(
+                    social.mycelium.android.ui.components.relay.RelayOrbs(
                         relayUrls = stats.relayUrls,
                         onRelayClick = onRelayClick,
                         onNavigateToRelayList = onNavigateToRelayList
@@ -1610,7 +1610,7 @@ private fun Kind11TopicCard(
                     raw.filter { url -> seen.add(url.trimEnd('/').lowercase()) }.take(4)
                 }
                 if (displayRelayUrls.isNotEmpty()) {
-                    social.mycelium.android.ui.components.RelayOrbs(
+                    social.mycelium.android.ui.components.relay.RelayOrbs(
                         relayUrls = displayRelayUrls,
                         onRelayClick = onRelayClick,
                         onNavigateToRelayList = onNavigateToRelayList

@@ -500,7 +500,7 @@ private fun MessageBubble(
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (message.relayUrls.isNotEmpty()) {
-                        social.mycelium.android.ui.components.RelayOrbs(
+                        social.mycelium.android.ui.components.relay.RelayOrbs(
                             relayUrls = message.relayUrls,
                             onNavigateToRelayList = { onNavigateToRelayList(message.relayUrls) },
                             modifier = Modifier

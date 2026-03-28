@@ -37,7 +37,7 @@ import social.mycelium.android.viewmodel.SearchResultItem
 import social.mycelium.android.viewmodel.SearchTab
 import social.mycelium.android.viewmodel.SearchUiState
 import social.mycelium.android.viewmodel.SearchViewModel
-import social.mycelium.android.ui.components.ClickableNoteContent
+import social.mycelium.android.ui.components.note.ClickableNoteContent
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

@@ -29,8 +29,8 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
-import social.mycelium.android.ui.components.MentionSuggestionList
-import social.mycelium.android.ui.components.MentionSuggestionState
+import social.mycelium.android.ui.components.compose.MentionSuggestionList
+import social.mycelium.android.ui.components.compose.MentionSuggestionState
 import social.mycelium.android.ui.components.common.ModernTextField
 
 /**
@@ -62,7 +62,7 @@ fun ReplyComposeScreen(
     val coroutineScope = rememberCoroutineScope()
     val mentionState = remember(myAuthor?.id) { MentionSuggestionState(coroutineScope, myAuthor?.id) }
     DisposableEffect(mentionState) { onDispose { mentionState.dispose() } }
-    val emojiState = remember { social.mycelium.android.ui.components.EmojiShortcodeSuggestionState(coroutineScope) }
+    val emojiState = remember { social.mycelium.android.ui.components.emoji.EmojiShortcodeSuggestionState(coroutineScope) }
     DisposableEffect(emojiState) { onDispose { emojiState.dispose() } }
     val onBackWithDraft = {
         if (content.isBlank()) {
@@ -342,7 +342,7 @@ fun ReplyComposeScreen(
                     textFieldValue = TextFieldValue(newText, TextRange(newCursor))
                 }
             )
-            social.mycelium.android.ui.components.EmojiShortcodeSuggestionList(
+            social.mycelium.android.ui.components.emoji.EmojiShortcodeSuggestionList(
                 emojiState = emojiState,
                 currentText = content,
                 onTextUpdated = { newText, newCursor ->

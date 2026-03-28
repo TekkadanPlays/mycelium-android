@@ -58,16 +58,16 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Note
-import social.mycelium.android.ui.components.AdaptiveHeader
-import social.mycelium.android.ui.components.BottomNavigationBar
-import social.mycelium.android.ui.components.SmartBottomNavigationBar
-import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
-import social.mycelium.android.ui.components.BottomNavDestinations
+import social.mycelium.android.ui.components.nav.AdaptiveHeader
+import social.mycelium.android.ui.components.nav.BottomNavigationBar
+import social.mycelium.android.ui.components.nav.SmartBottomNavigationBar
+import social.mycelium.android.ui.components.nav.ScrollAwareBottomNavigationBar
+import social.mycelium.android.ui.components.nav.BottomNavDestinations
 import social.mycelium.android.ui.components.common.ModernSearchBar
-import social.mycelium.android.ui.components.GlobalSidebar
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.nav.GlobalSidebar
+import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.ui.components.common.LoadingAnimation
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.viewmodel.DashboardViewModel
 import social.mycelium.android.viewmodel.AuthViewModel
 import social.mycelium.android.viewmodel.RelayManagementViewModel
@@ -821,7 +821,7 @@ private fun DashboardFeedContent(
         }
 
         androidx.compose.runtime.CompositionLocalProvider(
-            social.mycelium.android.ui.components.LocalFeedListState provides listState
+            social.mycelium.android.ui.components.note.LocalFeedListState provides listState
         ) {
         LazyColumn(
             state = listState,
@@ -874,7 +874,7 @@ private fun DashboardFeedContent(
                 contentType = { if (it.kind == 30023) "article_card" else "note_card" }
             ) { note ->
                 if (note.kind == 30023) {
-                    social.mycelium.android.ui.components.ArticleCard(
+                    social.mycelium.android.ui.components.note.ArticleCard(
                         note = note,
                         onNoteClick = { onThreadClick(note, null) },
                         onProfileClick = onProfileClick,
@@ -2130,7 +2130,7 @@ fun DashboardScreen(
                     val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
                     val kind1RootDrafts =
                         remember(draftsList) { draftsList.filter { it.type == social.mycelium.android.data.DraftType.NOTE } }
-                    social.mycelium.android.ui.components.HomeFab(
+                    social.mycelium.android.ui.components.nav.HomeFab(
                         onScrollToTop = {
                             scope.launch { listState.scrollToItem(0) }
                         },
@@ -2231,7 +2231,7 @@ fun DashboardScreen(
 
     // Account switcher bottom sheet
     if (showAccountSwitcher) {
-        social.mycelium.android.ui.components.AccountSwitchBottomSheet(
+        social.mycelium.android.ui.components.nav.AccountSwitchBottomSheet(
             accountStateViewModel = accountStateViewModel,
             onDismiss = { showAccountSwitcher = false },
             onAddAccount = {
@@ -2245,7 +2245,7 @@ fun DashboardScreen(
 
     // Wallet Connect dialog
     if (showWalletConnectDialog) {
-        social.mycelium.android.ui.components.WalletConnectDialog(
+        social.mycelium.android.ui.components.zap.WalletConnectDialog(
             onDismiss = { showWalletConnectDialog = false }
         )
     }

@@ -56,6 +56,8 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.collect
 import java.util.Calendar
+import social.mycelium.android.ui.components.note.isMarkdown
+import social.mycelium.android.ui.components.note.EmbeddedArticlePreview
 
 // ─── Time group labels ───────────────────────────────────────────────────────
 
@@ -693,7 +695,7 @@ private fun CompactNotificationRow(
                         if (notification.customEmojiUrl != null) urls[emoji] = notification.customEmojiUrl
                         urls.toMap()
                     }
-                    social.mycelium.android.ui.components.ReactionEmoji(
+                    social.mycelium.android.ui.components.emoji.ReactionEmoji(
                         emoji = emoji,
                         customEmojiUrls = emojiUrls,
                         fontSize = 16.sp,
@@ -804,7 +806,7 @@ private fun CompactNotificationRow(
                                 if (notification.customEmojiUrl != null) urls[emoji] = notification.customEmojiUrl
                                 urls.toMap()
                             }
-                            social.mycelium.android.ui.components.ReactionEmoji(
+                            social.mycelium.android.ui.components.emoji.ReactionEmoji(
                                 emoji = emoji,
                                 customEmojiUrls = emojiUrls,
                                 fontSize = 14.sp,
@@ -1047,7 +1049,7 @@ private fun NotificationReplyContent(
     val linkStyle = remember(linkColor) { SpanStyle(color = linkColor, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline) }
 
     // Use the full rich content pipeline (same as feed cards)
-    val contentIsMarkdown = remember(replyNote.content) { social.mycelium.android.ui.components.isMarkdown(replyNote.content) }
+    val contentIsMarkdown = remember(replyNote.content) { social.mycelium.android.ui.components.note.isMarkdown(replyNote.content) }
     val contentBlocks = remember(replyNote.content, mediaUrlSet, linkStyle) {
         social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
             content = replyNote.content,
@@ -1067,7 +1069,7 @@ private fun NotificationReplyContent(
                     val annotated = block.annotated
                     if (annotated.isNotEmpty()) {
                         if (contentIsMarkdown) {
-                            social.mycelium.android.ui.components.MarkdownNoteContent(
+                            social.mycelium.android.ui.components.note.MarkdownNoteContent(
                                 content = annotated.text,
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     color = MaterialTheme.colorScheme.onSurface,
@@ -1078,7 +1080,7 @@ private fun NotificationReplyContent(
                                 onUrlClick = { url -> uriHandler.openUri(url) }
                             )
                         } else {
-                            social.mycelium.android.ui.components.ClickableNoteContent(
+                            social.mycelium.android.ui.components.note.ClickableNoteContent(
                                 text = annotated,
                                 style = MaterialTheme.typography.bodyMedium.copy(
                                     color = MaterialTheme.colorScheme.onSurface,
@@ -1142,7 +1144,7 @@ private fun NotificationReplyContent(
                     }
                 }
                 is social.mycelium.android.utils.NoteContentBlock.Preview -> {
-                    social.mycelium.android.ui.components.UrlPreviewCard(
+                    social.mycelium.android.ui.components.preview.UrlPreviewCard(
                         previewInfo = block.previewInfo,
                         onUrlClick = { url -> uriHandler.openUri(url) },
                         onUrlLongClick = { }
@@ -1172,14 +1174,14 @@ private fun NotificationReplyContent(
                     }
                 }
                 is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
-                    social.mycelium.android.ui.components.EmojiPackGrid(
+                    social.mycelium.android.ui.components.emoji.EmojiPackGrid(
                         author = block.author,
                         dTag = block.dTag,
                         relayHints = block.relayHints
                     )
                 }
                 is social.mycelium.android.utils.NoteContentBlock.Article -> {
-                    social.mycelium.android.ui.components.EmbeddedArticlePreview(
+                    social.mycelium.android.ui.components.note.EmbeddedArticlePreview(
                         author = block.author,
                         dTag = block.dTag,
                         relayHints = block.relayHints,
@@ -1240,7 +1242,7 @@ private fun NotificationTargetPreview(
     val targetMediaSet = remember(target.mediaUrls) { target.mediaUrls.toSet() }
 
     // Rich content pipeline — same as feed
-    val contentIsMarkdown = remember(target.content) { social.mycelium.android.ui.components.isMarkdown(target.content) }
+    val contentIsMarkdown = remember(target.content) { social.mycelium.android.ui.components.note.isMarkdown(target.content) }
     val contentBlocks = remember(target.content, targetMediaSet, linkStyle) {
         social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
             content = target.content,
@@ -1302,7 +1304,7 @@ private fun NotificationTargetPreview(
                             val annotated = block.annotated
                             if (annotated.isNotEmpty()) {
                                 if (contentIsMarkdown) {
-                                    social.mycelium.android.ui.components.MarkdownNoteContent(
+                                    social.mycelium.android.ui.components.note.MarkdownNoteContent(
                                         content = annotated.text,
                                         style = MaterialTheme.typography.bodySmall.copy(
                                             color = contentColor,
@@ -1313,7 +1315,7 @@ private fun NotificationTargetPreview(
                                         onUrlClick = { url -> uriHandler.openUri(url) }
                                     )
                                 } else {
-                                    social.mycelium.android.ui.components.ClickableNoteContent(
+                                    social.mycelium.android.ui.components.note.ClickableNoteContent(
                                         text = annotated,
                                         style = MaterialTheme.typography.bodySmall.copy(
                                             color = contentColor,
@@ -1368,7 +1370,7 @@ private fun NotificationTargetPreview(
                             }
                         }
                         is social.mycelium.android.utils.NoteContentBlock.Preview -> {
-                            social.mycelium.android.ui.components.UrlPreviewCard(
+                            social.mycelium.android.ui.components.preview.UrlPreviewCard(
                                 previewInfo = block.previewInfo,
                                 onUrlClick = { url -> uriHandler.openUri(url) },
                                 onUrlLongClick = { }
@@ -1394,14 +1396,14 @@ private fun NotificationTargetPreview(
                             }
                         }
                         is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
-                            social.mycelium.android.ui.components.EmojiPackGrid(
+                            social.mycelium.android.ui.components.emoji.EmojiPackGrid(
                                 author = block.author,
                                 dTag = block.dTag,
                                 relayHints = block.relayHints
                             )
                         }
                         is social.mycelium.android.utils.NoteContentBlock.Article -> {
-                            social.mycelium.android.ui.components.EmbeddedArticlePreview(
+                            social.mycelium.android.ui.components.note.EmbeddedArticlePreview(
                                 author = block.author,
                                 dTag = block.dTag,
                                 relayHints = block.relayHints

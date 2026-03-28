@@ -73,10 +73,10 @@ import social.mycelium.android.repository.NotificationsRepository
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.repository.RelayRepository
 import social.mycelium.android.repository.RelayStorageManager
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.utils.normalizeAuthorIdForCache
-import social.mycelium.android.ui.components.ScrollAwareBottomNavigationBar
-import social.mycelium.android.ui.components.ThreadSlideBackBox
+import social.mycelium.android.ui.components.nav.ScrollAwareBottomNavigationBar
+import social.mycelium.android.ui.components.note.ThreadSlideBackBox
 import social.mycelium.android.ui.screens.AboutScreen
 import social.mycelium.android.ui.screens.DebugSettingsScreen
 import social.mycelium.android.ui.screens.AnnouncementsFeedScreen
@@ -116,9 +116,9 @@ import social.mycelium.android.ui.screens.LiveExplorerScreen
 import social.mycelium.android.ui.screens.ReactionsScreen
 import social.mycelium.android.ui.screens.LiveStreamScreen
 import social.mycelium.android.ui.screens.OnboardingScreen
-import social.mycelium.android.ui.components.PipStreamManager
-import social.mycelium.android.ui.components.PipStreamOverlay
-import social.mycelium.android.ui.components.SharedPlayerPool
+import social.mycelium.android.ui.components.media.PipStreamManager
+import social.mycelium.android.ui.components.media.PipStreamOverlay
+import social.mycelium.android.ui.components.media.SharedPlayerPool
 import social.mycelium.android.ui.screens.QrCodeScreen
 import social.mycelium.android.ui.screens.ReplyComposeScreen
 import social.mycelium.android.viewmodel.AnnouncementsViewModel

@@ -34,12 +34,13 @@ import social.mycelium.android.data.ThreadReply
 import social.mycelium.android.data.toNote
 import social.mycelium.android.repository.TopicNote
 import social.mycelium.android.repository.TopicRepliesRepository
-import social.mycelium.android.ui.components.NoteCard
-import social.mycelium.android.ui.components.ActionRowSchema
+import social.mycelium.android.ui.components.note.NoteCard
+import social.mycelium.android.ui.components.note.ActionRowSchema
 import social.mycelium.android.ui.components.common.ProfilePicture
 import social.mycelium.android.viewmodel.AccountStateViewModel
 import social.mycelium.android.viewmodel.ThreadRepliesViewModel
 import kotlinx.coroutines.launch
+import social.mycelium.android.ui.components.note.FabMenuItem
 
 /**
  * TopicThreadScreen - Displays a kind:11 topic with its kind:1 replies
@@ -145,14 +146,14 @@ fun TopicThreadScreen(
         },
         floatingActionButton = {
             val replyItems = listOf(
-                social.mycelium.android.ui.components.FabMenuItem(
+                social.mycelium.android.ui.components.note.FabMenuItem(
                     label = "Topic",
                     icon = Icons.Default.Comment,
                     onClick = onReplyKind1111Click,
                     containerColor = MaterialTheme.colorScheme.secondaryContainer,
                     contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                 ),
-                social.mycelium.android.ui.components.FabMenuItem(
+                social.mycelium.android.ui.components.note.FabMenuItem(
                     label = "Global",
                     icon = Icons.Default.Public,
                     onClick = onReplyKind1Click,
@@ -160,7 +161,7 @@ fun TopicThreadScreen(
                     contentColor = MaterialTheme.colorScheme.onTertiaryContainer
                 )
             )
-            social.mycelium.android.ui.components.ThreadFab(
+            social.mycelium.android.ui.components.note.ThreadFab(
                 listState = listState,
                 replyItems = replyItems,
                 firstReplyIndex = 2,

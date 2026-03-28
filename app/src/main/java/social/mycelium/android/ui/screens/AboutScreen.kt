@@ -27,7 +27,7 @@ import social.mycelium.android.data.Author
 import social.mycelium.android.repository.ProfileMetadataCache
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.ui.components.common.ProfilePicture
-import social.mycelium.android.ui.components.SupportZapBottomSheet
+import social.mycelium.android.ui.components.zap.SupportZapBottomSheet
 import com.example.cybin.nip19.Nip19Parser
 import com.example.cybin.nip19.NPub
 import kotlinx.coroutines.Dispatchers
@@ -209,7 +209,7 @@ fun AboutScreen(
                 // Bio (rich rendering with markdown, links, nip-19 entities)
                 author.about?.let { bio ->
                     Spacer(modifier = Modifier.height(8.dp))
-                    social.mycelium.android.ui.components.MarkdownNoteContent(
+                    social.mycelium.android.ui.components.note.MarkdownNoteContent(
                         content = bio,
                         style = MaterialTheme.typography.bodyMedium.copy(
                             color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -16,9 +16,9 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import social.mycelium.android.data.Note
-import social.mycelium.android.ui.components.AdaptiveHeader
-import social.mycelium.android.ui.components.HomeFab
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.nav.AdaptiveHeader
+import social.mycelium.android.ui.components.nav.HomeFab
+import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.viewmodel.AnnouncementsUiState
 
 @OptIn(ExperimentalMaterial3Api::class)

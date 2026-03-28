@@ -63,7 +63,7 @@ import social.mycelium.android.data.SampleData
 import social.mycelium.android.ui.components.common.ModernSearchBar
 import social.mycelium.android.repository.ProfileFeedRepository
 import social.mycelium.android.repository.ZapType
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.note.NoteCard
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
@@ -71,6 +71,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.ui.layout.layout
 import kotlin.math.roundToInt
+import social.mycelium.android.ui.components.zap.ZapCustomDialog
 
 // ─── Profile tab definitions ────────────────────────────────────────────────
 
@@ -632,7 +633,7 @@ fun ProfileScreen(
 
     // Profile zap dialog
     if (showProfileZapDialog) {
-        social.mycelium.android.ui.components.ZapCustomDialog(
+        social.mycelium.android.ui.components.zap.ZapCustomDialog(
             onDismiss = { showProfileZapDialog = false },
             onSendZap = { amount, zapType, message ->
                 showProfileZapDialog = false

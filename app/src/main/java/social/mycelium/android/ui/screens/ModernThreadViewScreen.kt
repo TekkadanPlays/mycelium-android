@@ -48,6 +48,9 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.animation.core.animateFloatAsState
+import social.mycelium.android.ui.components.note.isMarkdown
+import social.mycelium.android.ui.components.note.EmbeddedArticlePreview
+import social.mycelium.android.ui.components.note.FabMenuItem
 
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
@@ -79,16 +82,16 @@ import social.mycelium.android.data.toThreadReplyForThread
 import social.mycelium.android.data.toNote
 import social.mycelium.android.data.SampleData
 import social.mycelium.android.repository.RelayStorageManager
-import social.mycelium.android.ui.components.AdaptiveHeader
-import social.mycelium.android.ui.components.BottomNavigationBar
+import social.mycelium.android.ui.components.nav.AdaptiveHeader
+import social.mycelium.android.ui.components.nav.BottomNavigationBar
 import social.mycelium.android.repository.ZapType
-import social.mycelium.android.ui.components.NoteCard
+import social.mycelium.android.ui.components.note.NoteCard
 import social.mycelium.android.ui.components.common.ProfilePicture
-import social.mycelium.android.ui.components.RelayOrbs
-import social.mycelium.android.ui.components.SingleRelayOrb
+import social.mycelium.android.ui.components.relay.RelayOrbs
+import social.mycelium.android.ui.components.relay.SingleRelayOrb
 import androidx.compose.foundation.lazy.LazyRow
-import social.mycelium.android.ui.components.ZapButtonWithMenu
-import social.mycelium.android.ui.components.ZapMenuRow
+import social.mycelium.android.ui.components.zap.ZapButtonWithMenu
+import social.mycelium.android.ui.components.zap.ZapMenuRow
 import social.mycelium.android.ui.icons.ArrowDownward
 import social.mycelium.android.ui.icons.ArrowUpward
 import social.mycelium.android.ui.icons.Bolt
@@ -743,7 +746,7 @@ fun ModernThreadViewScreen(
             val replyItems = buildList {
                 if (onOpenReplyCompose != null || onPublishThreadReply != null) {
                     add(
-                        social.mycelium.android.ui.components.FabMenuItem(
+                        social.mycelium.android.ui.components.note.FabMenuItem(
                             label = "Reply",
                             icon = Icons.Outlined.Reply,
                             onClick = {
@@ -760,7 +763,7 @@ fun ModernThreadViewScreen(
             // Show ThreadFab when there are reply actions OR when there are replies to navigate
             if (replyItems.isNotEmpty() || repliesState.replies.isNotEmpty()) {
                 val hasNestedReplies = repliesState.threadedReplies.any { it.children.isNotEmpty() }
-                social.mycelium.android.ui.components.ThreadFab(
+                social.mycelium.android.ui.components.note.ThreadFab(
                     listState = listState,
                     replyItems = replyItems,
                     firstReplyIndex = 2,
@@ -864,8 +867,8 @@ fun ModernThreadViewScreen(
                             showHashtagsSection = false,
                             initialMediaPage = mediaPageForNote(note.id),
                             onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
-                            actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.ActionRowSchema.KIND1_FEED
-                            else social.mycelium.android.ui.components.ActionRowSchema.KIND11_FEED,
+                            actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.note.ActionRowSchema.KIND1_FEED
+                            else social.mycelium.android.ui.components.note.ActionRowSchema.KIND11_FEED,
                             onSeeAllReactions = { onSeeAllReactions(note.id) },
                             compactMedia = compactMedia,
                             onPollVote = onPollVote,
@@ -1281,7 +1284,7 @@ fun ModernThreadViewScreen(
                                 draft.parentId == note.id || draft.rootId == note.id -> 0
                                 else -> 0
                             }
-                            social.mycelium.android.ui.components.DraftReplyCard(
+                            social.mycelium.android.ui.components.note.DraftReplyCard(
                                 draft = draft,
                                 level = draftLevel,
                                 onEditClick = onEditDraft,
@@ -1298,7 +1301,7 @@ fun ModernThreadViewScreen(
     // Zap configuration: now navigates to zap_settings page via onNavigateToZapSettings
 
     if (showWalletConnectDialog) {
-        social.mycelium.android.ui.components.WalletConnectDialog(
+        social.mycelium.android.ui.components.zap.WalletConnectDialog(
             onDismiss = { showWalletConnectDialog = false }
         )
     }
@@ -1807,7 +1810,7 @@ private fun ModernCommentCard(
 
                     // Zap drawer — ModalBottomSheet for smooth animate-in/out
                     if (isZapMenuExpanded) {
-                        social.mycelium.android.ui.components.ZapBottomSheet(
+                        social.mycelium.android.ui.components.zap.ZapBottomSheet(
                             onDismiss = { onExpandZapMenu(commentId) },
                             onZap = { amount ->
                                 onExpandZapMenu(commentId)
@@ -2002,7 +2005,7 @@ private fun ReplyHeader(
                     if (hcReactions.isNotEmpty()) {
                         val uniqueEmojis = hcReactions.distinct().take(3)
                         uniqueEmojis.forEach { emoji ->
-                            social.mycelium.android.ui.components.ReactionEmoji(
+                            social.mycelium.android.ui.components.emoji.ReactionEmoji(
                                 emoji = emoji,
                                 customEmojiUrls = hcEmojiUrls,
                                 fontSize = 12.sp,
@@ -2100,7 +2103,7 @@ private fun ReplyContentBody(
             }
             .toSet()
     }
-    val replyIsMarkdown = remember(reply.content) { social.mycelium.android.ui.components.isMarkdown(reply.content) }
+    val replyIsMarkdown = remember(reply.content) { social.mycelium.android.ui.components.note.isMarkdown(reply.content) }
     val replyMentionedPubkeys = remember(reply.content) {
         social.mycelium.android.utils.extractPubkeysFromContent(reply.content)
     }
@@ -2176,7 +2179,7 @@ private fun ReplyContentBody(
                 val annotated = block.annotated
                 if (annotated.isNotEmpty()) {
                     if (replyIsMarkdown) {
-                        social.mycelium.android.ui.components.MarkdownNoteContent(
+                        social.mycelium.android.ui.components.note.MarkdownNoteContent(
                             content = annotated.text,
                             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
                             onProfileClick = onProfileClick,
@@ -2184,7 +2187,7 @@ private fun ReplyContentBody(
                             onUrlClick = { url -> uriHandler.openUri(url) }
                         )
                     } else {
-                        social.mycelium.android.ui.components.ClickableNoteContent(
+                        social.mycelium.android.ui.components.note.ClickableNoteContent(
                             text = annotated,
                             style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
                             emojiUrls = block.emojiUrls,
@@ -2210,7 +2213,7 @@ private fun ReplyContentBody(
                 val mediaList = block.urls.take(10)
                 if (mediaList.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(6.dp))
-                    social.mycelium.android.ui.components.NoteMediaCarousel(
+                    social.mycelium.android.ui.components.note.NoteMediaCarousel(
                         mediaList = mediaList,
                         allMediaUrls = mediaList,
                         groupStartIndex = 0,
@@ -2227,7 +2230,7 @@ private fun ReplyContentBody(
             }
 
             is social.mycelium.android.utils.NoteContentBlock.Preview -> {
-                social.mycelium.android.ui.components.UrlPreviewCard(
+                social.mycelium.android.ui.components.preview.UrlPreviewCard(
                     previewInfo = block.previewInfo,
                     onUrlClick = { url -> uriHandler.openUri(url) },
                     onUrlLongClick = { }
@@ -2325,7 +2328,7 @@ private fun ReplyContentBody(
             }
 
             is social.mycelium.android.utils.NoteContentBlock.EmojiPack -> {
-                social.mycelium.android.ui.components.EmojiPackGrid(
+                social.mycelium.android.ui.components.emoji.EmojiPackGrid(
                     author = block.author,
                     dTag = block.dTag,
                     relayHints = block.relayHints
@@ -2333,7 +2336,7 @@ private fun ReplyContentBody(
             }
 
             is social.mycelium.android.utils.NoteContentBlock.Article -> {
-                social.mycelium.android.ui.components.EmbeddedArticlePreview(
+                social.mycelium.android.ui.components.note.EmbeddedArticlePreview(
                     author = block.author,
                     dTag = block.dTag,
                     relayHints = block.relayHints,
@@ -2362,7 +2365,7 @@ private fun ReplyContentBody(
                 val meta = qMeta
                 if (meta != null) {
                     val qAuthor = remember(meta.authorId) { qProfileCache.resolveAuthor(meta.authorId) }
-                    social.mycelium.android.ui.components.QuotedNoteContent(
+                    social.mycelium.android.ui.components.note.QuotedNoteContent(
                         parentNoteId = reply.id,
                         meta = meta,
                         quotedAuthor = qAuthor,
@@ -2618,7 +2621,7 @@ private fun ReplyControlsPanel(
                                     if (myPubkey in authors) listOf(reply.id to emoji) else emptyList()
                                 }
                             }
-                            social.mycelium.android.ui.components.ReactionFavoritesBar(
+                            social.mycelium.android.ui.components.emoji.ReactionFavoritesBar(
                                 recentEmojis = recentEmojis,
                                 onEmojiSelected = { emoji ->
                                     showReactionMenu = false
@@ -2644,7 +2647,7 @@ private fun ReplyControlsPanel(
                             )
                         }
                         if (showFullPicker) {
-                            social.mycelium.android.ui.components.EmojiDrawer(
+                            social.mycelium.android.ui.components.emoji.EmojiDrawer(
                                 accountNpub = accountNpub,
                                 onDismiss = { showFullPicker = false },
                                 onEmojiSelected = { emoji ->
@@ -2690,7 +2693,7 @@ private fun ReplyControlsPanel(
 
     // Zap drawer — ModalBottomSheet for smooth animate-in/out
     if (isControlsExpanded && isZapMenuExpanded) {
-        social.mycelium.android.ui.components.ZapBottomSheet(
+        social.mycelium.android.ui.components.zap.ZapBottomSheet(
             onDismiss = { onExpandZapMenu(reply.id) },
             onZap = { amount ->
                 onExpandZapMenu(reply.id)
@@ -2787,7 +2790,7 @@ private fun ReplyDetailsPanel(
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                social.mycelium.android.ui.components.ReactionEmoji(
+                                social.mycelium.android.ui.components.emoji.ReactionEmoji(
                                     emoji = emoji,
                                     customEmojiUrls = detailEmojiUrls,
                                     fontSize = 13.sp,
@@ -2851,7 +2854,7 @@ private fun ReplyDetailsPanel(
                                     .fillMaxWidth()
                                     .padding(vertical = 2.dp)
                             ) {
-                                social.mycelium.android.ui.components.ReactionEmoji(
+                                social.mycelium.android.ui.components.emoji.ReactionEmoji(
                                     emoji = emoji,
                                     customEmojiUrls = detailEmojiUrls,
                                     fontSize = 14.sp,

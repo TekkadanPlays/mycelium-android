@@ -93,9 +93,9 @@ import social.mycelium.android.data.LiveChatMessage
 import social.mycelium.android.repository.LiveActivityRepository
 import social.mycelium.android.repository.LiveChatRepository
 import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.ui.components.LiveStatusDot
-import social.mycelium.android.ui.components.PipStreamManager
-import social.mycelium.android.ui.components.RelayOrbs
+import social.mycelium.android.ui.components.live.LiveStatusDot
+import social.mycelium.android.ui.components.media.PipStreamManager
+import social.mycelium.android.ui.components.relay.RelayOrbs
 import social.mycelium.android.viewmodel.AccountStateViewModel
 
 /**

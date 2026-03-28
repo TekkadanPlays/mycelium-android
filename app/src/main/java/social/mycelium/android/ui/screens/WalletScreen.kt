@@ -48,7 +48,7 @@ import social.mycelium.android.repository.CoinosTransaction
 import social.mycelium.android.repository.NotificationsRepository
 import social.mycelium.android.repository.NwcConfig
 import social.mycelium.android.repository.NwcConfigRepository
-import social.mycelium.android.ui.components.ZapBottomSheet
+import social.mycelium.android.ui.components.zap.ZapBottomSheet
 import com.example.cybin.signer.NostrSigner
 import kotlinx.coroutines.launch
 import social.mycelium.android.BuildConfig

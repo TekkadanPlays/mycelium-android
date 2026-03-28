@@ -221,7 +221,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     if (accountStateViewModel.onboardingComplete.value) {
                         RelayConnectionStateMachine.getInstance().requestReconnectOnResume()
                     }
-                    social.mycelium.android.ui.components.PipStreamManager.resumeIfActive()
+                    social.mycelium.android.ui.components.media.PipStreamManager.resumeIfActive()
                     social.mycelium.android.repository.Nip66RelayDiscoveryRepository.refreshIfStale()
                 }
                 Lifecycle.Event.ON_STOP -> {
@@ -229,9 +229,9 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                         DebugVerboseLog.record(DebugVerboseLog.Layer.SYSTEM, "MainActivity", "ON_STOP")
                     }
                     // Pause all inline video players when app goes to background
-                    social.mycelium.android.ui.components.SharedPlayerPool.pauseAll()
-                    if (!social.mycelium.android.ui.components.PipStreamManager.continueInBackground.value) {
-                        social.mycelium.android.ui.components.PipStreamManager.pauseIfActive()
+                    social.mycelium.android.ui.components.media.SharedPlayerPool.pauseAll()
+                    if (!social.mycelium.android.ui.components.media.PipStreamManager.continueInBackground.value) {
+                        social.mycelium.android.ui.components.media.PipStreamManager.pauseIfActive()
                     }
                     // WHEN_ACTIVE mode: disconnect all relays when app goes to background
                     if (social.mycelium.android.ui.settings.NotificationPreferences.connectionMode.value == social.mycelium.android.ui.settings.ConnectionMode.WHEN_ACTIVE) {

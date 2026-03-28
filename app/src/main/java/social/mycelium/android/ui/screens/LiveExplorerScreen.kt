@@ -41,7 +41,7 @@ import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.data.LiveActivityStatus
 import social.mycelium.android.repository.LiveActivityRepository
 import social.mycelium.android.repository.ProfileMetadataCache
-import social.mycelium.android.ui.components.LiveActivityCard
+import social.mycelium.android.ui.components.live.LiveActivityCard
 
 /**
  * Full-screen live broadcast explorer.

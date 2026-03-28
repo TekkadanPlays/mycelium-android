@@ -25,7 +25,7 @@ import androidx.compose.ui.unit.dp
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.repository.DebugEventStatsSnapshot
 import social.mycelium.android.repository.NotesRepository
-import social.mycelium.android.ui.components.SupportZapBottomSheet
+import social.mycelium.android.ui.components.zap.SupportZapBottomSheet
 import androidx.compose.runtime.collectAsState
 
 @OptIn(ExperimentalMaterial3Api::class)

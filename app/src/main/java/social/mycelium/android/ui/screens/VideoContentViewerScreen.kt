@@ -40,7 +40,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import social.mycelium.android.ui.components.InlineVideoPlayer
+import social.mycelium.android.ui.components.media.InlineVideoPlayer
 import java.net.URL
 import java.util.UUID
 

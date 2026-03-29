@@ -167,8 +167,9 @@ dependencies {
     // HTML parsing for URL previews
     implementation("org.jsoup:jsoup:1.17.2")
 
-    // QR code generation (npub share)
+    // QR code generation (npub share) + scanning (NWC setup)
     implementation("com.google.zxing:core:3.5.2")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // ML Kit: on-demand translation (language detection + translation)
     implementation("com.google.mlkit:language-id:17.0.6")

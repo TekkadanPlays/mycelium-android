@@ -5681,6 +5681,21 @@ fun MyceliumNavigation(
                 // Drafts Screen
                 composable("drafts") {
                     val draftsList by social.mycelium.android.repository.DraftsRepository.drafts.collectAsState()
+                    val currentAccountForDrafts by accountStateViewModel.currentAccount.collectAsState()
+                    val draftsContext = LocalContext.current
+                    val draftsStorageManager = remember(draftsContext) { RelayStorageManager(draftsContext) }
+                    val draftsRelays = remember(currentAccountForDrafts) {
+                        currentAccountForDrafts?.toHexKey()?.let { pubkey ->
+                            draftsStorageManager.loadDraftsRelays(pubkey)
+                        } ?: emptyList()
+                    }
+                    val rcsm = remember { social.mycelium.android.relay.RelayConnectionStateMachine.getInstance() }
+                    val allRelayState by rcsm.perRelayState.collectAsState()
+                    // Filter to only drafts relay URLs for the banner
+                    val draftsRelayUrls = remember(draftsRelays) { draftsRelays.map { it.url }.toSet() }
+                    val draftsPerRelayState = remember(allRelayState, draftsRelayUrls) {
+                        allRelayState.filter { it.key in draftsRelayUrls }
+                    }
                     DraftsScreen(
                         drafts = draftsList,
                         onBackClick = { navController.popBackStack() },
@@ -5732,6 +5747,20 @@ fun MyceliumNavigation(
                         },
                         onDeleteDraft = { draftId ->
                             social.mycelium.android.repository.DraftsRepository.deleteDraft(draftId)
+                        },
+                        draftsRelays = draftsRelays,
+                        perRelayState = draftsPerRelayState,
+                        onSyncDraft = { draft ->
+                            // Mark as synced for now — actual NIP-37 relay publishing
+                            // will be implemented when the protocol layer is ready
+                            social.mycelium.android.repository.DraftsRepository.markSynced(
+                                draft.id,
+                                draftsRelays.map { it.url }
+                            )
+                        },
+                        onRelayClick = { relayUrl ->
+                            val encoded = android.net.Uri.encode(relayUrl)
+                            navController.navigate("relay_log/$encoded") { launchSingleTop = true }
                         }
                     )
                 }

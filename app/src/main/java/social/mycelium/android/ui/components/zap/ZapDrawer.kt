@@ -672,12 +672,28 @@ private fun SetupContent() {
     var walletConnectRelay by remember(initialConfig) { mutableStateOf(initialConfig.relay) }
     var walletConnectSecret by remember(initialConfig) { mutableStateOf(initialConfig.secret) }
     var isSecretVisible by remember { mutableStateOf(false) }
+    var qrScanning by remember { mutableStateOf(false) }
 
     val clipboardManager = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
 
     val isConnected = initialConfig.pubkey.isNotBlank() && initialConfig.relay.isNotBlank() && initialConfig.secret.isNotBlank()
     val isPartiallyConnected = !isConnected && (initialConfig.pubkey.isNotBlank() || initialConfig.relay.isNotBlank() || initialConfig.secret.isNotBlank())
     val canSave = walletConnectPubkey.isNotBlank() && walletConnectRelay.isNotBlank() && walletConnectSecret.isNotBlank()
+
+    // QR scanner overlay — launches the camera Activity inline
+    if (qrScanning) {
+        SimpleQrCodeScanner { result ->
+            qrScanning = false
+            if (!result.isNullOrEmpty()) {
+                val parsed = ZapUtils.parseNwcUri(result)
+                if (parsed != null) {
+                    walletConnectPubkey = parsed.pubkey
+                    walletConnectRelay = parsed.relay
+                    walletConnectSecret = parsed.secret
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -718,7 +734,7 @@ private fun SetupContent() {
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Tool buttons: Disconnect & Paste
+        // Tool buttons: Disconnect, Scan QR, & Paste
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
@@ -742,28 +758,41 @@ private fun SetupContent() {
                 Spacer(Modifier.width(1.dp))
             }
 
-            TextButton(
-                onClick = {
-                    val clipData = clipboardManager.primaryClip
-                    if (clipData != null && clipData.itemCount > 0) {
-                        val text = clipData.getItemAt(0).text?.toString()
-                        if (text != null) {
-                            val parsed = ZapUtils.parseNwcUri(text)
-                            if (parsed != null) {
-                                walletConnectPubkey = parsed.pubkey
-                                walletConnectRelay = parsed.relay
-                                walletConnectSecret = parsed.secret
-                            } else {
-                                walletConnectPubkey = text
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Scan QR code button
+                TextButton(
+                    onClick = { qrScanning = true },
+                    contentPadding = PaddingValues(horizontal = 8.dp)
+                ) {
+                    Icon(Icons.Outlined.QrCodeScanner, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Scan QR")
+                }
+
+                // Paste from clipboard button
+                TextButton(
+                    onClick = {
+                        val clipData = clipboardManager.primaryClip
+                        if (clipData != null && clipData.itemCount > 0) {
+                            val text = clipData.getItemAt(0).text?.toString()
+                            if (text != null) {
+                                val parsed = ZapUtils.parseNwcUri(text)
+                                if (parsed != null) {
+                                    walletConnectPubkey = parsed.pubkey
+                                    walletConnectRelay = parsed.relay
+                                    walletConnectSecret = parsed.secret
+                                } else {
+                                    walletConnectPubkey = text
+                                }
                             }
                         }
-                    }
-                },
-                contentPadding = PaddingValues(horizontal = 8.dp)
-            ) {
-                Icon(Icons.Outlined.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("Paste NWC URI")
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp)
+                ) {
+                    Icon(Icons.Outlined.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Paste NWC URI")
+                }
             }
         }
 

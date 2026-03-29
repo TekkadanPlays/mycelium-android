@@ -34,6 +34,14 @@ Or the update manifest:
 https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/obtanium.json
 ```
 
+### Zapstore
+
+Install via [Zapstore](https://zapstore.dev) — search for **Mycelium**.
+
+### F-Droid
+
+F-Droid packaging is planned for a future release.
+
 ## Features
 
 ### Feed and Content

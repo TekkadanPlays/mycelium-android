@@ -20,7 +20,9 @@ data class Draft(
     val signedEventJson: String? = null,
     val relayUrls: List<String> = emptyList(),
     val publishError: String? = null,
-    val isCompleted: Boolean = false
+    val isCompleted: Boolean = false,
+    /** Relay URLs that have confirmed receipt of this draft (NIP-37 sync). */
+    val syncedRelays: List<String> = emptyList()
 )
 
 @Serializable

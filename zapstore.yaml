@@ -1,0 +1,88 @@
+# ═══════════════════════════════════════════════════════════════════
+# Mycelium — Zapstore Publisher Configuration
+# ═══════════════════════════════════════════════════════════════════
+# Used by zsp (https://github.com/zapstore/zsp) to publish Mycelium
+# releases to the Zapstore Nostr relay. Run from the project root:
+#
+#   zsp publish zapstore.yaml
+#
+# Or with the submodule tool:
+#
+#   cd zsp && go run . publish ../zapstore.yaml
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Source ────────────────────────────────────────────────────────
+repository: https://github.com/TekkadanPlays/mycelium-android
+
+# ── App Metadata ──────────────────────────────────────────────────
+name: Mycelium
+summary: A native Android Nostr client with relay-first architecture
+
+description: |
+  Mycelium is a native Android Nostr client built with Jetpack Compose
+  and Material Design 3. It connects to relays via WebSocket and delivers
+  decentralized social content through user-controlled relay configurations.
+
+  Features:
+  - Home feed with global and following filters, outbox relay routing
+  - Forum-style topics with threaded reply chains (NIP-22)
+  - Thread overlay stacks for chained exploration
+  - Long-form article rendering with markdown (NIP-23)
+  - Live activity discovery and HLS playback (NIP-53)
+  - Profile-based relay organization with per-relay health tracking
+  - Encrypted direct messages with conversation list (NIP-17)
+  - Lightning zaps via Wallet Connect or embedded wallet (NIP-47/57)
+  - Auto-save drafts, relay selection, Blossom media upload
+  - Multi-account with Amber external signer (NIP-55)
+  - 10-tab notification view with Android push notifications
+  - Emoji packs, polls, GIF search, custom reactions
+
+tags:
+  - nostr
+  - social
+  - android
+  - relay
+  - lightning
+  - decentralized
+
+license: MIT
+website: https://github.com/TekkadanPlays/mycelium-android
+
+# ── Media ─────────────────────────────────────────────────────────
+icon: ./images/alpha/ic_icon_playstore.png
+
+# ── Release ───────────────────────────────────────────────────────
+release_notes: ./CHANGELOG.md
+
+# ── Nostr NIPs ────────────────────────────────────────────────────
+supported_nips:
+  - "01"
+  - "02"
+  - "05"
+  - "10"
+  - "11"
+  - "17"
+  - "19"
+  - "22"
+  - "23"
+  - "25"
+  - "30"
+  - "33"
+  - "42"
+  - "44"
+  - "47"
+  - "53"
+  - "55"
+  - "57"
+  - "58"
+  - "65"
+  - "66"
+  - "78"
+  - "88"
+  - "89"
+  - "92"
+  - "96"
+
+# ── Metadata Sources ──────────────────────────────────────────────
+metadata_sources:
+  - github

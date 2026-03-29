@@ -134,6 +134,7 @@ primal-android-app/
 PureLink-Android/
 Prism/
 flightless2/
+zsp/
 
 # External reference repos (submodule artifacts — not used by build)
 nostr-watch/

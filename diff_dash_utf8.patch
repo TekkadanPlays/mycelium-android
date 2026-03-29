@@ -1,0 +1,281 @@
+﻿diff --git a/app/src/main/java/social/mycelium/android/ui/screens/DashboardScreen.kt b/app/src/main/java/social/mycelium/android/ui/screens/DashboardScreen.kt
+index 79e42fc..3ea9422 100644
+--- a/app/src/main/java/social/mycelium/android/ui/screens/DashboardScreen.kt
++++ b/app/src/main/java/social/mycelium/android/ui/screens/DashboardScreen.kt
+@@ -94,244 +94,6 @@ import social.mycelium.android.repository.sync.ZapType
+ // Γ£à PERFORMANCE: Cached date formatter (Thread view pattern)
+ private val dateFormatter by lazy { SimpleDateFormat("MMM d", Locale.getDefault()) }
+ 
+-/**
+- * Extracted relay connection loading indicator ΓÇö progress ring, animated orbs, status text.
+- * Splits ~190 lines from FeedOverlay to reduce JIT from 7.3MB.
+- */
+-@Composable
+-private fun RelayConnectionLoadingIndicator(
+-    perRelayState: Map<String, social.mycelium.android.relay.RelayEndpointStatus>,
+-    feedSession: FeedSessionState,
+-    onNavigateTo: (String) -> Unit,
+-) {
+-    val relayEntries = perRelayState.entries.toList()
+-    val connectedCount = relayEntries.count {
+-        it.value == social.mycelium.android.relay.RelayEndpointStatus.Connected
+-    }
+-    val connectingCount = relayEntries.count {
+-        it.value == social.mycelium.android.relay.RelayEndpointStatus.Connecting
+-    }
+-    val failedCount = relayEntries.count {
+-        it.value == social.mycelium.android.relay.RelayEndpointStatus.Failed
+-    }
+-    val totalCount = relayEntries.size
+-
+-    val targetProgress = if (totalCount > 0) connectedCount.toFloat() / totalCount else 0f
+-    val animatedProgress by animateFloatAsState(
+-        targetValue = targetProgress,
+-        animationSpec = tween(600, easing = FastOutSlowInEasing),
+-        label = "ring_progress"
+-    )
+-
+-    // Fixed-size column so nothing shifts as relay states change.
+-    // Total height: 80 (ring) + 20 (spacer) + 28 (orbs) + 8 (spacer) + 36 (text) = 172dp
+-    Column(
+-        horizontalAlignment = Alignment.CenterHorizontally,
+-        modifier = Modifier
+-            .padding(horizontal = 48.dp)
+-            .height(172.dp)
+-    ) {
+-        // ΓöÇΓöÇ Progress ring + mushroom (fixed 80dp) ΓöÇΓöÇ
+-        Box(
+-            contentAlignment = Alignment.Center,
+-            modifier = Modifier.size(80.dp)
+-        ) {
+-            CircularProgressIndicator(
+-                progress = { 1f },
+-                modifier = Modifier.size(80.dp),
+-                strokeWidth = 3.dp,
+-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+-                trackColor = Color.Transparent
+-            )
+-            if (totalCount > 0 && animatedProgress > 0f) {
+-                CircularProgressIndicator(
+-                    progress = { animatedProgress },
+-                    modifier = Modifier.size(80.dp),
+-                    strokeWidth = 3.dp,
+-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+-                    trackColor = Color.Transparent
+-                )
+-            }
+-            if (connectingCount > 0 || totalCount == 0) {
+-                CircularProgressIndicator(
+-                    modifier = Modifier.size(80.dp),
+-                    strokeWidth = 1.5.dp,
+-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)
+-                )
+-            }
+-            Icon(
+-                painter = androidx.compose.ui.res.painterResource(id = social.mycelium.android.R.drawable.ic_mushroom_purple),
+-                contentDescription = null,
+-                modifier = Modifier.size(36.dp),
+-                tint = Color.Unspecified
+-            )
+-        }
+-
+-        Spacer(modifier = Modifier.height(20.dp))
+-
+-        // ΓöÇΓöÇ Relay orbs (fixed 28dp container so appearing/disappearing doesn't shift text) ΓöÇΓöÇ
+-        Box(
+-            modifier = Modifier.height(28.dp),
+-            contentAlignment = Alignment.Center
+-        ) {
+-            if (relayEntries.isNotEmpty()) {
+-                val maxIndividualOrbs = 8
+-                Row(
+-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+-                    verticalAlignment = Alignment.CenterVertically,
+-                    modifier = Modifier
+-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(16.dp))
+-                        .clickable { onNavigateTo("relay_connection_status") }
+-                        .padding(horizontal = 8.dp, vertical = 6.dp)
+-                ) {
+-                    if (totalCount <= maxIndividualOrbs) {
+-                        for ((_, status) in relayEntries) {
+-                            val targetColor = when (status) {
+-                                social.mycelium.android.relay.RelayEndpointStatus.Connected ->
+-                                    Color(0xFF4CAF50)
+-
+-                                social.mycelium.android.relay.RelayEndpointStatus.Connecting ->
+-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+-
+-                                social.mycelium.android.relay.RelayEndpointStatus.Failed ->
+-                                    MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+-                            }
+-                            val animColor by animateColorAsState(
+-                                targetValue = targetColor,
+-                                animationSpec = tween(400),
+-                                label = "orb_color"
+-                            )
+-                            Box(
+-                                modifier = Modifier
+-                                    .size(7.dp)
+-                                    .background(animColor, shape = androidx.compose.foundation.shape.CircleShape)
+-                            )
+-                        }
+-                    } else {
+-                        if (connectedCount > 0) {
+-                            Box(
+-                                modifier = Modifier
+-                                    .size(7.dp)
+-                                    .background(
+-                                        Color(0xFF4CAF50),
+-                                        shape = androidx.compose.foundation.shape.CircleShape
+-                                    )
+-                            )
+-                            Spacer(Modifier.width(2.dp))
+-                            Text(
+-                                "$connectedCount",
+-                                style = MaterialTheme.typography.labelSmall,
+-                                color = Color(0xFF4CAF50).copy(alpha = 0.8f),
+-                                fontSize = 10.sp
+-                            )
+-                        }
+-                        if (connectingCount > 0) {
+-                            if (connectedCount > 0) Spacer(Modifier.width(6.dp))
+-                            Box(
+-                                modifier = Modifier
+-                                    .size(6.dp)
+-                                    .background(
+-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+-                                        shape = androidx.compose.foundation.shape.CircleShape
+-                                    )
+-                            )
+-                            Spacer(Modifier.width(2.dp))
+-                            Text(
+-                                "$connectingCount",
+-                                style = MaterialTheme.typography.labelSmall,
+-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+-                                fontSize = 10.sp
+-                            )
+-                        }
+-                        if (failedCount > 0) {
+-                            if (connectedCount > 0 || connectingCount > 0) Spacer(Modifier.width(6.dp))
+-                            Box(
+-                                modifier = Modifier
+-                                    .size(6.dp)
+-                                    .background(
+-                                        MaterialTheme.colorScheme.error.copy(alpha = 0.4f),
+-                                        shape = androidx.compose.foundation.shape.CircleShape
+-                                    )
+-                            )
+-                            Spacer(Modifier.width(2.dp))
+-                            Text(
+-                                "$failedCount",
+-                                style = MaterialTheme.typography.labelSmall,
+-                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.5f),
+-                                fontSize = 10.sp
+-                            )
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-
+-        Spacer(modifier = Modifier.height(8.dp))
+-
+-        // ΓöÇΓöÇ Status text (fixed 36dp ΓÇö all text crossfades in place) ΓöÇΓöÇ
+-        val statusText = when (feedSession) {
+-            FeedSessionState.Loading -> {
+-                if (connectedCount > 0) "Receiving notes\u2026"
+-                else if (totalCount > 0) "Connecting to relays\u2026"
+-                else "Connecting\u2026"
+-            }
+-
+-            FeedSessionState.Idle -> {
+-                if (totalCount > 0 && connectedCount > 0) "Waiting for notes\u2026"
+-                else "Connecting\u2026"
+-            }
+-
+-            else -> "Loading\u2026"
+-        }
+-        val detailText = if (totalCount > 0 && (failedCount > 0 || connectingCount > 0)) {
+-            buildString {
+-                if (connectingCount > 0) append("$connectingCount connecting")
+-                if (failedCount > 0) {
+-                    if (isNotEmpty()) append(" \u00b7 ")
+-                    append("$failedCount failed")
+-                }
+-            }
+-        } else ""
+-        Box(
+-            modifier = Modifier.height(36.dp).fillMaxWidth(),
+-            contentAlignment = Alignment.TopCenter
+-        ) {
+-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+-                androidx.compose.animation.Crossfade(
+-                    targetState = statusText,
+-                    animationSpec = tween(300),
+-                    label = "status_crossfade"
+-                ) { text ->
+-                    Text(
+-                        text = text,
+-                        style = MaterialTheme.typography.bodySmall,
+-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+-                        letterSpacing = 0.3.sp,
+-                        maxLines = 1
+-                    )
+-                }
+-                Spacer(modifier = Modifier.height(4.dp))
+-                androidx.compose.animation.Crossfade(
+-                    targetState = detailText,
+-                    animationSpec = tween(300),
+-                    label = "detail_crossfade"
+-                ) { text ->
+-                    if (text.isNotEmpty()) {
+-                        Text(
+-                            text = text,
+-                            style = MaterialTheme.typography.labelSmall,
+-                            color = if (failedCount > 0) MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+-                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+-                            fontSize = 10.sp,
+-                            maxLines = 1
+-                        )
+-                    }
+-                }
+-            }
+-        }
+-    }
+-}
+-
+ /**
+  * Non-blocking banner shown when a fetched kind-10086 indexer list differs from the
+  * user's confirmed local list. Lets the user accept or dismiss without interrupting feed.
+@@ -421,17 +183,9 @@ private fun FeedOverlay(
+     // disconnections (app backgrounded, relay restart, network switch) should NOT visually
+     // interrupt the feed. Reconnection status is shown via the subtle top-bar relay orbs only.
+     val showOnboarding = !hasEverLoadedFeed && feedCacheChecked && feedIsEmpty && noRelaysAtAll && onboardingComplete && feedSession != FeedSessionState.Loading
+-    // Never show loading overlay when feed is Live or Refreshing ΓÇö notes may be briefly empty
+-    // during recomposition on resume but the subscription is active and will deliver notes.
+-    // Also suppress until feedCacheChecked ΓÇö prevents flash on resume after process death
+-    // while the disk cache is still being loaded asynchronously.
+-    // Also suppress when hasEverLoadedFeed ΓÇö prevents the "Connecting to relays" animation
+-    // from appearing when the app resumes from background with transient relay state changes.
+-    val showLoading = !hasEverLoadedFeed && feedCacheChecked && feedIsEmpty && !showOnboarding &&
+-            feedSession != FeedSessionState.Live && feedSession != FeedSessionState.Refreshing
+ 
+     val overlayAlpha by animateFloatAsState(
+-        targetValue = if (showLoading || showOnboarding) 1f else 0f,
++        targetValue = if (showOnboarding) 1f else 0f,
+         animationSpec = tween(350, easing = FastOutSlowInEasing),
+         label = "overlay_alpha"
+     )
+@@ -488,12 +242,6 @@ private fun FeedOverlay(
+                         )
+                     }
+                 }
+-            } else if (showLoading) {
+-                RelayConnectionLoadingIndicator(
+-                    perRelayState = perRelayState,
+-                    feedSession = feedSession,
+-                    onNavigateTo = onNavigateTo,
+-                )
+             }
+         }
+     }

@@ -197,6 +197,33 @@ object DraftsRepository {
         Log.d(TAG, "Cleared completed scheduled drafts")
     }
 
+    // ── Relay sync tracking ────────────────────────────────────────────
+
+    /**
+     * Mark a draft as synced to a set of relay URLs.
+     * Called after successfully publishing the draft event to drafts relays.
+     */
+    fun markSynced(draftId: String, relayUrls: List<String>) {
+        val pubkey = currentPubkey ?: return
+        val existing = _drafts.value.toMutableList()
+        val idx = existing.indexOfFirst { it.id == draftId }
+        if (idx >= 0) {
+            val current = existing[idx].syncedRelays.toMutableSet()
+            current.addAll(relayUrls)
+            existing[idx] = existing[idx].copy(
+                syncedRelays = current.toList(),
+                updatedAt = System.currentTimeMillis()
+            )
+            _drafts.value = existing
+            schedulePersist(pubkey)
+            Log.d(TAG, "Draft marked synced to ${relayUrls.size} relay(s): ${draftId.take(8)}")
+        }
+    }
+
+    /** Drafts that have not been synced to any relay. */
+    fun unsyncedDrafts(): List<Draft> =
+        _drafts.value.filter { it.syncedRelays.isEmpty() && !it.isCompleted }
+
     /**
      * Debounced persistence — coalesces rapid successive saves into a single
      * SharedPreferences write after [PERSIST_DEBOUNCE_MS]. Runs on IO thread

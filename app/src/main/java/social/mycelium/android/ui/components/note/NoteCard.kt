@@ -3108,14 +3108,6 @@ fun NoteCard(
                                 )
                             }
                         } else {
-                            Text(
-                                text = authorDisplayLabel(displayAuthor),
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
                             if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
                                 val isDark = androidx.compose.foundation.isSystemInDarkTheme()
                                 Icon(
@@ -3125,6 +3117,14 @@ fun NoteCard(
                                     tint = Color.Unspecified
                                 )
                             }
+                            Text(
+                                text = authorDisplayLabel(displayAuthor),
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                     if (rootAuthorId != null) {
@@ -3137,28 +3137,6 @@ fun NoteCard(
                             )
                         )
                     }
-                }
-                // NIP-05 domain beneath the name (feed context)
-                val nip05Value = displayAuthor.nip05?.takeIf { it.isNotBlank() }
-                val nip05StatusForDomain = if (nip05Value != null)
-                    social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
-                else null
-                if (nip05Value != null && nip05StatusForDomain == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
-                    val nip05Display = remember(nip05Value) {
-                        val parts = nip05Value.split("@")
-                        when {
-                            parts.size == 2 && parts[0] == "_" -> parts[1]
-                            parts.size == 2 -> nip05Value
-                            else -> nip05Value
-                        }
-                    }
-                    Text(
-                        text = nip05Display,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
                 }
             }
             val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
@@ -3790,35 +3768,61 @@ fun NoteCard(
                                 onPollVote = onPollVote,
                             )
                         } else if (eventId in quotedFailedIds) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .defaultMinSize(minHeight = 72.dp)
-                                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Box(
+                            // DEBUG-only: foreign relay auth gate (experimental, gated until stable)
+                            val showAuthGate = social.mycelium.android.BuildConfig.DEBUG
+                            val hintRelays = remember(eventId) {
+                                social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(eventId)
+                            }
+                            val foreignHintUrl = hintRelays.firstOrNull()
+                            if (showAuthGate && foreignHintUrl != null) {
+                                ForeignRelayAuthGate(
+                                    eventId = eventId,
+                                    relayUrl = foreignHintUrl,
+                                    onRelayClick = onRelayClick,
+                                    onRetryFetch = { retryEventId ->
+                                        quotedFailedIds = quotedFailedIds - retryEventId
+                                        quotedLoading = true
+                                    },
+                                    onFetchResult = { retryEventId, result ->
+                                        if (result != null) {
+                                            quotedMetas = quotedMetas + (retryEventId to result)
+                                        } else {
+                                            quotedFailedIds = quotedFailedIds + retryEventId
+                                        }
+                                        quotedLoading = false
+                                    }
+                                )
+                            } else {
+                                Row(
                                     modifier = Modifier
-                                        .width(3.dp)
-                                        .height(20.dp)
-                                        .background(
-                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
-                                            shape = RoundedCornerShape(1.5.dp)
-                                        )
-                                )
-                                Spacer(Modifier.width(10.dp))
-                                Icon(
-                                    Icons.Outlined.Info,
-                                    null,
-                                    modifier = Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                )
-                                Spacer(Modifier.width(6.dp))
-                                Text(
-                                    "Quoted event not found",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
-                                )
+                                        .fillMaxWidth()
+                                        .defaultMinSize(minHeight = 72.dp)
+                                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(3.dp)
+                                            .height(20.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.2f),
+                                                shape = RoundedCornerShape(1.5.dp)
+                                            )
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Icon(
+                                        Icons.Outlined.Info,
+                                        null,
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        "Quoted event not found",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                }
                             }
                         } else if (quotedLoading) {
                             Row(
@@ -4484,6 +4488,148 @@ private fun formatSats(sats: Long): String = when {
     sats >= 1_000_000 -> "${sats / 1_000_000}.${(sats % 1_000_000) / 100_000}M"
     sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K"
     else -> "$sats"
+}
+
+/**
+ * Foreign relay auth gate — shown when a quoted event fetch failed and the nevent
+ * included relay hints to a relay not in the user's relay manager. Offers:
+ * 1. Relay icon + name (tappable → relay info page)
+ * 2. "Authenticate & Fetch" button → session-scoped NIP-42 auth + retry
+ * 3. Graceful fallback to "not found" on auth failure
+ */
+@Composable
+internal fun ForeignRelayAuthGate(
+    eventId: String,
+    relayUrl: String,
+    onRelayClick: (String) -> Unit,
+    onRetryFetch: (String) -> Unit,
+    onFetchResult: (String, social.mycelium.android.data.QuotedNoteMeta?) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val nip11Cache = remember { social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull() }
+    val relayInfo = remember(relayUrl) { nip11Cache?.getCachedRelayInfo(relayUrl) }
+    val relayName = relayInfo?.name ?: social.mycelium.android.utils.normalizeRelayUrl(relayUrl)
+        .removePrefix("wss://").removePrefix("ws://").trimEnd('/')
+    val relayIcon = relayInfo?.icon
+
+    var authState by remember(eventId) { mutableStateOf<String?>(null) } // null, "authenticating", "fetching", "failed"
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 72.dp)
+            .padding(horizontal = 16.dp, vertical = 4.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(40.dp)
+                    .background(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
+                        shape = RoundedCornerShape(1.5.dp)
+                    )
+            )
+            Spacer(Modifier.width(10.dp))
+            // Relay icon — tappable to view relay info
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(androidx.compose.foundation.shape.CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                    .clickable { onRelayClick(relayUrl) },
+                contentAlignment = Alignment.Center
+            ) {
+                if (relayIcon != null) {
+                    coil.compose.AsyncImage(
+                        model = relayIcon,
+                        contentDescription = relayName,
+                        modifier = Modifier.size(28.dp).clip(androidx.compose.foundation.shape.CircleShape),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                    )
+                } else {
+                    Icon(
+                        Icons.Outlined.Public,
+                        contentDescription = relayName,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = relayName,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.clickable { onRelayClick(relayUrl) }
+                )
+                Text(
+                    text = when (authState) {
+                        "authenticating" -> "Authenticating\u2026"
+                        "fetching" -> "Fetching event\u2026"
+                        "failed" -> "Authentication failed"
+                        else -> "Requires authentication"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (authState == "failed") MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
+            if (authState == "authenticating" || authState == "fetching") {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 1.5.dp,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                )
+            } else {
+                TextButton(
+                    onClick = {
+                        authState = "authenticating"
+                        val authHandler = social.mycelium.android.relay.RelayConnectionStateMachine
+                            .getInstance().nip42AuthHandler
+                        authHandler.allowSessionRelay(relayUrl)
+                        nip11Cache?.preloadRelayInfo(listOf(relayUrl), scope)
+                        social.mycelium.android.repository.cache.QuotedNoteCache.clearFailed(eventId)
+                        scope.launch {
+                            // QuotedNoteCache.get() uses awaitOneShotSubscription which
+                            // connects to the relay internally. The auth handler will
+                            // respond to the challenge since we added the relay to
+                            // sessionAllowedUrls. The one-shot subscription has its own
+                            // timeout so auth + fetch happen within one flow.
+                            authState = "fetching"
+                            onRetryFetch(eventId)
+                            val result = social.mycelium.android.repository.cache.QuotedNoteCache.get(
+                                eventId, listOf(relayUrl)
+                            )
+                            if (result != null) {
+                                authState = null
+                            } else {
+                                authState = "failed"
+                            }
+                            onFetchResult(eventId, result)
+                        }
+                    },
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Icon(
+                        Icons.Outlined.Security,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        if (authState == "failed") "Retry" else "Authenticate",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Preview(showBackground = true)

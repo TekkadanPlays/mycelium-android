@@ -145,11 +145,14 @@ fun SingleRelayOrb(
     }
 }
 
-/** Resolve the best icon URL for a relay: NIP-11 icon → NIP-11 image → favicon.ico */
+/** Resolve the best icon URL for a relay: NIP-11 icon → NIP-11 image → favicon.ico.
+ *  Returns null if NIP-11 data hasn't loaded yet — caller should show Router fallback
+ *  rather than attempting a favicon that usually 404s and triggers a permanent loadFailed state. */
 private fun resolveRelayIconUrl(info: RelayInformation?, relayUrl: String): String? {
-    info?.icon?.takeIf { it.isNotBlank() }?.let { return it }
-    info?.image?.takeIf { it.isNotBlank() }?.let { return it }
-    // Favicon fallback — construct from relay URL
+    if (info == null) return null
+    info.icon?.takeIf { it.isNotBlank() }?.let { return it }
+    info.image?.takeIf { it.isNotBlank() }?.let { return it }
+    // Favicon fallback only when NIP-11 was fetched but had no icon/image fields
     val httpBase = relayUrl
         .replace("wss://", "https://")
         .replace("ws://", "http://")
@@ -157,9 +160,10 @@ private fun resolveRelayIconUrl(info: RelayInformation?, relayUrl: String): Stri
     return "$httpBase/favicon.ico"
 }
 
-/** Single relay orb icon — shows NIP-11 icon if cached, else favicon, else Router fallback.
+/** Single relay orb icon — shows NIP-11 icon if cached, else Router fallback.
  *  Uses per-relay [Nip11CacheManager.relayUpdated] flow so each orb only recomposes
  *  when ITS relay's NIP-11 data arrives (no global recomposition storm).
+ *  Favicon fallback only kicks in after NIP-11 is fetched but lacks icon/image fields.
  *  Falls back to a lazy fetch if the relay isn't cached yet. */
 @Composable
 private fun RelayOrbIcon(relayUrl: String, nip11: Nip11CacheManager, context: android.content.Context) {
@@ -187,9 +191,9 @@ private fun RelayOrbIcon(relayUrl: String, nip11: Nip11CacheManager, context: an
             AsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(iconUrl)
-                    .crossfade(false)
+                    .crossfade(200)
                     .size(44)
-                    .memoryCacheKey("relay_icon_$relayUrl")
+                    .memoryCacheKey("relay_icon_${iconUrl.hashCode()}")
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
                     .build(),

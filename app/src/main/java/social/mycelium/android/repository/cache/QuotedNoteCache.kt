@@ -497,6 +497,16 @@ object QuotedNoteCache {
         return content.take(cutAt).trimEnd() + "…"
     }
 
+    /** Get relay hints registered for an event ID (from nevent1 TLV). Used by UI to show
+     *  which foreign relay might have the event when fetch fails (auth gate). */
+    fun getRelayHints(eventId: String): List<String> = relayHintsCache[eventId] ?: emptyList()
+
+    /** Clear the failed-ID entry for a specific event so it can be retried (e.g. after auth). */
+    fun clearFailed(eventId: String) {
+        failedIds.remove(eventId)
+        inFlightIds.remove(eventId)
+    }
+
     fun clear() {
         memoryCache.clear()
         relayHintsCache.clear()

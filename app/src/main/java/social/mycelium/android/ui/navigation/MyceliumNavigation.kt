@@ -1020,7 +1020,31 @@ fun MyceliumNavigation(
     val topAppBarState = rememberTopAppBarState()
 
     // Dashboard, Topics, and Notifications list states for scroll-to-top and position persistence
-    val dashboardListState = rememberLazyListState()
+    val homeFeedStateForScroll by feedStateViewModel.homeFeedState.collectAsState()
+    val dashboardListState = rememberLazyListState(
+        initialFirstVisibleItemIndex = homeFeedStateForScroll.scrollPosition.firstVisibleItem,
+        initialFirstVisibleItemScrollOffset = homeFeedStateForScroll.scrollPosition.scrollOffset
+    )
+    // Save dashboard scroll position on lifecycle stop (app backgrounded) and on dispose
+    val dashboardLifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(dashboardListState, dashboardLifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
+                feedStateViewModel.saveHomeScrollPosition(
+                    dashboardListState.firstVisibleItemIndex,
+                    dashboardListState.firstVisibleItemScrollOffset
+                )
+            }
+        }
+        dashboardLifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            dashboardLifecycleOwner.lifecycle.removeObserver(observer)
+            feedStateViewModel.saveHomeScrollPosition(
+                dashboardListState.firstVisibleItemIndex,
+                dashboardListState.firstVisibleItemScrollOffset
+            )
+        }
+    }
     val topicsListState = rememberLazyListState()
     val notificationsListState = rememberLazyListState()
     var notificationsSelectedTab by remember { mutableIntStateOf(0) }

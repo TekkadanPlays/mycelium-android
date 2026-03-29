@@ -85,6 +85,28 @@ class Nip42AuthHandler(
         Log.d(TAG, "Added ${newUrls.size} relay(s) to allowed set (total: ${allowedRelayUrls.size})")
     }
 
+    /** Session-scoped relay URLs temporarily allowed for auth (e.g. foreign relays
+     *  encountered via quoted event relay hints). Cleared on logout. Not persisted. */
+    @Volatile
+    private var sessionAllowedUrls: Set<String> = emptySet()
+
+    /** Temporarily allow auth with a foreign relay for this session only.
+     *  Does NOT add the relay to the user's permanent relay manager.
+     *  Used when the user manually chooses to authenticate with a relay
+     *  encountered via a quoted event hint. */
+    fun allowSessionRelay(url: String) {
+        val normalized = social.mycelium.android.utils.normalizeRelayUrl(url)
+        if (normalized in allowedRelayUrls || normalized in sessionAllowedUrls) return
+        sessionAllowedUrls = sessionAllowedUrls + normalized
+        Log.d(TAG, "Session-allowed relay: $normalized (total session: ${sessionAllowedUrls.size})")
+    }
+
+    /** Check if a relay URL is allowed (permanent or session). */
+    fun isRelayAllowed(url: String): Boolean {
+        val normalized = social.mycelium.android.utils.normalizeRelayUrl(url)
+        return normalized in allowedRelayUrls || normalized in sessionAllowedUrls
+    }
+
     /** Per-relay auth status for UI observation. */
     enum class AuthStatus { NONE, CHALLENGED, AUTHENTICATING, AUTHENTICATED, FAILED }
 
@@ -153,6 +175,7 @@ class Nip42AuthHandler(
             _authStatusByRelay.value = emptyMap()
             respondedChallenges.clear()
             pendingAuthEventIds.clear()
+            sessionAllowedUrls = emptySet()
         }
     }
 
@@ -162,12 +185,12 @@ class Nip42AuthHandler(
     }
 
     private fun handleAuthChallenge(url: String, challenge: String) {
-        // Only authenticate with relays the user has configured in their relay manager.
-        // If allowedRelayUrls hasn't been populated yet, we refuse ALL auth — never leak
-        // identity to relays the user hasn't explicitly chosen.
+        // Only authenticate with relays the user has configured or session-allowed.
+        // If neither set contains the relay, we refuse — never leak identity to
+        // relays the user hasn't explicitly chosen.
         val normalizedUrl = social.mycelium.android.utils.normalizeRelayUrl(url)
-        if (normalizedUrl !in allowedRelayUrls) {
-            Log.d(TAG, "AUTH[$url] Relay not in user's relay manager — ignoring")
+        if (normalizedUrl !in allowedRelayUrls && normalizedUrl !in sessionAllowedUrls) {
+            Log.d(TAG, "AUTH[$url] Relay not in allowed or session set — ignoring")
             return
         }
 

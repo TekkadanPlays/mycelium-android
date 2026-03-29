@@ -258,12 +258,6 @@ private fun NoteCardContent(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = authorDisplayLabel(displayAuthor),
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontWeight = FontWeight.Bold
-                            )
-                        )
                         val nip05Status = social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
                         if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
                             val isDark = androidx.compose.foundation.isSystemInDarkTheme()
@@ -274,26 +268,11 @@ private fun NoteCardContent(
                                 tint = androidx.compose.ui.graphics.Color.Unspecified
                             )
                         }
-                    }
-                    val nip05Value = displayAuthor.nip05?.takeIf { it.isNotBlank() }
-                    val nip05ForDomain = if (nip05Value != null)
-                        social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
-                    else null
-                    if (nip05Value != null && nip05ForDomain == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
-                        val nip05Display = remember(nip05Value) {
-                            val parts = nip05Value.split("@")
-                            when {
-                                parts.size == 2 && parts[0] == "_" -> parts[1]
-                                parts.size == 2 -> nip05Value
-                                else -> nip05Value
-                            }
-                        }
                         Text(
-                            text = nip05Display,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            text = authorDisplayLabel(displayAuthor),
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.Bold
+                            )
                         )
                     }
                     val formattedTime = remember(note.timestamp) {
@@ -551,7 +530,10 @@ private fun NoteCardContent(
                                         emptyMap()
                                     )
                                 }
+                                var quotedFailedIds by remember(note.id) { mutableStateOf<Set<String>>(emptySet()) }
+                                var quotedLoading by remember(note.id) { mutableStateOf(note.quotedEventIds.isNotEmpty()) }
                                 LaunchedEffect(note.quotedEventIds) {
+                                    quotedLoading = true
                                     // Quick cache check first (no network)
                                     note.quotedEventIds.forEach { id ->
                                         if (id !in quotedMetas) {
@@ -570,8 +552,40 @@ private fun NoteCardContent(
                                                     async { id to QuotedNoteCache.get(id) }
                                                 }.map { it.await() }
                                             }
+                                        val newFailed = mutableSetOf<String>()
                                         results.forEach { (id, meta) ->
                                             if (meta != null) quotedMetas = quotedMetas + (id to meta)
+                                            else newFailed.add(id)
+                                        }
+                                        if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
+                                    }
+                                    quotedLoading = false
+                                }
+                                // DEBUG-only: foreign relay auth gate (experimental, gated until stable)
+                                if (social.mycelium.android.BuildConfig.DEBUG) {
+                                    quotedFailedIds.forEach { failedId ->
+                                        val hintRelays = remember(failedId) {
+                                            QuotedNoteCache.getRelayHints(failedId)
+                                        }
+                                        val foreignHintUrl = hintRelays.firstOrNull()
+                                        if (foreignHintUrl != null) {
+                                            ForeignRelayAuthGate(
+                                                eventId = failedId,
+                                                relayUrl = foreignHintUrl,
+                                                onRelayClick = onRelayClick,
+                                                onRetryFetch = { retryEventId ->
+                                                    quotedFailedIds = quotedFailedIds - retryEventId
+                                                    quotedLoading = true
+                                                },
+                                                onFetchResult = { retryEventId, result ->
+                                                    if (result != null) {
+                                                        quotedMetas = quotedMetas + (retryEventId to result)
+                                                    } else {
+                                                        quotedFailedIds = quotedFailedIds + retryEventId
+                                                    }
+                                                    quotedLoading = false
+                                                }
+                                            )
                                         }
                                     }
                                 }

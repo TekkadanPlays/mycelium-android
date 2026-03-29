@@ -106,7 +106,7 @@ class Nip11CacheManager(private val context: Context) {
     /** Emits the normalized relay URL whenever that specific relay's NIP-11 data is cached.
      *  RelayOrbIcon observes this filtered to its own URL for targeted recomposition
      *  (avoids the global recomposition storm caused by cacheVersion). */
-    private val _relayUpdated = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    private val _relayUpdated = MutableSharedFlow<String>(extraBufferCapacity = 256)
     val relayUpdated: SharedFlow<String> = _relayUpdated.asSharedFlow()
     
     init {

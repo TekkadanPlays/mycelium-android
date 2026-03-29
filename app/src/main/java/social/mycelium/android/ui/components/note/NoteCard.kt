@@ -125,6 +125,38 @@ import social.mycelium.android.ui.components.preview.Kind1LinkEmbedBlock
 import social.mycelium.android.ui.components.emoji.isImageUrl
 
 import social.mycelium.android.repository.social.NoteCounts
+
+/**
+ * Shared profile revision map: one feed-level collector increments per-pubkey
+ * revision counters so individual NoteCards read revisions without launching
+ * their own [profileUpdated] collector coroutine. Collapses N coroutines → 1.
+ *
+ * When null (e.g. thread views not wrapped in the provider), cards fall back
+ * to their own per-card LaunchedEffect collector (backward compatible).
+ */
+val LocalProfileRevisions =
+    androidx.compose.runtime.compositionLocalOf<androidx.compose.runtime.snapshots.SnapshotStateMap<String, Int>?> { null }
+
+/**
+ * Provides a shared [profileUpdated] collector that feeds [LocalProfileRevisions].
+ * Wrap the feed-level LazyColumn in this so all NoteCards share one coroutine.
+ */
+@Composable
+fun SharedProfileRevisionProvider(content: @Composable () -> Unit) {
+    val revisionMap = remember { mutableStateMapOf<String, Int>() }
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+    LaunchedEffect(Unit) {
+        profileCache.profileUpdated
+            .collect { pubkey ->
+                val key = normalizeAuthorIdForCache(pubkey)
+                revisionMap[key] = (revisionMap[key] ?: 0) + 1
+            }
+    }
+    CompositionLocalProvider(LocalProfileRevisions provides revisionMap) {
+        content()
+    }
+}
+
 /**
  * Composition local that provides the feed [LazyListState] to nested composables.
  * Used by [QuotedNoteExpandedState] to restore exact scroll offset when collapsing
@@ -2922,14 +2954,21 @@ fun NoteCard(
     }
     // Observe profileUpdated directly so profile always renders correctly even if repository timing is off
     val profileCache = ProfileMetadataCache.getInstance()
-    var profileRevision by remember(note.id) { mutableIntStateOf(0) }
     val authorPubkey = remember(note.author.id) { normalizeAuthorIdForCache(note.author.id) }
-    LaunchedEffect(authorPubkey) {
-        profileCache.profileUpdated
-            .filter { it == authorPubkey }
-            .debounce(200)
-            .collect { profileRevision++ }
+    // Shared revision map from feed-level provider (1 coroutine for all cards).
+    // Falls back to per-card collector when not in a SharedProfileRevisionProvider (thread views).
+    val sharedRevisions = LocalProfileRevisions.current
+    val sharedRevision = sharedRevisions?.get(authorPubkey) ?: 0
+    var localProfileRevision by remember(note.id) { mutableIntStateOf(0) }
+    if (sharedRevisions == null) {
+        LaunchedEffect(authorPubkey) {
+            profileCache.profileUpdated
+                .filter { it == authorPubkey }
+                .debounce(200)
+                .collect { localProfileRevision++ }
+        }
     }
+    val profileRevision = if (sharedRevisions != null) sharedRevision else localProfileRevision
     // Snapshot read of diskCacheRestored avoids per-card flow collector; value only flips once at startup
     val diskCacheReady = profileCache.diskCacheRestored.value
     val displayAuthor = remember(note.author.id, profileRevision, diskCacheReady) {

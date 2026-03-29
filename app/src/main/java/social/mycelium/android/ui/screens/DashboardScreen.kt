@@ -192,11 +192,36 @@ private fun DashboardFeedContent(
                 }
             }
         }
-        // Continue prefetching 10 notes ahead as user scrolls
+        // Prefetch profile metadata so display names / @mentions resolve before scrolling into view
+        val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
+        LaunchedEffect(engagementFilteredNotes) {
+            val prefetchCount = 20.coerceAtMost(engagementFilteredNotes.size)
+            val pubkeys = mutableSetOf<String>()
+            for (i in 0 until prefetchCount) {
+                val note = engagementFilteredNotes[i]
+                pubkeys.add(note.author.id.lowercase())
+                pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
+            }
+            val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
+            if (uncached.isNotEmpty()) {
+                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+            }
+        }
+        // Combined scroll prefetch: one snapshotFlow drives image prefetch, profile
+        // prefetch, and visible range reporting. Replaces 3 separate snapshotFlows
+        // that each subscribed to Compose's snapshot system independently.
         LaunchedEffect(listState) {
+            var lastProfilePrefetchIdx = -1
             snapshotFlow {
-                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            }.collect { lastVisible ->
+                val info = listState.layoutInfo
+                val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                first to last
+            }.collect { (firstVisible, lastVisible) ->
+                // 1. Report visible range to ViewModel for URL preview prefetch
+                viewModel.updateVisibleRange(firstVisible, lastVisible)
+
+                // 2. Image prefetch: 10 notes ahead of last visible
                 val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
                 for (i in (lastVisible + 1)..prefetchEnd) {
                     val note = engagementFilteredNotes.getOrNull(i) ?: continue
@@ -214,50 +239,21 @@ private fun DashboardFeedContent(
                         }
                     }
                 }
-            }
-        }
-        // Prefetch profile metadata so display names / @mentions resolve before scrolling into view
-        val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
-        LaunchedEffect(engagementFilteredNotes) {
-            val prefetchCount = 20.coerceAtMost(engagementFilteredNotes.size)
-            val pubkeys = mutableSetOf<String>()
-            for (i in 0 until prefetchCount) {
-                val note = engagementFilteredNotes[i]
-                pubkeys.add(note.author.id.lowercase())
-                pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
-            }
-            val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
-            if (uncached.isNotEmpty()) {
-                profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-            }
-        }
-        // Continue prefetching profiles 10 notes ahead as user scrolls
-        LaunchedEffect(listState) {
-            snapshotFlow {
-                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-            }.debounce(200).collect { lastVisible ->
-                val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
-                val pubkeys = mutableSetOf<String>()
-                for (i in (lastVisible + 1)..prefetchEnd) {
-                    val note = engagementFilteredNotes.getOrNull(i) ?: continue
-                    pubkeys.add(note.author.id.lowercase())
-                    pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
+
+                // 3. Profile prefetch: debounce by skipping if position hasn't changed much
+                if (lastVisible > lastProfilePrefetchIdx + 3 || lastProfilePrefetchIdx == -1) {
+                    lastProfilePrefetchIdx = lastVisible
+                    val pubkeys = mutableSetOf<String>()
+                    for (i in (lastVisible + 1)..prefetchEnd) {
+                        val note = engagementFilteredNotes.getOrNull(i) ?: continue
+                        pubkeys.add(note.author.id.lowercase())
+                        pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
+                    }
+                    val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
+                    if (uncached.isNotEmpty()) {
+                        profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+                    }
                 }
-                val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
-                if (uncached.isNotEmpty()) {
-                    profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-                }
-            }
-        }
-        // Report visible range to ViewModel for viewport-aware URL preview prefetch
-        LaunchedEffect(listState) {
-            snapshotFlow {
-                val info = listState.layoutInfo
-                val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
-                val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-                first to last
-            }.collect { (first, last) ->
-                viewModel.updateVisibleRange(first, last)
             }
         }
         // Infinite scroll: detect end-of-list and load older notes.
@@ -412,6 +408,7 @@ private fun DashboardFeedContent(
             }
         }
 
+        social.mycelium.android.ui.components.note.SharedProfileRevisionProvider {
         androidx.compose.runtime.CompositionLocalProvider(
             social.mycelium.android.ui.components.note.LocalFeedListState provides listState
         ) {
@@ -603,6 +600,7 @@ private fun DashboardFeedContent(
             }
         }
         } // end CompositionLocalProvider
+        } // end SharedProfileRevisionProvider
 
 
         // ═══ BANNER: Relay failure warning (debounced for cold start) ═══

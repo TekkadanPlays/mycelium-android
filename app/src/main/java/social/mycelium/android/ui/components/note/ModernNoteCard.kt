@@ -208,12 +208,19 @@ private fun NoteCardContent(
             val profileCache = ProfileMetadataCache.getInstance()
             val diskCacheReady by profileCache.diskCacheRestored.collectAsState()
             val authorPubkey = remember(note.author.id) { normalizeAuthorIdForCache(note.author.id) }
-            var profileRevision by remember { mutableIntStateOf(0) }
-            LaunchedEffect(authorPubkey) {
-                profileCache.profileUpdated
-                    .filter { it == authorPubkey }
-                    .collect { profileRevision++ }
+            // Shared revision map from feed-level provider (1 coroutine for all cards).
+            // Falls back to per-card collector when not in a SharedProfileRevisionProvider.
+            val sharedRevisions = LocalProfileRevisions.current
+            val sharedRevision = sharedRevisions?.get(authorPubkey) ?: 0
+            var localProfileRevision by remember { mutableIntStateOf(0) }
+            if (sharedRevisions == null) {
+                LaunchedEffect(authorPubkey) {
+                    profileCache.profileUpdated
+                        .filter { it == authorPubkey }
+                        .collect { localProfileRevision++ }
+                }
             }
+            val profileRevision = if (sharedRevisions != null) sharedRevision else localProfileRevision
             val displayAuthor = remember(note.author.id, profileRevision, diskCacheReady) {
                 profileCache.getAuthor(authorPubkey) ?: note.author
             }
@@ -375,8 +382,17 @@ private fun NoteCardContent(
                     if (hasNewlyResolved) mentionProfileVersion++
                 }
             }
-            val contentBlocks =
-                remember(note.content, note.mediaUrls, note.urlPreviews, mentionProfileVersion, diskCacheReady) {
+            val contentCacheKey = remember(note.content, note.mediaUrls) {
+                social.mycelium.android.utils.ContentBlockCache.key(
+                    note.content,
+                    note.mediaUrls.toSet()
+                )
+            }
+            val contentBlocks by produceState(
+                initialValue = social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey) ?: emptyList(),
+                contentCacheKey, note.urlPreviews, mentionProfileVersion, diskCacheReady
+            ) {
+                val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                     buildNoteContentWithInlinePreviews(
                         note.content,
                         note.mediaUrls.toSet(),
@@ -387,6 +403,9 @@ private fun NoteCardContent(
                         extractEmojiUrls(note.tags)
                     )
                 }
+                social.mycelium.android.utils.ContentBlockCache.put(contentCacheKey, result)
+                value = result
+            }
             if (hasBodyText) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),

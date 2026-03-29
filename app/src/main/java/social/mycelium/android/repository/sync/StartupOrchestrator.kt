@@ -403,47 +403,52 @@ object StartupOrchestrator {
     ) {
         _enrichmentStarted.value = true
         _currentPhase.value = StartupPhase.ENRICHMENT
-        logD( "Phase 3: starting enrichment subscriptions")
+        logD( "Phase 3: starting enrichment (sub-phased over ~8s)")
 
-        // Notifications
-        NotificationsRepository.setCacheRelayUrls(indexerUrls)
-        NotificationsRepository.startSubscription(userPubkey, inboxUrls, outboxUrls, categoryUrls)
-        logD( "Phase 3: notifications started")
-
-        // Outbox feed (NIP-65 discovery for followed users)
+        // ── Phase 3a (immediate): outbox feed + self profile ──
+        // Outbox discovers notes from followed users on their write relays —
+        // highest value because it directly enriches the visible feed.
         if (followedPubkeys.isNotEmpty() && indexerUrls.isNotEmpty()) {
             NotesRepository.getInstance().startOutboxFeed(followedPubkeys, indexerUrls)
-            logD( "Phase 3: outbox feed started (${followedPubkeys.size} followed)")
+            logD( "Phase 3a: outbox feed started (${followedPubkeys.size} followed)")
         }
-
-        // Topics (kind-11) — separate subscription slot, pre-populates for Topics screen
-        val stateMachine = RelayConnectionStateMachine.getInstance()
-        stateMachine.startTopicsSubscription(allUserRelayUrls)
-        logD( "Phase 3: topics subscription started (separate slot)")
-
-        // Hydrate topics from Room (recovers deep-fetched kind-11 events from previous sessions)
-        val topicsRepo = TopicsRepository.getInstanceOrNull()
-        if (topicsRepo != null) {
-            topicsRepo.hydrateFromRoom(context)
-            logD( "Phase 3: topics Room hydration launched")
-        }
-
-        // Bookmarks, emoji packs, anchor subs
-        BookmarkRepository.fetchBookmarks(userPubkey, allUserRelayUrls)
-        EmojiPackRepository.setUserRelays(allUserRelayUrls)
-        EmojiPackSelectionRepository.start(userPubkey, allUserRelayUrls)
-        logD( "Phase 3: bookmarks + emoji packs started")
-
-        // Self NIP-65 is now fetched in Phase 1 concurrently with follow/mute
-
-        // Profile fetch for self
         scope.launch { ProfileMetadataCache.getInstance().requestProfiles(listOf(userPubkey), indexerUrls) }
+
+        // ── Phase 3b (+2s): notifications ──
+        // Notifications are background — user hasn't navigated there yet.
+        // Stagger to avoid competing with outbox for relay slots.
+        scope.launch {
+            delay(2_000L)
+            NotificationsRepository.setCacheRelayUrls(indexerUrls)
+            NotificationsRepository.startSubscription(userPubkey, inboxUrls, outboxUrls, categoryUrls)
+            logD( "Phase 3b: notifications started (+2s)")
+        }
+
+        // ── Phase 3c (+5s): topics, bookmarks, emoji, Room hydration ──
+        // Lowest priority enrichment — Topics/Bookmarks screens are not the landing page.
+        scope.launch {
+            delay(5_000L)
+            val stateMachine = RelayConnectionStateMachine.getInstance()
+            stateMachine.startTopicsSubscription(allUserRelayUrls)
+            logD( "Phase 3c: topics subscription started (+5s)")
+
+            val topicsRepo = TopicsRepository.getInstanceOrNull()
+            if (topicsRepo != null) {
+                topicsRepo.hydrateFromRoom(context)
+                logD( "Phase 3c: topics Room hydration launched")
+            }
+
+            BookmarkRepository.fetchBookmarks(userPubkey, allUserRelayUrls)
+            EmojiPackRepository.setUserRelays(allUserRelayUrls)
+            EmojiPackSelectionRepository.start(userPubkey, allUserRelayUrls)
+            logD( "Phase 3c: bookmarks + emoji packs started (+5s)")
+        }
 
         // Enable push notifications after replay settles
         scope.launch {
-            delay(4_000L)
+            delay(6_000L)
             NotificationsRepository.enableAndroidNotifications()
-            logD( "Phase 3: push notifications enabled")
+            logD( "Phase 3: push notifications enabled (+6s)")
         }
 
         // Auto-advance to Phase 4 after 10s

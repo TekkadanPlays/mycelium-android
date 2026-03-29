@@ -1526,15 +1526,7 @@ class NotesRepository private constructor() {
                 if (note.isReply) continue
                 // 4. Boost dedup: skip original if a repost version exists
                 if (note.originalNoteId == null && note.id in repostedOriginals) continue
-                // Enrich relay URLs from EventRelayTracker (accumulates across all deliveries)
-                val enrichedUrls = EventRelayTracker.enrichRelayUrls(
-                    note.id,
-                    note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                )
-                val enrichedNote = if (enrichedUrls.size > note.relayUrls.size || (note.relayUrls.isEmpty() && enrichedUrls.isNotEmpty())) {
-                    note.copy(relayUrls = enrichedUrls)
-                } else note
-                filtered.add(enrichedNote)
+                filtered.add(note)
             }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
                 Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")

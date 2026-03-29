@@ -144,3 +144,6 @@ better-antigravity/
 
 # Kotlin compiler sessions / temp
 .kotlin/
+
+# Temporary plan docs
+\# Notification\ Screen\ Data\ Flow*.md

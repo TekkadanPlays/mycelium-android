@@ -1303,15 +1303,16 @@ class NotificationsRepository(
         // Accept if user is p-tagged; otherwise still create the notification and verify
         // via fetchAndSetTargetNote (which removes it if root author isn't us)
         val note = eventToNote(event)
-        // If root note is one of our known topics, immediately classify as thread reply (replyKind=11)
-        // so it appears in the Threads tab without waiting for target fetch enrichment.
+        // If root note is one of our known topics, classify as thread REPLY (replyKind=11)
+        // so it appears in the Threads tab. Otherwise classify as COMMENT (kind-1111 on a kind-1 note).
         val isOurTopic = rootId in myTopicIds
+        val notifType = if (isOurTopic) NotificationType.REPLY else NotificationType.COMMENT
         val kind = if (isOurTopic) 11 else NOTIFICATION_KIND_TOPIC_REPLY
         val text =
             if (isOurTopic) "${author.displayName} replied to your thread" else "${author.displayName} commented on your post"
         val data = NotificationData(
             id = event.id,
-            type = NotificationType.REPLY,
+            type = notifType,
             text = text,
             note = note,
             author = author,
@@ -1323,7 +1324,7 @@ class NotificationsRepository(
         notificationsById[event.id] = data
         emitSorted()
         fireAndroidNotification(
-            NotificationType.COMMENT,
+            notifType,
             author.displayName ?: "Someone",
             text,
             event.id,
@@ -1332,22 +1333,31 @@ class NotificationsRepository(
             rootNoteId = rootId
         )
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
-        updateTodaySummary(NotificationType.REPLY, ts, 0L)
+        updateTodaySummary(notifType, ts, 0L)
         scheduleNotificationSave()
     }
 
     private fun handleHighlight(event: Event, author: Author, ts: Long) {
         val highlightedContent = event.content.take(200)
+        val text = "${author.displayName} highlighted your content"
         val data = NotificationData(
             id = event.id,
             type = NotificationType.HIGHLIGHT,
-            text = "${author.displayName} highlighted your content",
+            text = text,
             note = eventToNote(event),
             author = author,
             sortTimestamp = ts
         )
         notificationsById[event.id] = data
         emitSorted()
+        fireAndroidNotification(
+            NotificationType.HIGHLIGHT,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id
+        )
         scheduleNotificationSave()
     }
 
@@ -1386,6 +1396,14 @@ class NotificationsRepository(
         )
         notificationsById[event.id] = data
         emitSorted()
+        fireAndroidNotification(
+            NotificationType.REPORT,
+            author.displayName ?: "Someone",
+            text,
+            event.id,
+            eventEpochSec = ts / 1000,
+            noteId = event.id
+        )
         scheduleNotificationSave()
     }
 
@@ -1553,7 +1571,8 @@ class NotificationsRepository(
                 }
 
             val ev = pollEvent ?: return
-            val question = ev.content.takeIf { it.isNotBlank() }
+            val rawQuestion = ev.content.takeIf { it.isNotBlank() }
+            val question = rawQuestion?.let { resolveNpubMentions(it) }
             val allOptions = ev.tags
                 .filter { it.size >= 3 && it[0] == "option" }
                 .map { it[2] }
@@ -1561,6 +1580,7 @@ class NotificationsRepository(
                 .filter { it.size >= 3 && it[0] == "option" && it[1] in responseCodes }
                 .map { it[2] }
             val isMulti = ev.tags.any { it.size >= 2 && it[0] == "polltype" && it[1] == "multiplechoice" }
+            val pollNote = eventToNote(ev)
 
             val current = notificationsById[notificationId] ?: return
             val enrichedText = buildString {
@@ -1579,7 +1599,8 @@ class NotificationsRepository(
                 pollQuestion = question,
                 pollOptionLabels = optionLabels,
                 pollAllOptions = allOptions,
-                pollIsMultipleChoice = isMulti
+                pollIsMultipleChoice = isMulti,
+                note = pollNote
             )
             emitSorted()
             Log.d(TAG, "Enriched poll vote notification $notificationId: q=${question?.take(30)} opts=$optionLabels")
@@ -1598,9 +1619,9 @@ class NotificationsRepository(
         }.timeInMillis
         if (ts < todayStart) return
         when (type) {
-            NotificationType.REPLY, NotificationType.MENTION -> _todayReplies.value++
+            NotificationType.REPLY, NotificationType.COMMENT, NotificationType.MENTION, NotificationType.QUOTE -> _todayReplies.value++
             NotificationType.REPOST -> _todayBoosts.value++
-            NotificationType.LIKE -> _todayReactions.value++
+            NotificationType.LIKE, NotificationType.BADGE_AWARD -> _todayReactions.value++
             NotificationType.ZAP -> _todayZapSats.value += zapSats
             else -> {}
         }
@@ -1861,8 +1882,14 @@ class NotificationsRepository(
     /** Format sats for display: "1,000 sats", "21 sats", etc. */
     private fun formatSats(sats: Long): String {
         return when {
-            sats >= 1_000_000 -> "${sats / 1_000_000}.${(sats % 1_000_000) / 100_000}M sats"
-            sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K sats"
+            sats >= 1_000_000 -> {
+                val dec = (sats % 1_000_000) / 100_000
+                if (dec > 0) "${sats / 1_000_000}.${dec}M sats" else "${sats / 1_000_000}M sats"
+            }
+            sats >= 1_000 -> {
+                val dec = (sats % 1_000) / 100
+                if (dec > 0) "${sats / 1_000}.${dec}K sats" else "${sats / 1_000}K sats"
+            }
             else -> "$sats sats"
         }
     }
@@ -2143,7 +2170,8 @@ class NotificationsRepository(
         )
     }
 
-    /** Convert Room entity to NotificationData. Note/targetNote are null until re-enriched. */
+    /** Convert Room entity to NotificationData. Reconstructs Note stubs from persisted content
+     *  so reply text and target note previews are visible immediately on cold start. */
     private fun social.mycelium.android.db.CachedNotificationEntity.toNotificationData(): NotificationData {
         val notifType = try { NotificationType.valueOf(type) } catch (_: Exception) { NotificationType.LIKE }
         val author = if (authorId != null) Author(
@@ -2156,10 +2184,39 @@ class NotificationsRepository(
         val stringSerializer = String.serializer()
         val listSerializer = ListSerializer(stringSerializer)
         val mapSerializer = MapSerializer(stringSerializer, stringSerializer)
+        // Reconstruct Note stubs from persisted content for immediate display
+        val noteStub = if (!noteContent.isNullOrBlank() && author != null) {
+            Note(
+                id = replyNoteId ?: id,
+                author = author,
+                content = noteContent,
+                timestamp = sortTimestamp,
+                likes = 0, shares = 0, comments = 0,
+                isLiked = false, hashtags = emptyList(), mediaUrls = emptyList(),
+                rootNoteId = rootNoteId, replyToId = null, isReply = rootNoteId != null,
+                kind = replyKind ?: 1
+            )
+        } else null
+        val targetNoteStub = if (!targetNoteContent.isNullOrBlank() && targetNoteId != null) {
+            val targetAuthor = profileCache.getAuthor(targetNoteId) ?: Author(
+                id = targetNoteId, username = targetNoteId.take(8) + "...",
+                displayName = targetNoteId.take(8) + "...", avatarUrl = null, isVerified = false
+            )
+            Note(
+                id = targetNoteId,
+                author = targetAuthor,
+                content = targetNoteContent,
+                timestamp = sortTimestamp,
+                likes = 0, shares = 0, comments = 0,
+                isLiked = false, hashtags = emptyList(), mediaUrls = emptyList()
+            )
+        } else null
         return NotificationData(
             id = id,
             type = notifType,
             text = text,
+            note = noteStub,
+            targetNote = targetNoteStub,
             sortTimestamp = sortTimestamp,
             author = author,
             targetNoteId = targetNoteId,

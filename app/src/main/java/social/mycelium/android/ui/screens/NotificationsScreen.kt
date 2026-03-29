@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.common.cutoutPadding
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -179,7 +179,7 @@ fun NotificationsScreen(
                 it.type == NotificationType.REPLY && it.replyKind == 11
             },
             NotifTab("Comments", { Icon(Icons.Outlined.ChatBubble, null, modifier = Modifier.size(18.dp)) }) {
-                it.type == NotificationType.REPLY && (it.replyKind == 1111 || it.replyKind == 11)
+                it.type == NotificationType.COMMENT
             },
             NotifTab("Likes", { Icon(Icons.Default.Favorite, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.LIKE },
             NotifTab("Zaps", { Icon(Icons.Default.Bolt, null, modifier = Modifier.size(18.dp)) }) { it.type == NotificationType.ZAP },
@@ -507,7 +507,7 @@ fun NotificationsScreen(
                                         onClick = {
                                             NotificationsRepository.markAsSeen(notification.id)
                                             when {
-                                                notification.type == NotificationType.REPLY && notification.rootNoteId != null ->
+                                                (notification.type == NotificationType.REPLY || notification.type == NotificationType.COMMENT) && notification.rootNoteId != null ->
                                                     onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
                                                 notification.type == NotificationType.MENTION && notification.note != null ->
                                                     onNoteClick(notification.note!!)
@@ -667,12 +667,24 @@ private fun CompactNotificationRow(
         }
     }
 
+    // Profile revision counter for consolidated actor avatars
+    val actorPubkeySet = remember(notification.actorPubkeys) {
+        notification.actorPubkeys.map { normalizeAuthorIdForCache(it) }.toSet()
+    }
+    var actorProfileRevision by remember { mutableIntStateOf(0) }
+    LaunchedEffect(actorPubkeySet) {
+        if (actorPubkeySet.size <= 1) return@LaunchedEffect
+        profileCache.profileUpdated
+            .filter { it in actorPubkeySet }
+            .collect { actorProfileRevision++ }
+    }
+
     NotificationCardShell(isSeen = isSeen, onClick = onClick) {
         val isConsolidated = notification.actorPubkeys.size > 1
         if (isConsolidated) {
             // ── Consolidated view: avatar row + consolidated text ──
             // Resolve actor authors from profile cache for avatar display
-            val actorAuthors = remember(notification.actorPubkeys) {
+            val actorAuthors = remember(notification.actorPubkeys, actorProfileRevision) {
                 notification.actorPubkeys.take(6).map { pk ->
                     profileCache.getAuthor(normalizeAuthorIdForCache(pk))
                         ?: Author(
@@ -684,6 +696,7 @@ private fun CompactNotificationRow(
                         )
                 }
             }
+            // Row 1: icon + avatar row + timestamp (fixed height)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -711,43 +724,35 @@ private fun CompactNotificationRow(
                     )
                 }
                 Spacer(Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    // Avatar row
-                    AvatarRow(
-                        authors = actorAuthors,
-                        totalCount = notification.actorPubkeys.size,
-                        onProfileClick = onProfileClick,
-                        avatarSize = 24
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    // Consolidated text (e.g. "Alice, Bob, and 3 others liked your post")
-                    Text(
-                        text = notification.text,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    // Note preview snippet
-                    val rawPreview = notification.targetNote?.content ?: notification.note?.content
-                    val previewText = remember(rawPreview) {
-                        rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
-                            ?.replace(Regex("\\s+"), " ")?.trim()
-                    }
-                    if (!previewText.isNullOrBlank()) {
-                        Text(
-                            text = previewText,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            lineHeight = 16.sp
-                        )
-                    }
-                }
-                Spacer(Modifier.width(6.dp))
-                // Zap amount badge
+                AvatarRow(
+                    authors = actorAuthors,
+                    totalCount = notification.actorPubkeys.size,
+                    onProfileClick = onProfileClick,
+                    avatarSize = 24
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    text = timeAgo,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            // Row 2: action text + zap badge (consistent vertical space)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 26.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = notification.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false)
+                )
                 if (notification.type == NotificationType.ZAP && notification.zapAmountSats > 0) {
+                    Spacer(Modifier.width(6.dp))
                     Surface(
                         shape = RoundedCornerShape(4.dp),
                         color = Color(0xFFF59E0B).copy(alpha = 0.15f)
@@ -766,12 +771,23 @@ private fun CompactNotificationRow(
                             )
                         }
                     }
-                    Spacer(Modifier.width(6.dp))
                 }
+            }
+            // Note preview snippet
+            val rawPreview = notification.targetNote?.content ?: notification.note?.content
+            val previewText = remember(rawPreview) {
+                rawPreview?.replace(Regex("nostr:(nevent1|note1|nprofile1|npub1|naddr1)[qpzry9x8gf2tvdw0s3jn54khce6mua7l]+", RegexOption.IGNORE_CASE), "")
+                    ?.replace(Regex("\\s+"), " ")?.trim()
+            }
+            if (!previewText.isNullOrBlank()) {
                 Text(
-                    text = timeAgo,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline
+                    text = previewText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 16.sp,
+                    modifier = Modifier.padding(start = 26.dp)
                 )
             }
         } else {
@@ -869,21 +885,47 @@ private fun CompactNotificationRow(
                     }
                     Spacer(Modifier.width(6.dp))
                 }
-                // Badge thumbnail
-                if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
-                    coil.compose.AsyncImage(
-                        model = notification.badgeImageUrl,
-                        contentDescription = notification.badgeName ?: "Badge",
-                        modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp)),
-                        contentScale = ContentScale.Crop
-                    )
-                    Spacer(Modifier.width(6.dp))
-                }
                 Text(
                     text = timeAgo,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline
                 )
+            }
+            // Badge image — full-width prominent card below the row
+            if (notification.type == NotificationType.BADGE_AWARD && notification.badgeImageUrl != null) {
+                Spacer(Modifier.height(6.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        coil.compose.AsyncImage(
+                            model = notification.badgeImageUrl,
+                            contentDescription = notification.badgeName ?: "Badge",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 200.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Fit
+                        )
+                        if (!notification.badgeName.isNullOrBlank()) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                text = notification.badgeName!!,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -931,6 +973,7 @@ private fun FullNotificationCard(
     val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)
     val typeColor = when (notification.type) {
         NotificationType.REPLY -> MaterialTheme.colorScheme.secondary
+        NotificationType.COMMENT -> MaterialTheme.colorScheme.secondary
         NotificationType.MENTION -> MaterialTheme.colorScheme.tertiary
         NotificationType.HIGHLIGHT -> Color(0xFF9C27B0)
         NotificationType.REPORT -> Color(0xFFF44336)
@@ -942,9 +985,9 @@ private fun FullNotificationCard(
     val typeLabel = when (notification.type) {
         NotificationType.REPLY -> when (notification.replyKind) {
             11 -> "replied to your thread"
-            1111 -> "commented"
             else -> "replied"
         }
+        NotificationType.COMMENT -> "commented on your post"
         NotificationType.QUOTE -> "quoted your note"
         NotificationType.HIGHLIGHT -> "highlighted"
         NotificationType.REPORT -> "reported"
@@ -952,6 +995,7 @@ private fun FullNotificationCard(
     }
     val typeIcon = when (notification.type) {
         NotificationType.REPLY -> Icons.AutoMirrored.Outlined.Reply
+        NotificationType.COMMENT -> Icons.Outlined.ChatBubble
         NotificationType.QUOTE -> Icons.Default.FormatQuote
         NotificationType.HIGHLIGHT -> Icons.Outlined.FormatQuote
         NotificationType.REPORT -> Icons.Outlined.Flag
@@ -985,9 +1029,21 @@ private fun FullNotificationCard(
             )
         }
 
+        // Row 2: target note context (parent) — shown ABOVE reply for natural reading order
+        notification.targetNote?.let { target ->
+            Spacer(Modifier.height(6.dp))
+            NotificationTargetPreview(
+                target = target,
+                profileCache = profileCache,
+                profileRevision = profileRevision,
+                linkStyle = linkStyle,
+                onProfileClick = onProfileClick,
+            )
+        }
+
         Spacer(Modifier.height(6.dp))
 
-        // Row 2: author avatar + name (full width, no indent on content below)
+        // Row 3: reply author avatar + name
         Row(verticalAlignment = Alignment.CenterVertically) {
             ProfilePicture(
                 author = displayAuthor,
@@ -1005,25 +1061,13 @@ private fun FullNotificationCard(
             )
         }
 
-        // Row 3: reply/quote content — FULL WIDTH, no indentation
+        // Row 4: reply/quote content — FULL WIDTH, no indentation
         notification.note?.let { replyNote ->
             NotificationReplyContent(
                 replyNote = replyNote,
                 profileCache = profileCache,
                 onProfileClick = onProfileClick,
                 onClick = onClick,
-            )
-        }
-
-        // Row 4: target note context — FULL WIDTH
-        notification.targetNote?.let { target ->
-            Spacer(Modifier.height(6.dp))
-            NotificationTargetPreview(
-                target = target,
-                profileCache = profileCache,
-                profileRevision = profileRevision,
-                linkStyle = linkStyle,
-                onProfileClick = onProfileClick,
             )
         }
     }
@@ -1512,55 +1556,124 @@ private fun PollVoteNotificationCard(
         if (!notification.pollQuestion.isNullOrBlank()) {
             Spacer(Modifier.height(6.dp))
             Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                shape = RectangleShape,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(6.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
             ) {
-                Row(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                Row(
+                    modifier = Modifier.height(IntrinsicSize.Min)
+                ) {
                     Box(
                         modifier = Modifier
                             .width(3.dp)
-                            .height(IntrinsicSize.Min)
-                            .background(pollGreen.copy(alpha = 0.5f))
+                            .fillMaxHeight()
+                            .background(
+                                pollGreen.copy(alpha = 0.5f),
+                                RoundedCornerShape(topStart = 6.dp, bottomStart = 6.dp)
+                            )
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = notification.pollQuestion!!,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        // Mini option list
-                        if (notification.pollAllOptions.isNotEmpty()) {
-                            Spacer(Modifier.height(4.dp))
-                            notification.pollAllOptions.forEach { optLabel ->
-                                val isChosen = optLabel in notification.pollOptionLabels
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier.padding(vertical = 1.dp)
-                                ) {
-                                    if (isChosen) {
-                                        Icon(
-                                            imageVector = Icons.Filled.Check,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(12.dp),
-                                            tint = pollGreen
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        // Poll type badge
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Outlined.HowToVote,
+                                contentDescription = null,
+                                modifier = Modifier.size(12.dp),
+                                tint = pollGreen.copy(alpha = 0.7f)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = if (notification.pollIsMultipleChoice) "Multiple choice" else "Single choice",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = pollGreen.copy(alpha = 0.7f)
+                            )
+                        }
+                        // Poll question — use rich content pipeline for NIP-19 resolution
+                        val linkColor = MaterialTheme.colorScheme.primary
+                        val linkStyle = remember(linkColor) {
+                            SpanStyle(color = linkColor, textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)
+                        }
+                        val questionBlocks = remember(notification.pollQuestion, linkStyle) {
+                            social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
+                                content = notification.pollQuestion!!,
+                                mediaUrls = emptySet(),
+                                urlPreviews = emptyList(),
+                                linkStyle = linkStyle,
+                                profileCache = profileCache,
+                                emojiUrls = emptyMap()
+                            )
+                        }
+                        val uriHandler = LocalUriHandler.current
+                        questionBlocks.forEach { block ->
+                            when (block) {
+                                is social.mycelium.android.utils.NoteContentBlock.Content -> {
+                                    if (block.annotated.isNotEmpty()) {
+                                        social.mycelium.android.ui.components.note.ClickableNoteContent(
+                                            text = block.annotated,
+                                            style = MaterialTheme.typography.bodySmall.copy(
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                                lineHeight = 17.sp
+                                            ),
+                                            maxLines = 3,
+                                            emojiUrls = block.emojiUrls,
+                                            onClick = { offset ->
+                                                val profile = block.annotated.getStringAnnotations(tag = "PROFILE", start = offset, end = offset).firstOrNull()
+                                                val url = block.annotated.getStringAnnotations(tag = "URL", start = offset, end = offset).firstOrNull()
+                                                when {
+                                                    profile != null -> onProfileClick(profile.item)
+                                                    url != null -> uriHandler.openUri(url.item)
+                                                    else -> onClick()
+                                                }
+                                            }
                                         )
-                                    } else {
-                                        Spacer(Modifier.width(12.dp))
                                     }
-                                    Spacer(Modifier.width(4.dp))
-                                    Text(
-                                        text = optLabel,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (isChosen) pollGreen
-                                                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                                        fontWeight = if (isChosen) FontWeight.SemiBold else FontWeight.Normal,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                }
+                                else -> {}
+                            }
+                        }
+                        // Option chips
+                        if (notification.pollAllOptions.isNotEmpty()) {
+                            @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+                            androidx.compose.foundation.layout.FlowRow(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                notification.pollAllOptions.forEach { optLabel ->
+                                    val isChosen = optLabel in notification.pollOptionLabels
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isChosen) pollGreen.copy(alpha = 0.2f)
+                                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            if (isChosen) {
+                                                Icon(
+                                                    imageVector = Icons.Filled.Check,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(12.dp),
+                                                    tint = pollGreen
+                                                )
+                                            }
+                                            Text(
+                                                text = optLabel,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = if (isChosen) pollGreen
+                                                        else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                                fontWeight = if (isChosen) FontWeight.SemiBold else FontWeight.Normal,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1575,8 +1688,14 @@ private fun PollVoteNotificationCard(
 
 private fun formatSatsCompact(sats: Long): String {
     return when {
-        sats >= 1_000_000 -> "${sats / 1_000_000}.${(sats % 1_000_000) / 100_000}M"
-        sats >= 1_000 -> "${sats / 1_000}.${(sats % 1_000) / 100}K"
+        sats >= 1_000_000 -> {
+            val dec = (sats % 1_000_000) / 100_000
+            if (dec > 0) "${sats / 1_000_000}.${dec}M" else "${sats / 1_000_000}M"
+        }
+        sats >= 1_000 -> {
+            val dec = (sats % 1_000) / 100
+            if (dec > 0) "${sats / 1_000}.${dec}K" else "${sats / 1_000}K"
+        }
         else -> "$sats"
     }
 }

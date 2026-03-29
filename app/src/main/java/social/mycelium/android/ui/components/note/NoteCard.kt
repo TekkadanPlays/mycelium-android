@@ -924,6 +924,10 @@ internal fun QuotedNoteContent(
             ) {
                 ProfilePicture(author = quotedAuthor, size = 20.dp, onClick = { onProfileClick(meta.authorId) })
                 Spacer(modifier = Modifier.width(6.dp))
+                social.mycelium.android.ui.components.common.Nip05Icon(
+                    pubkeyHex = normalizeAuthorIdForCache(meta.authorId),
+                    size = 12.dp
+                )
                 Text(
                     text = quotedAuthor.displayName,
                     style = MaterialTheme.typography.labelSmall,
@@ -3069,6 +3073,7 @@ fun NoteCard(
                             rootAuthorId != null && normalizeAuthorIdForCache(note.author.id) == normalizeAuthorIdForCache(
                                 rootAuthorId
                             )
+                        val nip05Status = social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
                         if (isOp) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Surface(
@@ -3084,6 +3089,15 @@ fun NoteCard(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
+                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                    Icon(
+                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                        contentDescription = "Verified",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color.Unspecified
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(4.dp))
@@ -3102,8 +3116,7 @@ fun NoteCard(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
-                            if (displayAuthor.isVerified) {
-                                Spacer(modifier = Modifier.width(4.dp))
+                            if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
                                 val isDark = androidx.compose.foundation.isSystemInDarkTheme()
                                 Icon(
                                     imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
@@ -3124,6 +3137,28 @@ fun NoteCard(
                             )
                         )
                     }
+                }
+                // NIP-05 domain beneath the name (feed context)
+                val nip05Value = displayAuthor.nip05?.takeIf { it.isNotBlank() }
+                val nip05StatusForDomain = if (nip05Value != null)
+                    social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
+                else null
+                if (nip05Value != null && nip05StatusForDomain == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
+                    val nip05Display = remember(nip05Value) {
+                        val parts = nip05Value.split("@")
+                        when {
+                            parts.size == 2 && parts[0] == "_" -> parts[1]
+                            parts.size == 2 -> nip05Value
+                            else -> nip05Value
+                        }
+                    }
+                    Text(
+                        text = nip05Display,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
             val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
@@ -3392,7 +3427,9 @@ fun NoteCard(
         var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
         var quotedFailedIds by remember(note.id) { mutableStateOf<Set<String>>(emptySet()) }
         var quotedLoading by remember(note.id) { mutableStateOf(note.quotedEventIds.isNotEmpty()) }
-        var quotedProfileRevision by remember(note.id) { mutableIntStateOf(0) }
+        // Quoted profile revision: use shared map when available, per-card fallback otherwise
+        val quotedSharedRevisions = LocalProfileRevisions.current
+        var quotedLocalProfileRevision by remember(note.id) { mutableIntStateOf(0) }
         if (note.quotedEventIds.isNotEmpty()) {
             LaunchedEffect(note.quotedEventIds) {
                 quotedLoading = true
@@ -3425,21 +3462,27 @@ fun NoteCard(
                 }
                 quotedLoading = false
             }
-            // Observe profile updates for quoted note authors
+            // Observe profile updates for quoted note authors — shared map or per-card fallback
             val quotedAuthorPubkeys = remember(quotedMetas) {
                 quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
             }
-            if (quotedProfileRevision == 0) {
+            if (quotedSharedRevisions == null && quotedLocalProfileRevision == 0) {
                 LaunchedEffect(quotedAuthorPubkeys) {
                     if (quotedAuthorPubkeys.isNotEmpty()) {
                         profileCache.profileUpdated
                             .filter { it in quotedAuthorPubkeys }
-                            .debounce(1500)
-                            .collect { quotedProfileRevision = 1 }
+                            .debounce(500)
+                            .collect { quotedLocalProfileRevision = 1 }
                     }
                 }
             }
         }
+        // Compute effective quoted profile revision from shared map or local fallback
+        val quotedProfileRevision = if (quotedSharedRevisions != null) {
+            remember(quotedMetas) {
+                quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
+            }.sumOf { quotedSharedRevisions[it] ?: 0 }
+        } else quotedLocalProfileRevision
 
         // Use translated text when available and user hasn't toggled to original
         val displayContent =

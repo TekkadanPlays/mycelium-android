@@ -295,6 +295,10 @@ class ProfileMetadataCache {
         if (dataChanged) _profileVersion.value++
         // Only write to disk when the profile data actually changed
         if (dataChanged) scheduleDiskSave()
+        // Auto-trigger NIP-05 verification when profile has nip05 field
+        author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
+            social.mycelium.android.repository.social.Nip05Verifier.verify(key, nip05)
+        }
         return true
     }
 
@@ -308,6 +312,10 @@ class ProfileMetadataCache {
             _profileUpdated.emit(key)
         }
         scheduleDiskSave()
+        // Auto-trigger NIP-05 verification when profile has nip05 field
+        author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
+            social.mycelium.android.repository.social.Nip05Verifier.verify(key, nip05)
+        }
     }
 
     /**

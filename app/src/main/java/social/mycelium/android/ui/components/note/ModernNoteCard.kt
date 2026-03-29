@@ -264,8 +264,8 @@ private fun NoteCardContent(
                                 fontWeight = FontWeight.Bold
                             )
                         )
-                        if (displayAuthor.isVerified) {
-                            Spacer(modifier = Modifier.width(4.dp))
+                        val nip05Status = social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
+                        if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
                             val isDark = androidx.compose.foundation.isSystemInDarkTheme()
                             Icon(
                                 imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
@@ -274,6 +274,27 @@ private fun NoteCardContent(
                                 tint = androidx.compose.ui.graphics.Color.Unspecified
                             )
                         }
+                    }
+                    val nip05Value = displayAuthor.nip05?.takeIf { it.isNotBlank() }
+                    val nip05ForDomain = if (nip05Value != null)
+                        social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
+                    else null
+                    if (nip05Value != null && nip05ForDomain == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
+                        val nip05Display = remember(nip05Value) {
+                            val parts = nip05Value.split("@")
+                            when {
+                                parts.size == 2 && parts[0] == "_" -> parts[1]
+                                parts.size == 2 -> nip05Value
+                                else -> nip05Value
+                            }
+                        }
+                        Text(
+                            text = nip05Display,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                     val formattedTime = remember(note.timestamp) {
                         formatTimestamp(note.timestamp)

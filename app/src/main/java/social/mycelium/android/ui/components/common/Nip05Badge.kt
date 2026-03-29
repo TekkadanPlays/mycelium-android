@@ -24,6 +24,43 @@ import social.mycelium.android.ui.icons.Nip05Verified
 import social.mycelium.android.ui.icons.Nip05VerifiedDark
 
 /**
+ * Compact NIP-05 verification icon — just the checkmark or fail icon, no text, no spacing.
+ * For reply/comment author rows where space is tight. Place directly left of the display name.
+ * Reads from [Nip05Verifier.verificationStates] (SnapshotStateMap) so it recomposes reactively.
+ *
+ * @param pubkeyHex The author's hex pubkey.
+ * @param size Icon size in dp.
+ */
+@Composable
+fun Nip05Icon(
+    pubkeyHex: String,
+    size: androidx.compose.ui.unit.Dp = 14.dp,
+    modifier: Modifier = Modifier
+) {
+    val status = Nip05Verifier.verificationStates[pubkeyHex]
+    when (status) {
+        Nip05Verifier.VerificationStatus.VERIFIED -> {
+            val isDark = isSystemInDarkTheme()
+            Icon(
+                imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                contentDescription = "Verified",
+                modifier = modifier.size(size),
+                tint = Color.Unspecified
+            )
+        }
+        Nip05Verifier.VerificationStatus.FAILED -> {
+            Icon(
+                imageVector = Icons.Default.Report,
+                contentDescription = "NIP-05 failed",
+                modifier = modifier.size(size),
+                tint = Color(0xFFEF5350)
+            )
+        }
+        else -> {}
+    }
+}
+
+/**
  * Displays a NIP-05 identifier with a verification badge icon.
  * Triggers background verification on first composition if not already cached.
  *

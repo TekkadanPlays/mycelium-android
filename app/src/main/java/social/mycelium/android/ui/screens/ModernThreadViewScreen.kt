@@ -1390,11 +1390,16 @@ fun ModernThreadViewScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = note.author.displayName,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        social.mycelium.android.ui.components.common.Nip05Icon(
+                                            pubkeyHex = social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id)
+                                        )
+                                        Text(
+                                            text = note.author.displayName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                     Text(
                                         text = note.content.take(200)
                                             .let { if (note.content.length > 200) "$it…" else it },
@@ -1639,14 +1644,19 @@ private fun ModernCommentCard(
                     Spacer(modifier = Modifier.width(12.dp))
 
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = comment.author.displayName,
-                            style = MaterialTheme.typography.titleSmall.copy(
-                                fontWeight = FontWeight.SemiBold
-                            ),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            social.mycelium.android.ui.components.common.Nip05Icon(
+                                pubkeyHex = social.mycelium.android.utils.normalizeAuthorIdForCache(comment.author.id)
+                            )
+                            Text(
+                                text = comment.author.displayName,
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.SemiBold
+                                ),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                         Text(
                             text = formatTimestamp(comment.timestamp),
                             style = MaterialTheme.typography.bodySmall,
@@ -1847,6 +1857,10 @@ private fun ModernCommentCard(
 
                 Spacer(modifier = Modifier.width(6.dp))
 
+                social.mycelium.android.ui.components.common.Nip05Icon(
+                    pubkeyHex = social.mycelium.android.utils.normalizeAuthorIdForCache(comment.author.id),
+                    size = 12.dp
+                )
                 Text(
                     text = comment.author.displayName,
                     style = MaterialTheme.typography.bodySmall.copy(
@@ -1962,21 +1976,29 @@ private fun ReplyHeader(
                         rootAuthorId != null && social.mycelium.android.utils.normalizeAuthorIdForCache(reply.author.id) == social.mycelium.android.utils.normalizeAuthorIdForCache(
                             rootAuthorId
                         )
+                    val replyAuthorPubkey = social.mycelium.android.utils.normalizeAuthorIdForCache(reply.author.id)
                     if (isOp) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Surface(
                                 color = Color(0xFF8E30EB),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
-                                Text(
-                                    text = displayAuthor.displayName,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    social.mycelium.android.ui.components.common.Nip05Icon(
+                                        pubkeyHex = replyAuthorPubkey,
+                                        size = 14.dp,
+                                        modifier = Modifier.padding(start = 4.dp)
+                                    )
+                                    Text(
+                                        text = displayAuthor.displayName,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
@@ -1986,6 +2008,9 @@ private fun ReplyHeader(
                             )
                         }
                     } else {
+                        social.mycelium.android.ui.components.common.Nip05Icon(
+                            pubkeyHex = replyAuthorPubkey
+                        )
                         Text(
                             text = displayAuthor.displayName,
                             style = MaterialTheme.typography.bodyMedium,

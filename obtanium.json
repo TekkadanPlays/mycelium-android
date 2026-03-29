@@ -19,6 +19,34 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.22",
+      "versionCode": 47,
+      "releaseDate": "2026-03-29",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.22-beta/Mycelium-v0.5.22-beta.apk",
+      "changelog": "Notification UI overhaul, NIP-05 live verification, rendering pipeline optimization, NIP-19 parsing improvements, quoted event fetch fixes, component reorganization.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Notification screen presentation overhaul with restructured tabs and enrichment",
+        "Live NIP-05 verification across feed, thread, quoted notes, and reply authors",
+        "NIP-05 icon rendered left of display name in thread reply contexts",
+        "Rendering pipeline: shared profile revision provider (N coroutines → 1), async content block parsing off main thread",
+        "Startup sub-phasing: Phase 3 split into 3a/3b/3c for relay slot pressure distribution",
+        "Merged scroll snapshotFlows (4 → 2) for reduced snapshot system overhead",
+        "Relay enrichment moved from display-time to ingestion-time (eliminates per-update Note.copy allocations)",
+        "Fix: silent quoted event drops across fetch pipeline",
+        "NIP-19 identifier parsing improvements",
+        "Scroll retention and relay orb reactivity improvements",
+        "Debug auth gate for relay filter menu",
+        "Codebase reorganization: repository/ into 7 domain-aligned subdirectories, components/ into relay, live, preview, emoji, zap, compose, media, nav, note, and common subdirectories"
+      ]
+    },
+    {
       "version": "0.5.21",
       "versionCode": 46,
       "releaseDate": "2026-03-28",

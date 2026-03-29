@@ -73,16 +73,16 @@ object QuotedNoteCache {
         )
     }
 
-    private const val MAX_ENTRIES = 200
-    private const val DISK_CACHE_MAX = 150
+    private const val MAX_ENTRIES = 400
+    private const val DISK_CACHE_MAX = 300
     private const val PREFS_NAME = "quoted_note_cache"
     private const val PREFS_KEY = "entries"
 
     /** Size to trim to when UI is hidden. */
-    const val TRIM_SIZE_UI_HIDDEN = 100
+    const val TRIM_SIZE_UI_HIDDEN = 200
 
     /** Size to trim to when app is in background. */
-    const val TRIM_SIZE_BACKGROUND = 50
+    const val TRIM_SIZE_BACKGROUND = 100
 
     private val diskScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val diskJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -96,7 +96,7 @@ object QuotedNoteCache {
 
     /** IDs that failed to fetch (relay didn't have them). Cleared periodically so retries can happen. */
     private val failedIds = ConcurrentHashMap<String, Long>()
-    private const val FAILED_TTL_MS = 60_000L
+    private const val FAILED_TTL_MS = 30_000L
 
     // LRU map: access order, eldest evicted when over MAX_ENTRIES.
     private val memoryCache = Collections.synchronizedMap(
@@ -237,35 +237,41 @@ object QuotedNoteCache {
                 }
                 // Remaining: fire relay fetch (no debounce — these are needed NOW)
                 val stillNeeded = unresolved.filter { !memoryCache.containsKey(it) && it !in inFlightIds }
+                // Collect all relay hints for unresolved IDs (used for both fetch and depth-2)
+                val allHintRelays = unresolved.flatMap { relayHintsCache[it] ?: emptyList() }.distinct()
+                val combinedRelays = (allHintRelays + userRelayUrls).distinct().filter { it.isNotBlank() }.take(10)
                 if (stillNeeded.isNotEmpty()) {
                     Log.d(TAG, "Prefetch: ${stillNeeded.size} quoted notes fetching from relays")
-                    val relays = userRelayUrls.take(6)
-                    if (relays.isNotEmpty()) {
-                        val filter = Filter(
-                            kinds = ACCEPTED_KINDS.toList(),
-                            ids = stillNeeded.take(MAX_BATCH_SIZE),
-                            limit = stillNeeded.size
-                        )
+                    if (combinedRelays.isNotEmpty()) {
                         val stateMachine = RelayConnectionStateMachine.getInstance()
-                        try {
-                            stateMachine.awaitOneShotSubscription(
-                                relays, filter, priority = SubscriptionPriority.NORMAL,
-                                settleMs = 400L, maxWaitMs = FETCH_TIMEOUT_MS
-                            ) { event ->
-                                if (memoryCache.containsKey(event.id)) return@awaitOneShotSubscription
-                                memoryCache[event.id] = buildMetaFromEvent(event, relays.firstOrNull())
-                                failedIds.remove(event.id)
+                        // Process in chunks so we never silently drop overflow events
+                        for (chunk in stillNeeded.chunked(MAX_BATCH_SIZE)) {
+                            val filter = Filter(
+                                kinds = ACCEPTED_KINDS.toList(),
+                                ids = chunk,
+                                limit = chunk.size
+                            )
+                            try {
+                                stateMachine.awaitOneShotSubscription(
+                                    combinedRelays, filter, priority = SubscriptionPriority.NORMAL,
+                                    settleMs = 400L, maxWaitMs = FETCH_TIMEOUT_MS
+                                ) { event ->
+                                    if (memoryCache.containsKey(event.id)) return@awaitOneShotSubscription
+                                    memoryCache[event.id] = buildMetaFromEvent(event, combinedRelays.firstOrNull())
+                                    failedIds.remove(event.id)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Prefetch relay fetch error: ${e.message}")
                             }
-                            scheduleDiskSave()
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Prefetch relay fetch error: ${e.message}")
                         }
+                        scheduleDiskSave()
                     }
                 }
 
                 // ── Depth-2 prefetch: scan resolved quotes for nested nostr: references ──
                 // This eliminates loading spinners for quote-within-quote rendering.
-                prefetchNestedQuotes(allQuotedIds, relays = userRelayUrls.take(6))
+                val depth2Relays = combinedRelays.ifEmpty { userRelayUrls.take(6) }
+                prefetchNestedQuotes(allQuotedIds, relays = depth2Relays)
             }
         }
     }
@@ -309,14 +315,17 @@ object QuotedNoteCache {
             } catch (_: Exception) {
             }
         }
-        // Phase 2: relay fetch for remaining
+        // Phase 2: relay fetch for remaining (include relay hints for depth-2 events)
         val remaining = stillNeeded.filter { !memoryCache.containsKey(it) && it !in inFlightIds }
-        if (remaining.isNotEmpty() && relays.isNotEmpty()) {
+        if (remaining.isNotEmpty()) {
+            val nestedHints = remaining.flatMap { relayHintsCache[it] ?: emptyList() }.distinct()
+            val effectiveRelays = (nestedHints + relays).distinct().filter { it.isNotBlank() }.take(10)
+            if (effectiveRelays.isEmpty()) return
             val filter =
                 Filter(kinds = ACCEPTED_KINDS.toList(), ids = remaining.take(MAX_BATCH_SIZE), limit = remaining.size)
             try {
                 RelayConnectionStateMachine.getInstance().awaitOneShotSubscription(
-                    relays, filter, priority = SubscriptionPriority.LOW,
+                    effectiveRelays, filter, priority = SubscriptionPriority.LOW,
                     settleMs = 400L, maxWaitMs = FETCH_TIMEOUT_MS
                 ) { event ->
                     if (memoryCache.containsKey(event.id)) return@awaitOneShotSubscription

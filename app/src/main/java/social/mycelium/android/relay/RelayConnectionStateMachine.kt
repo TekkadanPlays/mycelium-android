@@ -1034,11 +1034,24 @@ class RelayConnectionStateMachine {
     /**
      * Filter out relays that require payment or NIP-42 auth (when no signer is available)
      * based on cached NIP-11 relay information. Relays we haven't checked yet pass through.
+     * Auth-required relays are allowed when a signer is present and the relay is in
+     * the user's allowed or session-allowed set — the auth handler will respond to challenges.
      */
     private fun filterUsableRelays(relayUrls: List<String>): List<String> {
         val cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
             ?: return relayUrls // Not initialized yet — let everything through
-        return relayUrls.filter { !cache.shouldSkipRelay(it) }
+        val hasSigner = nip42AuthHandler.hasSigner()
+        return relayUrls.filter { url ->
+            val info = cache.getCachedRelayInfo(url)
+            val limitation = info?.limitation
+            // Always skip payment-required relays
+            if (limitation?.payment_required == true) return@filter false
+            // Auth-required: allow if signer is present and relay is in allowed sets
+            if (limitation?.auth_required == true) {
+                return@filter hasSigner && nip42AuthHandler.isRelayAllowed(url)
+            }
+            true
+        }
     }
 
     // ── Temporary subscriptions (all routed through SubscriptionMultiplexer) ──────

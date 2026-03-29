@@ -101,6 +101,9 @@ class Nip42AuthHandler(
         Log.d(TAG, "Session-allowed relay: $normalized (total session: ${sessionAllowedUrls.size})")
     }
 
+    /** Whether a signer is available to respond to AUTH challenges. */
+    fun hasSigner(): Boolean = signer != null
+
     /** Check if a relay URL is allowed (permanent or session). */
     fun isRelayAllowed(url: String): Boolean {
         val normalized = social.mycelium.android.utils.normalizeRelayUrl(url)

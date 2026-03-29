@@ -344,6 +344,13 @@ class RelayManagementViewModel(
      * Save current relay data to storage
      */
     private fun saveToStorage() {
+        // Guard: don't persist during account switch when UI state is transiently empty.
+        // Background NIP-11 fetches or relay mutations could fire here before
+        // loadUserRelays() has repopulated the state from disk.
+        if (!storageLoaded) {
+            Log.w("RelayMgmtVM", "saveToStorage() skipped — storage not yet loaded (mid-switch)")
+            return
+        }
         currentPubkey?.let { pubkey ->
             storageManager.saveCategories(pubkey, _uiState.value.relayCategories)
             storageManager.saveProfiles(pubkey, _uiState.value.relayProfiles)
@@ -610,11 +617,68 @@ class RelayManagementViewModel(
         _uiState.update { it.copy(draftsRelays = it.draftsRelays + relay) }
         saveToStorage()
         fetchAndApplyNip11(relay.url)
+        connectDraftsRelay(relay.url)
     }
 
     fun removeDraftsRelay(url: String) {
         _uiState.update { it.copy(draftsRelays = it.draftsRelays.filter { r -> r.url != url }) }
         saveToStorage()
+        disconnectDraftsRelay(url)
+    }
+
+    /**
+     * Connect a drafts relay and keep it connected persistently.
+     * Drafts relays may require NIP-42 auth, so we:
+     * 1. Add the URL to the NIP-42 allowed relay set
+     * 2. Clear any stale auth state for a fresh AUTH handshake
+     * 3. Add it to the persistent relay set (won't disconnect when idle)
+     * 4. Request a connection via the relay pool
+     */
+    private fun connectDraftsRelay(url: String) {
+        val normalized = social.mycelium.android.utils.normalizeRelayUrl(url)
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+        val authHandler = stateMachine.nip42AuthHandler
+
+        // Allow NIP-42 auth for this relay (drafts relays often require auth)
+        authHandler.addAllowedRelayUrls(listOf(normalized))
+        authHandler.clearAuthStateForRelay(normalized)
+
+        // Add to persistent set so it stays connected (won't be pruned when idle)
+        val currentPersistent = _uiState.value.let { state ->
+            val outboxUrls = state.outboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val inboxUrls = state.inboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val subscribedCategoryUrls = state.relayCategories.filter { it.isSubscribed }
+                .flatMap { it.relays }.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val draftsUrls = state.draftsRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            outboxUrls + inboxUrls + subscribedCategoryUrls + draftsUrls + normalized
+        }
+        stateMachine.setPersistentRelayUrls(currentPersistent)
+
+        // Connect to the relay — requestConnect opens a WebSocket and triggers AUTH if needed
+        viewModelScope.launch(Dispatchers.IO) {
+            stateMachine.relayPool.connect(setOf(normalized))
+            Log.d("RelayMgmtVM", "Drafts relay connected and persistent: $normalized")
+        }
+    }
+
+    /**
+     * Clean up when a drafts relay is removed: remove from persistent set.
+     */
+    private fun disconnectDraftsRelay(url: String) {
+        val normalized = social.mycelium.android.utils.normalizeRelayUrl(url)
+        val stateMachine = RelayConnectionStateMachine.getInstance()
+
+        // Rebuild persistent set without this relay
+        val currentPersistent = _uiState.value.let { state ->
+            val outboxUrls = state.outboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val inboxUrls = state.inboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val subscribedCategoryUrls = state.relayCategories.filter { it.isSubscribed }
+                .flatMap { it.relays }.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            val draftsUrls = state.draftsRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
+            outboxUrls + inboxUrls + subscribedCategoryUrls + draftsUrls
+        }
+        stateMachine.setPersistentRelayUrls(currentPersistent)
+        Log.d("RelayMgmtVM", "Drafts relay removed from persistent set: $normalized")
     }
 
     fun addBlossomServer(server: social.mycelium.android.data.MediaServer) {
@@ -803,10 +867,10 @@ class RelayManagementViewModel(
                     val inbox = normalized.filter { it.read }
                     val current = _uiState.value
                     // Only populate outbox/inbox when they are empty so we don't overwrite user edits.
-                    // NOTE: We intentionally do NOT inject outbox relays into the Home Relays
-                    // category here. That seeding is handled by the onboarding flow
-                    // (OnboardingScreen) and kind-30002 sync (RelayCategorySyncRepository).
-                    // Injecting NIP-65 outbox relays into categories here would bypass
+                    // NOTE: We intentionally do NOT inject outbox relays into categories.
+                    // Categories (kind-30002) are a separate domain from outbox (kind-10002).
+                    // Category seeding is handled exclusively by kind-30002 sync (RelayCategorySyncRepository).
+                    // Injecting NIP-65 outbox relays into categories would bypass
                     // kind-30002 deletion state and resurrect relays the user deleted.
                     if (current.outboxRelays.isEmpty() && current.inboxRelays.isEmpty() && (outbox.isNotEmpty() || inbox.isNotEmpty())) {
                         DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: populating outbox=${outbox.size} inbox=${inbox.size} " +

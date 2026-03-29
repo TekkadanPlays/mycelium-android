@@ -42,7 +42,7 @@ object DefaultRelayCategories {
     fun getDefaultCategory(): RelayCategory {
         return RelayCategory(
             id = "default_my_relays",
-            name = "Home Relays",
+            name = "Default Category",
             relays = emptyList(),
             isDefault = true,
             isSubscribed = true

@@ -509,35 +509,19 @@ fun OnboardingScreen(
             storageManager.saveOutboxRelays(hexPubkey, outboxRelays)
             storageManager.saveInboxRelays(hexPubkey, inboxRelays)
 
-            // Populate Home relays category for feed subscription.
-            // REPLACE the relay list entirely — not merge — so relays removed from the
-            // user's NIP-65 event are pruned here too and never flow into persistentUrls.
-            val allNip65Urls = (liveWriteRelays + liveReadRelays).distinct()
-            val categoryRelays = allNip65Urls.map { UserRelay(url = it, read = true, write = true, source = RelaySource.NIP65_IMPORT) }
-            val existingCategories = storageManager.loadCategories(hexPubkey)
-            val updatedCategories = if (existingCategories.any { it.id == "default_my_relays" }) {
-                existingCategories.map { cat ->
-                    if (cat.id == "default_my_relays") cat.copy(relays = categoryRelays, isSubscribed = true)
-                    else cat
-                }
-            } else {
-                val newCat = RelayCategory(
-                    id = "default_my_relays",
-                    name = "Home relays",
-                    relays = categoryRelays,
-                    isDefault = true,
-                    isSubscribed = true
-                )
-                existingCategories + newCat
-            }
-            storageManager.saveCategories(hexPubkey, updatedCategories)
-            Log.d("OnboardingScreen", "Replaced Home relays category with ${categoryRelays.size} NIP-65 relays")
+            // Categories (kind-30002 relay sets) are NOT seeded from NIP-65 outbox/inbox.
+            // Each relay manager section is its own domain:
+            //   - Outbox tab → kind-10002 write relays (saved above)
+            //   - Inbox tab  → kind-10002 read relays (saved above)
+            //   - Categories → kind-30002 relay sets (fetched by RelayCategorySyncRepository)
+            // If the user has no published kind-30002, they get an empty Default Category.
+            Log.d("OnboardingScreen", "Outbox/inbox saved — categories left to kind-30002 sync (not seeded from NIP-65)")
 
             // Clean up: remove outbox/inbox relay URLs from the Indexer list.
             // These were seeded during auto-search as anchor indexers but if they
             // overlap with the user's personal NIP-65 relays, they will create
             // duplicate subscription channels and choke the relay pool.
-            val personalUrls = allNip65Urls.map { it.trim().removeSuffix("/").lowercase() }.toSet()
+            val personalUrls = (liveWriteRelays + liveReadRelays).distinct().map { it.trim().removeSuffix("/").lowercase() }.toSet()
             val existingIndexers = storageManager.loadIndexerRelays(hexPubkey)
             val cleanedIndexers = existingIndexers.filter { indexer ->
                 indexer.url.trim().removeSuffix("/").lowercase() !in personalUrls
@@ -2339,13 +2323,12 @@ private fun PrefetchingListsUI(
             }
         }
 
-        // ── Step 6: Feed Prewarm ──
+        // ── Step 6: Feed Prewarm (Fire-and-forget) ──
         // Now that the follow list is loaded, preload 500 enriched notes into the
-        // Room event cache. When the dashboard opens, loadFeedCacheFromRoom() finds
-        // these events and renders the feed instantly — no relay round-trip needed.
-        // This fires AFTER steps 2-5 so the follow list filter is accurate.
-        currentTask = "Pre-loading your feed\u2026"
-        withContext(kotlinx.coroutines.Dispatchers.IO) {
+        // Room event cache IN THE BACKGROUND. We use a detached scope so this prewarm
+        // safely completes concurrently while the user navigates through the
+        // NOTIFICATION_SETUP phase, allowing the dashboard to render instantly.
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO).launch {
             try {
                 val notesRepo = social.mycelium.android.repository.feed.NotesRepository.getInstance()
                 val followedPubkeys = social.mycelium.android.repository.social.ContactListRepository
@@ -2356,7 +2339,7 @@ private fun PrefetchingListsUI(
                     indexerUrls = allIndexerUrls,
                     limit = 500
                 )
-                android.util.Log.d("PrefetchingListsUI", "Step 6 done: feed prewarm complete")
+                android.util.Log.d("PrefetchingListsUI", "Step 6 done: background feed prewarm complete")
             } catch (e: Exception) {
                 android.util.Log.e("PrefetchingListsUI", "Feed prewarm error: ${e.message}")
             }

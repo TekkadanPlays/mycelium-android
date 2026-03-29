@@ -360,13 +360,16 @@ object ContentBlockCache {
             size > MAX_ENTRIES
     }
 
-    /** Build a cache key from the content string and media URLs. */
-    fun key(content: String, mediaUrls: Set<String>, consumedUrls: Set<String> = emptySet(), mentionVersion: Int = 0): String {
-        // Identity is content + which URLs are media + which are consumed + mention resolution version
+    /** Build a cache key from the content string and media URLs.
+     *  Mention resolution version is intentionally excluded — the cache stores the latest
+     *  build for a given content/media combo, and callers use the version counter only as
+     *  a `remember`/`produceState` key to trigger rebuilds.  This prevents orphaned entries
+     *  when mentions resolve one-by-one (each bump used to create a new key). */
+    fun key(content: String, mediaUrls: Set<String>, consumedUrls: Set<String> = emptySet()): String {
         return if (mediaUrls.isEmpty() && consumedUrls.isEmpty()) {
-            "$mentionVersion:$content"
+            content
         } else {
-            "$mentionVersion:$content\u0000${mediaUrls.sorted().joinToString(",")}\u0000${consumedUrls.sorted().joinToString(",")}"
+            "$content\u0000${mediaUrls.sorted().joinToString(",")}\u0000${consumedUrls.sorted().joinToString(",")}"
         }
     }
 

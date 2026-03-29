@@ -775,6 +775,7 @@ internal fun QuotedNoteContent(
         social.mycelium.android.utils.extractPubkeysFromContent(meta.fullContent)
     }
     var quotedMentionVersion by remember { mutableIntStateOf(0) }
+    val quotedDiskCacheReady by profileCache.diskCacheRestored.collectAsState()
     if (quotedMentionedPubkeys.isNotEmpty()) {
         LaunchedEffect(quotedMentionedPubkeys) {
             val pubkeySet = quotedMentionedPubkeys.toSet()
@@ -789,43 +790,30 @@ internal fun QuotedNoteContent(
             }
             profileCache.profileUpdated
                 .filter { it in pubkeySet }
-                .debounce(150)
+                .debounce(50)
                 .collect { quotedMentionVersion++ }
         }
-        LaunchedEffect(quotedMentionedPubkeys, quotedMentionVersion) {
+        LaunchedEffect(quotedMentionedPubkeys, quotedDiskCacheReady) {
+            if (!quotedDiskCacheReady) return@LaunchedEffect
             val pubkeySet = quotedMentionedPubkeys.toSet()
-            val hasPlaceholders = pubkeySet.any { pk ->
+            val hasNewlyResolved = pubkeySet.any { pk ->
                 val author = profileCache.getAuthor(pk)
-                author == null || author.displayName == pk.take(8) + "..."
+                author != null && author.displayName != pk.take(8) + "..."
             }
-            if (hasPlaceholders) {
-                delay(2000)
-                val stillPlaceholder = pubkeySet.any { pk ->
-                    val author = profileCache.getAuthor(pk)
-                    author == null || author.displayName == pk.take(8) + "..."
-                }
-                if (!stillPlaceholder) {
-                    quotedMentionVersion++
-                }
-            }
+            if (hasNewlyResolved) quotedMentionVersion++
         }
     }
 
-    val quotedCacheKey = remember(quotedDisplayContent, quotedMediaUrls, quotedMentionVersion) {
+    val quotedCacheKey = remember(quotedDisplayContent, quotedMediaUrls) {
         social.mycelium.android.utils.ContentBlockCache.key(
             quotedDisplayContent,
-            quotedMediaUrls,
-            mentionVersion = quotedMentionVersion
+            quotedMediaUrls
         )
     }
     val quotedContentBlocks by produceState(
         initialValue = social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey) ?: emptyList(),
-        quotedCacheKey
+        quotedCacheKey, quotedMentionVersion
     ) {
-        social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey)?.let { cached ->
-            value = cached
-            return@produceState
-        }
         val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             buildNoteContentWithInlinePreviews(
                 quotedDisplayContent,
@@ -2936,13 +2924,11 @@ fun NoteCard(
     val profileCache = ProfileMetadataCache.getInstance()
     var profileRevision by remember(note.id) { mutableIntStateOf(0) }
     val authorPubkey = remember(note.author.id) { normalizeAuthorIdForCache(note.author.id) }
-    if (profileRevision == 0) {
-        LaunchedEffect(authorPubkey) {
-            profileCache.profileUpdated
-                .filter { it == authorPubkey }
-                .debounce(300)
-                .collect { profileRevision = 1 }
-        }
+    LaunchedEffect(authorPubkey) {
+        profileCache.profileUpdated
+            .filter { it == authorPubkey }
+            .debounce(200)
+            .collect { profileRevision++ }
     }
     // Snapshot read of diskCacheRestored avoids per-card flow collector; value only flips once at startup
     val diskCacheReady = profileCache.diskCacheRestored.value
@@ -3339,44 +3325,28 @@ fun NoteCard(
         if (mentionedPubkeys.isNotEmpty()) {
             LaunchedEffect(mentionedPubkeys) {
                 val pubkeySet = mentionedPubkeys.toSet()
-                // Request profiles for any mentioned pubkeys not yet cached
                 val uncached = pubkeySet.filter { profileCache.getAuthor(it) == null }
                 if (uncached.isNotEmpty()) {
                     profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
                 }
-                // Catch-up check: profiles may have loaded between initial composition
-                // and this LaunchedEffect starting (SharedFlow replay=0 means we'd miss them).
-                // If any mentioned profile is now resolved that wasn't in the initial render, bump.
                 val nowResolved = pubkeySet.count { profileCache.getAuthor(it) != null }
                 val initiallyResolved = pubkeySet.size - uncached.size
                 if (nowResolved > initiallyResolved) {
                     mentionProfileVersion++
                 }
-                // Collect profile updates; use short debounce so mentions refresh quickly
                 profileCache.profileUpdated
                     .filter { it in pubkeySet }
-                    .debounce(150)
+                    .debounce(50)
                     .collect { mentionProfileVersion++ }
             }
-            // Safety net: if any mentions are still placeholders after profiles should have loaded,
-            // do a periodic re-check to catch any missed SharedFlow emissions.
-            LaunchedEffect(mentionedPubkeys, mentionProfileVersion) {
+            LaunchedEffect(mentionedPubkeys, diskCacheReady) {
+                if (!diskCacheReady) return@LaunchedEffect
                 val pubkeySet = mentionedPubkeys.toSet()
-                val hasPlaceholders = pubkeySet.any { pk ->
+                val hasNewlyResolved = pubkeySet.any { pk ->
                     val author = profileCache.getAuthor(pk)
-                    author == null || author.displayName == pk.take(8) + "..."
+                    author != null && author.displayName != pk.take(8) + "..."
                 }
-                if (hasPlaceholders) {
-                    delay(2000)
-                    // Re-check: if any placeholder resolved since last version, bump
-                    val stillPlaceholder = pubkeySet.any { pk ->
-                        val author = profileCache.getAuthor(pk)
-                        author == null || author.displayName == pk.take(8) + "..."
-                    }
-                    if (!stillPlaceholder) {
-                        mentionProfileVersion++
-                    }
-                }
+                if (hasNewlyResolved) mentionProfileVersion++
             }
         }
         // Quoted note fetch state (hoisted so inline QuotedNote blocks can access it)
@@ -3436,23 +3406,17 @@ fun NoteCard(
         val displayContent =
             if (translationResult != null && !showOriginal) translationResult!!.translatedText else note.content
         val contentIsMarkdown = remember(displayContent) { isMarkdown(displayContent) }
-        val contentCacheKey = remember(displayContent, note.mediaUrls, consumedUrls, mentionProfileVersion) {
+        val contentCacheKey = remember(displayContent, note.mediaUrls, consumedUrls) {
             social.mycelium.android.utils.ContentBlockCache.key(
                 displayContent,
                 note.mediaUrls.toSet(),
-                consumedUrls,
-                mentionProfileVersion
+                consumedUrls
             )
         }
         val contentBlocks by produceState(
             initialValue = social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey) ?: emptyList(),
-            contentCacheKey, resolvedPreviews, diskCacheReady
+            contentCacheKey, resolvedPreviews, diskCacheReady, mentionProfileVersion
         ) {
-            // Check cache first (may already be populated from a previous composition)
-            social.mycelium.android.utils.ContentBlockCache.get(contentCacheKey)?.let { cached ->
-                value = cached
-                return@produceState
-            }
             val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                 buildNoteContentWithInlinePreviews(
                     displayContent,

@@ -53,6 +53,24 @@ fun ReactionsScreen(
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
 
+    val profileCache = remember { ProfileMetadataCache.getInstance() }
+    val allScreenPubkeys = remember(data.pollVotesByOption, data.reactionAuthors, data.zapAuthors) {
+        val set = mutableSetOf<String>()
+        data.pollVotesByOption.values.forEach { set.addAll(it) }
+        data.reactionAuthors.values.forEach { set.addAll(it) }
+        set.addAll(data.zapAuthors)
+        set
+    }
+    var profileRevision by remember { mutableIntStateOf(0) }
+    LaunchedEffect(allScreenPubkeys) {
+        val uncached = allScreenPubkeys.filter { profileCache.getAuthor(it) == null }
+        if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+    }
+    LaunchedEffect(allScreenPubkeys) {
+        profileCache.profileUpdated.collect { pk -> if (pk in allScreenPubkeys) profileRevision++ }
+    }
+    @Suppress("UNUSED_EXPRESSION") profileRevision
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -114,18 +132,21 @@ fun ReactionsScreen(
                         pollVotesByOption = data.pollVotesByOption,
                         pollOptionLabels = data.pollOptionLabels,
                         totalVoters = data.pollTotalVoters,
+                        profileCache = profileCache,
                         onProfileClick = onProfileClick,
                     )
                     RxTab.REACTIONS -> RxReactionsTab(
                         reactions = data.reactions,
                         reactionAuthors = data.reactionAuthors,
                         customEmojiUrls = data.customEmojiUrls,
+                        profileCache = profileCache,
                         onProfileClick = onProfileClick,
                     )
                     RxTab.ZAPS -> RxZapsTab(
                         zapAuthors = data.zapAuthors,
                         zapAmountByAuthor = data.zapAmountByAuthor,
                         zapTotalSats = data.zapTotalSats,
+                        profileCache = profileCache,
                         onProfileClick = onProfileClick,
                     )
                     RxTab.BOOSTS -> RxBoostsTab(
@@ -145,17 +166,9 @@ private fun RxPollVotesTab(
     pollVotesByOption: Map<String, List<String>>,
     pollOptionLabels: Map<String, String>,
     totalVoters: Int,
+    profileCache: ProfileMetadataCache,
     onProfileClick: (String) -> Unit,
 ) {
-    val profileCache = remember { ProfileMetadataCache.getInstance() }
-    var profileRevision by remember { mutableIntStateOf(0) }
-    val allPubkeys = remember(pollVotesByOption) { pollVotesByOption.values.flatten().toSet() }
-    LaunchedEffect(allPubkeys) {
-        val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
-        if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-    }
-    LaunchedEffect(allPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
-    @Suppress("UNUSED_EXPRESSION") profileRevision
 
     val pollGreen = Color(0xFF8FBC8F)
 
@@ -239,17 +252,9 @@ private fun RxReactionsTab(
     reactions: List<String>,
     reactionAuthors: Map<String, List<String>>,
     customEmojiUrls: Map<String, String>,
+    profileCache: ProfileMetadataCache,
     onProfileClick: (String) -> Unit,
 ) {
-    val profileCache = remember { ProfileMetadataCache.getInstance() }
-    var profileRevision by remember { mutableIntStateOf(0) }
-    val allPubkeys = remember(reactionAuthors) { reactionAuthors.values.flatten().toSet() }
-    LaunchedEffect(allPubkeys) {
-        val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
-        if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-    }
-    LaunchedEffect(allPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
-    @Suppress("UNUSED_EXPRESSION") profileRevision
 
     val grouped = remember(reactions, reactionAuthors) {
         reactions.map { emoji -> emoji to (reactionAuthors[emoji] ?: emptyList()) }
@@ -301,17 +306,9 @@ private fun RxZapsTab(
     zapAuthors: List<String>,
     zapAmountByAuthor: Map<String, Long>,
     zapTotalSats: Long,
+    profileCache: ProfileMetadataCache,
     onProfileClick: (String) -> Unit,
 ) {
-    val profileCache = remember { ProfileMetadataCache.getInstance() }
-    var profileRevision by remember { mutableIntStateOf(0) }
-    val allPubkeys = remember(zapAuthors) { zapAuthors.toSet() }
-    LaunchedEffect(allPubkeys) {
-        val uncached = allPubkeys.filter { profileCache.getAuthor(it) == null }
-        if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
-    }
-    LaunchedEffect(allPubkeys) { profileCache.profileUpdated.collect { pk -> if (pk in allPubkeys) profileRevision++ } }
-    @Suppress("UNUSED_EXPRESSION") profileRevision
 
     val sorted = remember(zapAuthors, zapAmountByAuthor) {
         zapAuthors.distinct().sortedByDescending { zapAmountByAuthor[it] ?: 0L }

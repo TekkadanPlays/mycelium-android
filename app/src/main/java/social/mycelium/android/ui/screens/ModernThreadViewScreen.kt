@@ -1,5 +1,6 @@
 package social.mycelium.android.ui.screens
 
+import androidx.compose.runtime.collectAsState
 import coil.compose.AsyncImage
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.animation.AnimatedVisibility
@@ -2109,6 +2110,7 @@ private fun ReplyContentBody(
         social.mycelium.android.utils.extractPubkeysFromContent(reply.content)
     }
     var replyMentionVersion by remember(reply.id) { androidx.compose.runtime.mutableIntStateOf(0) }
+    val replyDiskCacheReady by profileCache.diskCacheRestored.collectAsState()
     if (replyMentionedPubkeys.isNotEmpty()) {
         LaunchedEffect(replyMentionedPubkeys) {
             val pubkeySet = replyMentionedPubkeys.toSet()
@@ -2123,42 +2125,29 @@ private fun ReplyContentBody(
             }
             profileCache.profileUpdated
                 .filter { it in pubkeySet }
-                .debounce(150)
+                .debounce(50)
                 .collect { replyMentionVersion++ }
         }
-        LaunchedEffect(replyMentionedPubkeys, replyMentionVersion) {
+        LaunchedEffect(replyMentionedPubkeys, replyDiskCacheReady) {
+            if (!replyDiskCacheReady) return@LaunchedEffect
             val pubkeySet = replyMentionedPubkeys.toSet()
-            val hasPlaceholders = pubkeySet.any { pk ->
+            val hasNewlyResolved = pubkeySet.any { pk ->
                 val author = profileCache.getAuthor(pk)
-                author == null || author.displayName == pk.take(8) + "..."
+                author != null && author.displayName != pk.take(8) + "..."
             }
-            if (hasPlaceholders) {
-                kotlinx.coroutines.delay(2000)
-                val stillPlaceholder = pubkeySet.any { pk ->
-                    val author = profileCache.getAuthor(pk)
-                    author == null || author.displayName == pk.take(8) + "..."
-                }
-                if (!stillPlaceholder) {
-                    replyMentionVersion++
-                }
-            }
+            if (hasNewlyResolved) replyMentionVersion++
         }
     }
-    val replyCacheKey = remember(reply.content, replyMediaUrls, replyMentionVersion) {
+    val replyCacheKey = remember(reply.content, replyMediaUrls) {
         social.mycelium.android.utils.ContentBlockCache.key(
             reply.content,
-            replyMediaUrls,
-            mentionVersion = replyMentionVersion
+            replyMediaUrls
         )
     }
     val replyContentBlocks by androidx.compose.runtime.produceState(
         initialValue = social.mycelium.android.utils.ContentBlockCache.get(replyCacheKey) ?: emptyList(),
-        replyCacheKey
+        replyCacheKey, replyMentionVersion
     ) {
-        social.mycelium.android.utils.ContentBlockCache.get(replyCacheKey)?.let { cached ->
-            value = cached
-            return@produceState
-        }
         val result = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
             social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
                 reply.content,

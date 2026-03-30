@@ -419,12 +419,15 @@ private fun DashboardFeedContent(
         ) {
             // New notes counter (tap to load).
             // Always present in the LazyColumn so adding/removing it doesn't shift items.
-            // Content is hidden via AnimatedVisibility when newCount==0.
+            // Only shown when user is at the top of the feed — expandVertically shifts
+            // all content below, which is disruptive when scrolled mid-feed. Users scroll
+            // to top or pull-to-refresh to load new notes.
             item(key = "new_notes_counter") {
                 val isFollowing = homeFeedState.isFollowing
                 val newCount = if (isFollowing) uiState.newNotesCountFollowing else uiState.newNotesCountAll
+                val isAtTop by remember { derivedStateOf { listState.firstVisibleItemIndex <= 0 } }
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = newCount > 0,
+                    visible = newCount > 0 && isAtTop,
                     enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
                     exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()
                 ) {
@@ -1186,6 +1189,11 @@ fun DashboardScreen(
     // When new notes first appear (0 → >0), expand the top app bar so the counter
     // is visible without requiring the user to pull down. Only triggers once per
     // batch — subsequent count increments while browsing do NOT re-expand the header.
+    // Guard: only expand when the user is near the top of the feed where the banner
+    // is actually visible. Expanding the header while scrolled mid-feed causes the
+    // header + bottom nav to flash in/out (bottom nav derives visibility from
+    // collapsedFraction) and disrupts scroll position — especially on app resume
+    // when new notes accumulated in the background.
     val newNotesCount = if (homeFeedState.isFollowing) uiState.newNotesCountFollowing else uiState.newNotesCountAll
     var hasExpandedForNewNotes by remember { mutableStateOf(false) }
     LaunchedEffect(newNotesCount) {
@@ -1193,8 +1201,12 @@ fun DashboardScreen(
             // Reset: next batch of new notes will trigger one expansion
             hasExpandedForNewNotes = false
         } else if (!hasExpandedForNewNotes && topAppBarState.heightOffset < 0f) {
-            topAppBarState.heightOffset = 0f
-            hasExpandedForNewNotes = true
+            // Only auto-expand when user is near the top where the banner is visible
+            val isNearTop = listState.firstVisibleItemIndex <= 1
+            if (isNearTop) {
+                topAppBarState.heightOffset = 0f
+                hasExpandedForNewNotes = true
+            }
         }
     }
 

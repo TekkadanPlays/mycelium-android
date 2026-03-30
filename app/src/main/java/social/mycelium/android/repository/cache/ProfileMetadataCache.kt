@@ -682,6 +682,17 @@ class ProfileMetadataCache {
                         }
                     }
                     Log.d(TAG, "Restored ${profileEntities.size} profiles from Room DB (${restoredKeys.size} new)")
+                    // Trigger NIP-05 verification for restored profiles so badges
+                    // appear on cold start without waiting for relay-fetched kind-0.
+                    var nip05Count = 0
+                    for (key in restoredKeys) {
+                        val author = cache[key] ?: continue
+                        author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
+                            social.mycelium.android.repository.social.Nip05Verifier.verify(key, nip05)
+                            nip05Count++
+                        }
+                    }
+                    if (nip05Count > 0) Log.d(TAG, "Queued $nip05Count NIP-05 verifications for disk-restored profiles")
                     _diskCacheRestored.value = true
                     return@withContext
                 }

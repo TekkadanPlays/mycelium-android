@@ -79,6 +79,18 @@ class AmberSignerManager(private val context: Context) {
             ),
             Permission(
                 type = CommandType.SIGN_EVENT,
+                kind = 5 // NIP-09 event deletion
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 6 // Kind-6 repost (NIP-18)
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
+                kind = 9734 // NIP-57 zap request
+            ),
+            Permission(
+                type = CommandType.SIGN_EVENT,
                 kind = 9735 // Zap receipts
             ),
             Permission(

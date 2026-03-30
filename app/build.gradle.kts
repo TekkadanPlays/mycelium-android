@@ -144,7 +144,6 @@ dependencies {
     // Lightning: ACINQ lightning-kmp (non-custodial LN node on device)
     implementation("fr.acinq.lightning:lightning-kmp-core-jvm:1.11.5-SNAPSHOT")
     implementation("fr.acinq.bitcoin:bitcoin-kmp-jvm:0.29.0")
-    implementation("fr.acinq.secp256k1:secp256k1-kmp-jni-android:0.22.0")
 
     // Encrypted storage for wallet seed
     implementation("androidx.security:security-crypto:1.1.0-alpha06")

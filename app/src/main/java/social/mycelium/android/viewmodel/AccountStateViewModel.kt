@@ -2054,6 +2054,12 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                         }
                     }
                 )
+            } catch (e: Exception) {
+                Log.e("AccountStateViewModel", "Zap coroutine failed: ${e.message}", e)
+                viewModelScope.launch(Dispatchers.Main.immediate) {
+                    _toastMessage.value = "Zap failed: ${e.message?.take(80)}"
+                }
+                ReactionsRepository.emitAnimation(noteId, ReactionsRepository.AnimationType.ZAP, success = false)
             } finally {
                 _zapInProgressNoteIds.value = _zapInProgressNoteIds.value - noteId
             }

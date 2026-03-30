@@ -28,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1060,17 +1061,20 @@ class NotesRepository private constructor() {
         val startMs = System.currentTimeMillis()
 
         val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400L * FEED_SINCE_DAYS
+        // Include kind-1 (notes), kind-6 (reposts), kind-30023 (articles) so the
+        // prewarm cache matches what loadFeedCacheFromRoom expects to restore.
+        val prewarmKinds = listOf(1, 6, 30023)
         val filter = if (followedPubkeys.isNotEmpty()) {
             // Following mode: fetch from followed authors only to match the default feed view
             Filter(
-                kinds = listOf(1),
+                kinds = prewarmKinds,
                 authors = followedPubkeys.toList(),
                 limit = limit,
                 since = sevenDaysAgo
             )
         } else {
             // No follow list yet: fetch globally so the cache isn't empty
-            Filter(kinds = listOf(1), limit = limit, since = sevenDaysAgo)
+            Filter(kinds = prewarmKinds, limit = limit, since = sevenDaysAgo)
         }
 
         val receivedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
@@ -1081,7 +1085,7 @@ class NotesRepository private constructor() {
             filters = listOf(filter),
             priority = SubscriptionPriority.HIGH
         ) { event, relayUrl ->
-            if (event.kind == 1) {
+            if (event.kind in prewarmKinds) {
                 receivedEvents.add(event to relayUrl)
                 lastEventAt.set(System.currentTimeMillis())
             }
@@ -1676,6 +1680,19 @@ class NotesRepository private constructor() {
         }
         lastEnsuredRelaySet = relaySet
         setSubscriptionRelays(allUserRelayUrls)
+
+        // Wait for Room cache check to complete before deciding resume vs fresh subscribe.
+        // Without this, a race between loadFeedCacheFromRoom() (async from prepareFeedCache)
+        // and this method would see _notes.value empty, fall through to subscribeToNotes(),
+        // which wipes the feed — destroying Room-restored notes.
+        if (!_feedCacheChecked.value) {
+            Log.d(TAG, "ensureSubscriptionToNotes: waiting for feed cache check to complete...")
+            kotlinx.coroutines.withTimeoutOrNull(3000L) {
+                _feedCacheChecked.first { it }
+            }
+            Log.d(TAG, "ensureSubscriptionToNotes: feed cache check done, notes=${_notes.value.size}")
+        }
+
         if (_notes.value.isNotEmpty()) {
             // Resume: keep existing feed; only set cutoff if not already set (avoid blocking all notes on re-subscribe).
             Log.d(TAG, "Restoring subscription for ${allUserRelayUrls.size} relays (keeping ${_notes.value.size} notes)")

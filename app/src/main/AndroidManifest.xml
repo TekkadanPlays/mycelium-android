@@ -84,6 +84,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Override zxing-android-embedded CaptureActivity orientation:
+             the library default is sensorLandscape, which is jarring.
+             Force portrait so the QR scanner matches the rest of the app. -->
+        <activity
+            android:name="com.journeyapps.barcodescanner.CaptureActivity"
+            android:screenOrientation="portrait"
+            tools:replace="screenOrientation" />
     </application>
 
 </manifest>

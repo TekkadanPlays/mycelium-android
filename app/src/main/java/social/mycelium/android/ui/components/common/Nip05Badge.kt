@@ -38,6 +38,17 @@ fun Nip05Icon(
     modifier: Modifier = Modifier
 ) {
     val status = Nip05Verifier.verificationStates[pubkeyHex]
+    // Self-heal: trigger verification when this icon first renders with UNKNOWN status.
+    // Without this, feed cards using Nip05Icon (not Nip05Badge) never request verification
+    // for disk-restored profiles, leaving badges blank until the next relay-fetched kind-0.
+    if (status == null || status == Nip05Verifier.VerificationStatus.UNKNOWN) {
+        LaunchedEffect(pubkeyHex) {
+            val author = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance().getAuthor(pubkeyHex)
+            author?.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
+                Nip05Verifier.verify(pubkeyHex, nip05)
+            }
+        }
+    }
     when (status) {
         Nip05Verifier.VerificationStatus.VERIFIED -> {
             val isDark = isSystemInDarkTheme()

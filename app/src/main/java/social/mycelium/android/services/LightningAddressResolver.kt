@@ -2,7 +2,7 @@ package social.mycelium.android.services
 
 import android.util.Log
 import io.ktor.client.request.get
-import io.ktor.client.request.header
+import io.ktor.client.plugins.timeout
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
 import kotlinx.serialization.Serializable
@@ -101,9 +101,17 @@ object LightningAddressResolver {
                     append("&nostr=${java.net.URLEncoder.encode(zapRequestJson, "UTF-8")}")
                 }
             }
-            Log.d(TAG, "Fetching invoice from: $invoiceUrl")
+            Log.d(TAG, "Fetching invoice from: ${callbackUrl.take(60)}...")
 
-            val response = httpClient.get(invoiceUrl)
+            val response = httpClient.get(invoiceUrl) {
+                // Use a shorter timeout for invoice fetching — if the LN provider
+                // is down, we don't want to wait 30s × 3 retries = 90s
+                timeout {
+                    requestTimeoutMillis = 15_000
+                    connectTimeoutMillis = 8_000
+                    socketTimeoutMillis = 15_000
+                }
+            }
             if (!response.status.isSuccess()) {
                 Log.w(TAG, "Invoice fetch failed: ${response.status}")
                 return null
@@ -121,9 +129,16 @@ object LightningAddressResolver {
                 return null
             }
 
-            jsonObj["pr"]?.jsonPrimitive?.content
+            val pr = jsonObj["pr"]?.jsonPrimitive?.content
+            if (pr != null) {
+                Log.d(TAG, "Got invoice: ${pr.take(20)}...")
+            } else {
+                Log.w(TAG, "Invoice response missing 'pr' field: ${responseBody.take(200)}")
+            }
+            pr
         } catch (e: Exception) {
-            Log.e(TAG, "Error fetching invoice: ${e.message}", e)
+            val domain = callbackUrl.substringAfter("://").substringBefore("/")
+            Log.e(TAG, "Error fetching invoice from $domain: ${e.message}")
             null
         }
     }

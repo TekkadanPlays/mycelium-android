@@ -1019,6 +1019,18 @@ fun MyceliumNavigation(
     // This state is shared across main screens so collapse state persists during navigation
     val topAppBarState = rememberTopAppBarState()
 
+    // Ensure header is fully expanded when first transitioning from sign-in to dashboard.
+    // Without this, the topAppBarState can inherit stale heightOffset from previous
+    // navigation states, causing the feed to flash full-screen before the header appears.
+    val onboardingCompleteForHeader by accountStateViewModel.onboardingComplete.collectAsState()
+    var wasInOnboarding by remember { mutableStateOf(!onboardingCompleteForHeader) }
+    LaunchedEffect(onboardingCompleteForHeader) {
+        if (onboardingCompleteForHeader && wasInOnboarding) {
+            topAppBarState.heightOffset = 0f
+            wasInOnboarding = false
+        }
+    }
+
     // Dashboard, Topics, and Notifications list states for scroll-to-top and position persistence
     val homeFeedStateForScroll by feedStateViewModel.homeFeedState.collectAsState()
     val dashboardListState = rememberLazyListState(
@@ -1410,6 +1422,8 @@ fun MyceliumNavigation(
 
     // Defer showing bottom bar when returning from thread so pop transition settles (avoids flash)
     var allowBottomNavVisible by remember { mutableStateOf(true) }
+    // Track whether bottom nav has ever been shown — skip delay on first sign-in appearance
+    var hasEverShownBottomNav by remember { mutableStateOf(false) }
     val isOnMainScreen = isMainScreen(currentRoute) &&
             currentRoute?.startsWith("thread") != true && overlayThreadNoteId == null && overlayTopicThreadNoteId == null && overlayProfileThreadNoteId == null && overlayNotifThreadNoteId == null
     LaunchedEffect(
@@ -1422,8 +1436,14 @@ fun MyceliumNavigation(
         if (!isOnMainScreen) {
             allowBottomNavVisible = false
         } else if (!allowBottomNavVisible && isOnMainScreen) {
-            kotlinx.coroutines.delay(80)
+            // Only delay when returning from a sub-screen (thread, settings) where
+            // bottom nav was previously visible. On first appearance (sign-in / app
+            // launch), show immediately so the bottom nav doesn't slide-in animate.
+            if (hasEverShownBottomNav) {
+                kotlinx.coroutines.delay(80)
+            }
             allowBottomNavVisible = true
+            hasEverShownBottomNav = true
         }
     }
 

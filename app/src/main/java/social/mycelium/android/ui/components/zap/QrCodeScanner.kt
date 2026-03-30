@@ -39,7 +39,7 @@ fun SimpleQrCodeScanner(onScan: (String?) -> Unit) {
             setDesiredBarcodeFormats(ScanOptions.QR_CODE)
             setPrompt("Point at an NWC QR code")
             setBeepEnabled(false)
-            setOrientationLocked(false)
+            setOrientationLocked(true)
             addExtra(Intents.Scan.SCAN_TYPE, Intents.Scan.MIXED_SCAN)
         }
 

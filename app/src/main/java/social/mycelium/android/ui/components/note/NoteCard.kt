@@ -801,6 +801,27 @@ internal fun QuotedNoteContent(
     // delayed relay responses after the parent card was already composed.
     val liveCountsMap by social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.collectAsState()
     val liveCounts = liveCountsMap[meta.eventId] ?: quotedCounts
+
+    // Reactive author resolution: re-resolve from cache when profile arrives.
+    // The caller may have passed a placeholder if the profile wasn't cached yet.
+    var authorProfileRevision by remember { mutableIntStateOf(0) }
+    val resolvedAuthor = remember(meta.authorId, authorProfileRevision) {
+        profileCache.resolveAuthor(meta.authorId)
+    }
+    val isPlaceholder = quotedAuthor.displayName == quotedAuthor.id.take(8) + "..."
+    if (isPlaceholder || resolvedAuthor.displayName != quotedAuthor.displayName) {
+        LaunchedEffect(meta.authorId) {
+            val normalized = normalizeAuthorIdForCache(meta.authorId)
+            if (profileCache.getAuthor(normalized) == null) {
+                profileCache.requestProfiles(listOf(normalized), profileCache.getConfiguredRelayUrls())
+            }
+            profileCache.profileUpdated
+                .filter { it == normalized }
+                .collect { authorProfileRevision++ }
+        }
+    }
+    val effectiveAuthor = if (resolvedAuthor.displayName != resolvedAuthor.id.take(8) + "...") resolvedAuthor else quotedAuthor
+
     // All nesting levels share the root parent's expand state so they toggle together
     val quotedExpanded = QuotedNoteExpandedState.isExpanded(rootParentNoteId, meta.eventId)
     val hasMore = meta.fullContent.length > meta.contentSnippet.length
@@ -878,7 +899,7 @@ internal fun QuotedNoteContent(
     val navigateToQuotedNote = {
         val quotedNote = Note(
             id = meta.eventId,
-            author = quotedAuthor,
+            author = effectiveAuthor,
             content = meta.fullContent,
             timestamp = meta.createdAt,
             likes = 0, shares = 0, comments = 0,
@@ -937,14 +958,14 @@ internal fun QuotedNoteContent(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().clickable(onClick = navigateToQuotedNote)
             ) {
-                ProfilePicture(author = quotedAuthor, size = 20.dp, onClick = { onProfileClick(meta.authorId) })
+                ProfilePicture(author = effectiveAuthor, size = 20.dp, onClick = { onProfileClick(meta.authorId) })
                 Spacer(modifier = Modifier.width(6.dp))
                 social.mycelium.android.ui.components.common.Nip05Icon(
                     pubkeyHex = normalizeAuthorIdForCache(meta.authorId),
                     size = 12.dp
                 )
                 Text(
-                    text = quotedAuthor.displayName,
+                    text = effectiveAuthor.displayName,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -1009,7 +1030,7 @@ internal fun QuotedNoteContent(
                 isExpanded = quotedExpanded,
                 hasMore = hasMore,
                 meta = meta,
-                quotedAuthor = quotedAuthor,
+                quotedAuthor = effectiveAuthor,
                 quotedMediaUrls = quotedMediaUrls,
                 isVisible = isVisible,
                 onExpandToggle = { QuotedNoteExpandedState.toggle(rootParentNoteId, meta.eventId, feedListState, toggleScope) },

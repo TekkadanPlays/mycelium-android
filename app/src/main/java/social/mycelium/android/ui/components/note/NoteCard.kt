@@ -1367,7 +1367,16 @@ private fun NoteDetailsPanel(
         val detailReactions = overrideReactions ?: note.reactions
         val detailZapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
         // Merge repost authors from note + NoteCountsRepository
-        val boostAuthors = remember(note.repostedByAuthors, overrideRepostAuthors) {
+        var boostProfileRevision by remember { mutableIntStateOf(0) }
+        val boostPubkeys = remember(overrideRepostAuthors) { overrideRepostAuthors?.distinct() ?: emptyList() }
+        LaunchedEffect(boostPubkeys) {
+            val uncached = boostPubkeys.filter { profileCache.getAuthor(it) == null }
+            if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
+        }
+        if (boostPubkeys.isNotEmpty()) {
+            LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in boostPubkeys) boostProfileRevision++ } }
+        }
+        val boostAuthors = remember(note.repostedByAuthors, overrideRepostAuthors, boostProfileRevision) {
             if (overrideRepostAuthors.isNullOrEmpty()) {
                 note.repostedByAuthors
             } else {
@@ -1585,13 +1594,14 @@ private fun NoteDetailsPanel(
                             )
                         }
                         LaunchedEffect(Unit) { rxProfileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) rxProfileRevision++ } }
-                        @Suppress("UNUSED_EXPRESSION") rxProfileRevision
+                        val rxResolvedAuthors = remember(latestReactions, rxProfileRevision) {
+                            latestReactions.map { (emoji, pubkey) -> Triple(emoji, pubkey, rxProfileCache.resolveAuthor(pubkey)) }
+                        }
                         Column(
                             modifier = Modifier.padding(start = 22.dp, top = 2.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
                         ) {
-                            latestReactions.forEach { (emoji, pubkey) ->
-                                val author = rxProfileCache.resolveAuthor(pubkey)
+                            rxResolvedAuthors.forEach { (emoji, pubkey, author) ->
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier
@@ -1692,7 +1702,12 @@ private fun NoteDetailsPanel(
                             )
                         }
                         LaunchedEffect(Unit) { zapProfileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
-                        @Suppress("UNUSED_EXPRESSION") zapProfileRevision
+                        val sortedZapAuthorsResolved = remember(overrideZapAuthors, overrideZapAmountByAuthor, zapProfileRevision) {
+                            overrideZapAuthors?.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
+                                ?.take(3)
+                                ?.map { pubkey -> pubkey to zapProfileCache.resolveAuthor(pubkey) }
+                                ?: emptyList()
+                        }
                         Column(
                             modifier = Modifier.padding(start = 22.dp, top = 2.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1705,11 +1720,7 @@ private fun NoteDetailsPanel(
                                 )
                             }
                             if (!overrideZapAuthors.isNullOrEmpty()) {
-                                val sortedZapAuthors = remember(overrideZapAuthors, overrideZapAmountByAuthor) {
-                                    overrideZapAuthors.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
-                                }
-                                sortedZapAuthors.take(3).forEach { pubkey ->
-                                    val author = zapProfileCache.resolveAuthor(pubkey)
+                                sortedZapAuthorsResolved.forEach { (pubkey, author) ->
                                     val zapSats = overrideZapAmountByAuthor?.get(pubkey) ?: 0L
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,

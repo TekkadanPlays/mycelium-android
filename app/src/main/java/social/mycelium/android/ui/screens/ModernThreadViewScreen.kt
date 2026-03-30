@@ -2865,13 +2865,14 @@ private fun ReplyDetailsPanel(
                         )
                     }
                     LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) profileRevision++ } }
-                    @Suppress("UNUSED_EXPRESSION") profileRevision
+                    val rxResolvedAuthors = remember(latestReactions, profileRevision) {
+                        latestReactions.map { (emoji, pubkey) -> Triple(emoji, pubkey, profileCache.resolveAuthor(pubkey)) }
+                    }
                     Column(
                         modifier = Modifier.padding(start = 22.dp, top = 2.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        latestReactions.forEach { (emoji, pubkey) ->
-                            val author = profileCache.resolveAuthor(pubkey)
+                        rxResolvedAuthors.forEach { (emoji, pubkey, author) ->
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier
@@ -2953,16 +2954,16 @@ private fun ReplyDetailsPanel(
                         )
                     }
                     LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
-                    @Suppress("UNUSED_EXPRESSION") zapProfileRevision
+                    val zapResolvedAuthors = remember(detailZapAuthors, detailZapAmountByAuthor, zapProfileRevision) {
+                        detailZapAuthors.sortedByDescending { detailZapAmountByAuthor[it] ?: 0L }
+                            .take(3)
+                            .map { pubkey -> pubkey to profileCache.resolveAuthor(pubkey) }
+                    }
                     Column(
                         modifier = Modifier.padding(start = 22.dp, top = 2.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
-                        val sortedZapAuthors = remember(detailZapAuthors, detailZapAmountByAuthor) {
-                            detailZapAuthors.sortedByDescending { detailZapAmountByAuthor[it] ?: 0L }
-                        }
-                        sortedZapAuthors.take(3).forEach { pubkey ->
-                            val author = profileCache.resolveAuthor(pubkey)
+                        zapResolvedAuthors.forEach { (pubkey, author) ->
                             val zapSats = detailZapAmountByAuthor[pubkey] ?: 0L
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,

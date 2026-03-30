@@ -24,8 +24,8 @@ android {
         applicationId = "social.mycelium.android"
         minSdk = 35
         targetSdk = 36
-        versionCode = 48
-        versionName = "0.5.23"
+        versionCode = 49
+        versionName = "0.5.24"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

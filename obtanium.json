@@ -19,6 +19,29 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.24",
+      "versionCode": 49,
+      "releaseDate": "2026-03-30",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.24-beta/Mycelium-v0.5.24-beta.apk",
+      "changelog": "Relay list persistence fix, NWC wallet connect NIP-04 compatibility, dual-store category desync elimination, reactive sidebar updates.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Fix: kind-30002 relay lists no longer drop from sidebar until restart (dual-store desync eliminated)",
+        "Fix: sidebar now updates immediately when fetchRelaySets auto-applies categories on first sign-in",
+        "Fix: standalone categories are the single source of truth — profile store mirrors them automatically",
+        "Fix: NWC reverted to NIP-04 encryption for wallet relay compatibility",
+        "Fix: reactive profile resolution in reaction/zap/boost drop-downs",
+        "Fix: quoted note counts and stale data on pending note release",
+        "Fix: reactive profile resolution for quoted notes at all nesting depths"
+      ]
+    },
+    {
       "version": "0.5.23",
       "versionCode": 48,
       "releaseDate": "2026-03-30",

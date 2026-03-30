@@ -175,7 +175,19 @@ class RelayManagementViewModel(
     private fun reloadFromStorage(pubkey: String) {
         viewModelScope.launch {
             val categories = storageManager.loadCategories(pubkey)
-            val profiles = storageManager.loadProfiles(pubkey)
+            var profiles = storageManager.loadProfiles(pubkey)
+
+            // ── Sync standalone categories → active profile ──
+            // Standalone categories are the single source of truth for kind-30002.
+            // Mirror them into the active profile so sidebar and subscriptions
+            // always reflect the latest state from RelayCategorySyncRepository.
+            val ap = profiles.find { it.isActive } ?: profiles.firstOrNull()
+            if (ap != null && ap.categories != categories) {
+                profiles = profiles.map { p ->
+                    if (p.id == ap.id) p.copy(categories = categories) else p
+                }
+                storageManager.saveProfiles(pubkey, profiles)
+            }
             val outbox = storageManager.loadOutboxRelays(pubkey)
             val inbox = storageManager.loadInboxRelays(pubkey)
             val cache = storageManager.loadIndexerRelays(pubkey)
@@ -210,6 +222,23 @@ class RelayManagementViewModel(
                     nip96Servers = nip96
                 )
             }
+        }
+    }
+
+    /**
+     * Mirror standalone categories into the active profile's category list.
+     * Standalone categories are the single source of truth for kind-30002 data;
+     * the profile's embedded category list must stay in sync to prevent the
+     * sidebar, subscription logic, and persisted state from diverging.
+     */
+    private fun syncCategoriesToActiveProfile() {
+        val state = _uiState.value
+        val active = state.relayProfiles.find { it.isActive } ?: return
+        if (active.categories == state.relayCategories) return
+        _uiState.update { s ->
+            s.copy(relayProfiles = s.relayProfiles.map { p ->
+                if (p.isActive) p.copy(categories = s.relayCategories) else p
+            })
         }
     }
 
@@ -259,43 +288,33 @@ class RelayManagementViewModel(
             val blossom = storageManager.loadBlossomServers(pubkey)
             val nip96 = storageManager.loadNip96Servers(pubkey)
 
-            // ── Merge fetched remote categories into active profile ──
-            // On first sign-in (or when local profile categories are empty), remote
-            // kind-30002 categories fetched by RelayCategorySyncRepository should
-            // replace the default placeholder. For returning users, pending diffs
-            // are auto-merged into the active profile's category list.
+            // ── Handle pending remote category diff ──
+            // For returning users, RelayCategorySyncRepository emits new remote
+            // categories as a pending diff rather than auto-applying. Merge them
+            // into the standalone store (the single source of truth).
             val pendingDiff = social.mycelium.android.repository.relay.RelayCategorySyncRepository.pendingCategoryDiff.value
-            val activeProfile = profiles.find { it.isActive } ?: profiles.firstOrNull()
-            if (activeProfile != null) {
-                val profileHasSubstantive = activeProfile.categories.any { it.relays.isNotEmpty() }
-                if (!profileHasSubstantive && categories.any { it.relays.isNotEmpty() }) {
-                    // First sign-in: standalone categories have data (from fetchRelaySets auto-apply)
-                    // but the active profile is empty — populate profile with the fetched categories
-                    val substantiveCategories = categories.filter { it.relays.isNotEmpty() }
-                    profiles = profiles.map { p ->
-                        if (p.id == activeProfile.id) p.copy(categories = substantiveCategories) else p
-                    }
-                    storageManager.saveProfiles(pubkey, profiles)
-                    DiagnosticLog.state("RelayMgmtVM", "First sign-in: populated active profile with ${substantiveCategories.size} fetched categories")
-                    Log.d("RelayMgmtVM", "First sign-in: populated active profile with ${substantiveCategories.size} fetched categories")
-                } else if (pendingDiff != null && pendingDiff.newFromRemote.isNotEmpty()) {
-                    // Returning user with pending remote diff — merge new-from-remote into profile
-                    val existingIds = activeProfile.categories.map { it.id }.toSet()
-                    val newCategories = pendingDiff.newFromRemote.filter { it.id !in existingIds && it.relays.isNotEmpty() }
-                    if (newCategories.isNotEmpty()) {
-                        profiles = profiles.map { p ->
-                            if (p.id == activeProfile.id) p.copy(categories = p.categories + newCategories) else p
-                        }
-                        // Also merge into standalone categories for consistency
-                        val standalonIds = categories.map { it.id }.toSet()
-                        categories = categories + newCategories.filter { it.id !in standalonIds }
-                        storageManager.saveProfiles(pubkey, profiles)
-                        storageManager.saveCategories(pubkey, categories)
-                        Log.d("RelayMgmtVM", "Returning user: merged ${newCategories.size} new remote categories into active profile")
-                    }
-                    // Clear the diff since we auto-merged
-                    social.mycelium.android.repository.relay.RelayCategorySyncRepository.dismissPendingCategoryDiff()
+            if (pendingDiff != null && pendingDiff.newFromRemote.isNotEmpty()) {
+                val existingIds = categories.map { it.id }.toSet()
+                val newCategories = pendingDiff.newFromRemote.filter { it.id !in existingIds && it.relays.isNotEmpty() }
+                if (newCategories.isNotEmpty()) {
+                    categories = categories + newCategories
+                    storageManager.saveCategories(pubkey, categories)
+                    Log.d("RelayMgmtVM", "Merged ${newCategories.size} new remote categories into standalone store")
                 }
+                social.mycelium.android.repository.relay.RelayCategorySyncRepository.dismissPendingCategoryDiff()
+            }
+
+            // ── Sync standalone categories → active profile ──
+            // Standalone categories are the single source of truth for kind-30002.
+            // Always mirror them into the active profile so sidebar, subscription
+            // logic, and persisted profiles stay consistent.
+            val activeProfile = profiles.find { it.isActive } ?: profiles.firstOrNull()
+            if (activeProfile != null && activeProfile.categories != categories) {
+                profiles = profiles.map { p ->
+                    if (p.id == activeProfile.id) p.copy(categories = categories) else p
+                }
+                storageManager.saveProfiles(pubkey, profiles)
+                DiagnosticLog.state("RelayMgmtVM", "Synced ${categories.size} standalone categories → active profile '${activeProfile.name}'")
             }
 
             // For same-user reload (e.g. returning from onboarding), only update if
@@ -579,6 +598,7 @@ class RelayManagementViewModel(
     // Category management methods
     fun addCategory(category: RelayCategory) {
         _uiState.update { it.copy(relayCategories = it.relayCategories + category) }
+        syncCategoriesToActiveProfile()
         saveToStorage()
     }
 
@@ -586,12 +606,14 @@ class RelayManagementViewModel(
         _uiState.update { state ->
             state.copy(relayCategories = state.relayCategories.map { if (it.id == categoryId) updatedCategory else it })
         }
+        syncCategoriesToActiveProfile()
         saveToStorage()
     }
 
     fun deleteCategory(categoryId: String) {
         val deleted = _uiState.value.relayCategories.find { it.id == categoryId }
         _uiState.update { it.copy(relayCategories = it.relayCategories.filter { cat -> cat.id != categoryId }) }
+        syncCategoriesToActiveProfile()
         saveToStorage()
         deleteCategoryFromRelays(categoryId)
         DiagnosticLog.state("RelayMgmtVM", "deleteCategory id=${categoryId.take(8)} name='${deleted?.name}' " +
@@ -604,6 +626,7 @@ class RelayManagementViewModel(
                 if (category.id == categoryId) category.copy(relays = category.relays + relay) else category
             })
         }
+        syncCategoriesToActiveProfile()
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()
             refreshActiveSubscription()
@@ -617,6 +640,7 @@ class RelayManagementViewModel(
                 if (category.id == categoryId) category.copy(relays = category.relays.filter { it.url != relayUrl }) else category
             })
         }
+        syncCategoriesToActiveProfile()
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()
             refreshActiveSubscription()
@@ -778,14 +802,13 @@ class RelayManagementViewModel(
             val updatedCategories = state.relayCategories.map { category ->
                 if (category.id == categoryId) category.copy(isSubscribed = !category.isSubscribed) else category
             }
-            // Also update the categories inside each relay profile so that
-            // DashboardScreen (which reads activeProfile.categories) sees the change.
-            val updatedProfiles = state.relayProfiles.map { profile ->
-                profile.copy(categories = profile.categories.map { category ->
-                    if (category.id == categoryId) category.copy(isSubscribed = !category.isSubscribed) else category
-                })
-            }
-            state.copy(relayCategories = updatedCategories, relayProfiles = updatedProfiles)
+            // Sync updated standalone categories into the active profile (single source of truth)
+            state.copy(
+                relayCategories = updatedCategories,
+                relayProfiles = state.relayProfiles.map { profile ->
+                    if (profile.isActive) profile.copy(categories = updatedCategories) else profile
+                }
+            )
         }
         viewModelScope.launch(Dispatchers.IO) {
             saveToStorage()

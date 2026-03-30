@@ -823,9 +823,13 @@ fun DashboardScreen(
 
     // (Indexer relay details removed from sidebar — icon-only access via onIndexerClick)
 
-    // Get active profile for sidebar + feed logic
+    // Standalone categories (relayCategories) are the single source of truth for
+    // kind-30002 data — always use them instead of activeProfile.categories, which
+    // can be stale when RelayCategorySyncRepository writes to the standalone store
+    // without updating the profile store (dual-store desync bug).
+    val relayCategories = relayUiState.relayCategories
     val activeProfile = relayUiState.relayProfiles.firstOrNull { it.isActive }
-    val relayCategories = activeProfile?.categories ?: emptyList()
+        ?.copy(categories = relayCategories)
 
     // Initialize sidebar sections as expanded on first load
     LaunchedEffect(relayCategories) {

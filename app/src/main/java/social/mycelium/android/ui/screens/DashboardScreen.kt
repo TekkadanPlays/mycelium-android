@@ -1123,18 +1123,31 @@ fun DashboardScreen(
     // Also skip when the LazyColumn is already at/near the saved position (overlay case: the list
     // was never destroyed, just hidden behind the thread overlay — scrollToItem on an already-
     // positioned list triggers a layout pass that causes a violent shift).
+    // On process death resume: notes may still be loading from Room cache — wait for them
+    // before attempting restore. feedCacheChecked ensures Room has finished loading.
     val scrollPos = homeFeedState.scrollPosition
-    LaunchedEffect(isDashboardVisible, scrollPos.firstVisibleItem, scrollPos.scrollOffset) {
-        if (isDashboardVisible && hasLoadedRelays && scrollPos.firstVisibleItem > 0 && uiState.notes.isNotEmpty()) {
-            val currentIdx = listState.firstVisibleItemIndex
-            val drift = kotlin.math.abs(currentIdx - scrollPos.firstVisibleItem)
-            // Only restore if the list drifted significantly (e.g. NavHost recreation).
-            // For overlay returns, currentIdx ≈ scrollPos.firstVisibleItem already.
-            if (drift > 2) {
-                listState.scrollToItem(
-                    scrollPos.firstVisibleItem.coerceAtMost(uiState.notes.size - 1),
-                    scrollPos.scrollOffset
-                )
+    LaunchedEffect(isDashboardVisible, scrollPos.firstVisibleItem, scrollPos.scrollOffset, feedCacheChecked) {
+        if (isDashboardVisible && scrollPos.firstVisibleItem > 0 && feedCacheChecked) {
+            // Wait briefly for notes to populate from Room cache if they haven't yet
+            if (uiState.notes.isEmpty()) {
+                @OptIn(kotlinx.coroutines.FlowPreview::class)
+                kotlinx.coroutines.withTimeoutOrNull(2000L) {
+                    snapshotFlow { uiState.notes.size }
+                        .filter { it > 0 }
+                        .first()
+                }
+            }
+            if (uiState.notes.isNotEmpty()) {
+                val currentIdx = listState.firstVisibleItemIndex
+                val drift = kotlin.math.abs(currentIdx - scrollPos.firstVisibleItem)
+                // Only restore if the list drifted significantly (e.g. NavHost recreation).
+                // For overlay returns, currentIdx ≈ scrollPos.firstVisibleItem already.
+                if (drift > 2) {
+                    listState.scrollToItem(
+                        scrollPos.firstVisibleItem.coerceAtMost(uiState.notes.size - 1),
+                        scrollPos.scrollOffset
+                    )
+                }
             }
             feedStateViewModel.updateHomeFeedState { copy(scrollPosition = ScrollPosition(0, 0)) }
         }
@@ -1146,15 +1159,23 @@ fun DashboardScreen(
     // on every pop-back and scrolls the feed to the top.
     // Debounce: wait for the note count to stabilize (300ms with no new notes) before scrolling,
     // so the feed settles before we snap to top — prevents landing mid-feed after relay events stream in.
+    // Skip when a saved scroll position exists (Room cache restore after process death) —
+    // the scroll-restore LaunchedEffect above handles that case.
     LaunchedEffect(Unit) {
         if (!feedStateViewModel.hasInitializedHomeScroll) {
-            @OptIn(kotlinx.coroutines.FlowPreview::class)
-            snapshotFlow { uiState.notes.size }
-                .filter { it > 0 }
-                .debounce(300)
-                .first()
-            listState.scrollToItem(0)
-            feedStateViewModel.hasInitializedHomeScroll = true
+            // If there's a saved scroll position from a previous session, the user was
+            // mid-feed when the process died. Don't override their position with scroll-to-top.
+            if (homeFeedState.scrollPosition.firstVisibleItem > 0) {
+                feedStateViewModel.hasInitializedHomeScroll = true
+            } else {
+                @OptIn(kotlinx.coroutines.FlowPreview::class)
+                snapshotFlow { uiState.notes.size }
+                    .filter { it > 0 }
+                    .debounce(300)
+                    .first()
+                listState.scrollToItem(0)
+                feedStateViewModel.hasInitializedHomeScroll = true
+            }
         }
     }
 

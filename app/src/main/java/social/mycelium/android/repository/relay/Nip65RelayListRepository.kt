@@ -985,8 +985,8 @@ object Nip65RelayListRepository {
         val writeOnly = outboxSet - bothSet
         val readOnly = inboxSet - bothSet
 
-        // Build all relay URLs to publish to (outbox + inbox + indexers for discoverability)
-        val publishRelays = (outboxSet + inboxSet + getIndexerRelayUrls()).toSet()
+        // Publish exclusively to outbox relays
+        val publishRelays = outboxSet.toSet()
 
         val result = social.mycelium.android.services.EventPublisher.publish(
             context = context,

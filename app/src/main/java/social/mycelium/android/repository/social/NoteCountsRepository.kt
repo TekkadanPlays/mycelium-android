@@ -254,8 +254,10 @@ object NoteCountsRepository {
         scheduleSubscriptionUpdate()
     }
 
-    /** Minimum number of new (unseen) note IDs required to trigger a re-subscription. */
-    private const val RESUB_THRESHOLD = 5
+    /** Minimum number of new (unseen) note IDs required to trigger a re-subscription.
+     *  Lowered from 5 → 1 so quoted note IDs (which arrive in small batches from
+     *  QuotedNoteCache prefetch) always trigger a counts subscription update. */
+    private const val RESUB_THRESHOLD = 1
 
     /** Pre-compiled regex for validating 64-char hex Nostr event IDs. */
     private val HEX_ID_REGEX = Regex("^[0-9a-f]{64}$")

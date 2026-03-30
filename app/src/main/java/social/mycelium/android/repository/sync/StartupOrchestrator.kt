@@ -149,6 +149,24 @@ object StartupOrchestrator {
         logD( "Reset — all phases cleared (deep fetch stopped)")
     }
 
+    /**
+     * Reset only if the account has actually changed. Prevents cascading state
+     * resets when [LaunchedEffect] re-fires for the same account (e.g. nav graph
+     * recreation, composable lifecycle restart). Without this, [reset] sets
+     * [settingsReady]/[userStateReady] to false, which triggers DashboardScreen's
+     * subscription LaunchedEffect to re-fire, potentially wiping the feed.
+     */
+    fun resetIfNewAccount(pubkey: String) {
+        if (pubkey == activePubkey) {
+            logD("resetIfNewAccount: same account ${pubkey.take(8)} — skipping reset")
+            return
+        }
+        reset()
+        // Set activePubkey immediately so subsequent LaunchedEffect re-fires
+        // for the same account don't double-reset before runPhase1 sets it.
+        activePubkey = pubkey
+    }
+
     /** Skip Phase 0 when settings are already applied or no signer is available. */
     fun skipPhase0() {
         _settingsReady.value = true

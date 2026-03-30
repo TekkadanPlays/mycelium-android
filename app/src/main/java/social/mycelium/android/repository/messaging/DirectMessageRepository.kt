@@ -203,8 +203,8 @@ object DirectMessageRepository {
     ) {
         val uniqueUrls = _dmRelayUrls.value
         
-        // Publish to user outbox/inbox, plus the DM relays themselves, plus indexers
-        val publishRelays = (uniqueUrls + Nip65RelayListRepository.getIndexerRelayUrls() + userOutboxRelays + userInboxRelays).toSet()
+        // Publish exclusively to outbox relays
+        val publishRelays = userOutboxRelays.toSet()
 
         val result = social.mycelium.android.services.EventPublisher.publish(
             context = context,

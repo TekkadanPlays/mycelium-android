@@ -786,6 +786,11 @@ internal fun QuotedNoteContent(
     val uriHandler = LocalUriHandler.current
     val feedListState = LocalFeedListState.current
     val toggleScope = rememberCoroutineScope()
+    // Live counts: read directly from singleton so quoted notes always reflect the
+    // latest data — even when counts arrive from thread views, deep history, or
+    // delayed relay responses after the parent card was already composed.
+    val liveCountsMap by social.mycelium.android.repository.social.NoteCountsRepository.countsByNoteId.collectAsState()
+    val liveCounts = liveCountsMap[meta.eventId] ?: quotedCounts
     // All nesting levels share the root parent's expand state so they toggle together
     val quotedExpanded = QuotedNoteExpandedState.isExpanded(rootParentNoteId, meta.eventId)
     val hasMore = meta.fullContent.length > meta.contentSnippet.length
@@ -936,12 +941,12 @@ internal fun QuotedNoteContent(
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                if (quotedCounts != null) {
-                    val qReplyCount = quotedCounts.replyCount
-                    val qReactionsList = quotedCounts.reactions
-                    val qReactionCount = quotedCounts.reactionAuthors.values.sumOf { it.size }
-                    val qZapSats = quotedCounts.zapTotalSats
-                    val qEmojiUrls = quotedCounts.customEmojiUrls
+                if (liveCounts != null) {
+                    val qReplyCount = liveCounts.replyCount
+                    val qReactionsList = liveCounts.reactions
+                    val qReactionCount = liveCounts.reactionAuthors.values.sumOf { it.size }
+                    val qZapSats = liveCounts.zapTotalSats
+                    val qEmojiUrls = liveCounts.customEmojiUrls
                     val cStyle = MaterialTheme.typography.labelSmall
                     val mutedColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     val zapColor = Color(0xFFFFD700)

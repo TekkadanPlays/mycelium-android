@@ -26,46 +26,38 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * Result of an NWC payment attempt.
- */
 sealed class NwcPaymentResult {
     data class Success(val preimage: String?) : NwcPaymentResult()
     data class Error(val message: String) : NwcPaymentResult()
 }
 
 /**
- * Manages NIP-47 Nostr Wallet Connect payments.
+ * Manages NIP-47 Nostr Wallet Connect payments via dedicated Ktor CIO WebSocket.
  *
- * Uses a DEDICATED raw WebSocket to the NWC relay — no relay pool, no
- * multiplexer, no scheduler. This ensures:
- * - Zero latency from debouncing or queuing
- * - Clean wire-level control (REQ → EOSE → EVENT → response)
- * - Proper NIP-42 AUTH handling if the relay requires it
- * - Fast feedback (15s timeout instead of 60s)
+ * Direct WebSocket gives full wire-level control for responsive feedback:
+ * - OK: true from relay   → event accepted, wallet is processing
+ * - OK: false from relay  → relay rejected event, fail immediately
+ * - CLOSED message        → subscription killed, fail immediately
+ * - kind-23195 EVENT      → wallet responded, complete immediately
+ * - No OK within 5s       → relay unresponsive, fail fast
+ * - No response within 10s after OK → wallet offline, timeout
  */
 object NwcPaymentManager {
     private const val TAG = "NwcPaymentManager"
-    private const val PAYMENT_TIMEOUT_MS = 15_000L
+    private const val RELAY_OK_TIMEOUT_MS = 5_000L
+    private const val WALLET_RESPONSE_TIMEOUT_MS = 10_000L
 
-    /** Minimal WebSocket-only client — no ContentNegotiation to avoid serializer conflicts. */
     private val wsClient by lazy {
         HttpClient(CIO) {
             install(WebSockets) { pingIntervalMillis = 20_000 }
         }
     }
 
-    /**
-     * Check if NWC is configured and ready to use.
-     */
     fun isConfigured(context: Context): Boolean {
         val config = NwcConfigRepository.getConfig(context)
         return config.pubkey.isNotBlank() && config.relay.isNotBlank() && config.secret.isNotBlank()
     }
 
-    /**
-     * Pay a bolt11 invoice via NWC.
-     */
     suspend fun payInvoice(
         context: Context,
         bolt11: String
@@ -80,82 +72,95 @@ object NwcPaymentManager {
 
     private suspend fun payInvoiceInternal(
         config: NwcConfig,
-        bolt11: String
+        bolt11: String,
     ): NwcPaymentResult {
         val secretBytes = config.secret.hexToByteArray()
         val nwcSigner = NostrSignerInternal(KeyPair(privKey = secretBytes))
-        val nwcRelayUrl = config.relay
 
-        Log.d(TAG, "NWC signer=${nwcSigner.pubKey.take(8)}, wallet=${config.pubkey.take(8)}, relay=$nwcRelayUrl")
+        Log.d(TAG, "NWC signer=${nwcSigner.pubKey.take(8)}, wallet=${config.pubkey.take(8)}, relay=${config.relay}")
 
-        // Build the kind-23194 pay_invoice request (try NIP-44 first)
         val paymentRequest = LnZapPaymentRequestEvent.create(
             lnInvoice = bolt11,
             walletServicePubkey = config.pubkey,
             signer = nwcSigner,
-            useNip44 = true
+            useNip44 = false,
         )
-        Log.d(TAG, "Payment request built: id=${paymentRequest.id.take(12)}, kind=${paymentRequest.kind}")
+        Log.d(TAG, "Request id=${paymentRequest.id.take(12)}")
+
+        val responseDeferred = CompletableDeferred<NwcPaymentResult>()
+        val relayAccepted = CompletableDeferred<Boolean>()
 
         try {
             var finalResult: NwcPaymentResult? = null
 
-            wsClient.webSocket(nwcRelayUrl) {
-                Log.d(TAG, "WebSocket connected to $nwcRelayUrl")
+            wsClient.webSocket(config.relay) {
+                Log.d(TAG, "Connected to ${config.relay}")
 
-                val responseDeferred = CompletableDeferred<NwcPaymentResult>()
                 val subId = "nwc_${System.currentTimeMillis()}"
 
-                // Launch reader coroutine
                 val readerJob = launch {
                     try {
                         for (frame in incoming) {
                             if (frame is Frame.Text) {
                                 val raw = frame.readText()
-                                Log.d(TAG, "RECV: ${raw.take(250)}")
-                                handleRelayMessage(raw, subId, nwcSigner, paymentRequest.id, responseDeferred)
+                                handleMessage(raw, subId, config.pubkey, nwcSigner, paymentRequest.id, responseDeferred, relayAccepted)
                             }
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "WebSocket read error: ${e.message}")
+                        Log.w(TAG, "Read error: ${e.message}")
+                        if (!relayAccepted.isCompleted) relayAccepted.complete(false)
                         if (!responseDeferred.isCompleted) {
-                            responseDeferred.complete(NwcPaymentResult.Error("Connection lost: ${e.message?.take(60)}"))
+                            responseDeferred.complete(NwcPaymentResult.Error("Connection lost"))
                         }
                     }
                 }
 
-                // Step 1: Send REQ for kind-23195 responses
+                // Subscribe for kind-23195 responses
                 val filter = Filter(
                     kinds = listOf(LnZapPaymentResponseEvent.KIND),
                     authors = listOf(config.pubkey),
-                    tags = mapOf("e" to listOf(paymentRequest.id)),
+                    tags = mapOf(
+                        "e" to listOf(paymentRequest.id),
+                        "p" to listOf(nwcSigner.pubKey),
+                    ),
                 )
                 send(Frame.Text(NostrProtocol.buildReq(subId, filter)))
-                Log.d(TAG, "SENT REQ: $subId")
 
-                // Step 2: Send the payment EVENT
+                // Publish the payment request
                 send(Frame.Text(NostrProtocol.buildEvent(paymentRequest)))
-                Log.d(TAG, "SENT EVENT: ${paymentRequest.id.take(12)}")
 
-                // Step 3: Wait for the response
-                val result = withTimeoutOrNull(PAYMENT_TIMEOUT_MS) {
-                    responseDeferred.await()
+                // Phase 1: Wait for relay to acknowledge (fast fail if rejected)
+                val accepted = withTimeoutOrNull(RELAY_OK_TIMEOUT_MS) {
+                    relayAccepted.await()
                 }
-
-                // Clean up
-                try { send(Frame.Text(NostrProtocol.buildClose(subId))) } catch (_: Exception) {}
-                readerJob.cancel()
-                finalResult = result
+                if (accepted == null) {
+                    Log.w(TAG, "Relay did not acknowledge event within ${RELAY_OK_TIMEOUT_MS / 1000}s")
+                    readerJob.cancel()
+                    finalResult = NwcPaymentResult.Error("Relay unresponsive")
+                } else if (accepted == false) {
+                    readerJob.cancel()
+                    finalResult = if (responseDeferred.isCompleted) responseDeferred.getCompleted()
+                        else NwcPaymentResult.Error("Relay rejected payment request")
+                } else if (responseDeferred.isCompleted) {
+                    // Wallet already responded before we checked (fast path)
+                    readerJob.cancel()
+                    finalResult = responseDeferred.getCompleted()
+                } else {
+                    // Phase 2: Relay accepted — wait for wallet response
+                    Log.d(TAG, "Relay accepted, waiting for wallet response...")
+                    val result = withTimeoutOrNull(WALLET_RESPONSE_TIMEOUT_MS) {
+                        responseDeferred.await()
+                    }
+                    try { send(Frame.Text(NostrProtocol.buildClose(subId))) } catch (_: Exception) {}
+                    readerJob.cancel()
+                    finalResult = result
+                }
             }
 
-            if (finalResult != null) {
-                Log.d(TAG, "Payment completed: $finalResult")
-                return finalResult!!
-            }
+            if (finalResult != null) return finalResult!!
 
-            // NIP-44 timed out — try NIP-04 as fallback
-            Log.w(TAG, "NIP-44 request timed out, retrying with NIP-04...")
-            return retryWithNip04(config, bolt11, nwcSigner)
+            Log.w(TAG, "Wallet did not respond within ${WALLET_RESPONSE_TIMEOUT_MS / 1000}s")
+            return NwcPaymentResult.Error("Wallet did not respond — may be offline")
 
         } catch (e: Exception) {
             Log.e(TAG, "NWC payment failed: ${e.message}", e)
@@ -163,161 +168,90 @@ object NwcPaymentManager {
         }
     }
 
-    /**
-     * Retry the payment using NIP-04 encryption (for older wallet services).
-     */
-    private suspend fun retryWithNip04(
-        config: NwcConfig,
-        bolt11: String,
-        nwcSigner: NostrSignerInternal,
-    ): NwcPaymentResult {
-        val paymentRequest = LnZapPaymentRequestEvent.create(
-            lnInvoice = bolt11,
-            walletServicePubkey = config.pubkey,
-            signer = nwcSigner,
-            useNip44 = false
-        )
-        Log.d(TAG, "NIP-04 retry: id=${paymentRequest.id.take(12)}")
-
-        try {
-            var result: NwcPaymentResult? = null
-
-            wsClient.webSocket(config.relay) {
-                val responseDeferred = CompletableDeferred<NwcPaymentResult>()
-                val subId = "nwc04_${System.currentTimeMillis()}"
-
-                val readerJob = launch {
-                    try {
-                        for (frame in incoming) {
-                            if (frame is Frame.Text) {
-                                val raw = frame.readText()
-                                Log.d(TAG, "RECV(04): ${raw.take(250)}")
-                                handleRelayMessage(raw, subId, nwcSigner, paymentRequest.id, responseDeferred)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        if (!responseDeferred.isCompleted) {
-                            responseDeferred.complete(NwcPaymentResult.Error("Connection lost"))
-                        }
-                    }
-                }
-
-                val filter = Filter(
-                    kinds = listOf(LnZapPaymentResponseEvent.KIND),
-                    authors = listOf(config.pubkey),
-                    tags = mapOf("e" to listOf(paymentRequest.id)),
-                )
-                send(Frame.Text(NostrProtocol.buildReq(subId, filter)))
-                send(Frame.Text(NostrProtocol.buildEvent(paymentRequest)))
-                Log.d(TAG, "NIP-04 REQ+EVENT sent")
-
-                val r = withTimeoutOrNull(PAYMENT_TIMEOUT_MS) {
-                    responseDeferred.await()
-                }
-
-                try { send(Frame.Text(NostrProtocol.buildClose(subId))) } catch (_: Exception) {}
-                readerJob.cancel()
-                result = r
-            }
-
-            return result ?: NwcPaymentResult.Error("Payment timed out — wallet service may be offline")
-        } catch (e: Exception) {
-            Log.e(TAG, "NIP-04 retry failed: ${e.message}")
-            return NwcPaymentResult.Error("Payment failed: ${e.message?.take(80)}")
-        }
-    }
-
-    /**
-     * Parse a raw relay message and handle EVENT, OK, AUTH, EOSE, NOTICE, CLOSED.
-     */
-    private suspend fun handleRelayMessage(
+    private suspend fun handleMessage(
         raw: String,
         subId: String,
+        walletPubkey: String,
         signer: NostrSignerInternal,
         requestId: String,
-        deferred: CompletableDeferred<NwcPaymentResult>
+        responseDeferred: CompletableDeferred<NwcPaymentResult>,
+        relayAccepted: CompletableDeferred<Boolean>,
     ) {
-        if (deferred.isCompleted) return
-
         try {
-            val msg = NostrProtocol.parseRelayMessage(raw)
-            when (msg) {
+            when (val msg = NostrProtocol.parseRelayMessage(raw)) {
                 is NostrProtocol.RelayMessage.EventMsg -> {
                     if (msg.subscriptionId == subId && msg.event.kind == LnZapPaymentResponseEvent.KIND) {
-                        Log.d(TAG, "Got kind-23195 response! id=${msg.event.id.take(12)}")
-                        processResponseEvent(msg.event, signer, requestId, deferred)
+                        Log.d(TAG, "Got kind-23195 id=${msg.event.id.take(12)}")
+                        processResponse(msg.event, signer, requestId, responseDeferred)
                     }
                 }
                 is NostrProtocol.RelayMessage.Ok -> {
-                    Log.d(TAG, "OK: ${msg.eventId.take(12)}, success=${msg.success}, msg=${msg.message}")
-                    if (!msg.success && !deferred.isCompleted) {
-                        deferred.complete(NwcPaymentResult.Error("Relay rejected event: ${msg.message}"))
+                    if (msg.eventId == requestId) {
+                        Log.d(TAG, "OK: accepted=${msg.success}${if (msg.message.isNotEmpty()) " msg=${msg.message}" else ""}")
+                        if (msg.success) {
+                            if (!relayAccepted.isCompleted) relayAccepted.complete(true)
+                        } else {
+                            if (!responseDeferred.isCompleted) {
+                                responseDeferred.complete(NwcPaymentResult.Error("Relay rejected: ${msg.message.take(80).ifEmpty { "unknown reason" }}"))
+                            }
+                            if (!relayAccepted.isCompleted) relayAccepted.complete(false)
+                        }
                     }
                 }
-                is NostrProtocol.RelayMessage.EndOfStoredEvents -> {
-                    Log.d(TAG, "EOSE: ${msg.subscriptionId}")
-                }
-                is NostrProtocol.RelayMessage.Auth -> {
-                    Log.w(TAG, "AUTH challenge received — NWC relay requires authentication")
-                    // TODO: Sign and send AUTH response if needed
+                is NostrProtocol.RelayMessage.EndOfStoredEvents -> {}
+                is NostrProtocol.RelayMessage.Closed -> {
+                    Log.w(TAG, "CLOSED: ${msg.message}")
+                    if (!responseDeferred.isCompleted) {
+                        responseDeferred.complete(NwcPaymentResult.Error("Subscription closed: ${msg.message.take(60)}"))
+                    }
+                    if (!relayAccepted.isCompleted) relayAccepted.complete(false)
                 }
                 is NostrProtocol.RelayMessage.Notice -> {
                     Log.w(TAG, "NOTICE: ${msg.message}")
                 }
-                is NostrProtocol.RelayMessage.Closed -> {
-                    Log.w(TAG, "CLOSED: sub=${msg.subscriptionId}, msg=${msg.message}")
-                    if (!deferred.isCompleted) {
-                        deferred.complete(NwcPaymentResult.Error("Subscription closed: ${msg.message}"))
-                    }
+                is NostrProtocol.RelayMessage.Auth -> {
+                    Log.w(TAG, "AUTH required by NWC relay")
                 }
                 else -> {}
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Error parsing relay message: ${e.message}")
+            Log.w(TAG, "Parse error: ${e.message}")
         }
     }
 
-    /**
-     * Decrypt and process a kind-23195 response event.
-     */
-    private suspend fun processResponseEvent(
+    private suspend fun processResponse(
         event: Event,
         signer: NostrSignerInternal,
         requestId: String,
-        deferred: CompletableDeferred<NwcPaymentResult>
+        deferred: CompletableDeferred<NwcPaymentResult>,
     ) {
         if (deferred.isCompleted) return
         try {
-            // Verify e-tag matches our request (skip stale responses)
             val responseRequestId = LnZapPaymentResponseEvent.requestId(event)
             if (responseRequestId != null && responseRequestId != requestId) {
-                Log.d(TAG, "Skipping stale response (e-tag ${responseRequestId.take(12)} != ${requestId.take(12)})")
+                Log.d(TAG, "Skipping stale response (${responseRequestId.take(12)} != ${requestId.take(12)})")
                 return
             }
 
             val response = LnZapPaymentResponseEvent.decrypt(event, signer)
-            Log.d(TAG, "Decrypted NWC response: type=${response.resultType}")
-
             when (response) {
                 is PayInvoiceSuccessResponse -> {
-                    val preimage = response.result?.preimage
-                    Log.d(TAG, "Payment SUCCESS! preimage=${preimage?.take(16)}")
-                    deferred.complete(NwcPaymentResult.Success(preimage))
+                    Log.d(TAG, "SUCCESS preimage=${response.result?.preimage?.take(16)}")
+                    deferred.complete(NwcPaymentResult.Success(response.result?.preimage))
                 }
                 is PayInvoiceErrorResponse -> {
-                    val errorMsg = response.error?.message ?: response.error?.code?.name ?: "Unknown error"
-                    Log.w(TAG, "Payment ERROR: $errorMsg")
-                    deferred.complete(NwcPaymentResult.Error(errorMsg))
+                    val msg = response.error?.message ?: response.error?.code?.name ?: "Unknown error"
+                    Log.w(TAG, "PAYMENT ERROR: $msg")
+                    deferred.complete(NwcPaymentResult.Error(msg))
                 }
                 else -> {
-                    Log.w(TAG, "Unexpected response type: ${response.resultType}")
                     deferred.complete(NwcPaymentResult.Error("Unexpected response"))
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error processing response: ${e.message}")
+            Log.e(TAG, "Decrypt error: ${e.message}")
             if (!deferred.isCompleted) {
-                deferred.complete(NwcPaymentResult.Error("Failed to process response: ${e.message?.take(60)}"))
+                deferred.complete(NwcPaymentResult.Error("Failed to decrypt response"))
             }
         }
     }

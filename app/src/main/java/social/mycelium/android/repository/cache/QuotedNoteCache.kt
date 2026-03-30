@@ -292,6 +292,10 @@ object QuotedNoteCache {
         }
         if (nestedIds.isEmpty()) return
         Log.d(TAG, "Depth-2 prefetch: ${nestedIds.size} nested quoted notes")
+        // Register nested quoted IDs with NoteCountsRepository so counts
+        // (reactions, zaps, replies) are fetched proactively for depth-2 quotes.
+        val nestedRelayMap = nestedIds.associateWith { relays.take(3) }
+        social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(nestedRelayMap)
         // Phase 1: RawEventCache + Room
         val stillNeeded = mutableListOf<String>()
         for (nid in nestedIds) {

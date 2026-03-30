@@ -1535,8 +1535,12 @@ fun MyceliumNavigation(
             accountStateViewModel.removeEmojiPack(author, dTag)
         }
 
-        // Reset orchestrator for this account session
-        social.mycelium.android.repository.sync.StartupOrchestrator.reset()
+        // Reset orchestrator only on actual account changes — not on LaunchedEffect
+        // restarts for the same account (nav graph recreation, composable lifecycle).
+        // Without this guard, reset() sets settingsReady/userStateReady to false,
+        // which cascades to DashboardScreen's subscription LaunchedEffect re-firing
+        // and potentially wiping the feed.
+        social.mycelium.android.repository.sync.StartupOrchestrator.resetIfNewAccount(pubkey)
 
         // ── Phase 0: Settings (CRITICAL priority, non-blocking) ──────────
         // Fires concurrently with Phase 1. Settings are cosmetic and apply

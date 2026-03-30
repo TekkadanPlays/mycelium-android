@@ -549,7 +549,17 @@ internal fun QuotedNoteBody(
                     if (nestedMeta == null) {
                         LaunchedEffect(nestedEventId) {
                             delay(300)
-                            nestedMeta = QuotedNoteCache.get(nestedEventId)
+                            val fetched = QuotedNoteCache.get(nestedEventId)
+                            nestedMeta = fetched
+                            // Register with NoteCountsRepository so counts are fetched
+                            if (fetched != null) {
+                                val relays = listOfNotNull(fetched.relayUrl).ifEmpty {
+                                    social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(nestedEventId)
+                                }
+                                social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(
+                                    mapOf(nestedEventId to relays)
+                                )
+                            }
                         }
                     }
                     val nm = nestedMeta
@@ -3440,7 +3450,17 @@ fun NoteCard(
                             newFailed.add(id); null
                         }
                     }
-                    if (fetched.isNotEmpty()) quotedMetas = quotedMetas + fetched.toMap()
+                    if (fetched.isNotEmpty()) {
+                        quotedMetas = quotedMetas + fetched.toMap()
+                        // Register fetched quoted note IDs for counts subscription
+                        val countsMap = fetched.associate { (id, meta) ->
+                            val relays = listOfNotNull(meta.relayUrl).ifEmpty {
+                                QuotedNoteCache.getRelayHints(id)
+                            }
+                            id to relays
+                        }
+                        social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(countsMap)
+                    }
                     if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
                 }
                 quotedLoading = false

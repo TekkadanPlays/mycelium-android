@@ -553,9 +553,23 @@ private fun NoteCardContent(
                                                 }.map { it.await() }
                                             }
                                         val newFailed = mutableSetOf<String>()
+                                        val newlyFetched = mutableListOf<Pair<String, QuotedNoteMeta>>()
                                         results.forEach { (id, meta) ->
-                                            if (meta != null) quotedMetas = quotedMetas + (id to meta)
+                                            if (meta != null) {
+                                                quotedMetas = quotedMetas + (id to meta)
+                                                newlyFetched.add(id to meta)
+                                            }
                                             else newFailed.add(id)
+                                        }
+                                        // Register fetched quoted note IDs for counts subscription
+                                        if (newlyFetched.isNotEmpty()) {
+                                            val countsMap = newlyFetched.associate { (id, meta) ->
+                                                val relays = listOfNotNull(meta.relayUrl).ifEmpty {
+                                                    QuotedNoteCache.getRelayHints(id)
+                                                }
+                                                id to relays
+                                            }
+                                            social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(countsMap)
                                         }
                                         if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
                                     }

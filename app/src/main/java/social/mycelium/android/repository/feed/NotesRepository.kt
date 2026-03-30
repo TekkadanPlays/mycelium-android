@@ -1582,6 +1582,22 @@ class NotesRepository private constructor() {
                     }
                 }
             }
+            // Depth-2: scan resolved depth-1 quoted notes for nested nostr: references
+            // so counts for recursively quoted notes survive the replace=true below.
+            val depth2Ids = mutableListOf<Pair<String, List<String>>>()
+            for ((qid, qRelays) in noteRelayMap.toMap()) {
+                val cached = QuotedNoteCache.getCached(qid) ?: continue
+                val nested = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(cached.fullContent)
+                for (nid in nested) {
+                    if (nid !in noteRelayMap) {
+                        val nestedCached = QuotedNoteCache.getCached(nid)
+                        depth2Ids.add(nid to (listOfNotNull(nestedCached?.relayUrl).ifEmpty { qRelays }))
+                    }
+                }
+            }
+            for ((nid, nRelays) in depth2Ids) {
+                noteRelayMap[nid] = nRelays
+            }
             NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap, replace = true)
         } catch (e: Throwable) {
             Log.e(TAG, "updateDisplayedNotes failed: ${e.message}", e)
@@ -2967,6 +2983,21 @@ class NotesRepository private constructor() {
         val pendingCount = toMerge.size
         val merged = trimNotesToCap((_notes.value + toMerge).distinctBy { it.id }.sortedByDescending { it.repostTimestamp ?: it.timestamp })
         _notes.value = merged.toImmutableList()
+        // Re-enrich quoted notes: clear failed IDs so stale fetch failures are retried,
+        // then re-prefetch any quoted notes that weren't resolved during initial ingestion.
+        val allQuotedIds = toMerge.flatMap { it.quotedEventIds }.distinct()
+        for (qid in allQuotedIds) {
+            if (QuotedNoteCache.getCached(qid) == null) {
+                QuotedNoteCache.clearFailed(qid)
+            }
+        }
+        val notesWithUnresolvedQuotes = toMerge.filter { note ->
+            note.quotedEventIds.any { QuotedNoteCache.getCached(it) == null }
+        }
+        if (notesWithUnresolvedQuotes.isNotEmpty()) {
+            Log.d(TAG, "Re-prefetching ${notesWithUnresolvedQuotes.size} notes with unresolved quoted content")
+            QuotedNoteCache.prefetchForNotes(notesWithUnresolvedQuotes)
+        }
         updateDisplayedNotes()
         latestNoteTimestampAtOpen = merged.maxOfOrNull { it.timestamp } ?: 0L
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())

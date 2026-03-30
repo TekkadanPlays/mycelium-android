@@ -2374,7 +2374,16 @@ private fun ReplyContentBody(
                 }
                 LaunchedEffect(block.eventId) {
                     if (qMeta == null) {
-                        qMeta = social.mycelium.android.repository.cache.QuotedNoteCache.get(block.eventId)
+                        val fetched = social.mycelium.android.repository.cache.QuotedNoteCache.get(block.eventId)
+                        qMeta = fetched
+                        if (fetched != null) {
+                            val relays = listOfNotNull(fetched.relayUrl).ifEmpty {
+                                social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(block.eventId)
+                            }
+                            social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(
+                                mapOf(block.eventId to relays)
+                            )
+                        }
                     }
                 }
                 val meta = qMeta

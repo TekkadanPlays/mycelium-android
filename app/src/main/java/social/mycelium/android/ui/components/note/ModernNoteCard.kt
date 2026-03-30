@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
@@ -259,14 +260,25 @@ private fun NoteCardContent(
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         val nip05Status = social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
-                        if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
-                            val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-                            Icon(
-                                imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
-                                contentDescription = "Verified",
-                                modifier = Modifier.size(16.dp),
-                                tint = androidx.compose.ui.graphics.Color.Unspecified
-                            )
+                        when (nip05Status) {
+                            social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
+                                val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                Icon(
+                                    imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                    contentDescription = "Verified",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = androidx.compose.ui.graphics.Color.Unspecified
+                                )
+                            }
+                            social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
+                                Icon(
+                                    imageVector = Icons.Default.Report,
+                                    contentDescription = "NIP-05 failed",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = androidx.compose.ui.graphics.Color(0xFFEF5350)
+                                )
+                            }
+                            else -> {}
                         }
                         Text(
                             text = authorDisplayLabel(displayAuthor),

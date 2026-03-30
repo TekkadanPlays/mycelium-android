@@ -19,6 +19,29 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.23",
+      "versionCode": 48,
+      "releaseDate": "2026-03-30",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.23-beta/Mycelium-v0.5.23-beta.apk",
+      "changelog": "Quoted note reactivity fixes, NIP-05 failed flags in home feed, reactive profile resolution for reaction/zap/boost drop-downs.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Fix: depth-2 quoted note counts survive replace=true wipe in updateDisplayedNotes",
+        "Fix: stale quoted notes re-prefetched when pending notes are released into feed",
+        "Fix: quoted notes fetched at render time now register with NoteCountsRepository for counts",
+        "Fix: QuotedNoteContent self-resolves author profiles reactively at all nesting depths",
+        "Fix: reaction/zap/boost drop-down profiles resolve reactively when arriving from relays",
+        "Fix: NIP-05 failed verification icon now displays in home feed and ModernNoteCard headers",
+        "README: Zapstore section updated to 'coming soon'"
+      ]
+    },
+    {
       "version": "0.5.22",
       "versionCode": 47,
       "releaseDate": "2026-03-29",

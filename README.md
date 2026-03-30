@@ -36,7 +36,7 @@ https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/obtanium.j
 
 ### Zapstore
 
-Install via [Zapstore](https://zapstore.dev) — search for **Mycelium**.
+[Zapstore](https://zapstore.dev) availability is planned for a future release.
 
 ### F-Droid
 

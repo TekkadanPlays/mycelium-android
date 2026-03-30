@@ -3138,14 +3138,25 @@ fun NoteCard(
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
-                                if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
-                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-                                    Icon(
-                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
-                                        contentDescription = "Verified",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = Color.Unspecified
-                                    )
+                                when (nip05Status) {
+                                    social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
+                                        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                        Icon(
+                                            imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                            contentDescription = "Verified",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = Color.Unspecified
+                                        )
+                                    }
+                                    social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
+                                        Icon(
+                                            imageVector = Icons.Default.Report,
+                                            contentDescription = "NIP-05 failed",
+                                            modifier = Modifier.size(16.dp),
+                                            tint = Color(0xFFEF5350)
+                                        )
+                                    }
+                                    else -> {}
                                 }
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
@@ -3155,14 +3166,25 @@ fun NoteCard(
                                 )
                             }
                         } else {
-                            if (nip05Status == social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED) {
-                                val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-                                Icon(
-                                    imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
-                                    contentDescription = "Verified",
-                                    modifier = Modifier.size(16.dp),
-                                    tint = Color.Unspecified
-                                )
+                            when (nip05Status) {
+                                social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
+                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                    Icon(
+                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                        contentDescription = "Verified",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color.Unspecified
+                                    )
+                                }
+                                social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
+                                    Icon(
+                                        imageVector = Icons.Default.Report,
+                                        contentDescription = "NIP-05 failed",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color(0xFFEF5350)
+                                    )
+                                }
+                                else -> {}
                             }
                             Text(
                                 text = authorDisplayLabel(displayAuthor),

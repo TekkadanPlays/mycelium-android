@@ -157,6 +157,18 @@ class RelayManagementViewModel(
                     reloadFromStorage(pubkey)
                 }
         }
+        // Catch-all: when fetchRelaySets writes categories to disk without
+        // emitting a pendingCategoryDiff (e.g. first-sign-in auto-apply),
+        // the version counter still triggers a reload so the sidebar updates.
+        viewModelScope.launch {
+            social.mycelium.android.repository.relay.RelayCategorySyncRepository
+                .categoriesWrittenVersion.collect { version ->
+                    if (version == 0) return@collect // Skip initial value
+                    val pubkey = currentPubkey ?: return@collect
+                    if (!storageLoaded) return@collect
+                    reloadFromStorage(pubkey)
+                }
+        }
 
         // Periodically refresh delivery stats (not a StateFlow in the tracker, so poll)
         viewModelScope.launch(Dispatchers.IO) {
@@ -339,6 +351,19 @@ class RelayManagementViewModel(
             _uiState.update { it.copy(relayCategories = categories, relayProfiles = profiles, outboxRelays = outbox, inboxRelays = inbox, indexerRelays = cache, announcementRelays = announcements, draftsRelays = drafts, blossomServers = blossom, nip96Servers = nip96) }
             storageLoaded = true
 
+            // Deferred reload: RelayCategorySyncRepository.fetchRelaySets() runs concurrently
+            // during Phase 1 and may have written categories to disk (incrementing
+            // categoriesWrittenVersion) before storageLoaded was set to true — the
+            // reactive bridge would have silently dropped that update. Re-read after
+            // a brief delay to catch any writes that arrived during initial loading.
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(2_000L)
+                val freshVersion = social.mycelium.android.repository.relay.RelayCategorySyncRepository
+                    .categoriesWrittenVersion.value
+                if (freshVersion > 0) {
+                    reloadFromStorage(pubkey)
+                }
+            }
             // Mark outbox relays as priority for connection (connect first, no jitter/cooldown)
             val outboxUrls = outbox.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }.toSet()
             if (outboxUrls.isNotEmpty()) {

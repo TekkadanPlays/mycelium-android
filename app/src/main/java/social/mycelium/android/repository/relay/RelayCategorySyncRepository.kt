@@ -116,6 +116,14 @@ object RelayCategorySyncRepository {
     private var fetchHandle: TemporarySubscriptionHandle? = null
     private var indexerFetchHandle: TemporarySubscriptionHandle? = null
 
+    /**
+     * Monotonic counter incremented whenever [fetchRelaySets] writes categories
+     * to disk. The ViewModel observes this to trigger [reloadFromStorage] even
+     * when no [pendingCategoryDiff] is emitted (e.g. first-sign-in auto-apply).
+     */
+    private val _categoriesWrittenVersion = kotlinx.coroutines.flow.MutableStateFlow(0)
+    val categoriesWrittenVersion: kotlinx.coroutines.flow.StateFlow<Int> = _categoriesWrittenVersion
+
     // ── Publish ──────────────────────────────────────────────────────────────
 
     /**
@@ -297,6 +305,7 @@ object RelayCategorySyncRepository {
                     if (purged.size < localCategories.size) {
                         val removedNames = localCategories.filter { it.id in deletedDTags }.joinToString { "'${it.name}'" }
                         storageManager.saveCategories(userPubkey, purged)
+                        _categoriesWrittenVersion.value++
                         Log.d(TAG, "Purged ${localCategories.size - purged.size} locally-cached categories that were deleted remotely: $removedNames")
                         DiagnosticLog.sync(TAG, "PURGE: removed ${localCategories.size - purged.size} deleted categories from local: $removedNames")
                     }
@@ -330,6 +339,7 @@ object RelayCategorySyncRepository {
                 if (!hasSubstantiveLocal) {
                     val merged = mergeCategories(localCategories, remoteCategories)
                     storageManager.saveCategories(userPubkey, merged)
+                    _categoriesWrittenVersion.value++
                     Log.d(TAG, "First sign-in: auto-applied ${remoteCategories.size} remote categories")
                     DiagnosticLog.sync(TAG, "MERGE (first sign-in): auto-applied ${remoteCategories.size} remote → ${merged.size} total")
                     return@launch

@@ -713,6 +713,7 @@ fun DashboardScreen(
     feedStateViewModel: FeedStateViewModel = viewModel(),
     accountStateViewModel: social.mycelium.android.viewmodel.AccountStateViewModel = viewModel(),
     relayRepository: RelayRepository? = null,
+    relayViewModel: RelayManagementViewModel? = null,
     onLoginClick: (() -> Unit)? = null,
     onTopAppBarStateChange: (TopAppBarState) -> Unit = {},
     initialTopAppBarState: TopAppBarState? = null,
@@ -783,11 +784,8 @@ fun DashboardScreen(
             }
     }
 
-    // Relay management
+    // Relay management — ViewModel is hoisted to MyceliumNavigation for sharing across screens
     val storageManager = remember { RelayStorageManager(context) }
-    val relayViewModel: RelayManagementViewModel? = relayRepository?.let {
-        viewModel { RelayManagementViewModel(it, storageManager) }
-    }
     val relayUiState = if (relayViewModel != null) {
         relayViewModel.uiState.collectAsState().value
     } else {
@@ -824,13 +822,6 @@ fun DashboardScreen(
     val subscribedRelayCount = userRelayUrls.size
 
     // (Indexer relay details removed from sidebar — icon-only access via onIndexerClick)
-
-    // Load user relays when account changes
-    LaunchedEffect(currentAccount) {
-        currentAccount?.toHexKey()?.let { pubkey ->
-            relayViewModel?.loadUserRelays(pubkey)
-        }
-    }
 
     // Get active profile for sidebar + feed logic
     val activeProfile = relayUiState.relayProfiles.firstOrNull { it.isActive }
@@ -981,13 +972,6 @@ fun DashboardScreen(
         if (isDashboardVisible) {
             kotlinx.coroutines.delay(400)
             viewModel.syncFeedAuthorsFromCache()
-        }
-    }
-
-    // Fetch user's NIP-65 relay list when account changes
-    LaunchedEffect(currentAccount) {
-        currentAccount?.toHexKey()?.let { pubkey ->
-            relayViewModel?.fetchUserRelaysFromNetwork(pubkey)
         }
     }
 

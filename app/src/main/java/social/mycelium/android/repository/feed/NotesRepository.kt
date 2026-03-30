@@ -489,30 +489,11 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Apply relay URL merges to existing notes
-            if (relayUpdates.isNotEmpty()) {
-                Log.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges to _notes")
-                val updatedList = currentNotes.map { note ->
-                    relayUpdates[note.id]?.let { urls -> note.copy(relayUrls = urls) } ?: note
-                }
-                _notes.value = updatedList.toImmutableList()
-                // Persist merged relay URLs to Room so cold-start restores all orbs.
-                // Must flush pending event INSERTs first — the debounced flushEventStore
-                // may not have run yet, so the row may not exist for UPDATE to match.
-                val dao = eventDao
-                if (dao != null) {
-                    scope.launch(Dispatchers.IO) {
-                        flushEventStore() // ensure rows exist before UPDATE
-                        for ((noteId, urls) in relayUpdates) {
-                            try { dao.updateRelayUrls(noteId, urls.joinToString(",")) }
-                            catch (e: Exception) { /* best-effort */ }
-                        }
-                    }
-                }
-            }
+            // Relay URL merges are deferred until after new notes are merged into
+            // _notes (below). Applying them here would be overwritten by the second
+            // _notes.value write in the feed-merge block, silently dropping the merged URLs.
 
-            if (newNotes.isEmpty()) {
-                if (relayUpdates.isNotEmpty()) scheduleDisplayUpdate()
+            if (newNotes.isEmpty() && relayUpdates.isEmpty()) {
                 return
             }
 
@@ -564,6 +545,28 @@ class NotesRepository private constructor() {
                 advancePaginationCursor(feedNotes)
                 if (!initialLoadComplete && merged.size % 50 == 0) {
                     Log.d(TAG, "Initial load: ${merged.size} notes so far")
+                }
+            }
+
+            // Apply deferred relay URL merges to the final _notes list (after new-note merge).
+            // This ensures the relay merges aren't overwritten by the feed-merge write above.
+            if (relayUpdates.isNotEmpty()) {
+                Log.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges to _notes")
+                val afterMerge = _notes.value
+                val updatedList = afterMerge.map { note ->
+                    relayUpdates[note.id]?.let { urls -> note.copy(relayUrls = urls) } ?: note
+                }
+                _notes.value = updatedList.toImmutableList()
+                // Persist merged relay URLs to Room so cold-start restores all orbs.
+                val dao = eventDao
+                if (dao != null) {
+                    scope.launch(Dispatchers.IO) {
+                        flushEventStore() // ensure rows exist before UPDATE
+                        for ((noteId, urls) in relayUpdates) {
+                            try { dao.updateRelayUrls(noteId, urls.joinToString(",")) }
+                            catch (e: Exception) { /* best-effort */ }
+                        }
+                    }
                 }
             }
 
@@ -1465,6 +1468,30 @@ class NotesRepository private constructor() {
     private fun updateDisplayedNotes() {
         android.os.Trace.beginSection("NotesRepo.updateDisplayedNotes")
         try {
+            // ── Retroactive relay enrichment from EventRelayTracker ──────────
+            // Events arriving from multiple relays record ALL relay URLs in the
+            // tracker, but Note objects only capture the relay from their first
+            // delivery. This pass merges accumulated tracker URLs back into Notes
+            // so relay orbs grow as duplicates arrive from additional relays.
+            // Lightweight: only copies Note objects that actually gained new URLs.
+            val preEnrich = _notes.value
+            var enrichedCount = 0
+            val enriched = preEnrich.map { note ->
+                val noteId = note.originalNoteId ?: note.id
+                // Strip "repost:" prefix for tracker lookup (tracker stores raw event IDs)
+                val trackerId = if (noteId.startsWith("repost:")) noteId.removePrefix("repost:") else noteId
+                val existing = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                val merged = EventRelayTracker.enrichRelayUrls(trackerId, existing)
+                if (merged.size > existing.size) {
+                    enrichedCount++
+                    note.copy(relayUrls = merged)
+                } else note
+            }
+            if (enrichedCount > 0) {
+                _notes.value = enriched.toImmutableList()
+                Log.d(TAG, "\uD83D\uDD35 Tracker enrichment: $enrichedCount notes gained relay URLs")
+            }
+
             // Pre-build a combined set of raw + normalized URLs for O(1) lookup (avoids per-note normalization)
             val hasRelayFilter = connectedRelays.isNotEmpty()
             val connectedSet = if (hasRelayFilter) buildSet {
@@ -1878,16 +1905,17 @@ class NotesRepository private constructor() {
                         for (entity in roomEvents) {
                             try {
                                 val event = Event.fromJson(entity.eventJson)
-                                // Seed tracker from cached relay URLs (may have multiple comma-separated)
-                                val cachedRelayUrl = entity.relayUrl ?: ""
-                                if (cachedRelayUrl.contains(",")) {
-                                    cachedRelayUrl.split(",").forEach { url ->
-                                        EventRelayTracker.addRelay(event.id, url.trim())
-                                    }
-                                } else {
-                                    EventRelayTracker.addRelay(event.id, cachedRelayUrl)
+                                // Seed tracker from ALL cached relay URLs (relayUrls column has merged multi-relay data)
+                                val allCachedUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+                                val primaryUrl = entity.relayUrl ?: ""
+                                if (allCachedUrls.isNotEmpty()) {
+                                    allCachedUrls.forEach { url -> EventRelayTracker.addRelay(event.id, url.trim()) }
+                                } else if (primaryUrl.isNotBlank()) {
+                                    EventRelayTracker.addRelay(event.id, primaryUrl)
                                 }
-                                pendingKind1Events.add(PendingKind1Event(event, cachedRelayUrl, isPagination = true))
+                                // Use primary URL for PendingKind1Event; the tracker enrichment
+                                // in updateDisplayedNotes will merge all URLs from the tracker.
+                                pendingKind1Events.add(PendingKind1Event(event, primaryUrl, isPagination = true))
                             } catch (e: Exception) {
                                 // Skip malformed cached events
                             }
@@ -2260,8 +2288,8 @@ class NotesRepository private constructor() {
                     likes = 0, shares = 0, comments = 0, isLiked = false,
                     hashtags = hashtags, mediaUrls = mediaUrls, mediaMeta = repostMediaMeta,
                     quotedEventIds = quotedEventIds,
-                    relayUrl = relayUrl.ifEmpty { null },
-                    relayUrls = if (relayUrl.isNotEmpty()) listOf(relayUrl) else emptyList(),
+                    relayUrl = relayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) },
+                    relayUrls = if (relayUrl.isNotEmpty()) listOf(social.mycelium.android.utils.normalizeRelayUrl(relayUrl)) else emptyList(),
                     isReply = repostIsReply,
                     rootNoteId = if (repostIsReply) repostRootId else null,
                     replyToId = if (repostIsReply) repostReplyToId else null,
@@ -2269,6 +2297,7 @@ class NotesRepository private constructor() {
                     repostedByAuthors = listOf(reposterAuthor),
                     repostTimestamp = repostTimestampMs
                 )
+                EventRelayTracker.addRelay(originalNoteId, relayUrl)
                 insertRepostNote(note, repostTimestampMs)
                 // Schedule profile fetch for accumulated repost pubkeys
                 if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {

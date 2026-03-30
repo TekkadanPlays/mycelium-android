@@ -137,11 +137,78 @@ class RelayManagementViewModel(
             }
         }
 
+        // Reactive bridge: when RelayCategorySyncRepository completes a startup fetch
+        // and writes new categories to SharedPreferences, auto-reload from disk so the
+        // sidebar updates immediately instead of requiring an app restart.
+        viewModelScope.launch {
+            social.mycelium.android.repository.relay.RelayCategorySyncRepository
+                .pendingCategoryDiff.collect { _ ->
+                    val pubkey = currentPubkey ?: return@collect
+                    if (!storageLoaded) return@collect
+                    reloadFromStorage(pubkey)
+                }
+        }
+        // Same for indexer list changes (kind-10086)
+        viewModelScope.launch {
+            social.mycelium.android.repository.relay.RelayCategorySyncRepository
+                .pendingIndexerDiff.collect { _ ->
+                    val pubkey = currentPubkey ?: return@collect
+                    if (!storageLoaded) return@collect
+                    reloadFromStorage(pubkey)
+                }
+        }
+
         // Periodically refresh delivery stats (not a StateFlow in the tracker, so poll)
         viewModelScope.launch(Dispatchers.IO) {
             while (true) {
                 _deliveryStats.value = RelayDeliveryTracker.getStats()
                 kotlinx.coroutines.delay(5_000)
+            }
+        }
+    }
+
+    /**
+     * Re-read relay data from SharedPreferences and update UI state.
+     * Called reactively when external writers (RelayCategorySyncRepository, onboarding)
+     * modify the persisted relay configuration.
+     */
+    private fun reloadFromStorage(pubkey: String) {
+        viewModelScope.launch {
+            val categories = storageManager.loadCategories(pubkey)
+            val profiles = storageManager.loadProfiles(pubkey)
+            val outbox = storageManager.loadOutboxRelays(pubkey)
+            val inbox = storageManager.loadInboxRelays(pubkey)
+            val cache = storageManager.loadIndexerRelays(pubkey)
+            val announcements = storageManager.loadAnnouncementRelays(pubkey)
+            val drafts = storageManager.loadDraftsRelays(pubkey)
+            val blossom = storageManager.loadBlossomServers(pubkey)
+            val nip96 = storageManager.loadNip96Servers(pubkey)
+
+            val current = _uiState.value
+            if (current.relayCategories == categories &&
+                current.relayProfiles == profiles &&
+                current.outboxRelays == outbox &&
+                current.inboxRelays == inbox &&
+                current.indexerRelays == cache &&
+                current.announcementRelays == announcements &&
+                current.draftsRelays == drafts &&
+                current.blossomServers == blossom &&
+                current.nip96Servers == nip96
+            ) return@launch
+
+            Log.d("RelayMgmtVM", "reloadFromStorage: categories=${categories.size} profiles=${profiles.size} outbox=${outbox.size} inbox=${inbox.size}")
+            _uiState.update {
+                it.copy(
+                    relayCategories = categories,
+                    relayProfiles = profiles,
+                    outboxRelays = outbox,
+                    inboxRelays = inbox,
+                    indexerRelays = cache,
+                    announcementRelays = announcements,
+                    draftsRelays = drafts,
+                    blossomServers = blossom,
+                    nip96Servers = nip96
+                )
             }
         }
     }
@@ -859,32 +926,60 @@ class RelayManagementViewModel(
 
             _uiState.update { it.copy(isLoading = true) }
 
-                relayRepository.fetchUserRelayList(pubkey)
+            relayRepository.fetchUserRelayList(pubkey)
                 .onSuccess { relays ->
                     // Normalize URLs (no trailing slash) then categorize by NIP-65
                     val normalized = relays.map { it.copy(url = RelayStorageManager.normalizeRelayUrl(it.url)) }
-                    val outbox = normalized.filter { it.write }
-                    val inbox = normalized.filter { it.read }
+                    val remoteOutbox = normalized.filter { it.write }
+                    val remoteInbox = normalized.filter { it.read }
+
+                    if (remoteOutbox.isEmpty() && remoteInbox.isEmpty()) {
+                        _uiState.update { it.copy(isLoading = false) }
+                        return@onSuccess
+                    }
+
                     val current = _uiState.value
-                    // Only populate outbox/inbox when they are empty so we don't overwrite user edits.
+
+                    // Merge strategy: remote NIP-65 is authoritative for relay URLs,
+                    // but we preserve local NIP-11 info enrichment already fetched.
                     // NOTE: We intentionally do NOT inject outbox relays into categories.
                     // Categories (kind-30002) are a separate domain from outbox (kind-10002).
-                    // Category seeding is handled exclusively by kind-30002 sync (RelayCategorySyncRepository).
-                    // Injecting NIP-65 outbox relays into categories would bypass
-                    // kind-30002 deletion state and resurrect relays the user deleted.
-                    if (current.outboxRelays.isEmpty() && current.inboxRelays.isEmpty() && (outbox.isNotEmpty() || inbox.isNotEmpty())) {
-                        DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: populating outbox=${outbox.size} inbox=${inbox.size} " +
-                            "(outbox was empty, inbox was empty) — NOT touching categories")
-                        _uiState.update {
-                            it.copy(outboxRelays = outbox, inboxRelays = inbox, isLoading = false)
-                        }
-                        saveToStorage()
+                    val localOutboxByUrl = current.outboxRelays.associateBy { it.url }
+                    val localInboxByUrl = current.inboxRelays.associateBy { it.url }
 
-                        // Eagerly fetch NIP-11 info for all newly added relays so the
-                        // Relay Management screen shows info immediately
+                    val mergedOutbox = remoteOutbox.map { remote ->
+                        val local = localOutboxByUrl[remote.url]
+                        if (local?.info != null) remote.copy(info = local.info) else remote
+                    }
+                    val mergedInbox = remoteInbox.map { remote ->
+                        val local = localInboxByUrl[remote.url]
+                        if (local?.info != null) remote.copy(info = local.info) else remote
+                    }
+
+                    val outboxChanged = mergedOutbox.map { it.url }.toSet() != current.outboxRelays.map { it.url }.toSet()
+                    val inboxChanged = mergedInbox.map { it.url }.toSet() != current.inboxRelays.map { it.url }.toSet()
+
+                    if (!outboxChanged && !inboxChanged) {
+                        DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: NIP-65 matches local — no changes")
+                        _uiState.update { it.copy(isLoading = false) }
+                        return@onSuccess
+                    }
+
+                    DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: merging outbox=${mergedOutbox.size} inbox=${mergedInbox.size} " +
+                        "(was outbox=${current.outboxRelays.size} inbox=${current.inboxRelays.size})")
+                    _uiState.update {
+                        it.copy(outboxRelays = mergedOutbox, inboxRelays = mergedInbox, isLoading = false)
+                    }
+                    saveToStorage()
+
+                    // Eagerly fetch NIP-11 info for all newly added relays so the
+                    // sidebar and Relay Management screen show info immediately
+                    val newUrls = (mergedOutbox.map { it.url } + mergedInbox.map { it.url }).distinct()
+                        .filter { url -> localOutboxByUrl[url]?.info == null && localInboxByUrl[url]?.info == null }
+                    if (newUrls.isNotEmpty()) {
                         viewModelScope.launch(Dispatchers.IO) {
                             val nip11 = Nip11CacheManager.getInstance(storageManager.context)
-                            (outbox + inbox).map { it.url }.distinct().forEach { url ->
+                            newUrls.forEach { url ->
                                 try {
                                     nip11.getRelayInfo(url, forceRefresh = true)
                                 } catch (e: Exception) {
@@ -892,10 +987,6 @@ class RelayManagementViewModel(
                                 }
                             }
                         }
-                    } else {
-                        DiagnosticLog.state("RelayMgmtVM", "fetchUserRelaysFromNetwork: SKIPPED — " +
-                            "outbox=${current.outboxRelays.size} inbox=${current.inboxRelays.size} already populated")
-                        _uiState.update { it.copy(isLoading = false) }
                     }
                 }
                 .onFailure { exception ->

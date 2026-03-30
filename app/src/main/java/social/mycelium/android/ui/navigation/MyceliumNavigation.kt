@@ -999,12 +999,27 @@ fun MyceliumNavigation(
     val context = LocalContext.current
     val relayRepository = remember { RelayRepository(context) }
 
+    // Relay management — single shared ViewModel for all screens (Dashboard, Topics, Relay Manager)
+    val relayStorageManager = remember { RelayStorageManager(context) }
+    val relayViewModel: social.mycelium.android.viewmodel.RelayManagementViewModel = viewModel {
+        social.mycelium.android.viewmodel.RelayManagementViewModel(relayRepository, relayStorageManager)
+    }
+
     // Report TTFD after first frame so system and tools can measure startup accurately
     LaunchedEffect(Unit) {
         withFrameMillis { }
         (context as? ComponentActivity)?.reportFullyDrawn()
     }
     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
+
+    // Load relay data from disk + fetch NIP-65 from network once when account changes
+    LaunchedEffect(currentAccount) {
+        currentAccount?.toHexKey()?.let { pubkey ->
+            relayViewModel.setSigner(accountStateViewModel.getCurrentSigner())
+            relayViewModel.loadUserRelays(pubkey)
+            relayViewModel.fetchUserRelaysFromNetwork(pubkey)
+        }
+    }
 
     // Feed state - separate states for Home and Topics feeds
     val feedStateViewModel: social.mycelium.android.viewmodel.FeedStateViewModel = viewModel()
@@ -2022,6 +2037,7 @@ fun MyceliumNavigation(
                             feedStateViewModel = feedStateViewModel,
                             accountStateViewModel = accountStateViewModel,
                             relayRepository = relayRepository,
+                            relayViewModel = relayViewModel,
                             onLoginClick = {
                                 val loginIntent = accountStateViewModel.loginWithAmber()
                                 onAmberLogin(loginIntent)
@@ -4369,6 +4385,7 @@ fun MyceliumNavigation(
                         prefillIndexerUrls = prefillIndexerUrls,
                         prefillOutboxUrls = prefillOutboxUrls,
                         prefillInboxUrls = prefillInboxUrls,
+                        relayViewModel = relayViewModel,
                         onOpenRelayLog = { relayUrl ->
                             val encoded = java.net.URLEncoder.encode(relayUrl, "UTF-8")
                             navController.navigate("relay_log/$encoded") {
@@ -5109,6 +5126,7 @@ fun MyceliumNavigation(
                             feedStateViewModel = feedStateViewModel,
                             appViewModel = appViewModel,
                             relayRepository = relayRepository,
+                            relayViewModel = relayViewModel,
                             accountStateViewModel = accountStateViewModel,
                             onLoginClick = {
                                 val loginIntent = accountStateViewModel.loginWithAmber()

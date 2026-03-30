@@ -110,6 +110,7 @@ fun RelayManagementScreen(
     onOpenRelayLog: (String) -> Unit = {},
     onOpenRelayHealth: () -> Unit = {},
     onOpenRelayDiscovery: () -> Unit = {},
+    relayViewModel: RelayManagementViewModel? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -117,7 +118,7 @@ fun RelayManagementScreen(
     val storageManager = remember { RelayStorageManager(context) }
     val scope = rememberCoroutineScope()
 
-    val viewModel: RelayManagementViewModel = viewModel {
+    val viewModel: RelayManagementViewModel = relayViewModel ?: viewModel {
         RelayManagementViewModel(relayRepository, storageManager)
     }
 
@@ -125,7 +126,6 @@ fun RelayManagementScreen(
     val currentAccount by accountStateViewModel.currentAccount.collectAsState()
 
     LaunchedEffect(currentAccount) {
-        currentAccount?.toHexKey()?.let { viewModel.loadUserRelays(it) }
         viewModel.setSigner(accountStateViewModel.getCurrentSigner())
     }
 

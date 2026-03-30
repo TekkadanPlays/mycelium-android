@@ -15,9 +15,11 @@ import java.util.concurrent.ConcurrentHashMap
 object EventRelayTracker {
     private val relaysByEvent = ConcurrentHashMap<String, MutableSet<String>>()
 
-    /** Maximum tracked events to prevent unbounded growth. */
-    private const val MAX_TRACKED = 10_000
-    private const val EVICT_BATCH = 2_000
+    /** Maximum tracked events to prevent unbounded growth.
+     *  Must exceed MAX_NOTES_IN_MEMORY (5000) + topics + thread replies + deep history
+     *  to avoid evicting relay data for notes still visible in the feed. */
+    private const val MAX_TRACKED = 20_000
+    private const val EVICT_BATCH = 4_000
 
     /**
      * Record that [relayUrl] delivered event [eventId].

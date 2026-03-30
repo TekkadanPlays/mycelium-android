@@ -116,6 +116,7 @@ fun TopicsScreen(
     appViewModel: social.mycelium.android.viewmodel.AppViewModel = viewModel(),
     accountStateViewModel: social.mycelium.android.viewmodel.AccountStateViewModel = viewModel(),
     relayRepository: RelayRepository? = null,
+    relayViewModel: RelayManagementViewModel? = null,
     onLoginClick: (() -> Unit)? = null,
     onTopAppBarStateChange: (TopAppBarState) -> Unit = {},
     initialTopAppBarState: TopAppBarState? = null,
@@ -179,11 +180,8 @@ fun TopicsScreen(
             }
     }
 
-    // Relay management
+    // Relay management — ViewModel is hoisted to MyceliumNavigation for sharing across screens
     val storageManager = remember { RelayStorageManager(context) }
-    val relayViewModel: RelayManagementViewModel? = relayRepository?.let {
-        viewModel { RelayManagementViewModel(it, storageManager) }
-    }
     val relayUiState = if (relayViewModel != null) {
         relayViewModel.uiState.collectAsState().value
     } else {
@@ -216,13 +214,6 @@ fun TopicsScreen(
         perRelayState.count { (url, status) ->
             status == social.mycelium.android.relay.RelayEndpointStatus.Connected &&
                     url.trim().removeSuffix("/").lowercase() in indexerRelayUrls
-        }
-    }
-
-    // Load user relays when account changes
-    LaunchedEffect(currentAccount) {
-        currentAccount?.toHexKey()?.let { pubkey ->
-            relayViewModel?.loadUserRelays(pubkey)
         }
     }
 
@@ -287,12 +278,6 @@ fun TopicsScreen(
         topicsViewModel.loadTopicsFromRelays(allUserRelayUrls, displayUrls)
     }
 
-    // Fetch user's NIP-65 relay list when account changes
-    LaunchedEffect(currentAccount) {
-        currentAccount?.toHexKey()?.let { pubkey ->
-            relayViewModel?.fetchUserRelaysFromNetwork(pubkey)
-        }
-    }
 
     // Set cache relay URLs for kind-0 profile fetches when account is available
     LaunchedEffect(currentAccount) {

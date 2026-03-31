@@ -67,6 +67,8 @@ data class CachedNotificationEntity(
     // ── Note content text (for display before re-enrichment) ──
     val noteContent: String? = null,
     val targetNoteContent: String? = null,
+    /** Pubkey of the target note's author for proper profile reconstruction on cold start. */
+    val targetNoteAuthorId: String? = null,
     // ── Metadata ──
     val cachedAt: Long = System.currentTimeMillis(),
 )

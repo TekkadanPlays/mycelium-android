@@ -905,6 +905,37 @@ class NotificationsRepository(
     )
 
     /**
+     * Check if a kind-6/16 repost event references one of our notes.
+     *
+     * NIP-18 reposts don't reliably include a p-tag for the original note author —
+     * many clients omit it. So we check:
+     * 1. **Fast path**: e-tag target is in [myNoteIds] (O(1) set lookup).
+     * 2. **Feed-cache fallback**: Before Phase 3 populates [myNoteIds], check the
+     *    live feed cache for the reposted note. If the cached note's author matches
+     *    [myPubkeyHex], the repost is relevant.
+     * 3. **Embedded JSON fallback**: Parse the repost's content (kind-6 embeds the
+     *    original event JSON) to extract the author pubkey.
+     */
+    private fun isRepostOfOurNote(event: Event, ourPubkey: String): Boolean {
+        val repostedNoteId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1)
+            ?: return false
+        // Fast path: myNoteIds is populated after Phase 3
+        if (repostedNoteId in myNoteIds) return true
+        // Feed-cache fallback: Phase 3 hasn't run yet but the note is in the live feed
+        val cached = NotesRepository.getInstance().getNoteFromCache(repostedNoteId)
+        if (cached != null) {
+            val cachedAuthor = normalizeAuthorIdForCache(cached.author.id)
+            if (cachedAuthor == ourPubkey) return true
+        }
+        // Embedded JSON fallback: kind-6 content often contains the original event JSON
+        if (event.content.isNotBlank()) {
+            val embeddedPubkey = Regex(""""pubkey"\s*:\s*"([a-f0-9]{64})"""").find(event.content)?.groupValues?.get(1)
+            if (embeddedPubkey != null && normalizeAuthorIdForCache(embeddedPubkey) == ourPubkey) return true
+        }
+        return false
+    }
+
+    /**
      * Public entry point for cross-pollination: other event pipelines (feed, thread replies)
      * can forward events here so notification state stays up-to-date even when the dedicated
      * BACKGROUND notification subscription is preempted by higher-priority relay slots.
@@ -913,6 +944,7 @@ class NotificationsRepository(
      * - p-tag matches our pubkey (replies, reactions, zaps, reposts TO us)
      * - E-tag matches one of our kind-11 topic IDs (kind-1111 thread replies)
      * - q-tag matches one of our kind-1 note IDs (quote posts)
+     * - e-tag on kind-6/16 matches one of our note IDs (reposts OF us — p-tag unreliable per NIP-18)
      * This mirrors the relay-side filters used by the dedicated notification subscriptions.
      */
     fun ingestEvent(event: Event) {
@@ -924,7 +956,11 @@ class NotificationsRepository(
                 event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
-        if (!hasPTag && !hasETag && !hasQTag) return
+        // NIP-18: kind-6/16 reposts reference the reposted note via e-tag but many clients
+        // don't include a p-tag for the original author. Check if the reposted note is ours.
+        val hasRepostETag = event.kind in setOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST) &&
+                isRepostOfOurNote(event, pubkey)
+        if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag) return
         handleEvent(event)
     }
 
@@ -941,7 +977,9 @@ class NotificationsRepository(
                 event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
-        if (!hasPTag && !hasETag && !hasQTag) return
+        val hasRepostETag = event.kind in setOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST) &&
+                isRepostOfOurNote(event, pubkey)
+        if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag) return
         // Suppress push notification by pre-marking the event ID as seen
         _seenIds.value = _seenIds.value + event.id
         handleEvent(event)
@@ -971,13 +1009,16 @@ class NotificationsRepository(
                 event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
+        // NIP-18: kind-6/16 reposts reference our note via e-tag (p-tag is unreliable)
+        val hasRepostETag = event.kind in setOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST) &&
+                isRepostOfOurNote(event, pubkey)
         // For kind-1 replies: also accept if user is directly cited in content (mention)
         val isCitedInContent = event.kind == NOTIFICATION_KIND_TEXT &&
                 isUserCitedInContent(event.content, pubkey)
-        if (!hasPTag && !hasETag && !hasQTag && !isCitedInContent) {
+        if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag && !isCitedInContent) {
             Log.d(
                 TAG,
-                "Dropping irrelevant event ${event.id.take(8)} kind=${event.kind} — no p/E/q tag or content cite matching us"
+                "Dropping irrelevant event ${event.id.take(8)} kind=${event.kind} — no p/E/q/repost tag or content cite matching us"
             )
             return
         }
@@ -1686,7 +1727,7 @@ class NotificationsRepository(
                     note = null,
                     author = author,
                     targetNote = targetNote,
-                    targetNoteId = if (targetNote == null) repostedNoteId else null,
+                    targetNoteId = repostedNoteId,
                     actorPubkeys = listOf(event.pubKey),
                     sortTimestamp = ts
                 )
@@ -2146,7 +2187,8 @@ class NotificationsRepository(
             authorDisplayName = author?.displayName,
             authorUsername = author?.username,
             authorAvatarUrl = author?.avatarUrl,
-            targetNoteId = targetNoteId,
+            targetNoteId = targetNoteId ?: targetNote?.id,
+            targetNoteAuthorId = targetNote?.author?.id,
             rootNoteId = rootNoteId,
             replyNoteId = replyNoteId,
             replyKind = replyKind,
@@ -2198,10 +2240,18 @@ class NotificationsRepository(
             )
         } else null
         val targetNoteStub = if (!targetNoteContent.isNullOrBlank() && targetNoteId != null) {
-            val targetAuthor = profileCache.getAuthor(targetNoteId) ?: Author(
-                id = targetNoteId, username = targetNoteId.take(8) + "...",
-                displayName = targetNoteId.take(8) + "...", avatarUrl = null, isVerified = false
-            )
+            val authorPk = targetNoteAuthorId
+            val targetAuthor = if (authorPk != null) {
+                profileCache.getAuthor(normalizeAuthorIdForCache(authorPk)) ?: Author(
+                    id = authorPk, username = authorPk.take(8) + "...",
+                    displayName = authorPk.take(8) + "...", avatarUrl = null, isVerified = false
+                )
+            } else {
+                Author(
+                    id = targetNoteId, username = targetNoteId.take(8) + "...",
+                    displayName = targetNoteId.take(8) + "...", avatarUrl = null, isVerified = false
+                )
+            }
             Note(
                 id = targetNoteId,
                 author = targetAuthor,

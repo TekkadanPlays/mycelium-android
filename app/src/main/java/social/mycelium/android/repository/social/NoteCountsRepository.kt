@@ -500,7 +500,8 @@ object NoteCountsRepository {
     }
 
     private fun applyKind6Repost(event: Event, snapshot: MutableMap<String, NoteCounts>) {
-        val noteId = event.tags.filter { it.getOrNull(0) == "e" }.firstOrNull()?.getOrNull(1) ?: return
+        // NIP-18: the reposted event id is the last e-tag (not first, which may be the root)
+        val noteId = event.tags.filter { it.getOrNull(0) == "e" }.lastOrNull()?.getOrNull(1) ?: return
         val authorPubkey = event.pubKey
         // If this is our own boost, track it so the boost icon turns green
         if (authorPubkey == currentUserPubkey && noteId.isNotBlank()) {

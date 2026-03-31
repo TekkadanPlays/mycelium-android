@@ -344,11 +344,15 @@ object DeepHistoryFetcher {
                     // populate the list for browsing but do NOT increment the badge or trigger
                     // system notifications. This prevents badge flicker during deep fetch.
                     //
-                    // ONLY replay events from p-tag groups (useUserAsPTag=true).
-                    // Feed content groups fetch by followed-author — those events will never
-                    // pass the p-tag relevance check in NotificationsRepository, so replaying
-                    // them is pure CPU waste (hundreds of events checked and immediately dropped).
-                    if (group.useUserAsPTag) {
+                    // For p-tag groups (useUserAsPTag=true): replay all notification kinds.
+                    // For feed content groups: only replay kind-6 reposts — the new
+                    // isRepostOfOurNote() check in NotificationsRepository accepts reposts
+                    // of our notes even without a p-tag (NIP-18 compliance).
+                    // Kind-1 events without p-tags are quickly rejected by the relevance gate
+                    // (cheap O(1) tag check), so this is safe and low-overhead.
+                    val shouldReplayNotifications = group.useUserAsPTag ||
+                            group.kinds.contains(6) || group.kinds.contains(16)
+                    if (shouldReplayNotifications) {
                         var notifCount = 0
                         var dmCount = 0
                         for ((event, _) in events) {

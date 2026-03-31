@@ -2404,6 +2404,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
         // Optimistic removal — update counts and tracking immediately
         NoteCountsRepository.removeOwnReaction(noteId, reactionEventId, emoji)
+        // Signal UI to clear the filled reaction icon. Empty emoji = "reaction removed";
+        // NoteCard / ThreadView re-read from ReactionsRepository for any remaining fallback.
+        ReactionsRepository.emitAnimation(noteId, "", success = true)
 
         viewModelScope.launch {
             val result = EventPublisher.publish(

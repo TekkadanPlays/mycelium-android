@@ -157,10 +157,14 @@ class RelayConnectionStateMachine {
                 val current = _perRelayState.value
                 val updates = HashMap(pendingRelayStateChanges)
                 pendingRelayStateChanges.clear()
-                // Only apply changes for URLs in the current map
+                // Apply changes for URLs already in the map (main subscription +
+                // external relays registered via registerExternalRelays) OR for
+                // persistent relays (indexers, inbox, outbox, DM) that the user
+                // configured but aren't in the main feed subscription set.
+                val persistent = persistentRelayUrls
                 val merged = current.toMutableMap()
                 for ((url, status) in updates) {
-                    if (url in merged) merged[url] = status
+                    if (url in merged || url in persistent) merged[url] = status
                 }
                 _perRelayState.value = merged
             }
@@ -496,10 +500,16 @@ class RelayConnectionStateMachine {
                 val newState = effectiveRelayUrls.associateWith { url ->
                     existing[url] ?: RelayEndpointStatus.Connecting
                 } + blockedUrls.associateWith { RelayEndpointStatus.Failed }
+                // Preserve persistent relay entries (indexers, DM, inbox, outbox) that
+                // were registered via registerExternalRelays — they are not part of the
+                // feed subscription but their orbs must survive feed changes.
+                val persistentUrls = persistentRelayUrls
+                val preserved = existing.filter { (url, _) -> url in persistentUrls && url !in newState }
+                val merged = newState + preserved
                 // Only emit if the map actually changed — avoids unnecessary recomposition
                 // that causes outbox relay orbs to visually flicker when toggling unrelated categories
-                if (newState != existing) {
-                    _perRelayState.value = newState
+                if (merged != existing) {
+                    _perRelayState.value = merged
                 }
                 if (effectiveRelayUrls.isEmpty()) {
                     // All relays blocked — state updated above for banner, but nothing to subscribe to
@@ -652,6 +662,31 @@ class RelayConnectionStateMachine {
      *  Call this with the user's outbox relay URLs so they connect before category relays. */
     fun setPriorityRelayUrls(urls: Set<String>) {
         priorityRelayUrls = urls
+    }
+
+    /** Read the current persistent relay set. Used by StartupRelayPreloader to merge in
+     *  indexer URLs without clobbering the existing inbox/outbox/category set. */
+    fun getPersistentRelayUrls(): Set<String> = persistentRelayUrls
+
+    /**
+     * Register relay URLs in [perRelayState] so their orbs show connection status
+     * in the UI even if they're not part of the main feed subscription.
+     *
+     * Indexer, DM, and system relays connect via [relayPool.connect] but aren't
+     * included in the feed subscription's relay list — [executeUpdateSubscription]
+     * builds [perRelayState] from the subscription set only. This method fills the
+     * gap: the [RelayConnectionListener] will upgrade these entries to Connected
+     * once the WebSocket handshake succeeds.
+     *
+     * Only adds entries that don't already exist (preserves Connected status).
+     */
+    fun registerExternalRelays(urls: Set<String>) {
+        if (urls.isEmpty()) return
+        val current = _perRelayState.value
+        val additions = urls.filter { it !in current }
+        if (additions.isEmpty()) return
+        _perRelayState.value = current + additions.associateWith { RelayEndpointStatus.Connecting }
+        Log.d(TAG, "Registered ${additions.size} external relays in perRelayState")
     }
 
     // --- Keepalive health check ---

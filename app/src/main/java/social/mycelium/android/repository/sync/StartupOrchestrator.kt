@@ -350,6 +350,21 @@ object StartupOrchestrator {
                         RelayCategorySyncRepository.fetchIndexerList(userPubkey, allUserRelayUrls, context)
                         logD( "Phase 1: relay sets + indexer list fetched")
                         DiagnosticLog.startup(TAG, "Phase 1: fetchRelaySets + fetchIndexerList completed (${allUserRelayUrls.size} relays)")
+
+                        // ── Preload NIP-11 + connect indexers ──
+                        // Now that relay lists have landed, warm the NIP-11 cache so
+                        // relay orbs render with icons on first Relay Manager visit.
+                        val storageManager = RelayStorageManager(context)
+
+                        // Indexers: preload NIP-11 + connect to pool for profile lookups
+                        val indexerUrls = storageManager.loadIndexerRelays(userPubkey).map { it.url }
+                        StartupRelayPreloader.preloadNip11(indexerUrls, context, "indexers")
+                        StartupRelayPreloader.connectIndexerRelays(indexerUrls)
+
+                        // Kind-30002 categories: preload NIP-11 for all category relay URLs
+                        val categoryUrls = storageManager.loadCategories(userPubkey)
+                            .flatMap { it.relays }.map { it.url }.distinct()
+                        StartupRelayPreloader.preloadNip11(categoryUrls, context, "categories")
                     } catch (e: Exception) {
                         logE("Phase 1: relay sync failed: ${e.message}")
                     }
@@ -492,6 +507,7 @@ object StartupOrchestrator {
         outboxUrls: List<String>,
         followedPubkeys: Set<String>,
         indexerUrls: List<String>,
+        context: Context? = null,
     ) {
         _currentPhase.value = StartupPhase.BACKGROUND
         logD( "Phase 4: starting background subscriptions")
@@ -506,6 +522,12 @@ object StartupOrchestrator {
             fetchDmRelayLists(userPubkey, followedPubkeys, inboxUrls + outboxUrls, indexerUrls)
             DirectMessageRepository.startEarlyConnection()
             logD( "Phase 4: DM relays connected proactively after kind-10050 fetch")
+
+            // Preload NIP-11 for self DM relays so orbs render with icons
+            if (context != null) {
+                val selfDmUrls = DirectMessageRepository.dmRelayUrls.value
+                StartupRelayPreloader.preloadNip11(selfDmUrls, context, "dm")
+            }
         }
 
         scope.launch {

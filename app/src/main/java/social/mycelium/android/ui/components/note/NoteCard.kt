@@ -2975,6 +2975,10 @@ fun NoteCard(
                     if (event.type == ReactionsRepository.AnimationType.REACTION) {
                         if (event.success && event.emoji.isNotBlank()) {
                             reactionEmoji = event.emoji
+                        } else if (event.success && event.emoji.isBlank()) {
+                            // Reaction removed — re-read from repo for fallback to prior reaction
+                            reactionEmoji = ReactionsRepository.getLastReaction(effectiveReactionNoteId)
+                                ?: ReactionsRepository.getLastReaction(note.id)
                         }
                         // On failure, reactionEmoji stays as-was (null or previous emoji)
                     }

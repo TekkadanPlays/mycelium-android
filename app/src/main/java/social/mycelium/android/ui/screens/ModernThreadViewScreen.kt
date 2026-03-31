@@ -1979,26 +1979,23 @@ private fun ReplyHeader(
                     val replyAuthorPubkey = social.mycelium.android.utils.normalizeAuthorIdForCache(reply.author.id)
                     if (isOp) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            social.mycelium.android.ui.components.common.Nip05Icon(
+                                pubkeyHex = replyAuthorPubkey,
+                                size = 14.dp,
+                            )
                             Surface(
                                 color = Color(0xFF8E30EB),
                                 shape = RoundedCornerShape(4.dp)
                             ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    social.mycelium.android.ui.components.common.Nip05Icon(
-                                        pubkeyHex = replyAuthorPubkey,
-                                        size = 14.dp,
-                                        modifier = Modifier.padding(start = 4.dp)
-                                    )
-                                    Text(
-                                        text = displayAuthor.displayName,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.Bold,
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
+                                Text(
+                                    text = displayAuthor.displayName,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
                             }
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
@@ -2557,6 +2554,19 @@ private fun ReplyControlsPanel(
                         var showFullPicker by remember { mutableStateOf(false) }
                         var selectedEmoji by remember(reply.id) {
                             mutableStateOf(social.mycelium.android.repository.social.ReactionsRepository.getLastReaction(reply.id))
+                        }
+                        // Observe reaction animations so deletion clears the filled emoji
+                        LaunchedEffect(reply.id) {
+                            social.mycelium.android.repository.social.ReactionsRepository.noteAnimations.collect { event ->
+                                if (event.noteId == reply.id && event.type == social.mycelium.android.repository.social.ReactionsRepository.AnimationType.REACTION) {
+                                    if (event.success && event.emoji.isNotBlank()) {
+                                        selectedEmoji = event.emoji
+                                    } else if (event.success && event.emoji.isBlank()) {
+                                        // Reaction removed — re-read for fallback
+                                        selectedEmoji = social.mycelium.android.repository.social.ReactionsRepository.getLastReaction(reply.id)
+                                    }
+                                }
+                            }
                         }
                         val hasReacted = replyIsLiked || selectedEmoji != null
                         // Close reaction menu on scroll

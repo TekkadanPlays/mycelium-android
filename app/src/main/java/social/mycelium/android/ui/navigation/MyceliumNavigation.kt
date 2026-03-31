@@ -1633,7 +1633,8 @@ fun MyceliumNavigation(
                     inboxUrls = inboxUrls,
                     outboxUrls = outboxUrls,
                     followedPubkeys = cachedFollowList ?: emptySet(),
-                    indexerUrls = indexerUrls
+                    indexerUrls = indexerUrls,
+                    context = context.applicationContext
                 )
             }
         }

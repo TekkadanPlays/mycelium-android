@@ -152,21 +152,6 @@ fun NotificationsScreen(
     val myPubkeyHex = NotificationsRepository.getMyPubkeyHex()
     val timeTick = rememberTimeTick()
 
-    // Batch-request profiles for all notification and note authors
-    val profileCache = ProfileMetadataCache.getInstance()
-    val cacheRelayUrls = NotificationsRepository.getCacheRelayUrls()
-    LaunchedEffect(allNotifications, cacheRelayUrls) {
-        if (cacheRelayUrls.isEmpty()) return@LaunchedEffect
-        val authorIds = allNotifications.flatMap { n ->
-            buildList {
-                n.author?.id?.let { add(normalizeAuthorIdForCache(it)) }
-                n.actorPubkeys.forEach { add(normalizeAuthorIdForCache(it)) }
-                (n.targetNote ?: n.note)?.author?.id?.let { add(normalizeAuthorIdForCache(it)) }
-            }
-        }.distinct().filter { it.isNotBlank() }
-        if (authorIds.isNotEmpty()) profileCache.requestProfiles(authorIds, cacheRelayUrls)
-    }
-
     // Tab definitions (keyed on myPubkeyHex so Threads filter captures correct value)
     val tabs = remember(myPubkeyHex) {
         listOf(
@@ -193,13 +178,48 @@ fun NotificationsScreen(
         )
     }
 
-    // Pre-compute unseen counts per tab once per data change (not per frame).
-    // Previously each tab row recomputed O(notifications) per tab per recomposition.
-    val tabUnseenCounts = remember(allNotifications, seenIds) {
-        IntArray(tabs.size) { tabIdx ->
-            val f = tabs[tabIdx].filter
-            allNotifications.count { f(it) && it.id !in seenIds }
+    // ── Single-pass classification: O(n) instead of O(13n) ──
+    // Iterate once, classify each notification into all applicable tabs,
+    // compute unseen counts, and collect author IDs simultaneously.
+    data class TabClassification(
+        val filteredByTab: Array<MutableList<NotificationData>>,
+        val groupedByTab: Array<Map<TimeGroup, List<NotificationData>>>,
+        val tabUnseenCounts: IntArray,
+        val authorIds: Set<String>
+    )
+    val classification = remember(allNotifications, seenIds) {
+        val numTabs = tabs.size
+        val filtered = Array(numTabs) { mutableListOf<NotificationData>() }
+        val unseen = IntArray(numTabs)
+        val authors = HashSet<String>()
+        for (n in allNotifications) {
+            val isSeen = n.id in seenIds
+            // Collect author IDs for profile batch request
+            n.author?.id?.let { authors.add(normalizeAuthorIdForCache(it)) }
+            n.actorPubkeys.forEach { authors.add(normalizeAuthorIdForCache(it)) }
+            (n.targetNote ?: n.note)?.author?.id?.let { authors.add(normalizeAuthorIdForCache(it)) }
+            // Classify into each tab
+            for (tabIdx in 0 until numTabs) {
+                if (tabs[tabIdx].filter(n)) {
+                    filtered[tabIdx].add(n)
+                    if (!isSeen) unseen[tabIdx]++
+                }
+            }
         }
+        val grouped = Array(numTabs) { tabIdx -> filtered[tabIdx].groupBy { timeGroupFor(it.sortTimestamp) } }
+        authors.remove("") // Remove blank entries
+        TabClassification(filtered, grouped, unseen, authors)
+    }
+    val filteredByTab = classification.filteredByTab
+    val groupedByTab = classification.groupedByTab
+    val tabUnseenCounts = classification.tabUnseenCounts
+
+    // Batch-request profiles for all notification and note authors
+    val profileCache = ProfileMetadataCache.getInstance()
+    val cacheRelayUrls = NotificationsRepository.getCacheRelayUrls()
+    LaunchedEffect(classification.authorIds, cacheRelayUrls) {
+        if (cacheRelayUrls.isEmpty() || classification.authorIds.isEmpty()) return@LaunchedEffect
+        profileCache.requestProfiles(classification.authorIds.toList(), cacheRelayUrls)
     }
 
     // Pager state synced with external selectedTabIndex
@@ -337,18 +357,11 @@ fun NotificationsScreen(
             }
         }
     ) { paddingValues ->
-        // Pre-compute filtered + grouped lists per tab outside the pager.
-        // This avoids re-filtering inside each page lambda on every recomposition.
-        val filteredByTab = remember(allNotifications) {
-            Array(tabs.size) { tabIdx -> allNotifications.filter(tabs[tabIdx].filter) }
-        }
-        val groupedByTab = remember(filteredByTab) {
-            Array(tabs.size) { tabIdx -> filteredByTab[tabIdx].groupBy { timeGroupFor(it.sortTimestamp) } }
-        }
+        // filteredByTab and groupedByTab are pre-computed in the single-pass classification above.
 
         // Threads tab (index 2): condensed per-thread grouping
         val threadsTabIndex = 2
-        val threadGroups = remember(filteredByTab) {
+        val threadGroups = remember(allNotifications) {
             val threadsNotifs = filteredByTab.getOrElse(threadsTabIndex) { emptyList() }
             threadsNotifs
                 .groupBy { it.rootNoteId ?: it.id }

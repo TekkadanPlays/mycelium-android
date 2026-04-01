@@ -326,8 +326,10 @@ class NotificationsRepository(
     /** Tick counter for continuous validation loop to periodically retry exhausted fetches. */
     private var targetFetchValidationTick = 0
 
-    /** Debounce job for batched target note flush. */
-    private var targetFetchBatchJob: kotlinx.coroutines.Job? = null
+    /** Dirty flag for target fetch polling loop. Set to true when new entries are added to pendingTargetFetches. */
+    @Volatile
+    private var targetFetchDirty = false
+    private var targetFetchPollerJob: Job? = null
     private val targetFetchMutex = kotlinx.coroutines.sync.Mutex()
 
     /** Call once from Application or Activity to provide app context. */
@@ -722,6 +724,9 @@ class NotificationsRepository(
         startProfileWatcher()
         // ── Start emit poller (replaces cancel+relaunch debounce) ──
         startEmitPoller()
+        // ── Start target fetch and profile batch pollers (dirty-flag based) ──
+        startTargetFetchPoller()
+        startProfileBatchPoller()
         val stateMachine = RelayConnectionStateMachine.getInstance()
 
         // ── Phase 1: Deep inbox fetch (immediate) ────────────────────────────
@@ -844,7 +849,7 @@ class NotificationsRepository(
                 )
             }
             if (noteIds.isNotEmpty()) {
-                Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes + comment replies filters")
+                Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes + comment replies + repost filters")
                 extraFilters.add(
                     Filter(
                         kinds = listOf(NOTIFICATION_KIND_TEXT),
@@ -859,6 +864,15 @@ class NotificationsRepository(
                     Filter(
                         kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
                         tags = mapOf("E" to noteIds),
+                        limit = 5000
+                    )
+                )
+                // NIP-18: kind-6/16 reposts that don't include a p-tag are missed by Phase 1's
+                // p-tag relay filter. Subscribe for e-tag matches on our note IDs to catch them.
+                extraFilters.add(
+                    Filter(
+                        kinds = listOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST),
+                        tags = mapOf("e" to noteIds),
                         limit = 5000
                     )
                 )
@@ -918,6 +932,10 @@ class NotificationsRepository(
         stopProfileWatcher()
         emitPollerJob?.cancel()
         emitPollerJob = null
+        targetFetchPollerJob?.cancel()
+        targetFetchPollerJob = null
+        profileBatchPollerJob?.cancel()
+        profileBatchPollerJob = null
         // Flush any pending notification save
         val ctx = appContext
         if (ctx != null && notificationsById.isNotEmpty()) {
@@ -1016,8 +1034,8 @@ class NotificationsRepository(
 
     private fun handleEvent(event: Event) {
         if (event.kind !in ACCEPTED_KINDS) return
-        // Deduplicate: skip events already processed (relay reconnects replay all stored events)
-        if (!seenEventIds.add(event.id)) return
+        // Deduplicate: check if already processed (but don't add yet — see below)
+        if (event.id in seenEventIds) return
         val pubkey = myPubkeyHex ?: return
         // ── STRICT OWNER GATE ──────────────────────────────────────────
         // This instance only processes events for ownerPubkeyHex.
@@ -1045,12 +1063,16 @@ class NotificationsRepository(
         val isCitedInContent = event.kind == NOTIFICATION_KIND_TEXT &&
                 isUserCitedInContent(event.content, pubkey)
         if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag && !isCitedInContent) {
-            Log.d(
-                TAG,
-                "Dropping irrelevant event ${event.id.take(8)} kind=${event.kind} — no p/E/q/repost tag or content cite matching us"
-            )
+            // Don't add to seenEventIds here — the event may become relevant after
+            // Phase 3 populates myNoteIds (e.g. kind-6 reposts without p-tag arriving
+            // during Phase 1 when myNoteIds is empty). Allowing re-evaluation lets
+            // Phase 3's replay deliver events that were initially irrelevant.
             return
         }
+        // ── Now commit the dedup marker ──────────────────────────────────────
+        // The event passed the relevance gate — mark it as processed so relay
+        // reconnects that replay stored events don't create duplicate notifications.
+        if (!seenEventIds.add(event.id)) return
         // Skip notifications from muted/blocked users
         if (MuteListRepository.isHidden(event.pubKey)) return
         val profileIsCached = profileCache.getAuthor(event.pubKey) != null
@@ -1772,31 +1794,43 @@ class NotificationsRepository(
             eventEpochSec = ts / 1000,
             noteId = repostedNoteId
         )
-        if (notificationsById[consolidatedId]?.targetNote == null) {
+        // Always attempt to resolve the full target note, even if parseRepostedNoteFromContent
+        // extracted a stub. The regex-based parser often produces Notes with empty/garbled content
+        // because it can't handle complex JSON escaping in the embedded event. fetchAndSetTargetNote
+        // will replace the stub with a properly deserialized Note from cache/Room/relay.
+        val storedNote = notificationsById[consolidatedId]?.targetNote
+        if (storedNote == null || storedNote.content.isNullOrBlank()) {
             scope.launch { fetchAndSetTargetNote(repostedNoteId, consolidatedId) { d -> { n -> d.copy(targetNote = n) } } }
         }
         updateTodaySummary(NotificationType.REPOST, ts, 0L)
         scheduleNotificationSave()
     }
 
-    private fun parseRepostedNoteIdFromContent(content: String): String? {
-        return Regex(""""id"\s*:\s*"([a-f0-9]{64})"""").find(content)?.groupValues?.get(1)
+    private fun parseRepostedNoteFromContent(content: String): Note? {
+        if (content.isBlank()) return null
+        return try {
+            // NIP-18: kind-6 content is the full JSON of the reposted event.
+            // Use the proper Event deserializer instead of fragile regexes.
+            val event = Event.fromJson(content)
+            eventToNote(event)
+        } catch (_: Exception) {
+            // Fallback: minimal regex extraction for malformed JSON
+            val id = Regex(""""id"\s*:\s*"([a-f0-9]{64})"""").find(content)?.groupValues?.get(1) ?: return null
+            val pubkey = Regex(""""pubkey"\s*:\s*"([a-f0-9]{64})"""").find(content)?.groupValues?.get(1) ?: return null
+            val author = profileCache.resolveAuthor(pubkey)
+            Note(
+                id = id,
+                author = author,
+                content = "", // Don't attempt regex content parsing — fetchAndSetTargetNote will resolve properly
+                timestamp = 0L,
+                likes = 0, shares = 0, comments = 0,
+                isLiked = false, hashtags = emptyList(), mediaUrls = emptyList()
+            )
+        }
     }
 
-    private fun parseRepostedNoteFromContent(content: String): Note? {
-        val id = Regex(""""id"\s*:\s*"([a-f0-9]{64})"""").find(content)?.groupValues?.get(1) ?: return null
-        val pubkey = Regex(""""pubkey"\s*:\s*"([a-f0-9]{64})"""").find(content)?.groupValues?.get(1) ?: return null
-        val created = Regex(""""created_at"\s*:\s*([0-9]+)""").find(content)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
-        val cont = Regex(""""content"\s*:\s*"((?:[^"\\\\]|\\\\.)*)"""").find(content)?.groupValues?.get(1) ?: ""
-        val author = profileCache.resolveAuthor(pubkey)
-        return Note(
-            id = id,
-            author = author,
-            content = cont,
-            timestamp = created * 1000L,
-            likes = 0, shares = 0, comments = 0,
-            isLiked = false, hashtags = emptyList(), mediaUrls = emptyList()
-        )
+    private fun parseRepostedNoteIdFromContent(content: String): String? {
+        return Regex(""""id"\s*:\s*"([a-f0-9]{64})"""").find(content)?.groupValues?.get(1)
     }
 
     private fun handleZap(event: Event, author: Author, ts: Long) {
@@ -2103,25 +2137,34 @@ class NotificationsRepository(
     // affected notifications via a single profileUpdated collector.
 
     private val pendingProfilePubkeys = java.util.Collections.synchronizedSet(HashSet<String>())
-    private var profileBatchJob: Job? = null
+    @Volatile
+    private var profileBatchDirty = false
+    private var profileBatchPollerJob: Job? = null
     private var profileWatcherJob: Job? = null
     private val PROFILE_BATCH_DELAY_MS = 200L
 
     /** Queue a pubkey for batched profile resolution. */
     private fun queueProfileFetch(pubkey: String) {
         pendingProfilePubkeys.add(normalizeAuthorIdForCache(pubkey))
-        scheduleProfileBatchFlush()
+        profileBatchDirty = true
     }
 
-    private fun scheduleProfileBatchFlush() {
-        profileBatchJob?.cancel()
-        profileBatchJob = scope.launch {
-            delay(PROFILE_BATCH_DELAY_MS)
-            val batch = synchronized(pendingProfilePubkeys) {
-                pendingProfilePubkeys.toList().also { pendingProfilePubkeys.clear() }
-            }
-            if (batch.isNotEmpty() && cacheRelayUrls.isNotEmpty()) {
-                profileCache.requestProfiles(batch, cacheRelayUrls)
+    /** Single long-lived coroutine polling the profile batch dirty flag.
+     *  Replaces thousands of cancel+relaunch Job allocations during ingestion. */
+    private fun startProfileBatchPoller() {
+        profileBatchPollerJob?.cancel()
+        profileBatchPollerJob = scope.launch {
+            while (true) {
+                delay(PROFILE_BATCH_DELAY_MS)
+                if (profileBatchDirty) {
+                    profileBatchDirty = false
+                    val batch = synchronized(pendingProfilePubkeys) {
+                        pendingProfilePubkeys.toList().also { pendingProfilePubkeys.clear() }
+                    }
+                    if (batch.isNotEmpty() && cacheRelayUrls.isNotEmpty()) {
+                        profileCache.requestProfiles(batch, cacheRelayUrls)
+                    }
+                }
             }
         }
     }
@@ -2358,28 +2401,28 @@ class NotificationsRepository(
                 // Verify relevance (same logic as flushTargetFetchBatch Step 3)
                 if (current.type == NotificationType.LIKE && !isOurNote) {
                     notificationsById.remove(notificationId)
-                    emitSortedImmediate()
+                    emitSorted()
                     return
                 }
-                if (current.type == NotificationType.REPOST && !isOurNote) {
-                    notificationsById.remove(notificationId)
-                    emitSortedImmediate()
-                    return
-                }
+                // REPOST: don't remove — the event already passed relay p-tag
+                // or isRepostOfOurNote validation upstream. Attach the target
+                // note for display regardless of ownership verification.
+                // (Author format mismatches or cached note variants could fail
+                // the isOurNote check even for valid boosts.)
                 if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
                     val contentToCheck = current.rawContent ?: current.note?.content ?: ""
                     val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
                             isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                     if (!isCited) {
                         notificationsById.remove(notificationId)
-                        emitSortedImmediate()
+                        emitSorted()
                         return
                     }
                     notificationsById[notificationId] = current.copy(
                         type = NotificationType.MENTION,
                         text = "${current.author?.displayName ?: "Someone"} mentioned you"
                     )
-                    emitSortedImmediate()
+                    emitSorted()
                     return
                 }
                 var updated = update(current)(cached)
@@ -2393,7 +2436,7 @@ class NotificationsRepository(
                     }
                 }
                 notificationsById[notificationId] = updated
-                emitSortedImmediate()
+                emitSorted()
                 return
             }
         }
@@ -2412,26 +2455,24 @@ class NotificationsRepository(
                             val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
                             val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
                             if (current.type == NotificationType.LIKE && !isOurNote) {
-                                notificationsById.remove(notificationId); emitSortedImmediate(); return@launch
+                                notificationsById.remove(notificationId); emitSorted(); return@launch
                             }
-                            if (current.type == NotificationType.REPOST && !isOurNote) {
-                                notificationsById.remove(notificationId); emitSortedImmediate(); return@launch
-                            }
+                            // REPOST: skip removal — upstream validation already confirmed relevance
                             if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
                                 val contentToCheck = current.rawContent ?: current.note?.content ?: ""
                                 val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
                                         isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                                 if (!isCited) {
-                                    notificationsById.remove(notificationId); emitSortedImmediate(); return@launch
+                                    notificationsById.remove(notificationId); emitSorted(); return@launch
                                 }
                                 notificationsById[notificationId] = current.copy(
                                     type = NotificationType.MENTION,
                                     text = "${current.author?.displayName ?: "Someone"} mentioned you"
                                 )
-                                emitSortedImmediate(); return@launch
+                                emitSorted(); return@launch
                             }
                             notificationsById[notificationId] = update(current)(note)
-                            emitSortedImmediate()
+                            emitSorted()
                         }
                         return@launch
                     }
@@ -2452,21 +2493,25 @@ class NotificationsRepository(
         scheduleTargetFetchFlush()
     }
 
-    /** Schedule a debounced flush of the target note fetch buffer.
-     *  Flushes immediately when the batch buffer exceeds [MAX_TARGET_FETCH_BATCH]
-     *  to prevent starvation during continuous event delivery (Phase 1 replay). */
+    /** Mark target fetch buffer as dirty — the poller will pick it up within 200ms.
+     *  If the buffer exceeds [MAX_TARGET_FETCH_BATCH], the poller triggers immediately
+     *  via the dirty flag (no cancel+relaunch overhead). */
     private fun scheduleTargetFetchFlush() {
-        val totalPending = pendingTargetFetches.values.sumOf { it.size }
-        if (totalPending >= MAX_TARGET_FETCH_BATCH) {
-            // Buffer full — flush immediately to prevent starvation
-            targetFetchBatchJob?.cancel()
-            targetFetchBatchJob = scope.launch { flushTargetFetchBatch() }
-            return
-        }
-        targetFetchBatchJob?.cancel()
-        targetFetchBatchJob = scope.launch {
-            delay(TARGET_FETCH_BATCH_DELAY_MS)
-            flushTargetFetchBatch()
+        targetFetchDirty = true
+    }
+
+    /** Single long-lived coroutine polling the target fetch dirty flag.
+     *  Replaces hundreds of cancel+relaunch Job allocations during Phase 1. */
+    private fun startTargetFetchPoller() {
+        targetFetchPollerJob?.cancel()
+        targetFetchPollerJob = scope.launch {
+            while (true) {
+                delay(TARGET_FETCH_BATCH_DELAY_MS)
+                if (targetFetchDirty) {
+                    targetFetchDirty = false
+                    flushTargetFetchBatch()
+                }
+            }
         }
     }
 
@@ -2594,12 +2639,10 @@ class NotificationsRepository(
                         removedCount++
                         continue
                     }
-                    // Kind-6/16 (repost): only show if the reposted note is authored by us
-                    if (current.type == NotificationType.REPOST && !isOurNote) {
-                        notificationsById.remove(pending.notificationId)
-                        removedCount++
-                        continue
-                    }
+                    // Kind-6/16 (repost): skip removal — upstream relay p-tag or
+                    // isRepostOfOurNote validation already confirmed relevance.
+                    // Removing here caused valid boost notifications to be silently
+                    // deleted due to author format mismatches in the cache.
                     // Kind-1 reply: verify the parent note is authored by us OR we're cited in content.
                     if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
                         // Use rawContent (original event content with nostr: URIs intact) for cite check.
@@ -2634,7 +2677,7 @@ class NotificationsRepository(
                 }
             }
             if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
-            emitSortedImmediate()
+            emitSorted()
             // Re-queue unfetched reactions/reposts for a retry with longer timeout
             if (retryQueue.isNotEmpty()) {
                 Log.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")

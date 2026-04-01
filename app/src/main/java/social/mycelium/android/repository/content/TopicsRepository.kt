@@ -1,7 +1,6 @@
 package social.mycelium.android.repository.content
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.util.Log
 import android.util.LruCache
 import social.mycelium.android.data.Author
@@ -26,8 +25,6 @@ import social.mycelium.android.relay.TemporarySubscriptionHandle
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.repository.feed.NotesRepository
@@ -93,9 +90,10 @@ data class HashtagStats(
  *
  * Features:
  * - Live streaming of topics from relays (like NotesRepository)
- * - Persistent cache with SharedPreferences (unlike home feed)
+ * - Room-backed persistence via cached_events table (same as feed pipeline)
  * - LruCache for in-memory fast access
- * - Real-time event processing with cache updates
+ * - Live kind-1111 reply count tracking
+ * - Real-time event processing with deferred batch writes to Room
  *
  * Kind 11 events are topics that:
  * - Have a "title" tag
@@ -117,8 +115,13 @@ class TopicsRepository private constructor(context: Context) {
     private val PROFILE_BATCH_DELAY_MS = 50L
     private val PROFILE_BATCH_SIZE = 60
 
-    // Persistent storage
-    private val sharedPrefs: SharedPreferences = appContext.getSharedPreferences(CACHE_PREFS, Context.MODE_PRIVATE)
+    // Room persistence (replaces SharedPreferences — single source of truth)
+    private val eventDao by lazy {
+        social.mycelium.android.db.AppDatabase.getInstance(appContext).eventDao()
+    }
+    /** Pending events to write to Room. Written in batches every 5s to avoid per-event IO. */
+    private val pendingRoomWrites = java.util.concurrent.ConcurrentLinkedQueue<social.mycelium.android.db.CachedEventEntity>()
+    @Volatile private var roomWriteDirty = false
     private val json = Json { ignoreUnknownKeys = true }
 
     // In-memory LruCache for fast access (Amethyst-style)
@@ -195,10 +198,8 @@ class TopicsRepository private constructor(context: Context) {
         private const val TAG = "TopicsRepository"
         private const val TOPIC_FETCH_TIMEOUT_MS = 2000L // Clear loading after 2s if no events
         private const val SUBSCRIPTION_SETTLE_MS = 400L   // Let state machine apply subscription
-        private const val CACHE_PREFS = "topics_cache"
-        private const val CACHE_KEY = "cached_topics"
         private const val CACHE_SIZE = 1000
-        private const val CACHE_SAVE_INTERVAL = 30000L // Save to disk every 30 seconds, not on every event
+        private const val ROOM_FLUSH_INTERVAL_MS = 5000L // Flush pending Room writes every 5s
         /** Page size for loading older topics. Kind-11 is sparse so we ask for a lot. */
         private const val TOPICS_PAGE_SIZE = 200
         /** Timeout for older topics page. */
@@ -219,8 +220,8 @@ class TopicsRepository private constructor(context: Context) {
     init {
         relayStateMachine.registerKind11Handler { event, relayUrl -> handleTopicEvent(event, relayUrl) }
         relayStateMachine.registerKind1111Handler { event, relayUrl -> handleCommentEvent(event, relayUrl) }
-        loadCacheFromStorage()
-        startPeriodicCacheSaving()
+        loadFromRoom()
+        startRoomFlushPoller()
         startProfileUpdateCoalescer()
         startReplyCountCoalescer()
     }
@@ -291,6 +292,9 @@ class TopicsRepository private constructor(context: Context) {
             if (relayUrl.isNotBlank()) {
                 social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
             }
+
+            // Buffer for deferred Room persistence
+            bufferEventForRoom(event, relayUrl)
         }
     }
 
@@ -520,6 +524,9 @@ class TopicsRepository private constructor(context: Context) {
                     computeHashtagStatistics()
                     Log.d(TAG, "✅ Added topic from relay: ${topic.title} (Total: ${currentTopics.size})")
                 }
+
+                // Buffer for deferred Room persistence
+                bufferEventForRoom(event, relayUrl)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling topic event: ${e.message}", e)
@@ -596,16 +603,15 @@ class TopicsRepository private constructor(context: Context) {
     }
 
     /**
-     * Hydrate the in-memory topics map from Room's cached_events table (kind-11).
-     * Called during Phase 3 (enrichment) so previously deep-fetched topics that
-     * survived in Room but not in the SharedPreferences cache are recovered.
+     * Additive re-hydration from Room. Called during Phase 3 (enrichment) to pick up
+     * any topics deep-fetched between init and enrichment. Uses the class-level [eventDao]
+     * so no Context parameter is needed (kept for API compatibility).
      *
      * Safe to call multiple times (additive merge — never removes existing topics).
      */
     fun hydrateFromRoom(context: Context) {
         scope.launch {
             try {
-                val eventDao = social.mycelium.android.db.AppDatabase.getInstance(context.applicationContext).eventDao()
                 val entities = eventDao.getTopicEvents(limit = 1000)
                 if (entities.isEmpty()) {
                     Log.d(TAG, "hydrateFromRoom: no kind-11 events in Room")
@@ -619,14 +625,11 @@ class TopicsRepository private constructor(context: Context) {
                     val event = com.example.cybin.core.Event.fromJsonOrNull(entity.eventJson) ?: continue
                     if (event.kind != 11) continue
 
-                    // Restore relay URLs from the dedicated relayUrls column (comma-separated,
-                    // matching the pattern in NotesRepository.loadFeedCacheFromRoom)
                     val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
-                    // Seed EventRelayTracker so relay orbs survive cold starts
                     if (allUrls.isNotEmpty()) {
-                        allUrls.forEach { url -> social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, url) }
+                        allUrls.forEach { url -> EventRelayTracker.addRelay(event.id, url) }
                     } else if (!entity.relayUrl.isNullOrBlank()) {
-                        social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, entity.relayUrl)
+                        EventRelayTracker.addRelay(event.id, entity.relayUrl)
                     }
 
                     val relayStr = if (allUrls.isNotEmpty()) allUrls.joinToString(",") else (entity.relayUrl ?: "")
@@ -639,9 +642,8 @@ class TopicsRepository private constructor(context: Context) {
                     _topics.value = current
                     cacheDirty = true
                     computeHashtagStatistics()
-                    // Enrich from EventRelayTracker so orbs reflect all known relay deliveries
                     enrichTopicRelayOrbs()
-                    Log.d(TAG, "hydrateFromRoom: loaded $addedCount topics from Room (total: ${current.size})")
+                    Log.d(TAG, "hydrateFromRoom: loaded $addedCount new topics (total: ${current.size})")
                 } else {
                     Log.d(TAG, "hydrateFromRoom: all ${entities.size} Room topics already in memory")
                 }
@@ -1026,90 +1028,132 @@ class TopicsRepository private constructor(context: Context) {
     }
 
     /**
-     * Load topics cache from persistent storage
+     * Load topics and comment reply counts from Room on cold start.
+     * Replaces the old SharedPreferences loadCacheFromStorage().
+     * This is the single source of truth for persisted topic data.
      */
-    private fun loadCacheFromStorage() {
+    private fun loadFromRoom() {
         scope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val cachedJson = sharedPrefs.getString(CACHE_KEY, null)
-                    if (cachedJson != null) {
-                        val cachedTopics = json.decodeFromString<List<TopicNote>>(cachedJson)
+                    // Load kind-11 topics
+                    val topicEntities = eventDao.getTopicEvents(limit = 1000)
+                    if (topicEntities.isNotEmpty()) {
+                        val topicsMap = mutableMapOf<String, TopicNote>()
+                        for (entity in topicEntities) {
+                            val event = com.example.cybin.core.Event.fromJsonOrNull(entity.eventJson) ?: continue
+                            if (event.kind != 11) continue
 
-                        // Populate LruCache
-                        cachedTopics.forEach { topic ->
+                            // Restore relay URLs
+                            val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+                            if (allUrls.isNotEmpty()) {
+                                allUrls.forEach { url -> EventRelayTracker.addRelay(event.id, url) }
+                            } else if (!entity.relayUrl.isNullOrBlank()) {
+                                EventRelayTracker.addRelay(event.id, entity.relayUrl)
+                            }
+
+                            val relayStr = if (allUrls.isNotEmpty()) allUrls.joinToString(",") else (entity.relayUrl ?: "")
+                            val topic = convertEventToTopicNote(event, relayStr)
                             topicsCache.put(topic.id, topic)
+                            topicsMap[topic.id] = topic
                         }
-
-                        // Populate StateFlow
-                        val topicsMap = cachedTopics.associateBy { it.id }
                         _topics.value = topicsMap
-
-                        // Compute initial statistics
                         computeHashtagStatistics()
+                        Log.d(TAG, "💾 Loaded ${topicsMap.size} topics from Room")
+                    }
 
-                        Log.d(TAG, "💾 Loaded ${cachedTopics.size} topics from persistent cache")
+                    // Load kind-1111 comments for reply count hydration
+                    val commentEntities = eventDao.getCommentEvents(limit = 5000)
+                    if (commentEntities.isNotEmpty()) {
+                        var counted = 0
+                        for (entity in commentEntities) {
+                            if (!seenCommentIds.add(entity.eventId)) continue
+                            val event = com.example.cybin.core.Event.fromJsonOrNull(entity.eventJson) ?: continue
+                            if (event.kind != 1111) continue
+                            val rootTopicId = extractRootTopicId(event) ?: continue
+                            replyCountByTopicId.getOrPut(rootTopicId) {
+                                java.util.concurrent.atomic.AtomicInteger(0)
+                            }.incrementAndGet()
+                            counted++
+                        }
+                        if (counted > 0) {
+                            replyCountDirty = true
+                            Log.d(TAG, "💾 Hydrated reply counts from $counted comments in Room")
+                        }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to load topics cache: ${e.message}", e)
+                Log.e(TAG, "❌ Failed to load from Room: ${e.message}", e)
             }
         }
     }
 
     /**
-     * Save topics cache to persistent storage (called periodically, not per-event)
+     * Buffer a live event for deferred Room persistence.
+     * Converts the event to a CachedEventEntity and adds it to the queue.
+     * The Room flush poller writes accumulated events in batches.
      */
-    private suspend fun saveCacheToStorage() {
-        try {
-            withContext(Dispatchers.IO) {
-                val topicsList = _topics.value.values.toList()
-                if (topicsList.isEmpty()) {
-                    return@withContext
-                }
-
-                val cachedJson = json.encodeToString(topicsList)
-
-                sharedPrefs.edit()
-                    .putString(CACHE_KEY, cachedJson)
-                    .apply()
-
-                Log.d(TAG, "💾 Saved ${topicsList.size} topics to persistent cache")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to save topics cache: ${e.message}", e)
-        }
+    private fun bufferEventForRoom(event: com.example.cybin.core.Event, relayUrl: String) {
+        val allRelays = EventRelayTracker.getRelays(event.id)
+        val relayUrlsCsv = allRelays.joinToString(",").ifEmpty { null }
+        pendingRoomWrites.add(
+            social.mycelium.android.db.CachedEventEntity(
+                eventId = event.id,
+                kind = event.kind,
+                pubkey = event.pubKey,
+                createdAt = event.createdAt,
+                eventJson = event.toJson(),
+                relayUrl = relayUrl.ifEmpty { null },
+                relayUrls = relayUrlsCsv,
+            )
+        )
+        roomWriteDirty = true
     }
 
     /**
-     * Start periodic cache saving (every 30 seconds instead of per-event)
+     * Periodically flush buffered events to Room (every 5s).
+     * Replaces the old startPeriodicCacheSaving() which serialized all topics to JSON
+     * and wrote them as a single SharedPreferences entry.
      */
-    private fun startPeriodicCacheSaving() {
+    private fun startRoomFlushPoller() {
         scope.launch {
             while (true) {
-                delay(CACHE_SAVE_INTERVAL)
-                if (!cacheDirty) continue
-                try {
-                    saveCacheToStorage()
-                    cacheDirty = false
-                } catch (e: Exception) {
-                    Log.e(TAG, "\u274C Periodic cache save failed: ${e.message}", e)
-                }
+                delay(ROOM_FLUSH_INTERVAL_MS)
+                if (!roomWriteDirty) continue
+                roomWriteDirty = false
+                flushPendingRoomWrites()
             }
         }
     }
 
     /**
-     * Clear persistent cache
+     * Drain the pending Room write buffer and insert all events in one batch.
+     */
+    private suspend fun flushPendingRoomWrites() {
+        val batch = mutableListOf<social.mycelium.android.db.CachedEventEntity>()
+        while (true) {
+            val item = pendingRoomWrites.poll() ?: break
+            batch.add(item)
+        }
+        if (batch.isEmpty()) return
+        try {
+            withContext(Dispatchers.IO) {
+                eventDao.insertAll(batch)
+            }
+            Log.d(TAG, "💾 Flushed ${batch.size} events to Room (${batch.count { it.kind == 11 }} topics, ${batch.count { it.kind == 1111 }} comments)")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Room flush failed: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Clear persistent cache (topics + comments from Room).
      */
     private suspend fun clearPersistentCache() {
         try {
             withContext(Dispatchers.IO) {
-                sharedPrefs.edit()
-                    .remove(CACHE_KEY)
-                    .apply()
-
-                Log.d(TAG, "🧹 Cleared persistent topics cache")
+                eventDao.deleteByKinds(listOf(11, 1111))
+                Log.d(TAG, "🧹 Cleared topics + comments from Room")
             }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Failed to clear persistent cache: ${e.message}", e)

@@ -42,6 +42,14 @@ interface EventDao {
     @Query("SELECT * FROM cached_events WHERE kind = 11 ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getTopicEvents(limit: Int = 500): List<CachedEventEntity>
 
+    /** Topic comment events (kind-1111) for reply count hydration. */
+    @Query("SELECT * FROM cached_events WHERE kind = 1111 ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun getCommentEvents(limit: Int = 5000): List<CachedEventEntity>
+
+    /** Paginated topic events older than [untilSec]. */
+    @Query("SELECT * FROM cached_events WHERE kind = 11 AND createdAt < :untilSec ORDER BY createdAt DESC LIMIT :limit")
+    suspend fun getOlderTopicEvents(untilSec: Long, limit: Int = 200): List<CachedEventEntity>
+
     /** Events by specific IDs. */
     @Query("SELECT * FROM cached_events WHERE eventId IN (:ids)")
     suspend fun getByIds(ids: List<String>): List<CachedEventEntity>

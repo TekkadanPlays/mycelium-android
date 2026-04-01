@@ -773,6 +773,7 @@ class RelayConnectionStateMachine {
     @Volatile private var onKind1WithRelay: ((Event, String) -> Unit)? = null
     @Volatile private var onKind6WithRelay: ((Event, String) -> Unit)? = null
     @Volatile private var onKind11: ((Event, String) -> Unit)? = null
+    @Volatile private var onKind1111: ((Event, String) -> Unit)? = null
     @Volatile private var onKind1011: ((Event) -> Unit)? = null
     @Volatile private var onKind30073: ((Event) -> Unit)? = null
     @Volatile private var onKind30311: ((Event, String) -> Unit)? = null
@@ -789,13 +790,21 @@ class RelayConnectionStateMachine {
         onKind11 = handler
     }
 
-    // ── Separate topics subscription (kind-11) ───────────────────────────────
+    fun registerKind1111Handler(handler: (Event, String) -> Unit) {
+        onKind1111 = handler
+    }
+
+    // ── Separate topics + comments subscription (kind-11 + kind-1111) ────────────
 
     /**
-     * Start a dedicated kind-11 (topics) subscription on the current relay set.
-     * Runs independently from the main feed subscription so topics don't clog
-     * the primary kind-1 pipeline. Call during enrichment phase (Phase 3).
-     * Safe to call multiple times (idempotent).
+     * Start a dedicated kind-11 + kind-1111 (topics + thread comments) subscription
+     * on the current relay set. Runs independently from the main feed subscription
+     * so topics/comments don't clog the primary kind-1 pipeline.
+     * Call during enrichment phase (Phase 3). Safe to call multiple times (idempotent).
+     *
+     * kind-1111 events are routed to [onKind1111] so TopicsRepository can track
+     * reply counts in real-time (previously these events had zero live subscription
+     * path, causing all topics to show replyCount=0).
      */
     fun startTopicsSubscription(
         relayUrls: List<String> = currentSubscriptionRelayUrls
@@ -811,20 +820,25 @@ class RelayConnectionStateMachine {
         topicsSubId?.let { relayPool.closeSubscription(it) }
 
         val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
-        val topicsFilter = Filter(kinds = listOf(11), limit = 500, since = sevenDaysAgo)
+        val topicsFilter = Filter(kinds = listOf(11, 1111), limit = 500, since = sevenDaysAgo)
         val newSubId = "topics_" + CybinUtils.randomChars(6)
         topicsSubId = newSubId
 
         val relayFilterMap = effectiveUrls.associateWith { listOf(topicsFilter) }
         relayPool.openSubscription(newSubId, relayFilterMap) { event, relayUrl ->
-            if (event.kind == 11) {
-                markEventReceived()
-                RelayHealthTracker.recordEventReceived(relayUrl)
-                social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
-                onKind11?.invoke(event, relayUrl)
+            markEventReceived()
+            RelayHealthTracker.recordEventReceived(relayUrl)
+            social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
+            when (event.kind) {
+                11 -> onKind11?.invoke(event, relayUrl)
+                1111 -> {
+                    onKind1111?.invoke(event, relayUrl)
+                    // Cross-pollinate to notifications so badge updates for topic replies
+                    social.mycelium.android.repository.NotificationsRepository.ingestEvent(event)
+                }
             }
         }
-        Log.d(TAG, "Topics subscription started: ${effectiveUrls.size} relays (separate slot, subId=$newSubId)")
+        Log.d(TAG, "Topics+Comments subscription started: ${effectiveUrls.size} relays (kind-11+1111, subId=$newSubId)")
     }
 
     /**

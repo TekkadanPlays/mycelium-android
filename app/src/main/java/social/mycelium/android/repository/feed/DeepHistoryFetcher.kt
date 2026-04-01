@@ -77,9 +77,9 @@ object DeepHistoryFetcher {
      *  (replies TO us, reposts OF us). */
     private val NOTIFICATION_KINDS = setOf(1, 6, 7, 8, 16, 1068, 1018, 1111, 1984, 9735, 9802)
 
-    /** Kind-11 topic events should be replayed to TopicsRepository so the
-     *  Topics screen is pre-populated with historical data. */
-    private val TOPIC_KINDS = setOf(11)
+    /** Kind-11 topic events and kind-1111 comments should be replayed to TopicsRepository
+     *  so the Topics screen is pre-populated with historical data and reply counts. */
+    private val TOPIC_KINDS = setOf(11, 1111)
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -205,34 +205,31 @@ object DeepHistoryFetcher {
         val useUserAsPTag: Boolean = false,
     )
 
-    /** All kind groups to fetch per window. Order matters — most important first. */
+    /** All kind groups to fetch per window. Order matters — most important first.
+     *
+     * Consolidated from 13 groups to 8 to halve subscription churn per window:
+     * - topics+comments+votes merged (related NIP-22 content)
+     * - reactions+zaps merged (p-tag notification events)
+     * - badge-awards+highlights merged (low-volume p-tag events)
+     */
     private val KIND_GROUPS = listOf(
         // ── Content groups (by followed authors → feed) ─────────────────
-        KindGroup("feed",       listOf(1, 6, 30023)),           // Notes, reposts, long-form articles
-        KindGroup("topics",     listOf(11)),                     // NIP-22 topic roots
-        KindGroup("comments",   listOf(1111)),                   // NIP-22 thread comments
-        KindGroup("votes",      listOf(30011)),                  // In-house votes on topics/comments
-        KindGroup("polls",      listOf(1068, 6969)),             // NIP-88 polls + zap polls
+        KindGroup("feed",                 listOf(1, 6, 30023)),         // Notes, reposts, long-form articles
+        KindGroup("topics+comments+votes", listOf(11, 1111, 30011)),   // NIP-22 topics, thread comments, votes
+        KindGroup("polls",                listOf(1068, 6969)),          // NIP-88 polls + zap polls
 
         // ── Notification groups (p-tag = user → notifications) ─────────
-        KindGroup("reactions",  listOf(7),                       // NIP-25 reactions/likes TO the user
+        KindGroup("reactions+zaps",       listOf(7, 9735),              // Reactions + zap receipts TO the user
             useFollowedAuthors = false, useUserAsPTag = true),
-        KindGroup("zaps",       listOf(9735),                    // NIP-57 zap receipts TO the user
+        KindGroup("reposts-of-me",        listOf(6, 16),                // Reposts OF the user's notes
             useFollowedAuthors = false, useUserAsPTag = true),
-        KindGroup("reposts-of-me", listOf(6, 16),               // Reposts OF the user's notes
+        KindGroup("replies-mentions",     listOf(1),                    // Replies/mentions/quotes TO the user
             useFollowedAuthors = false, useUserAsPTag = true),
-        KindGroup("replies-mentions", listOf(1),                 // Replies/mentions/quotes TO the user
+        KindGroup("badges+highlights",    listOf(8, 9802),              // Badge awards + highlights referencing the user
             useFollowedAuthors = false, useUserAsPTag = true),
-        KindGroup("badge-awards", listOf(8),                     // NIP-58 badge awards TO the user
-            useFollowedAuthors = false, useUserAsPTag = true),
-        KindGroup("highlights", listOf(9802),                    // NIP-84 highlights referencing the user
-            useFollowedAuthors = false, useUserAsPTag = true),
-
-        // ── Metadata groups (by followed authors) ──────────────────────
-        KindGroup("badges-defs", listOf(30009)),                 // NIP-58 badge definitions
 
         // ── DM group (gift wraps addressed to user) ──────────────────────
-        KindGroup("dms",         listOf(1059),                   // NIP-17 gift-wrapped DMs TO the user
+        KindGroup("dms",                  listOf(1059),                 // NIP-17 gift-wrapped DMs TO the user
             useFollowedAuthors = false, useUserAsPTag = true),
     )
 
@@ -384,45 +381,41 @@ object DeepHistoryFetcher {
                         }
                     }
 
-                    // Replay kind-11 topic events into TopicsRepository so the Topics
-                    // screen shows historical data even before the live subscription EOSE.
-                    if (group.kinds.contains(11)) {
+                    // Replay kind-11/1111/30011 events from the consolidated topics+comments+votes group.
+                    // kind-11 → TopicsRepository (historical topics for Topics screen)
+                    // kind-1111 → TopicsRepository (reply count tracking) + NotificationsRepository (thread notifications)
+                    // kind-30011 → NoteCountsRepository (historical vote aggregation)
+                    if (group.kinds.contains(11) || group.kinds.contains(1111) || group.kinds.contains(30011)) {
                         var topicCount = 0
-                        val topicsRepo = TopicsRepository.getInstanceOrNull()
-                        for ((event, _) in events) {
-                            if (event.kind == 11 && topicsRepo != null) {
-                                try {
-                                    topicsRepo.ingestDeepFetchedTopic(event)
-                                    topicCount++
-                                } catch (e: Exception) {
-                                    // Don't let a single bad event kill the whole batch
-                                }
-                            }
-                        }
-                        if (topicCount > 0) {
-                            Log.d(TAG, "  ${group.label}: replayed $topicCount topics to TopicsRepository")
-                        }
-                    }
-
-                    // Replay kind-30011 vote events through NoteCountsRepository so
-                    // VoteRepository aggregates historical up/down votes on topics
-                    // and kind-1111 replies. Without this, vote scores appear as 0
-                    // until the user scrolls to each topic and triggers a live fetch.
-                    if (group.kinds.contains(30011)) {
+                        var commentCount = 0
                         var voteCount = 0
-                        for ((event, _) in events) {
-                            if (event.kind == 30011) {
-                                try {
-                                    NoteCountsRepository.onCountsEvent(event)
-                                    voteCount++
-                                } catch (e: Exception) {
-                                    // Don't let a single bad event kill the whole batch
+                        val topicsRepo = TopicsRepository.getInstanceOrNull()
+                        for ((event, relayUrl) in events) {
+                            try {
+                                when (event.kind) {
+                                    11 -> {
+                                        topicsRepo?.ingestDeepFetchedTopic(event)
+                                        topicCount++
+                                    }
+                                    1111 -> {
+                                        // Replay to TopicsRepository for reply count accumulation
+                                        topicsRepo?.ingestDeepFetchedComment(event)
+                                        // Also replay to NotificationsRepository for thread notification coverage
+                                        NotificationsRepository.ingestEventAsHistorical(event)
+                                        commentCount++
+                                    }
+                                    30011 -> {
+                                        NoteCountsRepository.onCountsEvent(event)
+                                        voteCount++
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                // Don't let a single bad event kill the whole batch
                             }
                         }
-                        if (voteCount > 0) {
-                            Log.d(TAG, "  ${group.label}: replayed $voteCount votes to VoteRepository")
-                        }
+                        if (topicCount > 0) Log.d(TAG, "  ${group.label}: replayed $topicCount topics")
+                        if (commentCount > 0) Log.d(TAG, "  ${group.label}: replayed $commentCount comments (reply counts + notifications)")
+                        if (voteCount > 0) Log.d(TAG, "  ${group.label}: replayed $voteCount votes")
                     }
 
                     windowTotalEvents += events.size

@@ -172,6 +172,14 @@ class TopicsRepository private constructor(context: Context) {
     /** Dirty flag: set when topics change, cleared after save. Prevents pointless periodic saves. */
     @Volatile private var cacheDirty = false
 
+    // ── Kind-1111 reply count tracking ──────────────────────────────────────
+    /** Accumulated reply counts per topic ID. Updated live as kind-1111 events arrive. */
+    private val replyCountByTopicId = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+    /** Dedup: comment event IDs we've already counted. Prevents double-counting from multiple relays. */
+    private val seenCommentIds = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    /** Dirty flag for reply count changes — coalesces UI updates. */
+    @Volatile private var replyCountDirty = false
+
     // ── Pagination state for loading older topics ──────────────────────────
     private val _isLoadingOlderTopics = MutableStateFlow(false)
     val isLoadingOlderTopics: StateFlow<Boolean> = _isLoadingOlderTopics.asStateFlow()
@@ -210,9 +218,11 @@ class TopicsRepository private constructor(context: Context) {
 
     init {
         relayStateMachine.registerKind11Handler { event, relayUrl -> handleTopicEvent(event, relayUrl) }
+        relayStateMachine.registerKind1111Handler { event, relayUrl -> handleCommentEvent(event, relayUrl) }
         loadCacheFromStorage()
         startPeriodicCacheSaving()
         startProfileUpdateCoalescer()
+        startReplyCountCoalescer()
     }
 
     /** Listen for profile updates and refresh topic authors in batches (same as NotesRepository). */
@@ -252,6 +262,102 @@ class TopicsRepository private constructor(context: Context) {
             _topics.value = updated
             cacheDirty = true
             computeHashtagStatistics()
+        }
+    }
+
+    // ── Kind-1111 comment handling ──────────────────────────────────────────
+
+    /**
+     * Handle an incoming kind-1111 (thread reply/comment) event from the topics subscription.
+     * Extracts the root topic ID from E-tags (uppercase = root per NIP-22) and increments
+     * the reply count for that topic. Events are deduped by event ID so multi-relay
+     * delivery doesn't inflate counts.
+     */
+    private fun handleCommentEvent(event: com.example.cybin.core.Event, relayUrl: String) {
+        if (event.kind != 1111) return
+        // Dedup: same event from multiple relays should only count once
+        if (!seenCommentIds.add(event.id)) return
+
+        // NIP-22: uppercase "E" tag = root event ID. Check both "E" and "e" with "root" marker.
+        val rootTopicId = extractRootTopicId(event)
+        if (rootTopicId != null) {
+            val counter = replyCountByTopicId.getOrPut(rootTopicId) {
+                java.util.concurrent.atomic.AtomicInteger(0)
+            }
+            counter.incrementAndGet()
+            replyCountDirty = true
+
+            // Track relay for orb accumulation
+            if (relayUrl.isNotBlank()) {
+                social.mycelium.android.utils.EventRelayTracker.addRelay(event.id, relayUrl)
+            }
+        }
+    }
+
+    /**
+     * Extract the root topic ID from a kind-1111 event's tags.
+     *
+     * NIP-22 specifies:
+     * - Uppercase "E" tag for the root event reference
+     * - Lowercase "e" tag with "root" marker (some clients)
+     * We check both for maximum compatibility.
+     */
+    private fun extractRootTopicId(event: com.example.cybin.core.Event): String? {
+        // Uppercase E-tag (NIP-22 canonical format)
+        val upperE = event.tags.firstOrNull { it.size >= 2 && it[0] == "E" }
+        if (upperE != null) return upperE[1]
+
+        // Fallback: lowercase e-tag with "root" marker
+        val rootMarked = event.tags.firstOrNull { tag ->
+            tag.size >= 4 && tag[0] == "e" && tag[3] == "root"
+        } ?: event.tags.firstOrNull { tag ->
+            tag.size >= 5 && tag[0] == "e" && tag[4] == "root"
+        }
+        if (rootMarked != null) return rootMarked[1]
+
+        // Last fallback: first lowercase e-tag (if only one exists, it's the root)
+        val eTags = event.tags.filter { it.size >= 2 && it[0] == "e" }
+        if (eTags.size == 1) return eTags[0][1]
+        // Multiple e-tags without markers: first = root (NIP-10 positional)
+        return eTags.firstOrNull()?.get(1)
+    }
+
+    /**
+     * Periodically apply accumulated reply counts to TopicNote instances.
+     * Runs every 500ms while replyCountDirty is set, to coalesce rapid-fire
+     * kind-1111 events into a single UI update (like the emit poller pattern).
+     */
+    private fun startReplyCountCoalescer() {
+        scope.launch {
+            while (true) {
+                delay(500L)
+                if (!replyCountDirty) continue
+                replyCountDirty = false
+                applyReplyCountsToTopics()
+            }
+        }
+    }
+
+    /**
+     * Apply accumulated reply counts from [replyCountByTopicId] to in-memory TopicNote
+     * instances. Only updates topics whose count actually changed.
+     */
+    private fun applyReplyCountsToTopics() {
+        val current = _topics.value
+        if (current.isEmpty() || replyCountByTopicId.isEmpty()) return
+        var changed = false
+        val updated = current.mapValues { (id, topic) ->
+            val count = replyCountByTopicId[id]?.get() ?: 0
+            if (count != topic.replyCount && count > 0) {
+                changed = true
+                topic.copy(replyCount = count)
+            } else topic
+        }
+        if (changed) {
+            _topics.value = updated
+            cacheDirty = true
+            computeHashtagStatistics()
+            Log.d(TAG, "Applied reply counts to ${replyCountByTopicId.size} topics")
         }
     }
 
@@ -315,6 +421,9 @@ class TopicsRepository private constructor(context: Context) {
         followFilterEnabled = false
         followFilter = null
         synchronized(pendingTopicsLock) { _pendingNewTopics.clear(); _newTopicsCount.value = 0 }
+        replyCountByTopicId.clear()
+        seenCommentIds.clear()
+        replyCountDirty = false
         resetTopicsPagination()
         clearAllTopics()
     }
@@ -466,6 +575,24 @@ class TopicsRepository private constructor(context: Context) {
         cacheDirty = true
         // Defer statistics recomputation — deep fetch delivers many events in rapid
         // succession. The periodic cache saver will trigger a recompute anyway.
+    }
+
+    /**
+     * Ingest a deep-fetched kind-1111 comment event for reply count tracking.
+     * Extracts the root topic ID and increments the reply count, same as
+     * [handleCommentEvent] but without relay-specific handling.
+     * Called by [DeepHistoryFetcher] as batches complete.
+     */
+    fun ingestDeepFetchedComment(event: com.example.cybin.core.Event) {
+        if (event.kind != 1111) return
+        if (!seenCommentIds.add(event.id)) return // Already counted
+
+        val rootTopicId = extractRootTopicId(event) ?: return
+        val counter = replyCountByTopicId.getOrPut(rootTopicId) {
+            java.util.concurrent.atomic.AtomicInteger(0)
+        }
+        counter.incrementAndGet()
+        replyCountDirty = true
     }
 
     /**
@@ -622,7 +749,7 @@ class TopicsRepository private constructor(context: Context) {
             content = event.content,
             hashtags = hashtags,
             timestamp = event.createdAt * 1000L, // Convert to milliseconds
-            replyCount = 0, // Will be updated when we fetch Kind 1111 replies
+            replyCount = replyCountByTopicId[event.id]?.get() ?: 0,
             relayUrl = relayUrls.firstOrNull() ?: relayUrl,
             relayUrls = relayUrls
         )

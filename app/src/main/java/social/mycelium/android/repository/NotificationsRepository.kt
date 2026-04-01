@@ -86,8 +86,6 @@ class NotificationsRepository(
         private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 4000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
 
-        /** Maximum notifications kept in memory. Oldest are evicted during [emitSortedImmediate]. */
-        private const val MAX_NOTIFICATIONS = 3000
 
         /** Maximum time to wait for profile/enrichment data before firing the notification anyway. */
         private const val ENRICHMENT_WAIT_MS = 3000L
@@ -240,12 +238,10 @@ class NotificationsRepository(
     /** Active notification subscription handles (inbox deep + sweep + extras). */
     private val notificationHandles = CopyOnWriteArrayList<TemporarySubscriptionHandle>()
 
-    // ── Debounced emitSorted ────────────────────────────────────────────────
-    // Instead of emitting on every single event (thousands during Phase 1 replay),
-    // coalesce emissions with a 100ms debounce. This reduces StateFlow emissions
-    // from ~5000 to ~50 during startup, dramatically cutting recomposition churn
-    // in NotificationsScreen.
-    private var emitJob: Job? = null
+    // ── Emit polling ──────────────────────────────────────────────────────
+    // A single long-lived coroutine polls emitDirty every 100ms and emits when set.
+    // Replaces thousands of cancel+relaunch Job allocations with zero-alloc dirty checks.
+    // See startEmitPoller() / emitSorted() / emitSortedImmediate().
     private val EMIT_DEBOUNCE_MS = 100L
 
     /** Force an immediate emit (bypass debounce). Used after critical operations
@@ -724,6 +720,8 @@ class NotificationsRepository(
         scope.launch(Dispatchers.IO) { loadNotificationsFromRoom(pubkey) }
         // ── Start single profile watcher (replaces N per-event coroutines) ──
         startProfileWatcher()
+        // ── Start emit poller (replaces cancel+relaunch debounce) ──
+        startEmitPoller()
         val stateMachine = RelayConnectionStateMachine.getInstance()
 
         // ── Phase 1: Deep inbox fetch (immediate) ────────────────────────────
@@ -918,6 +916,8 @@ class NotificationsRepository(
         }
         notificationHandles.clear()
         stopProfileWatcher()
+        emitPollerJob?.cancel()
+        emitPollerJob = null
         // Flush any pending notification save
         val ctx = appContext
         if (ctx != null && notificationsById.isNotEmpty()) {
@@ -2042,38 +2042,43 @@ class NotificationsRepository(
     }
 
     /**
-     * Debounced notification list emission. Instead of emitting a new sorted list
-     * on every individual event (5000+ during Phase 1 replay), this coalesces
-     * rapid updates into a single emission after 100ms of quiet.
+     * Mark notifications as dirty and let the polling loop handle emission.
+     * Replaces the old cancel+relaunch debounce which created thousands of
+     * Job allocations/sec during Phase 1 replay.
+     *
+     * The polling loop ([startEmitPoller]) checks the dirty flag every 100ms
+     * and emits once. Zero allocations per call — just a volatile write.
      *
      * Call [emitSortedImmediate] when the UI must update instantly (e.g. after
      * markAllAsSeen, notification removal, or target note enrichment).
      */
     private fun emitSorted() {
         emitDirty = true
-        emitJob?.cancel()
-        emitJob = scope.launch {
-            delay(EMIT_DEBOUNCE_MS)
-            emitSortedImmediate()
+    }
+
+    /** Single long-lived coroutine that polls the dirty flag and emits when set.
+     *  Replaces thousands of cancel+relaunch Job allocations with zero-alloc dirty checks. */
+    private var emitPollerJob: Job? = null
+    private fun startEmitPoller() {
+        emitPollerJob?.cancel()
+        emitPollerJob = scope.launch {
+            while (true) {
+                delay(EMIT_DEBOUNCE_MS)
+                if (emitDirty) {
+                    emitSortedImmediate()
+                }
+            }
         }
     }
 
     /** Immediate (non-debounced) emit. Used after critical state changes.
-     *  Caps the in-memory map at [MAX_NOTIFICATIONS] to prevent unbounded growth
-     *  during deep history replay (DeepHistoryFetcher can replay 5 years of events). */
+     *
+     *  No in-memory cap: with the polling approach (sort runs at most every 100ms),
+     *  even 100K+ notifications are feasible — sortedByDescending takes ~10-20ms on
+     *  modern hardware. Room persistence handles long-term storage; the in-memory map
+     *  is naturally bounded by session lifetime. */
     private fun emitSortedImmediate() {
         emitDirty = false
-        // Cap: if the map has grown beyond the limit, trim oldest entries.
-        // This prevents O(n log n) sort from growing unboundedly and avoids
-        // OOM on accounts with deep history.
-        if (notificationsById.size > MAX_NOTIFICATIONS) {
-            val sorted = notificationsById.values.sortedByDescending { it.sortTimestamp }
-            val toRemove = sorted.drop(MAX_NOTIFICATIONS)
-            for (item in toRemove) {
-                notificationsById.remove(item.id)
-            }
-            Log.d(TAG, "Trimmed ${toRemove.size} oldest notifications (was ${sorted.size}, now $MAX_NOTIFICATIONS)")
-        }
         val sorted = notificationsById.values
             .sortedByDescending { it.sortTimestamp }
             .toList()

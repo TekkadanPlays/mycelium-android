@@ -358,6 +358,9 @@ object NoteCountsRepository {
                 // Cross-pollinate reactions/zaps/reposts to notifications so they appear
                 // in real-time (counts subscription is LOW priority but always active;
                 // notification subscription is BACKGROUND and can be preempted).
+                // Guard: NotificationsRepository.ingestEvent deduplicates via seenEventIds,
+                // so duplicate forwarding is already safe. The real guard is that ingestEvent
+                // is a no-op for already-processed events, preventing the feedback loop.
                 if (event.kind == 7 || event.kind == 9735 || event.kind == 6) {
                     NotificationsRepository.ingestEvent(event)
                 }

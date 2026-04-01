@@ -158,6 +158,20 @@ class TopicsRepository private constructor(context: Context) {
     // Track which relay set was used when fetching (for filtering cached topics)
     private var currentRelaySet = setOf<String>()
 
+    /** Normalize a relay URL for display-filter matching (lowercase, strip trailing slash). */
+    private fun normalizeUrl(url: String) = url.trim().removeSuffix("/").lowercase()
+
+    /** Check if a topic matches the current display relay filter. */
+    private fun topicMatchesRelayFilter(topic: TopicNote): Boolean {
+        if (currentRelaySet.isEmpty()) return true
+        // Check the relayUrls list first (authoritative), fall back to relayUrl string
+        val topicRelays = topic.relayUrls.ifEmpty {
+            topic.relayUrl.split(",").filter { it.isNotBlank() }
+        }
+        if (topicRelays.isEmpty()) return true // No relay info → show everywhere
+        return topicRelays.any { normalizeUrl(it) in currentRelaySet }
+    }
+
     /** When true, only show topics from authors in followFilter (same idea as Home Following). Empty list = show All until loaded. */
     private var followFilterEnabled = false
     private var followFilter: Set<String>? = null
@@ -409,7 +423,7 @@ class TopicsRepository private constructor(context: Context) {
         }
         Log.d(TAG, "Topics display filter: ${displayFilterUrls.size} relay(s)")
         connectedRelays = displayFilterUrls
-        currentRelaySet = displayFilterUrls.toSet()
+        currentRelaySet = displayFilterUrls.map { normalizeUrl(it) }.toSet()
         _isLoading.value = false
         computeHashtagStatistics()
     }
@@ -456,7 +470,7 @@ class TopicsRepository private constructor(context: Context) {
         _isLoading.value = true
         _isReceivingEvents.value = false
         _error.value = null
-        currentRelaySet = targetRelays.toSet()
+        currentRelaySet = targetRelays.map { normalizeUrl(it) }.toSet()
         computeHashtagStatistics()
 
         try {
@@ -776,13 +790,7 @@ class TopicsRepository private constructor(context: Context) {
      * Compute hashtag statistics from collected topics (filtered by relay set and optional follow list).
      */
     private fun computeHashtagStatistics() {
-        var topics = if (currentRelaySet.isEmpty()) {
-            _topics.value.values
-        } else {
-            _topics.value.values.filter { topic ->
-                topic.relayUrl.isEmpty() || topic.relayUrl.split(",").toSet().intersect(currentRelaySet).isNotEmpty()
-            }
-        }
+        var topics = _topics.value.values.filter { topicMatchesRelayFilter(it) }
         if (isFollowFilterActive() && followFilter != null) {
             val filter = followFilter!!
             topics = topics.filter { it.author.id.lowercase() in filter }
@@ -824,7 +832,7 @@ class TopicsRepository private constructor(context: Context) {
     fun getTopicsForHashtag(hashtag: String): List<TopicNote> {
         var list = _topicsByHashtag.value[hashtag.lowercase()] ?: emptyList()
         if (currentRelaySet.isNotEmpty()) {
-            list = list.filter { t -> t.relayUrl.isEmpty() || t.relayUrl.split(",").toSet().intersect(currentRelaySet).isNotEmpty() }
+            list = list.filter { topicMatchesRelayFilter(it) }
         }
         if (isFollowFilterActive() && followFilter != null) {
             list = list.filter { it.author.id.lowercase() in followFilter!! }
@@ -845,7 +853,7 @@ class TopicsRepository private constructor(context: Context) {
     fun getAllTopics(): List<TopicNote> {
         var list = _topics.value.values
         if (currentRelaySet.isNotEmpty()) {
-            list = list.filter { t -> t.relayUrl.isEmpty() || t.relayUrl.split(",").toSet().intersect(currentRelaySet).isNotEmpty() }
+            list = list.filter { topicMatchesRelayFilter(it) }
         }
         if (isFollowFilterActive() && followFilter != null) {
             list = list.filter { it.author.id.lowercase() in followFilter!! }

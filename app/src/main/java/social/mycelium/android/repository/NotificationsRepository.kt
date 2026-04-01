@@ -1001,13 +1001,13 @@ class NotificationsRepository(
         if (event.kind !in ACCEPTED_KINDS) return
         val pubkey = myPubkeyHex ?: return
         // Check relevance: does this event reference us?
-        val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
+        // NIP-22 kind-1111 uses uppercase P for pubkeys; NIP-01 uses lowercase p.
+        val hasPTag = event.tags.any { it.size >= 2 && (it[0] == "p" || it[0] == "P") && it[1] == pubkey }
+        // NIP-22 kind-1111 uses uppercase E for root; also accept lowercase e for non-compliant clients.
         val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
-                event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
+                event.tags.any { it.size >= 2 && (it[0] == "E" || it[0] == "e") && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
-        // NIP-18: kind-6/16 reposts reference the reposted note via e-tag but many clients
-        // don't include a p-tag for the original author. Check if the reposted note is ours.
         val hasRepostETag = event.kind in setOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST) &&
                 isRepostOfOurNote(event, pubkey)
         if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag) return
@@ -1022,9 +1022,9 @@ class NotificationsRepository(
     fun ingestEventAsHistorical(event: Event) {
         if (event.kind !in ACCEPTED_KINDS) return
         val pubkey = myPubkeyHex ?: return
-        val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
+        val hasPTag = event.tags.any { it.size >= 2 && (it[0] == "p" || it[0] == "P") && it[1] == pubkey }
         val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
-                event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
+                event.tags.any { it.size >= 2 && (it[0] == "E" || it[0] == "e") && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
         val hasRepostETag = event.kind in setOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST) &&
@@ -1054,12 +1054,13 @@ class NotificationsRepository(
         // Relays may return events that don't match our subscription filters
         // (buggy filter implementations, extra events, etc.). Validate that
         // the event actually references us before creating a notification.
-        val hasPTag = event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == pubkey }
+        // NIP-22 kind-1111 uses uppercase P for pubkeys; NIP-01 uses lowercase p.
+        val hasPTag = event.tags.any { it.size >= 2 && (it[0] == "p" || it[0] == "P") && it[1] == pubkey }
+        // NIP-22 kind-1111 uses uppercase E for root; also accept lowercase e for non-compliant clients.
         val hasETag = event.kind == NOTIFICATION_KIND_TOPIC_REPLY &&
-                event.tags.any { it.size >= 2 && it[0] == "E" && (it[1] in myTopicIds || it[1] in myNoteIds) }
+                event.tags.any { it.size >= 2 && (it[0] == "E" || it[0] == "e") && (it[1] in myTopicIds || it[1] in myNoteIds) }
         val hasQTag = event.kind == NOTIFICATION_KIND_TEXT &&
                 event.tags.any { it.size >= 2 && it[0] == "q" && it[1] in myNoteIds }
-        // NIP-18: kind-6/16 reposts reference our note via e-tag (p-tag is unreliable)
         val hasRepostETag = event.kind in setOf(NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST) &&
                 isRepostOfOurNote(event, pubkey)
         // For kind-1 replies: also accept if user is directly cited in content (mention)
@@ -2468,6 +2469,7 @@ class NotificationsRepository(
                     val rootAuthorHex = normalizeAuthorIdForCache(cached.author.id)
                     if (rootAuthorHex == myPubkeyHex) {
                         updated = updated.copy(
+                            type = NotificationType.REPLY,
                             replyKind = 11,
                             text = "${current.author?.displayName ?: "Someone"} replied to your thread"
                         )
@@ -2509,7 +2511,19 @@ class NotificationsRepository(
                                 )
                                 emitSorted(); return@launch
                             }
-                            notificationsById[notificationId] = update(current)(note)
+                            var updated = update(current)(note)
+                            // Kind-11 topic reclassification (same as fast path and batch path)
+                            if (current.replyKind == NOTIFICATION_KIND_TOPIC_REPLY && note.kind == 11 && myPubkeyHex != null) {
+                                val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
+                                if (rootAuthorHex == myPubkeyHex) {
+                                    updated = updated.copy(
+                                        type = NotificationType.REPLY,
+                                        replyKind = 11,
+                                        text = "${current.author?.displayName ?: "Someone"} replied to your thread"
+                                    )
+                                }
+                            }
+                            notificationsById[notificationId] = updated
                             emitSorted()
                         }
                         return@launch
@@ -2706,6 +2720,7 @@ class NotificationsRepository(
                         val rootAuthorHex = normalizeAuthorIdForCache(note.author.id)
                         if (rootAuthorHex == myPubkeyHex) {
                             updated = updated.copy(
+                                type = NotificationType.REPLY,
                                 replyKind = 11,
                                 text = "${current.author?.displayName ?: "Someone"} replied to your thread"
                             )

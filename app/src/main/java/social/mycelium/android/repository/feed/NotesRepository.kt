@@ -217,6 +217,11 @@ class NotesRepository private constructor() {
     /**
      * Drain all pending kind-1 events, convert to Notes, deduplicate, and merge into the
      * notes list with a single sort + emit. This replaces the old per-event mutex+sort pattern.
+     *
+     * Runs under [processEventMutex] to serialize against [handleKind6Repost] and
+     * [updateAuthorsInNotesBatch], which also mutate [feedIndex] (a plain HashMap).
+     * Without this lock, concurrent reads/writes to feedIndex.byId would cause
+     * ConcurrentModificationException.
      */
     private suspend fun flushKind1Events() {
         val batch = mutableListOf<PendingKind1Event>()
@@ -239,6 +244,7 @@ class NotesRepository private constructor() {
 
         val flushStartMs = System.currentTimeMillis()
         android.os.Trace.beginSection("NotesRepo.flushKind1Events(${batch.size})")
+        processEventMutex.withLock {
         try {
             // Convert all events to Notes (no lock needed — convertEventToNote is stateless except profile cache)
             val newNotes = mutableListOf<Note>()
@@ -687,6 +693,7 @@ class NotesRepository private constructor() {
             if (BuildConfig.DEBUG) PipelineDiagnostics.logSummary(TAG)
             android.os.Trace.endSection()
         }
+        } // processEventMutex.withLock
     }
 
     /** Schedule a debounced NIP-11 preload for relay URLs seen in feed notes.
@@ -1500,23 +1507,36 @@ class NotesRepository private constructor() {
             // tracker, but Note objects only capture the relay from their first
             // delivery. This pass merges accumulated tracker URLs back into Notes
             // so relay orbs grow as duplicates arrive from additional relays.
-            // Lightweight: only copies Note objects that actually gained new URLs.
+            //
+            // Optimization: sample the first 10 notes to check if ANY enrichment
+            // is likely. If none of the sampled notes gained URLs, skip the full
+            // O(n) pass entirely. This avoids 5000+ iterations every 150ms during
+            // high-throughput ingestion when no relay merges are pending.
             val preEnrich = _notes.value
-            var enrichedCount = 0
-            val enriched = preEnrich.map { note ->
+            val sampleSize = minOf(10, preEnrich.size)
+            val sampleHasEnrichment = (0 until sampleSize).any { i ->
+                val note = preEnrich[i]
                 val noteId = note.originalNoteId ?: note.id
-                // Strip "repost:" prefix for tracker lookup (tracker stores raw event IDs)
                 val trackerId = if (noteId.startsWith("repost:")) noteId.removePrefix("repost:") else noteId
                 val existing = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                val merged = EventRelayTracker.enrichRelayUrls(trackerId, existing)
-                if (merged.size > existing.size) {
-                    enrichedCount++
-                    note.copy(relayUrls = merged)
-                } else note
+                EventRelayTracker.enrichRelayUrls(trackerId, existing).size > existing.size
             }
-            if (enrichedCount > 0) {
-                setNotes(enriched.toImmutableList())
-                Log.d(TAG, "\uD83D\uDD35 Tracker enrichment: $enrichedCount notes gained relay URLs")
+            if (sampleHasEnrichment) {
+                var enrichedCount = 0
+                val enriched = preEnrich.map { note ->
+                    val noteId = note.originalNoteId ?: note.id
+                    val trackerId = if (noteId.startsWith("repost:")) noteId.removePrefix("repost:") else noteId
+                    val existing = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    val merged = EventRelayTracker.enrichRelayUrls(trackerId, existing)
+                    if (merged.size > existing.size) {
+                        enrichedCount++
+                        note.copy(relayUrls = merged)
+                    } else note
+                }
+                if (enrichedCount > 0) {
+                    setNotes(enriched.toImmutableList())
+                    Log.d(TAG, "\uD83D\uDD35 Tracker enrichment: $enrichedCount notes gained relay URLs")
+                }
             }
 
             // Pre-build a combined set of raw + normalized URLs for O(1) lookup (avoids per-note normalization)

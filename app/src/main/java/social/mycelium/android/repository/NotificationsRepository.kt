@@ -86,6 +86,9 @@ class NotificationsRepository(
         private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 4000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
 
+        /** Maximum notifications kept in memory. Oldest are evicted during [emitSortedImmediate]. */
+        private const val MAX_NOTIFICATIONS = 3000
+
         /** Maximum time to wait for profile/enrichment data before firing the notification anyway. */
         private const val ENRICHMENT_WAIT_MS = 3000L
         private const val ENRICHMENT_POLL_MS = 200L
@@ -197,8 +200,33 @@ class NotificationsRepository(
     val notifications: StateFlow<List<NotificationData>> = _notifications.asStateFlow()
 
     /** IDs of notifications the user has "seen" (opened notifications screen or tapped one). Badge and dropdown use unseen count. */
+    /** Thread-safe backing set for seen notification IDs.
+     *  Replaces the old MutableStateFlow<Set<String>> pattern which suffered from
+     *  a non-atomic read-modify-write race: concurrent `_seenIds.value = _seenIds.value + id`
+     *  would silently drop additions under high throughput.
+     *  All mutations go through [addSeenId] / [addSeenIds] which atomically add to the
+     *  backing ConcurrentHashMap and then snapshot into the StateFlow for UI observers. */
+    private val _seenIdsBacking = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     private val _seenIds = MutableStateFlow<Set<String>>(emptySet())
     val seenIds: StateFlow<Set<String>> = _seenIds.asStateFlow()
+
+    /** Atomically add a single seen ID. Thread-safe, no lost updates. */
+    private fun addSeenId(id: String) {
+        if (_seenIdsBacking.add(id)) {
+            _seenIds.value = _seenIdsBacking.toSet()
+        }
+    }
+
+    /** Atomically add multiple seen IDs. Thread-safe, emits once. */
+    private fun addSeenIds(ids: Collection<String>) {
+        var added = false
+        for (id in ids) {
+            if (_seenIdsBacking.add(id)) added = true
+        }
+        if (added) {
+            _seenIds.value = _seenIdsBacking.toSet()
+        }
+    }
 
     /** Suppresses unseen count during initial relay replay so the badge doesn't flicker
      *  as historical events arrive before the markAllSeen watermark auto-marks them. */
@@ -499,7 +527,7 @@ class NotificationsRepository(
      *  Also sets a watermark timestamp so that historical events arriving later (e.g. Phase 3
      *  thread replies / quotes) are auto-marked as seen without requiring another button press. */
     fun markAllAsSeen() {
-        _seenIds.value = _seenIds.value + _notifications.value.mapTo(mutableSetOf()) { it.id }
+        addSeenIds(_notifications.value.map { it.id })
         markAllSeenEpochMs = System.currentTimeMillis()
         scope.launch(Dispatchers.IO) {
             prefs?.edit()?.putLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, markAllSeenEpochMs)?.apply()
@@ -522,7 +550,7 @@ class NotificationsRepository(
 
     /** Mark one notification as seen (e.g. when user taps it to open thread). */
     fun markAsSeen(notificationId: String) {
-        _seenIds.value = _seenIds.value + notificationId
+        addSeenId(notificationId)
         cancelSystemNotification(notificationId)
         persistSeenIds()
     }
@@ -531,7 +559,7 @@ class NotificationsRepository(
     fun markAsSeenByType(type: NotificationType) {
         val idsForType = _notifications.value.filter { it.type == type }.map { it.id }.toSet()
         if (idsForType.isNotEmpty()) {
-            _seenIds.value = _seenIds.value + idsForType
+            addSeenIds(idsForType)
             idsForType.forEach { cancelSystemNotification(it) }
             persistSeenIds()
         }
@@ -576,9 +604,9 @@ class NotificationsRepository(
     /** Trim seen IDs to only include IDs that still exist in the current notification list (prevents unbounded growth). */
     private fun trimSeenIds() {
         val currentIds = _notifications.value.mapTo(mutableSetOf()) { it.id }
-        val trimmed = _seenIds.value.intersect(currentIds)
-        if (trimmed.size != _seenIds.value.size) {
-            _seenIds.value = trimmed
+        val removed = _seenIdsBacking.retainAll(currentIds)
+        if (removed) {
+            _seenIds.value = _seenIdsBacking.toSet()
             persistSeenIds()
         }
     }
@@ -597,7 +625,7 @@ class NotificationsRepository(
         seenIdsPersistJob?.cancel()
         seenIdsPersistJob = scope.launch(Dispatchers.IO) {
             delay(500L) // Debounce: batch rapid seen changes
-            val ids = _seenIds.value
+            val ids = _seenIdsBacking.toSet()
             // Cap at MAX to prevent SharedPreferences from growing unbounded
             val toSave = if (ids.size > MAX_PERSISTED_SEEN_IDS) {
                 // Keep the most recent IDs (intersection with current notifications)
@@ -612,7 +640,8 @@ class NotificationsRepository(
     private fun restoreSeenIds() {
         val saved = prefs?.getStringSet(PREFS_KEY_SEEN_IDS_SET, null)
         if (saved != null && saved.isNotEmpty()) {
-            _seenIds.value = saved.toSet()
+            _seenIdsBacking.addAll(saved)
+            _seenIds.value = _seenIdsBacking.toSet()
             Log.d(TAG, "Restored ${saved.size} seen IDs from disk")
         }
     }
@@ -981,7 +1010,7 @@ class NotificationsRepository(
                 isRepostOfOurNote(event, pubkey)
         if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag) return
         // Suppress push notification by pre-marking the event ID as seen
-        _seenIds.value = _seenIds.value + event.id
+        addSeenId(event.id)
         handleEvent(event)
     }
 
@@ -1048,7 +1077,7 @@ class NotificationsRepository(
         )
         val watermark = markAllSeenEpochMs
         if (watermark > 0 && ts <= watermark && !isConsolidatedKind) {
-            _seenIds.value = _seenIds.value + event.id
+            addSeenId(event.id)
         }
         when (event.kind) {
             NOTIFICATION_KIND_REACTION -> handleLike(event, author, ts)
@@ -1099,7 +1128,7 @@ class NotificationsRepository(
         // Each unique emoji gets its own row per target note, so ❤️ and 🔥
         // on the same note appear as separate notification lines.
         val consolidatedId = "like:$eTag:$emoji"
-        val shouldAutoMark = (event.id in _seenIds.value) ||
+        val shouldAutoMark = (event.id in _seenIdsBacking) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
@@ -1135,7 +1164,7 @@ class NotificationsRepository(
                 )
             }
         }
-        if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
+        if (shouldAutoMark) addSeenId(consolidatedId)
         emitSorted()
         fireAndroidNotification(
             NotificationType.LIKE,
@@ -1703,7 +1732,7 @@ class NotificationsRepository(
         val targetNote = parseRepostedNoteFromContent(event.content)
         // ── Consolidated: one notification per reposted note ──
         val consolidatedId = "repost:$repostedNoteId"
-        val shouldAutoMark = (event.id in _seenIds.value) ||
+        val shouldAutoMark = (event.id in _seenIdsBacking) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
@@ -1733,7 +1762,7 @@ class NotificationsRepository(
                 )
             }
         }
-        if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
+        if (shouldAutoMark) addSeenId(consolidatedId)
         emitSorted()
         fireAndroidNotification(
             NotificationType.REPOST,
@@ -1789,7 +1818,7 @@ class NotificationsRepository(
             DirectMessageRepository.isKnownGiftWrapId(eTag)
         // ── Consolidated: one notification per zapped note ──
         val consolidatedId = "zap:$eTag"
-        val shouldAutoMark = (event.id in _seenIds.value) ||
+        val shouldAutoMark = (event.id in _seenIdsBacking) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
@@ -1827,7 +1856,7 @@ class NotificationsRepository(
                 )
             }
         }
-        if (shouldAutoMark) _seenIds.value = _seenIds.value + consolidatedId
+        if (shouldAutoMark) addSeenId(consolidatedId)
         emitSorted()
         fireAndroidNotification(
             NotificationType.ZAP,
@@ -2029,9 +2058,22 @@ class NotificationsRepository(
         }
     }
 
-    /** Immediate (non-debounced) emit. Used after critical state changes. */
+    /** Immediate (non-debounced) emit. Used after critical state changes.
+     *  Caps the in-memory map at [MAX_NOTIFICATIONS] to prevent unbounded growth
+     *  during deep history replay (DeepHistoryFetcher can replay 5 years of events). */
     private fun emitSortedImmediate() {
         emitDirty = false
+        // Cap: if the map has grown beyond the limit, trim oldest entries.
+        // This prevents O(n log n) sort from growing unboundedly and avoids
+        // OOM on accounts with deep history.
+        if (notificationsById.size > MAX_NOTIFICATIONS) {
+            val sorted = notificationsById.values.sortedByDescending { it.sortTimestamp }
+            val toRemove = sorted.drop(MAX_NOTIFICATIONS)
+            for (item in toRemove) {
+                notificationsById.remove(item.id)
+            }
+            Log.d(TAG, "Trimmed ${toRemove.size} oldest notifications (was ${sorted.size}, now $MAX_NOTIFICATIONS)")
+        }
         val sorted = notificationsById.values
             .sortedByDescending { it.sortTimestamp }
             .toList()
@@ -2041,13 +2083,14 @@ class NotificationsRepository(
         // is a historical replay and should be considered already seen.
         val cutoff = markAllSeenEpochMs
         if (cutoff > 0) {
-            val currentSeen = _seenIds.value
-            val autoSeen = sorted.filter { it.sortTimestamp <= cutoff && it.id !in currentSeen }.map { it.id }.toSet()
+            val autoSeen = sorted.filter { it.sortTimestamp <= cutoff && it.id !in _seenIdsBacking }.map { it.id }
             if (autoSeen.isNotEmpty()) {
-                _seenIds.value = currentSeen + autoSeen
+                addSeenIds(autoSeen)
             }
         }
     }
+
+
 
     // ── Batched profile resolution (Item 2) ──────────────────────────────────
     // Instead of launching individual coroutines per event that each wait 3s,

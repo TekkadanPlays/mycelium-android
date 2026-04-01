@@ -101,6 +101,9 @@ class FeedIndex {
  * Replaces O(p) `_pendingNewNotes.indexOfFirst { it.id == ... }` scans
  * and `_pendingNewNotes.map { it.id }.toSet()` rebuilds.
  *
+ * Uses reference counting for repost originals so [removeById] is O(1)
+ * instead of scanning all pending notes.
+ *
  * Synchronized externally via `pendingNotesLock` (same as `_pendingNewNotes`).
  */
 class PendingIndex {
@@ -110,20 +113,30 @@ class PendingIndex {
     /** O(1) repost dedup: set of originalNoteIds in pending. */
     val repostOriginals = HashSet<String>(256)
 
+    /** Reference count per originalNoteId — tracks how many pending notes share this origId.
+     *  When count drops to 0, the origId is removed from [repostOriginals]. O(1) removal. */
+    private val repostOriginalRefCounts = HashMap<String, Int>(256)
+
     /** IDs as a read-only set (for `pendingIds.contains()`). */
     val ids: Set<String> get() = byId.keys
 
     fun addNote(note: Note) {
         byId[note.id] = note
-        note.originalNoteId?.let { repostOriginals.add(it) }
+        note.originalNoteId?.let { origId ->
+            repostOriginals.add(origId)
+            repostOriginalRefCounts[origId] = (repostOriginalRefCounts[origId] ?: 0) + 1
+        }
     }
 
     fun removeById(noteId: String) {
         val removed = byId.remove(noteId)
         removed?.originalNoteId?.let { origId ->
-            // Only remove from repostOriginals if no other pending note shares this origId
-            if (byId.values.none { it.originalNoteId == origId }) {
+            val count = (repostOriginalRefCounts[origId] ?: 1) - 1
+            if (count <= 0) {
                 repostOriginals.remove(origId)
+                repostOriginalRefCounts.remove(origId)
+            } else {
+                repostOriginalRefCounts[origId] = count
             }
         }
     }
@@ -135,6 +148,7 @@ class PendingIndex {
     fun clear() {
         byId.clear()
         repostOriginals.clear()
+        repostOriginalRefCounts.clear()
     }
 
     fun rebuild(notes: List<Note>) {

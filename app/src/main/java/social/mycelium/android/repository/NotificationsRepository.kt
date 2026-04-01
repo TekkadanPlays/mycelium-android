@@ -831,6 +831,9 @@ class NotificationsRepository(
             kotlinx.coroutines.withTimeoutOrNull(SWEEP_FALLBACK_DELAY_MS) { phase1Eose.await() }
             val topicIds = fetchUserTopicIds(pubkey, allRelays, null)
             myTopicIds.addAll(topicIds)
+            // Reclassify Phase 1 kind-1111 events that were marked as COMMENT because
+            // myTopicIds was empty. Now that topic IDs are known, promote them to thread REPLY.
+            reclassifyTopicReplies()
             val noteIdsFromRelays = fetchUserNoteIds(pubkey, allRelays, null)
             val noteIds = mergeNoteIdsWithFeedCache(pubkey, noteIdsFromRelays)
             myNoteIds.addAll(noteIds)
@@ -1320,6 +1323,41 @@ class NotificationsRepository(
         }
         if (reclassified > 0) {
             Log.d(TAG, "reclassifyQuotes: reclassified $reclassified replies → quotes")
+            emitSorted()
+        }
+    }
+
+    /**
+     * Phase 3 reclassification: kind-1111 events that arrived during Phase 1 are classified as
+     * COMMENT (replyKind=1111) because myTopicIds was empty. After Phase 3 populates myTopicIds,
+     * sweep all COMMENT notifications whose rootNoteId is now in myTopicIds and reclassify them
+     * as thread REPLY (replyKind=11) so they appear in the Threads tab.
+     *
+     * Also catches kind-1111 notifications with replyKind=1111 and type=REPLY that were created
+     * by handleTopicReply with isOurTopic=false (e.g. events that arrived before myTopicIds was populated).
+     */
+    private fun reclassifyTopicReplies() {
+        if (myTopicIds.isEmpty()) return
+        var reclassified = 0
+        for ((id, data) in notificationsById) {
+            val rootId = data.rootNoteId ?: continue
+            if (rootId !in myTopicIds) continue
+            // Already correctly classified as thread reply
+            if (data.type == NotificationType.REPLY && data.replyKind == 11) continue
+            // Reclassify COMMENT → REPLY (thread reply), or REPLY with wrong replyKind
+            if (data.type == NotificationType.COMMENT || 
+                (data.type == NotificationType.REPLY && data.replyKind != 11 && data.replyKind != null && data.replyKind != 1)) {
+                val authorName = data.author?.displayName ?: "Someone"
+                notificationsById[id] = data.copy(
+                    type = NotificationType.REPLY,
+                    replyKind = 11,
+                    text = "$authorName replied to your thread"
+                )
+                reclassified++
+            }
+        }
+        if (reclassified > 0) {
+            Log.d(TAG, "reclassifyTopicReplies: reclassified $reclassified comments → thread replies")
             emitSorted()
         }
     }

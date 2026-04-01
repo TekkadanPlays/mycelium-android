@@ -69,6 +69,9 @@ data class CachedNotificationEntity(
     val targetNoteContent: String? = null,
     /** Pubkey of the target note's author for proper profile reconstruction on cold start. */
     val targetNoteAuthorId: String? = null,
+    // ── Verification ──
+    /** VerificationStatus.name (PENDING, VERIFIED, UNVERIFIED, EXHAUSTED, IRRELEVANT). */
+    val verificationStatus: String = "PENDING",
     // ── Metadata ──
     val cachedAt: Long = System.currentTimeMillis(),
 )

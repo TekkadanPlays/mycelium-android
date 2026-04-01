@@ -59,7 +59,14 @@ data class NotificationData(
     val pollIsMultipleChoice: Boolean = false,
     /** Raw event content before nostr:npub→@name resolution. Used by flushTargetFetchBatch
      *  to detect mentions via isUserCitedInContent (which needs the original nostr: URIs). */
-    val rawContent: String? = null
+    val rawContent: String? = null,
+    /** Target note verification status. Replaces destructive removal:
+     *  - PENDING: not yet fetched/verified (default)
+     *  - VERIFIED: target note confirmed as ours
+     *  - UNVERIFIED: target note author doesn't match (hidden from UI, retained for re-verification)
+     *  - EXHAUSTED: fetch retries exhausted, keep without preview
+     *  - IRRELEVANT: not applicable (replies, quotes, etc. that don't need target verification) */
+    val verificationStatus: VerificationStatus = VerificationStatus.PENDING
 )
 
 enum class NotificationType {
@@ -75,4 +82,24 @@ enum class NotificationType {
     QUOTE,
     BADGE_AWARD,
     POLL_VOTE
+}
+
+/**
+ * Target note verification status for notifications that reference another event.
+ *
+ * Replaces the old pattern of destructively removing notifications from `notificationsById`
+ * when target note verification fails. UNVERIFIED notifications are retained in the map
+ * (for later re-verification) but filtered out at the UI layer.
+ */
+enum class VerificationStatus {
+    /** Target note not yet fetched/verified. Default for all newly created notifications. */
+    PENDING,
+    /** Target note fetched and confirmed as authored by the current user. */
+    VERIFIED,
+    /** Target note fetched but author doesn't match. Hidden from UI, retained for re-verification. */
+    UNVERIFIED,
+    /** Fetch retries exhausted. Kept without target note preview. */
+    EXHAUSTED,
+    /** Not applicable — notification types that don't need target verification (replies, quotes, etc.). */
+    IRRELEVANT,
 }

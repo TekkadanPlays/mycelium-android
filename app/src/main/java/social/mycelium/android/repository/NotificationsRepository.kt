@@ -6,6 +6,7 @@ import android.util.Log
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.NotificationData
 import social.mycelium.android.data.NotificationType
+import social.mycelium.android.data.VerificationStatus
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.utils.normalizeAuthorIdForCache
@@ -255,8 +256,12 @@ class NotificationsRepository(
         "wss://nostr.mom", "wss://relay.nostr.band",
     )
 
-    /** Event IDs already processed — prevents re-processing on relay reconnect (which replays all stored events). */
-    private val seenEventIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    // seenEventIds REMOVED — handleEvent is idempotent for all types:
+    // - Non-consolidated (replies/quotes/comments): notificationsById[event.id] = data is an overwrite
+    // - Consolidated (likes/zaps/reposts): actorPubkeys.distinct() handles re-processing
+    // The SubscriptionMultiplexer's per-merged-subscription dedup (10K cap) still prevents
+    // identical events from the same relay session from wastefully double-processing.
+    // Removing this layer allows Phase 3 events to re-enter when classification context changes.
 
     // ── Summary counts (today) ──────────────────────────────────────────────
     private val _todayReplies = MutableStateFlow(0)
@@ -707,7 +712,6 @@ class NotificationsRepository(
         _replaySettled.value = false
         if (isNewUser) {
             notificationsById.clear()
-            seenEventIds.clear()
             myTopicIds.clear()
             myNoteIds.clear()
             kind1EventTags.clear()
@@ -1037,8 +1041,6 @@ class NotificationsRepository(
 
     private fun handleEvent(event: Event) {
         if (event.kind !in ACCEPTED_KINDS) return
-        // Deduplicate: check if already processed (but don't add yet — see below)
-        if (event.id in seenEventIds) return
         val pubkey = myPubkeyHex ?: return
         // ── STRICT OWNER GATE ──────────────────────────────────────────
         // This instance only processes events for ownerPubkeyHex.
@@ -1067,16 +1069,8 @@ class NotificationsRepository(
         val isCitedInContent = event.kind == NOTIFICATION_KIND_TEXT &&
                 isUserCitedInContent(event.content, pubkey)
         if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag && !isCitedInContent) {
-            // Don't add to seenEventIds here — the event may become relevant after
-            // Phase 3 populates myNoteIds (e.g. kind-6 reposts without p-tag arriving
-            // during Phase 1 when myNoteIds is empty). Allowing re-evaluation lets
-            // Phase 3's replay deliver events that were initially irrelevant.
             return
         }
-        // ── Now commit the dedup marker ──────────────────────────────────────
-        // The event passed the relevance gate — mark it as processed so relay
-        // reconnects that replay stored events don't create duplicate notifications.
-        if (!seenEventIds.add(event.id)) return
         // Skip notifications from muted/blocked users
         if (MuteListRepository.isHidden(event.pubKey)) return
         val profileIsCached = profileCache.getAuthor(event.pubKey) != null
@@ -1092,17 +1086,20 @@ class NotificationsRepository(
 
     private fun dispatchEvent(event: Event, author: Author) {
         val ts = event.createdAt * 1000L
-        // Auto-mark as seen if this event arrived after the user pressed "Read All".
-        // Phase 3 (kind-1111 thread replies) can deliver events seconds after the
-        // watermark was set — pre-adding the ID prevents them from appearing as unread.
-        // For consolidated types (like/zap/repost), the handlers mark the consolidated
-        // ID themselves since event.id != notification ID for those types.
+        // ── Auto-seen during initial replay ──────────────────────────────────
+        // Before enableAndroidNotifications() is called, sessionStartEpochSec == MAX_VALUE.
+        // ALL events arriving during this window are historical relay replays —
+        // auto-mark them as seen so the badge doesn't show 100+ "unread" on startup.
+        // Only events that arrive AFTER enableAndroidNotifications() sets the cutoff
+        // will be treated as genuinely new (unseen) notifications.
         val isConsolidatedKind = event.kind in setOf(
             NOTIFICATION_KIND_REACTION, NOTIFICATION_KIND_REPOST,
             NOTIFICATION_KIND_GENERIC_REPOST, NOTIFICATION_KIND_ZAP
         )
+        val isReplayPhase = sessionStartEpochSec == Long.MAX_VALUE
         val watermark = markAllSeenEpochMs
-        if (watermark > 0 && ts <= watermark && !isConsolidatedKind) {
+        val shouldAutoMark = isReplayPhase || (watermark > 0 && ts <= watermark)
+        if (shouldAutoMark && !isConsolidatedKind) {
             addSeenId(event.id)
         }
         when (event.kind) {
@@ -1155,6 +1152,7 @@ class NotificationsRepository(
         // on the same note appear as separate notification lines.
         val consolidatedId = "like:$eTag:$emoji"
         val shouldAutoMark = (event.id in _seenIdsBacking) ||
+                (sessionStartEpochSec == Long.MAX_VALUE) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
@@ -1794,6 +1792,7 @@ class NotificationsRepository(
         // ── Consolidated: one notification per reposted note ──
         val consolidatedId = "repost:$repostedNoteId"
         val shouldAutoMark = (event.id in _seenIdsBacking) ||
+                (sessionStartEpochSec == Long.MAX_VALUE) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
@@ -1892,6 +1891,7 @@ class NotificationsRepository(
         // ── Consolidated: one notification per zapped note ──
         val consolidatedId = "zap:$eTag"
         val shouldAutoMark = (event.id in _seenIdsBacking) ||
+                (sessionStartEpochSec == Long.MAX_VALUE) ||
                 (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
@@ -2153,6 +2153,7 @@ class NotificationsRepository(
     private fun emitSortedImmediate() {
         emitDirty = false
         val sorted = notificationsById.values
+            .filter { it.verificationStatus != social.mycelium.android.data.VerificationStatus.UNVERIFIED }
             .sortedByDescending { it.sortTimestamp }
             .toList()
         _notifications.value = sorted
@@ -2339,6 +2340,7 @@ class NotificationsRepository(
             rawContent = rawContent,
             noteContent = note?.content,
             targetNoteContent = targetNote?.content,
+            verificationStatus = verificationStatus.name,
         )
     }
 
@@ -2418,6 +2420,7 @@ class NotificationsRepository(
             pollAllOptions = pollAllOptionsJson?.let { try { json.decodeFromString(listSerializer, it) } catch (_: Exception) { emptyList<String>() } } ?: emptyList(),
             pollIsMultipleChoice = pollIsMultipleChoice,
             rawContent = rawContent,
+            verificationStatus = try { social.mycelium.android.data.VerificationStatus.valueOf(verificationStatus) } catch (_: Exception) { social.mycelium.android.data.VerificationStatus.PENDING },
         )
     }
 
@@ -2439,7 +2442,9 @@ class NotificationsRepository(
                 val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
                 // Verify relevance (same logic as flushTargetFetchBatch Step 3)
                 if (current.type == NotificationType.LIKE && !isOurNote) {
-                    notificationsById.remove(notificationId)
+                    notificationsById[notificationId] = current.copy(
+                        verificationStatus = social.mycelium.android.data.VerificationStatus.UNVERIFIED
+                    )
                     emitSorted()
                     return
                 }
@@ -2453,7 +2458,9 @@ class NotificationsRepository(
                     val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
                             isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                     if (!isCited) {
-                        notificationsById.remove(notificationId)
+                        notificationsById[notificationId] = current.copy(
+                            verificationStatus = social.mycelium.android.data.VerificationStatus.UNVERIFIED
+                        )
                         emitSorted()
                         return
                     }
@@ -2475,7 +2482,9 @@ class NotificationsRepository(
                         )
                     }
                 }
-                notificationsById[notificationId] = updated
+                notificationsById[notificationId] = updated.copy(
+                    verificationStatus = social.mycelium.android.data.VerificationStatus.VERIFIED
+                )
                 emitSorted()
                 return
             }
@@ -2495,7 +2504,9 @@ class NotificationsRepository(
                             val targetAuthorHex = normalizeAuthorIdForCache(note.author.id)
                             val isOurNote = myPubkeyHex != null && targetAuthorHex == myPubkeyHex
                             if (current.type == NotificationType.LIKE && !isOurNote) {
-                                notificationsById.remove(notificationId); emitSorted(); return@launch
+                                notificationsById[notificationId] = current.copy(
+                                    verificationStatus = social.mycelium.android.data.VerificationStatus.UNVERIFIED
+                                ); emitSorted(); return@launch
                             }
                             // REPOST: skip removal — upstream validation already confirmed relevance
                             if (current.type == NotificationType.REPLY && current.replyKind == NOTIFICATION_KIND_TEXT && !isOurNote) {
@@ -2503,7 +2514,9 @@ class NotificationsRepository(
                                 val isCited = myPubkeyHex != null && contentToCheck.isNotBlank() &&
                                         isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                                 if (!isCited) {
-                                    notificationsById.remove(notificationId); emitSorted(); return@launch
+                                    notificationsById[notificationId] = current.copy(
+                                        verificationStatus = social.mycelium.android.data.VerificationStatus.UNVERIFIED
+                                    ); emitSorted(); return@launch
                                 }
                                 notificationsById[notificationId] = current.copy(
                                     type = NotificationType.MENTION,
@@ -2523,7 +2536,9 @@ class NotificationsRepository(
                                     )
                                 }
                             }
-                            notificationsById[notificationId] = updated
+                            notificationsById[notificationId] = updated.copy(
+                                verificationStatus = social.mycelium.android.data.VerificationStatus.VERIFIED
+                            )
                             emitSorted()
                         }
                         return@launch
@@ -2639,7 +2654,7 @@ class NotificationsRepository(
             }
 
             // ── Step 3: Apply fetched notes; verify reactions are to our notes ─
-            var removedCount = 0
+            var unverifiedCount = 0
             val retryQueue = mutableListOf<PendingTargetFetch>()
             for ((noteId, pendingList) in batch) {
                 val note = fetched[noteId]
@@ -2658,6 +2673,9 @@ class NotificationsRepository(
                             // p-tag filtering so it IS relevant) but without a target note preview.
                             // Previously we deleted likes/reposts here, causing silent notification loss.
                             targetFetchExhaustedIds.add(pending.notificationId)
+                            notificationsById[pending.notificationId] = current.copy(
+                                verificationStatus = social.mycelium.android.data.VerificationStatus.EXHAUSTED
+                            )
                             Log.d(
                                 TAG,
                                 "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview"
@@ -2687,8 +2705,10 @@ class NotificationsRepository(
 
                     // Kind-7 (like): only show if target note author is the current user
                     if (current.type == NotificationType.LIKE && !isOurNote) {
-                        notificationsById.remove(pending.notificationId)
-                        removedCount++
+                        notificationsById[pending.notificationId] = current.copy(
+                            verificationStatus = social.mycelium.android.data.VerificationStatus.UNVERIFIED
+                        )
+                        unverifiedCount++
                         continue
                     }
                     // Kind-6/16 (repost): skip removal — upstream relay p-tag or
@@ -2703,8 +2723,10 @@ class NotificationsRepository(
                         val isCitedInContent = myPubkeyHex != null && contentToCheck.isNotBlank() &&
                                 isUserCitedInContent(contentToCheck, myPubkeyHex!!)
                         if (!isCitedInContent) {
-                            notificationsById.remove(pending.notificationId)
-                            removedCount++
+                            notificationsById[pending.notificationId] = current.copy(
+                                verificationStatus = social.mycelium.android.data.VerificationStatus.UNVERIFIED
+                            )
+                            unverifiedCount++
                             continue
                         }
                         // Parent isn't ours but we're cited → reclassify as MENTION (not a direct reply)
@@ -2726,10 +2748,12 @@ class NotificationsRepository(
                             )
                         }
                     }
-                    notificationsById[pending.notificationId] = updated
+                    notificationsById[pending.notificationId] = updated.copy(
+                        verificationStatus = social.mycelium.android.data.VerificationStatus.VERIFIED
+                    )
                 }
             }
-            if (removedCount > 0) Log.d(TAG, "Removed $removedCount false-positive notifications after target fetch")
+            if (unverifiedCount > 0) Log.d(TAG, "Marked $unverifiedCount false-positive notifications as UNVERIFIED after target fetch")
             emitSorted()
             // Re-queue unfetched reactions/reposts for a retry with longer timeout
             if (retryQueue.isNotEmpty()) {

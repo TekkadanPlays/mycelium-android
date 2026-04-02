@@ -135,6 +135,16 @@ class NotesRepository private constructor() {
     /** Timestamp of the last _notes.value emission — used to enforce MIN_EMISSION_INTERVAL_MS. */
     @Volatile private var lastEmissionMs = 0L
 
+    // ── Viewport-aware enrichment ────────────────────────────────────────────
+    /** Number of notes treated as "viewport" for prioritized enrichment.
+     *  These notes get NORMAL-priority counts subscriptions and are enriched
+     *  before off-screen content. Covers ~2 screens of typical card height. */
+    private val VIEWPORT_ENRICHMENT_SIZE = 15
+    /** Delay (ms) before firing background enrichment after viewport enrichment.
+     *  Gives viewport subscriptions time to claim relay slots before background
+     *  content competes for the same slots. */
+    private val BACKGROUND_ENRICHMENT_DELAY_MS = 100L
+
     private val outboxFeedManager = OutboxFeedManager.getInstance()
     private val globalFeedManager = GlobalFeedManager.getInstance()
 
@@ -719,27 +729,82 @@ class NotesRepository private constructor() {
 
     /**
      * Fire counts, quoted-note, and URL preview enrichment for a batch of notes.
-     * Extracted from flushKind1Events so it can be called both inline (steady-state)
-     * and from [fireDeferredEnrichment] (after burst drains).
+     *
+     * ## Timestamp-ordered tiered enrichment
+     *
+     * Notes are sorted by timestamp descending (newest first = top of feed) and
+     * split into two tiers:
+     *
+     * **Viewport (top [VIEWPORT_ENRICHMENT_SIZE])** — what the user actually sees:
+     * - Counts subscription at NORMAL priority (fires immediately, no debounce)
+     * - Quoted note prefetch fires first (processed serially → resolves first)
+     * - URL preview prefetch queued first (FIFO → dequeued first)
+     *
+     * **Background (rest)** — off-screen, can wait:
+     * - Counts subscription at LOW priority (debounced, existing behavior)
+     * - Quoted note + URL prefetch deferred by [BACKGROUND_ENRICHMENT_DELAY_MS]
+     *
+     * This provides **algorithmic certainty** of top-down feed population:
+     * the relay scheduler always gives viewport enrichment relay slots before
+     * background enrichment can compete for them.
      */
     private fun fireEnrichmentForNotes(notes: List<Note>) {
         if (notes.isEmpty()) return
-        val batchRelayMap = LinkedHashMap<String, List<String>>(notes.size)
+
+        // ── Sort by timestamp descending: newest (top of feed) first ──
+        val sorted = notes.sortedByDescending { it.timestamp }
+
+        // ── Split into viewport and background tiers ──
+        val viewport: List<Note>
+        val background: List<Note>
+        if (sorted.size > VIEWPORT_ENRICHMENT_SIZE) {
+            viewport = sorted.subList(0, VIEWPORT_ENRICHMENT_SIZE)
+            background = sorted.subList(VIEWPORT_ENRICHMENT_SIZE, sorted.size)
+        } else {
+            viewport = sorted
+            background = emptyList()
+        }
+
+        // ── Phase 1: Viewport — immediate, NORMAL priority ──
+        val viewportRelayMap = buildEnrichmentRelayMap(viewport)
+        NoteCountsRepository.setViewportNoteIds(viewportRelayMap)
+        QuotedNoteCache.prefetchForNotes(viewport)
+        scheduleUrlPreviewPrefetch(viewport)
+
+        // ── Phase 2: Background — deferred, LOW priority ──
+        if (background.isNotEmpty()) {
+            val backgroundRelayMap = buildEnrichmentRelayMap(background)
+            // Register background IDs for LOW-priority counts (debounced)
+            NoteCountsRepository.setNoteIdsOfInterest(backgroundRelayMap)
+            // Defer background quoted notes + URL previews so viewport
+            // subscriptions claim relay slots first
+            scope.launch {
+                delay(BACKGROUND_ENRICHMENT_DELAY_MS)
+                QuotedNoteCache.prefetchForNotes(background)
+                scheduleUrlPreviewPrefetch(background)
+            }
+        }
+    }
+
+    /** Build noteId → relay URLs map from a list of notes, including their quoted event IDs.
+     *  Preserves insertion order (LinkedHashMap) so timestamp ordering is maintained
+     *  through to the subscription layer. */
+    private fun buildEnrichmentRelayMap(notes: List<Note>): LinkedHashMap<String, List<String>> {
+        val map = LinkedHashMap<String, List<String>>(notes.size)
         for (note in notes) {
             val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
             val effectiveId = note.originalNoteId ?: note.id
-            if (effectiveId !in batchRelayMap) {
-                batchRelayMap[effectiveId] = relays
+            if (effectiveId !in map) {
+                map[effectiveId] = relays
             }
+            // Include quoted event IDs so counts for embedded notes resolve too
             note.quotedEventIds.forEach { qid ->
-                if (qid !in batchRelayMap) {
-                    batchRelayMap[qid] = relays
+                if (qid !in map) {
+                    map[qid] = relays
                 }
             }
         }
-        NoteCountsRepository.setNoteIdsOfInterest(batchRelayMap)
-        QuotedNoteCache.prefetchForNotes(notes)
-        scheduleUrlPreviewPrefetch(notes)
+        return map
     }
 
     /**

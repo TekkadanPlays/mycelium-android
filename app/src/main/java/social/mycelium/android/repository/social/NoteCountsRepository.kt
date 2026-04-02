@@ -162,9 +162,17 @@ object NoteCountsRepository {
     @Volatile
     private var lastSubscribedNoteIds: Set<String> = emptySet()
 
-    /** Active CybinRelayPool subscription handle for counts. Cancel before re-subscribing. */
+    /** Active CybinRelayPool subscription handle for background counts (LOW priority). */
     @Volatile
     private var countsSubscriptionHandle: TemporarySubscriptionHandle? = null
+
+    /** Viewport: top N notes visible in the feed.
+     *  These get a dedicated NORMAL-priority subscription that fires immediately
+     *  (no debounce) so counts for visible content resolve before off-screen data. */
+    @Volatile
+    private var viewportNoteRelays: Map<String, List<String>> = emptyMap()
+    @Volatile
+    private var viewportCountsHandle: TemporarySubscriptionHandle? = null
 
     /** Debounce job so rapid note-ID changes don't thrash subscriptions. */
     private var debounceJob: Job? = null
@@ -243,6 +251,80 @@ object NoteCountsRepository {
             // all in one shot — no Phase 1/Phase 2 split, no extra delays.
             updateCountsSubscription(overrideMerged = snapshot)
         }
+    }
+
+    /**
+     * Set note IDs for the viewport (top of feed, visible to user).
+     * Creates a dedicated NORMAL-priority subscription that fires **immediately**
+     * without debounce. This ensures counts for visible notes resolve before the
+     * background LOW-priority subscription for off-screen content.
+     *
+     * Called by [NotesRepository.fireEnrichmentForNotes] with the top N notes
+     * sorted by timestamp descending.
+     */
+    fun setViewportNoteIds(noteRelays: Map<String, List<String>>) {
+        if (noteRelays.isEmpty()) return
+        // Skip if exact same viewport IDs
+        if (noteRelays.keys == viewportNoteRelays.keys) return
+        viewportNoteRelays = noteRelays
+        Log.d(TAG, "setViewportNoteIds: ${noteRelays.size} viewport notes (NORMAL priority, immediate)")
+        updateViewportSubscription()
+    }
+
+    /**
+     * Create/replace the viewport counts subscription at NORMAL priority.
+     * Runs the same filter logic as [updateCountsSubscription] but:
+     * - NORMAL priority (vs LOW for background)
+     * - No debounce (fires immediately)
+     * - Smaller filter set (only viewport IDs)
+     */
+    private fun updateViewportSubscription() {
+        viewportCountsHandle?.cancel()
+        val validMerged = viewportNoteRelays.filterKeys { HEX_ID_REGEX.matches(it) }
+        if (validMerged.isEmpty()) return
+
+        // Build per-relay note ID groups
+        val perRelayNoteIds = mutableMapOf<String, MutableSet<String>>()
+        for ((noteId, relayUrls) in validMerged) {
+            for (url in relayUrls.ifEmpty { FALLBACK_RELAYS }) {
+                perRelayNoteIds.getOrPut(url) { mutableSetOf() }.add(noteId)
+            }
+        }
+
+        val cappedPerRelay = if (perRelayNoteIds.size > MAX_COUNTS_RELAYS) {
+            perRelayNoteIds.entries
+                .sortedByDescending { it.value.size }
+                .take(MAX_COUNTS_RELAYS)
+                .associate { it.key to it.value }
+        } else perRelayNoteIds
+
+        // Build per-relay filters — proportional limits for the small viewport set
+        val relayFilters = mutableMapOf<String, List<Filter>>()
+        for ((relayUrl, noteIds) in cappedPerRelay) {
+            val noteIdList = noteIds.toList()
+            if (noteIdList.isEmpty()) continue
+            val eTags = mapOf("e" to noteIdList)
+            relayFilters[relayUrl] = listOf(
+                Filter(kinds = listOf(1), tags = eTags, limit = 200),
+                Filter(kinds = listOf(6), tags = eTags, limit = 100),
+                Filter(kinds = listOf(7), tags = eTags, limit = 200),
+                Filter(kinds = listOf(9735), tags = eTags, limit = 100),
+                Filter(kinds = listOf(30011), tags = eTags, limit = 200)
+            )
+        }
+
+        val rsm = RelayConnectionStateMachine.getInstance()
+        viewportCountsHandle = rsm.requestTemporarySubscriptionPerRelay(
+            relayFilters = relayFilters,
+            onEvent = { event ->
+                onCountsEvent(event)
+                // Cross-pollinate to notifications (same as background subscription)
+                if (event.kind == 7 || event.kind == 9735 || event.kind == 6) {
+                    NotificationsRepository.ingestEvent(event)
+                }
+            },
+            priority = SubscriptionPriority.NORMAL,
+        )
     }
 
     /**
@@ -370,6 +452,8 @@ object NoteCountsRepository {
     }
 
     private fun cancelCountsSubscription() {
+        viewportCountsHandle?.cancel()
+        viewportCountsHandle = null
         countsSubscriptionHandle?.cancel()
         countsSubscriptionHandle = null
     }
@@ -708,6 +792,7 @@ object NoteCountsRepository {
         pendingCountEvents.clear()
         firstPendingEventTs = 0L
         feedNoteRelays = emptyMap()
+        viewportNoteRelays = emptyMap()
         topicNoteRelays = emptyMap()
         threadNoteRelays = emptyMap()
         lastSubscribedNoteIds = emptySet()
@@ -724,6 +809,7 @@ object NoteCountsRepository {
         countsFlushJob?.cancel()
         pendingCountEvents.clear()
         firstPendingEventTs = 0L
+        viewportNoteRelays = emptyMap()
         processedEventIds.clear()
         _countsByNoteId.value = emptyMap()
         lastSubscribedNoteIds = emptySet()

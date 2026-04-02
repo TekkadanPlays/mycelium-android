@@ -2820,6 +2820,370 @@ private fun ZapSuccessLine() {
     )
 }
 
+/**
+ * Extracted author section: repost label, avatar, display name, NIP-05 badge,
+ * OP highlight, relay orbs, moderation flag badge, topic title.
+ * Pulled out of NoteCard to reduce ART JIT instruction count (16935 → under limit).
+ */
+@Composable
+private fun NoteCardAuthorSection(
+    note: Note,
+    displayAuthor: social.mycelium.android.data.Author,
+    authorPubkey: String,
+    rootAuthorId: String?,
+    moderationFlagCount: Int,
+    onProfileClick: (String) -> Unit,
+    onRelayClick: (String) -> Unit,
+    onNavigateToRelayList: ((List<String>) -> Unit)?,
+) {
+    // Repost label (kind-6)
+    if (note.repostedByAuthors.isNotEmpty()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 0.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.Repeat,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Spacer(Modifier.width(4.dp))
+            val displayBoostAuthors = note.repostedByAuthors.take(3)
+            Box(modifier = Modifier.width(if (displayBoostAuthors.size > 1) (16 + (displayBoostAuthors.size - 1) * 10).dp else 16.dp)) {
+                displayBoostAuthors.forEachIndexed { i, author ->
+                    Box(modifier = Modifier.offset(x = (i * 10).dp)) {
+                        ProfilePicture(
+                            author = author,
+                            size = 16.dp,
+                            onClick = { onProfileClick(author.id) }
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.width(4.dp))
+            val repostTimeText = note.repostTimestamp?.let { " \u2022 ${formatTimestamp(it)}" } ?: ""
+            val boosterCount = note.repostedByAuthors.size
+            val firstName = authorDisplayLabel(note.repostedByAuthors.first())
+            val boostText = when {
+                boosterCount == 1 -> "$firstName boosted"
+                boosterCount == 2 -> "$firstName & ${authorDisplayLabel(note.repostedByAuthors[1])} boosted"
+                else -> "$firstName & ${boosterCount - 1} others boosted"
+            }
+            Text(
+                text = "$boostText$repostTimeText",
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+    // Author info
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ProfilePicture(
+            author = displayAuthor,
+            size = 40.dp,
+            onClick = { onProfileClick(note.author.id) }
+        )
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
+                    val isOp =
+                        rootAuthorId != null && normalizeAuthorIdForCache(note.author.id) == normalizeAuthorIdForCache(
+                            rootAuthorId
+                        )
+                    val nip05Status = social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
+                    if (isOp) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                color = Color(0xFF8E30EB),
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = authorDisplayLabel(displayAuthor),
+                                    style = MaterialTheme.typography.titleSmall.copy(
+                                        fontWeight = FontWeight.Bold
+                                    ),
+                                    color = Color.White,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            when (nip05Status) {
+                                social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
+                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                    Icon(
+                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                        contentDescription = "Verified",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color.Unspecified
+                                    )
+                                }
+                                social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
+                                    Icon(
+                                        imageVector = Icons.Default.Report,
+                                        contentDescription = "NIP-05 failed",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = Color(0xFFEF5350)
+                                    )
+                                }
+                                else -> {}
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "OP",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    } else {
+                        when (nip05Status) {
+                            social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
+                                val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+                                Icon(
+                                    imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
+                                    contentDescription = "Verified",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = Color.Unspecified
+                                )
+                            }
+                            social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
+                                Icon(
+                                    imageVector = Icons.Default.Report,
+                                    contentDescription = "NIP-05 failed",
+                                    modifier = Modifier.size(16.dp),
+                                    tint = Color(0xFFEF5350)
+                                )
+                            }
+                            else -> {}
+                        }
+                        Text(
+                            text = authorDisplayLabel(displayAuthor),
+                            style = MaterialTheme.typography.titleSmall.copy(
+                                fontWeight = FontWeight.Bold
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (rootAuthorId != null) {
+                    val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
+                    val score = note.likes
+                    Text(
+                        text = "$score • $formattedTime",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    )
+                }
+            }
+        }
+        val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
+        RelayOrbs(
+            relayUrls = relayUrlsForOrbs,
+            onRelayClick = onRelayClick,
+            onNavigateToRelayList = onNavigateToRelayList
+        )
+        if (moderationFlagCount > 0) {
+            Spacer(modifier = Modifier.width(4.dp))
+            androidx.compose.material3.Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                shape = RoundedCornerShape(4.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Flag,
+                        contentDescription = "Moderation flags",
+                        modifier = Modifier.size(10.dp),
+                        tint = MaterialTheme.colorScheme.error
+                    )
+                    Spacer(Modifier.width(2.dp))
+                    Text(
+                        text = "$moderationFlagCount",
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+    }
+
+    // Optional SUBJECT/TOPIC row (kind-11 / kind-1111)
+    val topicTitle = note.topicTitle
+    if (!topicTitle.isNullOrEmpty()) {
+        Text(
+            text = topicTitle,
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+    }
+}
+
+/**
+ * Extracted counts row: timestamp, replies, reactions, zaps, vote score, zapraiser bar.
+ * Pulled out of NoteCard to reduce ART JIT instruction count (16935 → under limit).
+ */
+@Composable
+private fun NoteCardCountsRow(
+    note: Note,
+    actionRowSchema: ActionRowSchema,
+    overrideReplyCount: Int?,
+    overrideZapCount: Int?,
+    overrideZapTotalSats: Long?,
+    overrideReactions: List<String>?,
+    overrideReactionAuthors: Map<String, List<String>>?,
+    overrideCustomEmojiUrls: Map<String, String>?,
+) {
+    val replyCountVal = (overrideReplyCount ?: note.comments).coerceAtLeast(0)
+    val zapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
+    val zapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
+    val reactionsList = overrideReactions ?: note.reactions
+    val reactionAuthorsMap = overrideReactionAuthors ?: emptyMap()
+    val reactionCount = if (reactionAuthorsMap.isNotEmpty()) {
+        reactionAuthorsMap.values.sumOf { it.size }
+    } else {
+        reactionsList.size
+    }.coerceAtLeast(0)
+    val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
+    val MyceliumGreen = Color(0xFF8FBC8F)
+    val pastelRed = Color(0xFFE57373)
+    val zapYellow = Color(0xFFFFD700)
+    val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
+    val countStyle = MaterialTheme.typography.bodySmall
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
+                val reactiveScores by social.mycelium.android.repository.social.VoteRepository.scoreByNoteId.collectAsState()
+                val score = reactiveScores[note.id] ?: 0
+                if (score != 0) {
+                    val scoreColor = if (score > 0) MyceliumGreen else pastelRed
+                    Text(text = "$score", style = countStyle, color = scoreColor)
+                    Text(text = " • ", style = countStyle, color = mutedText)
+                }
+            }
+            Text(text = formattedTime, style = countStyle, color = mutedText)
+            if (replyCountVal > 0) {
+                Text(text = " • ", style = countStyle, color = mutedText)
+                Text(text = "$replyCountVal", style = countStyle, color = MyceliumGreen)
+                Text(
+                    text = " repl${if (replyCountVal == 1) "y" else "ies"}",
+                    style = countStyle,
+                    color = mutedText
+                )
+            }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (reactionCount > 0) {
+                val uniqueEmojis = reactionsList.distinct().take(5)
+                val emojiUrls = overrideCustomEmojiUrls ?: emptyMap()
+                uniqueEmojis.forEach { emoji ->
+                    ReactionEmoji(
+                        emoji = emoji,
+                        customEmojiUrls = emojiUrls,
+                        fontSize = 13.sp,
+                        imageSize = 14.dp
+                    )
+                }
+                if (reactionCount > 1) {
+                    Text(text = " $reactionCount", style = countStyle, color = pastelRed)
+                }
+            }
+            if (reactionCount > 0 && (zapTotalSats > 0 || zapCount > 0)) {
+                Text(text = " • ", style = countStyle, color = mutedText)
+            }
+            if (zapTotalSats > 0) {
+                Text(
+                    text = social.mycelium.android.utils.ZapUtils.formatZapAmount(zapTotalSats),
+                    style = countStyle,
+                    color = zapYellow
+                )
+                Text(text = " sats", style = countStyle, color = mutedText)
+            } else if (zapCount > 0) {
+                Text(text = "$zapCount", style = countStyle, color = zapYellow)
+                Text(text = " zap${if (zapCount == 1) "" else "s"}", style = countStyle, color = mutedText)
+            }
+        }
+    }
+
+    val zapraiserGoal = remember(note.tags) {
+        note.tags.firstOrNull { it.firstOrNull() == "zapraiser" }
+            ?.getOrNull(1)?.toLongOrNull()
+    }
+    if (zapraiserGoal != null && zapraiserGoal > 0) {
+        val raised = zapTotalSats
+        val progress = (raised.toFloat() / zapraiserGoal).coerceIn(0f, 1f)
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(raised)} raised",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFFF59E0B)
+                )
+                Text(
+                    text = "Goal: ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapraiserGoal)} sats",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = mutedText.copy(alpha = 0.6f)
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp)),
+                color = Color(0xFFF59E0B),
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            )
+            if (raised >= zapraiserGoal) {
+                Text(
+                    text = "Goal reached!",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF66DDAA),
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, FlowPreview::class)
 @Composable
 fun NoteCard(
@@ -3051,217 +3415,19 @@ fun NoteCard(
                 ReactionsRepository.AnimationType.ZAP -> ZapSuccessLine()
             }
         }
-        // Repost label (kind-6) — at the top of the card
-        if (note.repostedByAuthors.isNotEmpty()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 0.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Repeat,
-                    contentDescription = null,
-                    modifier = Modifier.size(12.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                )
-                Spacer(Modifier.width(4.dp))
-                // Stacked avatars (up to 3)
-                val displayBoostAuthors = note.repostedByAuthors.take(3)
-                Box(modifier = Modifier.width(if (displayBoostAuthors.size > 1) (16 + (displayBoostAuthors.size - 1) * 10).dp else 16.dp)) {
-                    displayBoostAuthors.forEachIndexed { i, author ->
-                        Box(modifier = Modifier.offset(x = (i * 10).dp)) {
-                            ProfilePicture(
-                                author = author,
-                                size = 16.dp,
-                                onClick = { onProfileClick(author.id) }
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.width(4.dp))
-                val repostTimeText = note.repostTimestamp?.let { " \u2022 ${formatTimestamp(it)}" } ?: ""
-                val boosterCount = note.repostedByAuthors.size
-                val firstName = authorDisplayLabel(note.repostedByAuthors.first())
-                val boostText = when {
-                    boosterCount == 1 -> "$firstName boosted"
-                    boosterCount == 2 -> "$firstName & ${authorDisplayLabel(note.repostedByAuthors[1])} boosted"
-                    else -> "$firstName & ${boosterCount - 1} others boosted"
-                }
-                Text(
-                    text = "$boostText$repostTimeText",
-                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-        // Author info
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Avatar with shared element support
-            ProfilePicture(
-                author = displayAuthor,
-                size = 40.dp,
-                onClick = { onProfileClick(note.author.id) }
-            )
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
-                        val isOp =
-                            rootAuthorId != null && normalizeAuthorIdForCache(note.author.id) == normalizeAuthorIdForCache(
-                                rootAuthorId
-                            )
-                        val nip05Status = social.mycelium.android.repository.social.Nip05Verifier.verificationStates[authorPubkey]
-                        if (isOp) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Surface(
-                                    color = Color(0xFF8E30EB),
-                                    shape = RoundedCornerShape(4.dp)
-                                ) {
-                                    Text(
-                                        text = authorDisplayLabel(displayAuthor),
-                                        style = MaterialTheme.typography.titleSmall.copy(
-                                            fontWeight = FontWeight.Bold
-                                        ),
-                                        color = Color.White,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                                when (nip05Status) {
-                                    social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
-                                        val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-                                        Icon(
-                                            imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
-                                            contentDescription = "Verified",
-                                            modifier = Modifier.size(16.dp),
-                                            tint = Color.Unspecified
-                                        )
-                                    }
-                                    social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
-                                        Icon(
-                                            imageVector = Icons.Default.Report,
-                                            contentDescription = "NIP-05 failed",
-                                            modifier = Modifier.size(16.dp),
-                                            tint = Color(0xFFEF5350)
-                                        )
-                                    }
-                                    else -> {}
-                                }
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "OP",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        } else {
-                            when (nip05Status) {
-                                social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.VERIFIED -> {
-                                    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
-                                    Icon(
-                                        imageVector = if (isDark) Icons.Outlined.Nip05VerifiedDark else Icons.Outlined.Nip05Verified,
-                                        contentDescription = "Verified",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = Color.Unspecified
-                                    )
-                                }
-                                social.mycelium.android.repository.social.Nip05Verifier.VerificationStatus.FAILED -> {
-                                    Icon(
-                                        imageVector = Icons.Default.Report,
-                                        contentDescription = "NIP-05 failed",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = Color(0xFFEF5350)
-                                    )
-                                }
-                                else -> {}
-                            }
-                            Text(
-                                text = authorDisplayLabel(displayAuthor),
-                                style = MaterialTheme.typography.titleSmall.copy(
-                                    fontWeight = FontWeight.Bold
-                                ),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                    if (rootAuthorId != null) {
-                        val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
-                        val score = note.likes
-                        Text(
-                            text = "$score • $formattedTime",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        )
-                    }
-                }
-            }
-            val relayUrlsForOrbs = remember(note.relayUrls, note.relayUrl) { note.displayRelayUrls() }
-            RelayOrbs(
-                relayUrls = relayUrlsForOrbs,
-                onRelayClick = onRelayClick,
-                onNavigateToRelayList = onNavigateToRelayList
-            )
-            // NIP-22: Moderation flag badge (shown when note has flags but is below hide threshold)
-            if (moderationFlagCount > 0) {
-                Spacer(modifier = Modifier.width(4.dp))
-                androidx.compose.material3.Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(4.dp)
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Flag,
-                            contentDescription = "Moderation flags",
-                            modifier = Modifier.size(10.dp),
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                        Spacer(Modifier.width(2.dp))
-                        Text(
-                            text = "$moderationFlagCount",
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-                            color = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-            }
-        }
+        NoteCardAuthorSection(
+            note = note,
+            displayAuthor = displayAuthor,
+            authorPubkey = authorPubkey,
+            rootAuthorId = rootAuthorId,
+            moderationFlagCount = moderationFlagCount,
+            onProfileClick = onProfileClick,
+            onRelayClick = onRelayClick,
+            onNavigateToRelayList = onNavigateToRelayList,
+        )
 
         val uriHandler = LocalUriHandler.current
         val hasBodyText = note.content.isNotBlank() || note.quotedEventIds.isNotEmpty()
-
-        // Optional SUBJECT/TOPIC row (kind-11 / kind-1111)
-        val topicTitle = note.topicTitle
-        if (!topicTitle.isNullOrEmpty()) {
-            Text(
-                text = topicTitle,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-        }
 
         // Resolve URL previews: prefer note's own previews, but fall back to global cache
         // so previews fetched by any screen (dashboard, profile, thread) propagate everywhere.
@@ -3281,140 +3447,16 @@ fun NoteCard(
 
         // Counts row: above embed and body (when action row is shown)
         if (showActionRow) {
-            val replyCountVal = (overrideReplyCount ?: note.comments).coerceAtLeast(0)
-            val zapTotalSats = (overrideZapTotalSats ?: 0L).coerceAtLeast(0L)
-            val zapCount = (overrideZapCount ?: note.zapCount).coerceAtLeast(0)
-            val reactionsList = overrideReactions ?: note.reactions
-            val reactionAuthorsMap = overrideReactionAuthors ?: emptyMap()
-            val reactionCount = if (reactionAuthorsMap.isNotEmpty()) {
-                reactionAuthorsMap.values.sumOf { it.size }
-            } else {
-                reactionsList.size
-            }.coerceAtLeast(0)
-            val formattedTime = remember(note.timestamp) { formatTimestamp(note.timestamp) }
-            // Colors for count numbers
-            val MyceliumGreen = Color(0xFF8FBC8F)
-            val pastelRed = Color(0xFFE57373)
-            val zapYellow = Color(0xFFFFD700)
-            val mutedText = MaterialTheme.colorScheme.onSurfaceVariant
-            val countStyle = MaterialTheme.typography.bodySmall
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Left side: [vote score •] timestamp • replies
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // Vote score — left of timestamp for kind-11 / kind-1111
-                    if (actionRowSchema == ActionRowSchema.KIND11_FEED || actionRowSchema == ActionRowSchema.KIND1111_REPLY) {
-                        val reactiveScores by social.mycelium.android.repository.social.VoteRepository.scoreByNoteId.collectAsState()
-                        val score = reactiveScores[note.id] ?: 0
-                        if (score != 0) {
-                            val scoreColor = if (score > 0) MyceliumGreen else pastelRed
-                            Text(
-                                text = "$score",
-                                style = countStyle,
-                                color = scoreColor
-                            )
-                            Text(text = " • ", style = countStyle, color = mutedText)
-                        }
-                    }
-                    Text(text = formattedTime, style = countStyle, color = mutedText)
-                    if (replyCountVal > 0) {
-                        Text(text = " • ", style = countStyle, color = mutedText)
-                        Text(text = "$replyCountVal", style = countStyle, color = MyceliumGreen)
-                        Text(
-                            text = " repl${if (replyCountVal == 1) "y" else "ies"}",
-                            style = countStyle,
-                            color = mutedText
-                        )
-                    }
-                }
-                // Right side: reaction emojis • zaps
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (reactionCount > 0) {
-                        // Show actual emoji characters (up to 5 unique), then count
-                        val uniqueEmojis = reactionsList.distinct().take(5)
-                        val emojiUrls = overrideCustomEmojiUrls ?: emptyMap()
-                        uniqueEmojis.forEach { emoji ->
-                            ReactionEmoji(
-                                emoji = emoji,
-                                customEmojiUrls = emojiUrls,
-                                fontSize = 13.sp,
-                                imageSize = 14.dp
-                            )
-                        }
-                        if (reactionCount > 1) {
-                            Text(text = " $reactionCount", style = countStyle, color = pastelRed)
-                        }
-                    }
-                    if (reactionCount > 0 && (zapTotalSats > 0 || zapCount > 0)) {
-                        Text(text = " • ", style = countStyle, color = mutedText)
-                    }
-                    if (zapTotalSats > 0) {
-                        Text(
-                            text = social.mycelium.android.utils.ZapUtils.formatZapAmount(zapTotalSats),
-                            style = countStyle,
-                            color = zapYellow
-                        )
-                        Text(text = " sats", style = countStyle, color = mutedText)
-                    } else if (zapCount > 0) {
-                        Text(text = "$zapCount", style = countStyle, color = zapYellow)
-                        Text(text = " zap${if (zapCount == 1) "" else "s"}", style = countStyle, color = mutedText)
-                    }
-                }
-            }
-
-            // ── Zapraiser progress bar (NIP-TBD) ──
-            val zapraiserGoal = remember(note.tags) {
-                note.tags.firstOrNull { it.firstOrNull() == "zapraiser" }
-                    ?.getOrNull(1)?.toLongOrNull()
-            }
-            if (zapraiserGoal != null && zapraiserGoal > 0) {
-                val raised = zapTotalSats
-                val progress = (raised.toFloat() / zapraiserGoal).coerceIn(0f, 1f)
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "${social.mycelium.android.utils.ZapUtils.formatZapAmount(raised)} raised",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFFF59E0B)
-                        )
-                        Text(
-                            text = "Goal: ${social.mycelium.android.utils.ZapUtils.formatZapAmount(zapraiserGoal)} sats",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = mutedText.copy(alpha = 0.6f)
-                        )
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(6.dp)
-                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(3.dp)),
-                        color = Color(0xFFF59E0B),
-                        trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    )
-                    if (raised >= zapraiserGoal) {
-                        Text(
-                            text = "Goal reached!",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF66DDAA),
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                    }
-                }
-            }
+            NoteCardCountsRow(
+                note = note,
+                actionRowSchema = actionRowSchema,
+                overrideReplyCount = overrideReplyCount,
+                overrideZapCount = overrideZapCount,
+                overrideZapTotalSats = overrideZapTotalSats,
+                overrideReactions = overrideReactions,
+                overrideReactionAuthors = overrideReactionAuthors,
+                overrideCustomEmojiUrls = overrideCustomEmojiUrls,
+            )
         }
 
         // HTML embed: below counts, above body text

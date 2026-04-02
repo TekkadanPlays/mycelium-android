@@ -144,7 +144,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                 .memoryCache {
                     coil.memory.MemoryCache.Builder(this)
-                        .maxSizePercent(0.25) // 25% of available app memory
+                        .maxSizePercent(0.15) // 15% of available app memory — reduced from 25% to cut GC pressure
                         .build()
                 }
                 .diskCache {

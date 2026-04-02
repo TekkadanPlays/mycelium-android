@@ -680,8 +680,12 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Always debounce the display update
-            scheduleDisplayUpdate()
+            // Display update: only during steady-state. During burst ingestion the
+            // display layer can't keep up anyway, and updateDisplayedNotes does 5 O(n)
+            // passes + fires counts subscriptions — wasted work while draining 60k events.
+            if (!queueStillLarge) {
+                scheduleDisplayUpdate()
+            }
 
             // Profiles and NIP-11: also deferred during burst
             if (!queueStillLarge) {
@@ -831,6 +835,8 @@ class NotesRepository private constructor() {
         if (pendingNip11Urls.isNotEmpty()) {
             scheduleNip11Preload()
         }
+        // Display update: suppressed during burst, fire now that the queue has drained
+        scheduleDisplayUpdate()
     }
 
     /** Schedule a debounced NIP-11 preload for relay URLs seen in feed notes.
@@ -2625,11 +2631,12 @@ class NotesRepository private constructor() {
             updateDisplayedNewNotesCount()
         }
 
-        // Fire enrichment for the repost: the original note needs counts (reactions,
-        // zaps, reposts), its quoted notes need prefetch, and its URLs need preview.
-        // Without this, boosted notes render with empty engagement data because the
-        // kind-6 path bypasses flushKind1Events (which normally triggers enrichment).
-        fireEnrichmentForNotes(listOf(note))
+        // Buffer for batch enrichment: the repost's original note needs counts, quotes,
+        // and URL previews, but firing per-repost creates a subscription storm (100+
+        // individual subscription updates during burst). Instead, buffer into the
+        // deferred enrichment queue — the flush poller will fire enrichment in batch
+        // when the queue drains, or the next steady-state cycle picks them up.
+        deferredEnrichmentNotes.add(note)
     }
 
     // ── Optimistic local rendering ────────────────────────────────────────────

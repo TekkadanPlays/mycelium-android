@@ -1260,7 +1260,10 @@ fun DashboardScreen(
         derivedStateOf {
             val deduped = notesList.distinctBy { it.id }
             when (homeFeedState.homeSortOrder) {
-                HomeSortOrder.Latest -> deduped.sortedByDescending { it.repostTimestamp ?: it.timestamp }
+                // Latest: data layer already maintains descending timestamp order
+                // (flushKind1Events, insertRepostNote both sort by repostTimestamp ?: timestamp).
+                // Skip the redundant O(n log n) sort on the main thread — only dedup for safety.
+                HomeSortOrder.Latest -> deduped
                 HomeSortOrder.Popular -> deduped.sortedWith(
                     compareByDescending<Note> { note ->
                         val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
@@ -1268,7 +1271,7 @@ fun DashboardScreen(
                         val zapCount = counts?.zapAuthors?.size ?: 0
                         val replyCount = replyCountByNoteId[note.id] ?: 0
                         reactionCount + zapCount + replyCount
-                    }.thenByDescending { it.timestamp }
+                    }.thenByDescending { it.repostTimestamp ?: it.timestamp }
                 )
             }
         }

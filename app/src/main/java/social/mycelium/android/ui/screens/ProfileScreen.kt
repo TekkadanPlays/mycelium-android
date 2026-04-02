@@ -1,5 +1,9 @@
 package social.mycelium.android.ui.screens
 
+import social.mycelium.android.ui.components.note.NoteCardCallbacks
+import social.mycelium.android.ui.components.note.NoteCardOverrides
+import social.mycelium.android.ui.components.note.NoteCardConfig
+import social.mycelium.android.ui.components.note.NoteCardInteractionState
 import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -740,36 +744,44 @@ private fun ProfileNoteCard(
 ) {
     val counts = countsForNote(note.originalNoteId ?: note.id) ?: countsForNote(note.id)
     NoteCard(
-        isVisible = isVisible,
         note = note,
-        onLike = onLike,
-        onShare = onShare,
-        onComment = onComment,
-        onReact = onReact,
-        onProfileClick = onProfileClick,
-        onNoteClick = onNoteClick,
-        onImageTap = onImageTap,
-        onOpenImageViewer = onOpenImageViewer,
-        onVideoClick = onVideoClick,
-        onCustomZapSend = onCustomZapSend,
-        onZap = onZap,
-        isZapInProgress = isZapInProgress(note.id),
-        isZapped = isZapped(note.id),
-        isBoosted = social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(note.id),
-        myZappedAmount = myZappedAmountForNote(note.id),
-        overrideReplyCount = overrideReplyCountForNote(note.id),
-        overrideZapCount = counts?.zapCount,
-        overrideZapTotalSats = counts?.zapTotalSats,
-        overrideReactions = counts?.reactions,
-        overrideReactionAuthors = counts?.reactionAuthors,
-        overrideZapAuthors = counts?.zapAuthors,
-        overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
-        overrideCustomEmojiUrls = counts?.customEmojiUrls,
-        onRelayClick = onRelayClick,
+        callbacks = NoteCardCallbacks(
+            onLike = onLike,
+            onShare = onShare,
+            onComment = onComment,
+            onReact = onReact,
+            onProfileClick = onProfileClick,
+            onNoteClick = onNoteClick,
+            onImageTap = onImageTap,
+            onOpenImageViewer = onOpenImageViewer,
+            onVideoClick = onVideoClick,
+            onCustomZapSend = onCustomZapSend,
+            onZap = onZap,
+            onRelayClick = onRelayClick,
+            onDelete = onDelete,
+            onSeeAllReactions = { onSeeAllReactions(note) },
+        ),
+        overrides = NoteCardOverrides(
+            replyCount = overrideReplyCountForNote(note.id),
+            zapCount = counts?.zapCount,
+            zapTotalSats = counts?.zapTotalSats,
+            reactions = counts?.reactions,
+            reactionAuthors = counts?.reactionAuthors,
+            zapAuthors = counts?.zapAuthors,
+            zapAmountByAuthor = counts?.zapAmountByAuthor,
+            customEmojiUrls = counts?.customEmojiUrls,
+        ),
+        config = NoteCardConfig(
+            isVisible = isVisible,
+            compactMedia = compactMedia,
+        ),
+        interaction = NoteCardInteractionState(
+            isZapInProgress = isZapInProgress(note.id),
+            isZapped = isZapped(note.id),
+            isBoosted = social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(note.id),
+            myZappedAmount = myZappedAmountForNote(note.id),
+        ),
         accountNpub = accountNpub,
-        onDelete = onDelete,
-        onSeeAllReactions = { onSeeAllReactions(note) },
-        compactMedia = compactMedia,
         modifier = Modifier.fillMaxWidth()
     )
 }

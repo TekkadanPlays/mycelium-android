@@ -1,5 +1,8 @@
 package social.mycelium.android.ui.screens
 
+import social.mycelium.android.ui.components.note.NoteCardCallbacks
+import social.mycelium.android.ui.components.note.NoteCardConfig
+import social.mycelium.android.ui.components.note.NoteCardInteractionState
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
@@ -1118,101 +1121,65 @@ fun TopicsScreen(
                                                 Box {
                                                     NoteCard(
                                                         note = note,
-                                                        onNoteClick = {
-                                                            onThreadClick(
-                                                                note,
-                                                                topic.relayUrls.takeIf { it.isNotEmpty() })
-                                                        },
-                                                        onComment = {
-                                                            onThreadClick(
-                                                                note,
-                                                                topic.relayUrls.takeIf { it.isNotEmpty() })
-                                                        },
-                                                        onReact = stableTopicOnReact,
-                                                        onProfileClick = onProfileClick,
-                                                        onImageTap = { n, urls, idx ->
-                                                            onThreadClick(
-                                                                note,
-                                                                topic.relayUrls.takeIf { it.isNotEmpty() })
-                                                        },
-                                                        onZap = { noteId, amount ->
-                                                            accountStateViewModel.sendZap(
-                                                                note,
-                                                                amount,
-                                                                social.mycelium.android.repository.sync.ZapType.PUBLIC,
-                                                                ""
-                                                            )
-                                                        },
-                                                        onCustomZapSend = stableTopicOnCustomZapSend,
-                                                        onVote = stableTopicOnVote,
-                                                        ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(
-                                                            note.id
+                                                        callbacks = NoteCardCallbacks(
+                                                            onNoteClick = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                            onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                            onReact = stableTopicOnReact,
+                                                            onProfileClick = onProfileClick,
+                                                            onImageTap = { _, _, _ -> onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                            onZap = { _, amount -> accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.sync.ZapType.PUBLIC, "") },
+                                                            onCustomZapSend = stableTopicOnCustomZapSend,
+                                                            onVote = stableTopicOnVote,
+                                                            onZapSettings = { onNavigateToZapSettings() },
+                                                            onRelayClick = onRelayClick,
+                                                            onNavigateToRelayList = onNavigateToRelayList,
+                                                            onDelete = if (topicCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == topicCurrentUserHex) stableTopicOnDelete else null,
                                                         ),
-                                                        voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(
-                                                            note.id
+                                                        config = NoteCardConfig(
+                                                            actionRowSchema = ActionRowSchema.KIND11_FEED,
+                                                            showHashtagsSection = false,
+                                                            moderationFlagCount = noteFlagCount,
+                                                            compactMedia = compactMedia,
                                                         ),
-                                                        shouldCloseZapMenus = shouldCloseZapMenus,
-                                                        onZapSettings = { onNavigateToZapSettings() },
-                                                        onRelayClick = onRelayClick,
-                                                        onNavigateToRelayList = onNavigateToRelayList,
-                                                        accountNpub = currentAccount?.npub,
+                                                        interaction = NoteCardInteractionState(
+                                                            ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(note.id),
+                                                            voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(note.id),
+                                                            shouldCloseZapMenus = shouldCloseZapMenus,
+                                                        ),
                                                         extraMoreMenuItems = moderationMenuItems,
-                                                        actionRowSchema = ActionRowSchema.KIND11_FEED,
-                                                        showHashtagsSection = false,
-                                                        moderationFlagCount = noteFlagCount,
-                                                        onDelete = if (topicCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(
-                                                                note.author.id
-                                                            ) == topicCurrentUserHex
-                                                        ) stableTopicOnDelete else null,
-                                                        compactMedia = compactMedia,
+                                                        accountNpub = currentAccount?.npub,
                                                         modifier = Modifier.fillMaxWidth()
                                                     )
                                                 }
                                             } else {
                                                 NoteCard(
                                                     note = note,
-                                                    onNoteClick = {
-                                                        onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
-                                                    },
-                                                    onComment = {
-                                                        onThreadClick(
-                                                            note,
-                                                            topic.relayUrls.takeIf { it.isNotEmpty() })
-                                                    },
-                                                    onReact = stableTopicOnReact,
-                                                    onProfileClick = onProfileClick,
-                                                    onImageTap = { n, urls, idx ->
-                                                        onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() })
-                                                    },
-                                                    onZap = { noteId, amount ->
-                                                        accountStateViewModel.sendZap(
-                                                            note,
-                                                            amount,
-                                                            social.mycelium.android.repository.sync.ZapType.PUBLIC,
-                                                            ""
-                                                        )
-                                                    },
-                                                    onCustomZapSend = stableTopicOnCustomZapSend,
-                                                    onVote = stableTopicOnVote,
-                                                    ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(
-                                                        note.id
+                                                    callbacks = NoteCardCallbacks(
+                                                        onNoteClick = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                        onComment = { onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                        onReact = stableTopicOnReact,
+                                                        onProfileClick = onProfileClick,
+                                                        onImageTap = { _, _, _ -> onThreadClick(note, topic.relayUrls.takeIf { it.isNotEmpty() }) },
+                                                        onZap = { _, amount -> accountStateViewModel.sendZap(note, amount, social.mycelium.android.repository.sync.ZapType.PUBLIC, "") },
+                                                        onCustomZapSend = stableTopicOnCustomZapSend,
+                                                        onVote = stableTopicOnVote,
+                                                        onZapSettings = { onNavigateToZapSettings() },
+                                                        onRelayClick = onRelayClick,
+                                                        onNavigateToRelayList = onNavigateToRelayList,
+                                                        onDelete = if (topicCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == topicCurrentUserHex) stableTopicOnDelete else null,
                                                     ),
-                                                    voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(
-                                                        note.id
+                                                    config = NoteCardConfig(
+                                                        actionRowSchema = ActionRowSchema.KIND11_FEED,
+                                                        showHashtagsSection = false,
+                                                        compactMedia = compactMedia,
                                                     ),
-                                                    shouldCloseZapMenus = shouldCloseZapMenus,
-                                                    onZapSettings = { onNavigateToZapSettings() },
-                                                    onRelayClick = onRelayClick,
-                                                    onNavigateToRelayList = onNavigateToRelayList,
-                                                    accountNpub = currentAccount?.npub,
+                                                    interaction = NoteCardInteractionState(
+                                                        ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(note.id),
+                                                        voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(note.id),
+                                                        shouldCloseZapMenus = shouldCloseZapMenus,
+                                                    ),
                                                     extraMoreMenuItems = moderationMenuItems,
-                                                    actionRowSchema = ActionRowSchema.KIND11_FEED,
-                                                    showHashtagsSection = false,
-                                                    onDelete = if (topicCurrentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(
-                                                            note.author.id
-                                                        ) == topicCurrentUserHex
-                                                    ) stableTopicOnDelete else null,
-                                                    compactMedia = compactMedia,
+                                                    accountNpub = currentAccount?.npub,
                                                     modifier = Modifier.fillMaxWidth()
                                                 )
                                             }

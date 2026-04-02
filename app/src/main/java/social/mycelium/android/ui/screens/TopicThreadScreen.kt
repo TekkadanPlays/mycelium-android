@@ -1,5 +1,7 @@
 package social.mycelium.android.ui.screens
 
+import social.mycelium.android.ui.components.note.NoteCardCallbacks
+import social.mycelium.android.ui.components.note.NoteCardConfig
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import social.mycelium.android.ui.components.common.cutoutPadding
@@ -229,31 +231,15 @@ fun TopicThreadScreen(
             ) { reply ->
                 NoteCard(
                     note = reply,
-                    onLike = { },
-                    onShare = { },
-                    onComment = { },
-                    onReact = { _, _ -> },
-                    onProfileClick = onProfileClick,
-                    onNoteClick = { },
-                    onImageTap = onImageTap,
-                    onOpenImageViewer = onOpenImageViewer,
-                    onVideoClick = onVideoClick,
-                    onZap = { _, _ -> },
-                    onCustomZapSend = { _, _, _, _ -> },
-                    onZapSettings = { },
-                    shouldCloseZapMenus = false,
-                    onRelayClick = { },
-                    accountNpub = null,
-                    isZapInProgress = false,
-                    isZapped = false,
-                    myZappedAmount = null,
-                    overrideReplyCount = null,
-                    overrideZapCount = null,
-                    overrideReactions = null,
-                    actionRowSchema = ActionRowSchema.KIND1111_REPLY,
-                    showHashtagsSection = true,
-                    initialMediaPage = 0,
-                    onMediaPageChanged = { },
+                    callbacks = NoteCardCallbacks(
+                        onProfileClick = onProfileClick,
+                        onImageTap = onImageTap,
+                        onOpenImageViewer = onOpenImageViewer,
+                        onVideoClick = onVideoClick,
+                    ),
+                    config = NoteCardConfig(
+                        actionRowSchema = ActionRowSchema.KIND1111_REPLY,
+                    ),
                     modifier = Modifier.fillMaxWidth()
                 )
             }

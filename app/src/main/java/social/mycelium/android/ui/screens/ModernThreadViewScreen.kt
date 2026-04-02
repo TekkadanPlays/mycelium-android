@@ -1,5 +1,9 @@
 package social.mycelium.android.ui.screens
 
+import social.mycelium.android.ui.components.note.NoteCardCallbacks
+import social.mycelium.android.ui.components.note.NoteCardOverrides
+import social.mycelium.android.ui.components.note.NoteCardConfig
+import social.mycelium.android.ui.components.note.NoteCardInteractionState
 import androidx.compose.runtime.collectAsState
 import coil.compose.AsyncImage
 import androidx.compose.ui.layout.ContentScale
@@ -821,61 +825,59 @@ fun ModernThreadViewScreen(
                     Column(modifier = Modifier.fillMaxWidth()) {
                         NoteCard(
                             note = note,
-                            onLike = onLike,
-                            onShare = onShare,
-                            onComment = effectiveOnComment,
-                            onReact = onReact,
-                            onBoost = onBoost,
-                            onQuote = onQuote,
-                            onFork = onFork,
-                            onProfileClick = onProfileClick,
-                            onNoteClick = { clickedNote ->
-                                // Prevent opening a duplicate thread of the current root note
-                                if (clickedNote.id != note.id) onNoteClick(clickedNote)
-                            },
-                            onImageTap = onImageTap,
-                            onOpenImageViewer = onOpenImageViewer,
-                            onVideoClick = onVideoClick,
-                            onCustomZapSend = onCustomZapSend,
-                            onZap = effectiveOnZap,
-                            isZapInProgress = note.id in zapInProgressNoteIds,
-                            isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
-                                note.id
+                            callbacks = NoteCardCallbacks(
+                                onLike = onLike,
+                                onShare = onShare,
+                                onComment = effectiveOnComment,
+                                onReact = onReact,
+                                onBoost = onBoost,
+                                onQuote = onQuote,
+                                onFork = onFork,
+                                onProfileClick = onProfileClick,
+                                onNoteClick = { clickedNote -> if (clickedNote.id != note.id) onNoteClick(clickedNote) },
+                                onImageTap = onImageTap,
+                                onOpenImageViewer = onOpenImageViewer,
+                                onVideoClick = onVideoClick,
+                                onCustomZapSend = onCustomZapSend,
+                                onZap = effectiveOnZap,
+                                onRelayClick = onRelayNavigate,
+                                onNavigateToRelayList = onNavigateToRelayList,
+                                onDelete = if (onDeleteNote != null && currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(note.author.id) == currentUserHex) onDeleteNote else null,
+                                onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
+                                onSeeAllReactions = { onSeeAllReactions(note.id) },
+                                onVote = onVote,
+                                onPollVote = onPollVote,
+                                onDeleteReaction = onDeleteReaction,
                             ),
-                            isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
-                                note.originalNoteId ?: note.id
+                            overrides = NoteCardOverrides(
+                                replyCount = repliesState.totalReplyCount,
+                                zapCount = noteCountsByNoteId[note.id]?.zapCount,
+                                zapTotalSats = noteCountsByNoteId[note.id]?.zapTotalSats,
+                                reactions = noteCountsByNoteId[note.id]?.reactions,
+                                reactionAuthors = noteCountsByNoteId[note.id]?.reactionAuthors,
+                                zapAuthors = noteCountsByNoteId[note.id]?.zapAuthors,
+                                zapAmountByAuthor = noteCountsByNoteId[note.id]?.zapAmountByAuthor,
+                                customEmojiUrls = noteCountsByNoteId[note.id]?.customEmojiUrls,
                             ),
-                            onVote = onVote,
-                            ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(note.id),
-                            voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(note.id),
-                            myZappedAmount = myZappedAmountByNoteId[note.id],
-                            overrideReplyCount = repliesState.totalReplyCount,
-                            overrideZapCount = noteCountsByNoteId[note.id]?.zapCount,
-                            overrideZapTotalSats = noteCountsByNoteId[note.id]?.zapTotalSats,
-                            overrideReactions = noteCountsByNoteId[note.id]?.reactions,
-                            overrideReactionAuthors = noteCountsByNoteId[note.id]?.reactionAuthors,
-                            overrideZapAuthors = noteCountsByNoteId[note.id]?.zapAuthors,
-                            overrideZapAmountByAuthor = noteCountsByNoteId[note.id]?.zapAmountByAuthor,
-                            overrideCustomEmojiUrls = noteCountsByNoteId[note.id]?.customEmojiUrls,
-                            onRelayClick = onRelayNavigate,
-                            onNavigateToRelayList = onNavigateToRelayList,
-                            shouldCloseZapMenus = shouldCloseZapMenus,
+                            config = NoteCardConfig(
+                                expandLinkPreviewInThread = true,
+                                showHashtagsSection = false,
+                                initialMediaPage = mediaPageForNote(note.id),
+                                actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.note.ActionRowSchema.KIND1_FEED
+                                else social.mycelium.android.ui.components.note.ActionRowSchema.KIND11_FEED,
+                                compactMedia = compactMedia,
+                            ),
+                            interaction = NoteCardInteractionState(
+                                isZapInProgress = note.id in zapInProgressNoteIds,
+                                isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(note.id),
+                                isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(note.originalNoteId ?: note.id),
+                                myZappedAmount = myZappedAmountByNoteId[note.id],
+                                ownVoteValue = social.mycelium.android.repository.social.VoteRepository.getOwnVote(note.id),
+                                voteScore = social.mycelium.android.repository.social.VoteRepository.getScore(note.id),
+                                shouldCloseZapMenus = shouldCloseZapMenus,
+                            ),
                             accountNpub = accountNpub,
-                            onDelete = if (onDeleteNote != null && currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(
-                                    note.author.id
-                                ) == currentUserHex
-                            ) onDeleteNote else null,
-                            expandLinkPreviewInThread = true,
-                            showHashtagsSection = false,
-                            initialMediaPage = mediaPageForNote(note.id),
-                            onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
-                            actionRowSchema = if (replyKind == 1) social.mycelium.android.ui.components.note.ActionRowSchema.KIND1_FEED
-                            else social.mycelium.android.ui.components.note.ActionRowSchema.KIND11_FEED,
-                            onSeeAllReactions = { onSeeAllReactions(note.id) },
-                            compactMedia = compactMedia,
-                            onPollVote = onPollVote,
                             myPubkeyHex = myPubkeyHex,
-                            onDeleteReaction = onDeleteReaction,
                             modifier = Modifier.fillMaxWidth()
                         )
 

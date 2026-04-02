@@ -2,6 +2,10 @@
 
 package social.mycelium.android.ui.screens
 
+import social.mycelium.android.ui.components.note.NoteCardCallbacks
+import social.mycelium.android.ui.components.note.NoteCardOverrides
+import social.mycelium.android.ui.components.note.NoteCardConfig
+import social.mycelium.android.ui.components.note.NoteCardInteractionState
 import kotlinx.coroutines.flow.debounce
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
@@ -503,62 +507,70 @@ private fun DashboardFeedContent(
                 val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                 NoteCard(
                     note = note,
-                    onLike = stableOnLike,
-                    onShare = stableOnShare,
-                    onComment = { _ -> stableOnComment(note) },
-                    onReact = stableOnReact,
-                    onBoost = stableOnBoost,
-                    onQuote = stableOnQuote,
-                    onFork = stableOnFork,
-                    onProfileClick = onProfileClick,
-                    onNoteClick = stableOnNoteClick,
-                    onImageTap = onImageTap,
-                    onOpenImageViewer = onOpenImageViewer,
-                    onVideoClick = onVideoClick,
-                    onZap = { _, amount -> stableOnZap(note, amount) },
-                    onCustomZapSend = stableOnCustomZapSend,
-                    onZapSettings = onShowZapConfig,
-                    shouldCloseZapMenus = shouldCloseZapMenus,
-                    onRelayClick = onRelayClick,
-                    onNavigateToRelayList = onNavigateToRelayList,
-                    isAuthorFollowed = note.author.id.lowercase() in followSetLower,
-                    onFollowAuthor = stableOnFollowAuthor,
-                    onUnfollowAuthor = stableOnUnfollowAuthor,
-                    onBlockAuthor = stableOnBlockAuthor,
-                    onMuteAuthor = stableOnMuteAuthor,
-                    onBookmarkToggle = stableOnBookmarkToggle,
-                    onDelete = if (currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(
-                            note.author.id
-                        ) == currentUserHex
-                    ) stableOnDelete else null,
+                    callbacks = NoteCardCallbacks(
+                        onLike = stableOnLike,
+                        onShare = stableOnShare,
+                        onComment = { _ -> stableOnComment(note) },
+                        onReact = stableOnReact,
+                        onBoost = stableOnBoost,
+                        onQuote = stableOnQuote,
+                        onFork = stableOnFork,
+                        onProfileClick = onProfileClick,
+                        onNoteClick = stableOnNoteClick,
+                        onImageTap = onImageTap,
+                        onOpenImageViewer = onOpenImageViewer,
+                        onVideoClick = onVideoClick,
+                        onZap = { _, amount -> stableOnZap(note, amount) },
+                        onCustomZapSend = stableOnCustomZapSend,
+                        onZapSettings = onShowZapConfig,
+                        onRelayClick = onRelayClick,
+                        onNavigateToRelayList = onNavigateToRelayList,
+                        onFollowAuthor = stableOnFollowAuthor,
+                        onUnfollowAuthor = stableOnUnfollowAuthor,
+                        onBlockAuthor = stableOnBlockAuthor,
+                        onMuteAuthor = stableOnMuteAuthor,
+                        onBookmarkToggle = stableOnBookmarkToggle,
+                        onDelete = if (currentUserHex != null && social.mycelium.android.utils.normalizeAuthorIdForCache(
+                                note.author.id
+                            ) == currentUserHex
+                        ) stableOnDelete else null,
+                        onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
+                        onSeeAllReactions = { stableOnSeeAllReactions(note) },
+                        onPollVote = stableOnPollVote,
+                        onDeleteReaction = stableOnDeleteReaction,
+                    ),
+                    overrides = NoteCardOverrides(
+                        replyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
+                        zapCount = counts?.zapCount,
+                        zapTotalSats = counts?.zapTotalSats,
+                        reactions = counts?.reactions,
+                        reactionAuthors = counts?.reactionAuthors,
+                        zapAuthors = counts?.zapAuthors,
+                        zapAmountByAuthor = counts?.zapAmountByAuthor,
+                        customEmojiUrls = counts?.customEmojiUrls,
+                    ),
+                    config = NoteCardConfig(
+                        showHashtagsSection = false,
+                        initialMediaPage = mediaPageForNote(note.id),
+                        isVisible = isDashboardVisible && note.id in visibleKeys,
+                        compactMedia = compactMedia,
+                        showSensitiveContent = showSensitiveContent,
+                    ),
+                    interaction = NoteCardInteractionState(
+                        isZapInProgress = note.id in zapInProgressNoteIds,
+                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
+                            note.id
+                        ),
+                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
+                            note.originalNoteId ?: note.id
+                        ),
+                        myZappedAmount = zappedAmountByNoteId[note.id],
+                        isAuthorFollowed = note.author.id.lowercase() in followSetLower,
+                        shouldCloseZapMenus = shouldCloseZapMenus,
+                    ),
                     accountNpub = accountNpub,
-                    isZapInProgress = note.id in zapInProgressNoteIds,
-                    isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
-                        note.id
-                    ),
-                    isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
-                        note.originalNoteId ?: note.id
-                    ),
-                    myZappedAmount = zappedAmountByNoteId[note.id],
-                    overrideReplyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
-                    overrideZapCount = counts?.zapCount,
-                    overrideZapTotalSats = counts?.zapTotalSats,
-                    overrideReactions = counts?.reactions,
-                    overrideReactionAuthors = counts?.reactionAuthors,
-                    overrideZapAuthors = counts?.zapAuthors,
-                    overrideZapAmountByAuthor = counts?.zapAmountByAuthor,
-                    overrideCustomEmojiUrls = counts?.customEmojiUrls,
-                    countsByNoteId = countsByNoteId,
-                    onSeeAllReactions = { stableOnSeeAllReactions(note) },
-                    showHashtagsSection = false,
-                    initialMediaPage = mediaPageForNote(note.id),
-                    onMediaPageChanged = { page -> onMediaPageChanged(note.id, page) },
-                    isVisible = isDashboardVisible && note.id in visibleKeys,
-                    compactMedia = compactMedia,
-                    showSensitiveContent = showSensitiveContent,
-                    onPollVote = stableOnPollVote,
                     myPubkeyHex = currentUserHex,
-                    onDeleteReaction = stableOnDeleteReaction,
+                    countsByNoteId = countsByNoteId,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

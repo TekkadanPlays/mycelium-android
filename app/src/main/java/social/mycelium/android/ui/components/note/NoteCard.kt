@@ -3184,121 +3184,87 @@ private fun NoteCardCountsRow(
     }
 }
 
+/**
+ * Modular NoteCard — the primary composable for rendering a single note.
+ *
+ * Parameters are grouped into holder classes to keep the JIT instruction count
+ * well under the ART compiler limit and to make call sites maintainable:
+ * - [callbacks]: All user-interaction lambdas (tap, zap, react, follow, etc.)
+ * - [overrides]: Count/reaction data from NoteCountsRepository
+ * - [config]: Display flags (action row schema, visibility, compact mode, etc.)
+ * - [interaction]: Per-note state (zap in progress, own vote, followed, etc.)
+ */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, FlowPreview::class)
 @Composable
 fun NoteCard(
     note: Note,
-    onLike: (String) -> Unit = {},
-    onShare: (String) -> Unit = {},
-    onComment: (String) -> Unit = {},
-    onReact: (Note, String) -> Unit = { _, _ -> },
-    /** Boost (kind-6 repost): republish the note as-is. */
-    onBoost: ((Note) -> Unit)? = null,
-    /** Quote: open compose with this note quoted (nostr:nevent1…). */
-    onQuote: ((Note) -> Unit)? = null,
-    /** Fork: open compose pre-filled with this note's content for editing. */
-    onFork: ((Note) -> Unit)? = null,
-    /** Kind-30011 vote: (noteId, authorPubkey, direction +1/-1). */
-    onVote: ((String, String, Int) -> Unit)? = null,
-    /** Current user's own vote on this note: +1, -1, or 0. */
-    ownVoteValue: Int = 0,
-    /** Net vote score for this note (upvotes - downvotes). */
-    voteScore: Int = 0,
-    onProfileClick: (String) -> Unit = {},
-    onNoteClick: (Note) -> Unit = {},
-    /** Called when user taps the image (not the magnifier): (note, urls, index). E.g. feed = open thread, thread = open viewer. */
-    onImageTap: (Note, List<String>, Int) -> Unit = { _, _, _ -> },
-    /** Called when user taps the magnifier on an image: open full viewer. */
-    onOpenImageViewer: (List<String>, Int) -> Unit = { _, _ -> },
-    /** Called when user taps a video: (urls, initialIndex). */
-    onVideoClick: (List<String>, Int) -> Unit = { _, _ -> },
-    onZap: (String, Long) -> Unit = { _, _ -> },
-    onCustomZap: (String) -> Unit = {},
-    onCustomZapSend: ((Note, Long, ZapType, String) -> Unit)? = null,
-    onZapSettings: () -> Unit = {},
-    shouldCloseZapMenus: Boolean = false,
-    /** Called when user taps a relay orb to show relay info. */
-    onRelayClick: (relayUrl: String) -> Unit = {},
-    /** When set, tapping relay orbs navigates to a dedicated relay list screen. */
-    onNavigateToRelayList: ((List<String>) -> Unit)? = null,
-    /** Extra items for the 3-dot More menu (e.g. "Copy text" on thread view). */
+    callbacks: NoteCardCallbacks = NoteCardCallbacks(),
+    overrides: NoteCardOverrides = NoteCardOverrides.EMPTY,
+    config: NoteCardConfig = NoteCardConfig(),
+    interaction: NoteCardInteractionState = NoteCardInteractionState(),
     extraMoreMenuItems: List<Pair<String, () -> Unit>> = emptyList(),
-    /** Whether the current user follows the note's author. */
-    isAuthorFollowed: Boolean = false,
-    /** Follow the note's author. */
-    onFollowAuthor: ((String) -> Unit)? = null,
-    /** Unfollow the note's author. */
-    onUnfollowAuthor: ((String) -> Unit)? = null,
-    /** Open a DM chat with the note's author. */
-    onMessageAuthor: ((String) -> Unit)? = null,
-    /** Block the note's author. */
-    onBlockAuthor: ((String) -> Unit)? = null,
-    /** Mute the note's author. */
-    onMuteAuthor: ((String) -> Unit)? = null,
-    /** Toggle bookmark for a note: (noteId, isCurrentlyBookmarked) -> Unit. */
-    onBookmarkToggle: ((String, Boolean) -> Unit)? = null,
-    /** Delete this note (hybrid NIP-86 + NIP-09). Only pass for the current user's own notes. */
-    onDelete: ((Note) -> Unit)? = null,
-    /** Current account npub for per-account recent emoji list. */
     accountNpub: String? = null,
-    /** True while a zap is being sent for this note (shows loading on bolt). */
-    isZapInProgress: Boolean = false,
-    /** True if current user has zapped this note (bolt turns yellow). */
-    isZapped: Boolean = false,
-    /** True if current user has boosted this note (repost icon turns green). */
-    isBoosted: Boolean = false,
-    /** Amount (sats) the current user zapped this note; shown as "You zapped X sats" when isZapped. */
-    myZappedAmount: Long? = null,
-    /** Override comment count (e.g. from ReplyCountCache when thread was loaded); used for counts row when non-null. */
-    overrideReplyCount: Int? = null,
-    /** Override zap count (e.g. from NoteCountsRepository kind-9735). */
-    overrideZapCount: Int? = null,
-    /** Total sats zapped (from NoteCountsRepository bolt11 parsing). */
-    overrideZapTotalSats: Long? = null,
-    /** Override reaction emojis (e.g. from NoteCountsRepository kind-7). */
-    overrideReactions: List<String>? = null,
-    /** Override reaction authors keyed by emoji (from NoteCountsRepository). */
-    overrideReactionAuthors: Map<String, List<String>>? = null,
-    /** Override zap author pubkeys (from NoteCountsRepository). */
-    overrideZapAuthors: List<String>? = null,
-    /** Per-author zap amounts in sats (from NoteCountsRepository). */
-    overrideZapAmountByAuthor: Map<String, Long>? = null,
-    /** NIP-30 custom emoji URLs: maps ":shortcode:" to image URL for rendering custom emoji reactions. */
-    overrideCustomEmojiUrls: Map<String, String>? = null,
-    /** When false, hides counts row and action row (like/reply/zap/more); used for compact reply in thread. */
-    showActionRow: Boolean = true,
-    /** Controls which buttons appear in the action row (kind-1 feed, kind-11 feed, kind-1111 reply). */
-    actionRowSchema: ActionRowSchema = ActionRowSchema.KIND1_FEED,
-    /** When set (e.g. thread view), author matching this id gets OP highlight and "OP" label; score • time shown on author line. */
-    rootAuthorId: String? = null,
-    /** When true (e.g. thread view), link embed shows expanded description. */
-    expandLinkPreviewInThread: Boolean = false,
-    /** When false, hides hashtags section below body (used in feed contexts). */
-    showHashtagsSection: Boolean = true,
-    /** Initial page index for the media album (shared state from AppViewModel). */
-    initialMediaPage: Int = 0,
-    /** Called when user swipes the media album to a different page. */
-    onMediaPageChanged: (Int) -> Unit = {},
-    /** Whether this card is currently visible on screen; off-screen cards pause video playback. */
-    isVisible: Boolean = true,
-    /** Aggregated counts for all notes (feed + quoted); used to show counters on quoted note previews. */
-    countsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
-    /** Called when user taps "See all" in the expanded reaction details panel. */
-    onSeeAllReactions: (() -> Unit)? = null,
-    /** NIP-22: Number of moderation flags on this note (shown as badge when > 0). */
-    moderationFlagCount: Int = 0,
-    /** Hoisted from ThemePreferences.compactMedia so each card doesn't subscribe independently. */
-    compactMedia: Boolean = false,
-    /** Hoisted from MediaPreferences.showSensitiveContent so each card doesn't subscribe independently. */
-    showSensitiveContent: Boolean = false,
-    /** NIP-88 poll vote callback: (noteId, authorPubkey, selectedOptions, relayHint). */
-    onPollVote: ((String, String, Set<String>, String?) -> Unit)? = null,
-    /** Current user hex pubkey for detecting own poll votes. */
     myPubkeyHex: String? = null,
-    /** Delete a reaction (kind-5 deletion): (noteId, reactionEventId, emoji). */
-    onDeleteReaction: ((noteId: String, reactionEventId: String, emoji: String) -> Unit)? = null,
+    countsByNoteId: Map<String, social.mycelium.android.repository.social.NoteCounts> = emptyMap(),
     modifier: Modifier = Modifier
 ) {
+    // Destructure holders into local vals for readability in the body
+    val onLike = callbacks.onLike
+    val onShare = callbacks.onShare
+    val onComment = callbacks.onComment
+    val onReact = callbacks.onReact
+    val onBoost = callbacks.onBoost
+    val onQuote = callbacks.onQuote
+    val onFork = callbacks.onFork
+    val onVote = callbacks.onVote
+    val onProfileClick = callbacks.onProfileClick
+    val onNoteClick = callbacks.onNoteClick
+    val onImageTap = callbacks.onImageTap
+    val onOpenImageViewer = callbacks.onOpenImageViewer
+    val onVideoClick = callbacks.onVideoClick
+    val onZap = callbacks.onZap
+    val onCustomZap = callbacks.onCustomZap
+    val onCustomZapSend = callbacks.onCustomZapSend
+    val onZapSettings = callbacks.onZapSettings
+    val onRelayClick = callbacks.onRelayClick
+    val onNavigateToRelayList = callbacks.onNavigateToRelayList
+    val onFollowAuthor = callbacks.onFollowAuthor
+    val onUnfollowAuthor = callbacks.onUnfollowAuthor
+    val onMessageAuthor = callbacks.onMessageAuthor
+    val onBlockAuthor = callbacks.onBlockAuthor
+    val onMuteAuthor = callbacks.onMuteAuthor
+    val onBookmarkToggle = callbacks.onBookmarkToggle
+    val onDelete = callbacks.onDelete
+    val onMediaPageChanged = callbacks.onMediaPageChanged
+    val onSeeAllReactions = callbacks.onSeeAllReactions
+    val onPollVote = callbacks.onPollVote
+    val onDeleteReaction = callbacks.onDeleteReaction
+    val overrideReplyCount = overrides.replyCount
+    val overrideZapCount = overrides.zapCount
+    val overrideZapTotalSats = overrides.zapTotalSats
+    val overrideReactions = overrides.reactions
+    val overrideReactionAuthors = overrides.reactionAuthors
+    val overrideZapAuthors = overrides.zapAuthors
+    val overrideZapAmountByAuthor = overrides.zapAmountByAuthor
+    val overrideCustomEmojiUrls = overrides.customEmojiUrls
+    val showActionRow = config.showActionRow
+    val actionRowSchema = config.actionRowSchema
+    val rootAuthorId = config.rootAuthorId
+    val expandLinkPreviewInThread = config.expandLinkPreviewInThread
+    val showHashtagsSection = config.showHashtagsSection
+    val initialMediaPage = config.initialMediaPage
+    val isVisible = config.isVisible
+    val compactMedia = config.compactMedia
+    val showSensitiveContent = config.showSensitiveContent
+    val moderationFlagCount = config.moderationFlagCount
+    val isZapInProgress = interaction.isZapInProgress
+    val isZapped = interaction.isZapped
+    val isBoosted = interaction.isBoosted
+    val myZappedAmount = interaction.myZappedAmount
+    val ownVoteValue = interaction.ownVoteValue
+    val voteScore = interaction.voteScore
+    val isAuthorFollowed = interaction.isAuthorFollowed
+    val shouldCloseZapMenus = interaction.shouldCloseZapMenus
     var isZapMenuExpanded by remember { mutableStateOf(false) }
     var showCustomZapDialog by remember { mutableStateOf(false) }
     var showZapDrawer by remember { mutableStateOf(false) }

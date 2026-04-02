@@ -1,5 +1,6 @@
 package social.mycelium.android.ui.screens
 
+import social.mycelium.android.ui.components.note.NoteCardCallbacks
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -155,8 +156,10 @@ fun AnnouncementsFeedScreen(
                         ) { note ->
                             NoteCard(
                                 note = note,
-                                onNoteClick = { onNoteClick(note) },
-                                onProfileClick = { onProfileClick(note.author.id) }
+                                callbacks = NoteCardCallbacks(
+                                    onNoteClick = { onNoteClick(note) },
+                                    onProfileClick = { onProfileClick(note.author.id) },
+                                ),
                             )
                         }
                     }

@@ -115,9 +115,19 @@ class NotesRepository private constructor() {
     private val pendingNip11Urls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var nip11PreloadJob: Job? = null
     private val NIP11_PRELOAD_DEBOUNCE_MS = 2000L
-    /** Max events to process per flush cycle. Remaining events stay in the queue
-     *  and are processed on the next poll iteration, spreading work across frames. */
-    private val MAX_FLUSH_CHUNK_SIZE = 50
+    /** Max events to process per flush cycle during steady-state (live feed, post-initial-load).
+     *  Remaining events stay in the queue and are processed on the next poll iteration. */
+    private val STEADY_STATE_CHUNK_SIZE = 50
+    /** Max events to process per flush cycle during initial load / burst ingestion.
+     *  10× steady-state to drain 60k+ event queues in ~120 cycles instead of 1200+. */
+    private val BURST_CHUNK_SIZE = 500
+    /** Enrichment (counts, quotes, URL previews, profiles, NIP-11) is deferred until the
+     *  pending queue shrinks below this threshold. Prevents 1200 rounds of subscription
+     *  fan-out when ingesting 60k events — enrichment fires once when the queue is mostly drained. */
+    private val ENRICHMENT_DRAIN_THRESHOLD = 200
+    /** Notes awaiting enrichment (counts/quotes/URL previews). Accumulated across flush cycles
+     *  during burst ingestion and fired once when the queue drains below ENRICHMENT_DRAIN_THRESHOLD. */
+    private val deferredEnrichmentNotes = java.util.concurrent.ConcurrentLinkedQueue<Note>()
     /** Minimum interval between flush emissions (ms). Prevents UI recomposition storms
      *  during heavy ingestion. The poller will process events but defer the StateFlow
      *  write until this interval has elapsed since the last emission. */
@@ -207,16 +217,27 @@ class NotesRepository private constructor() {
      * no event loss — if enqueuers set kind1Dirty, the next poll iteration picks it up.
      *
      * Idle: polls every 100ms (sleeping, no CPU cost).
-     * Active: processes a chunk, then yields one frame (~16ms) before the next chunk
-     *         so the UI can render progressively.
+     * Burst (queue > ENRICHMENT_DRAIN_THRESHOLD): processes large chunks (BURST_CHUNK_SIZE),
+     *   defers enrichment, uses 4ms inter-flush delay to drain fast.
+     * Steady-state: processes small chunks (STEADY_STATE_CHUNK_SIZE), fires enrichment
+     *   immediately, yields one frame (~16ms) between chunks.
      */
     private fun startKind1FlushPoller() {
         scope.launch {
             while (true) {
                 if (kind1Dirty.getAndSet(false) || pendingKind1Events.isNotEmpty()) {
                     flushKind1Events()
-                    // Yield a frame to let Compose render, then immediately check for more
-                    delay(16)
+                    // Adaptive inter-flush delay: tight during burst, relaxed in steady-state
+                    val queueSize = pendingKind1Events.size
+                    if (queueSize > ENRICHMENT_DRAIN_THRESHOLD) {
+                        delay(4) // Burst: drain fast, UI can wait
+                    } else {
+                        // Queue just drained below threshold — fire accumulated enrichment
+                        if (deferredEnrichmentNotes.isNotEmpty()) {
+                            fireDeferredEnrichment()
+                        }
+                        delay(16) // Steady-state: yield a frame for Compose
+                    }
                 } else {
                     // Idle — no data to process. Sleep longer to save battery.
                     delay(100)
@@ -235,9 +256,16 @@ class NotesRepository private constructor() {
      * ConcurrentModificationException.
      */
     private suspend fun flushKind1Events() {
+        // Dynamic chunk sizing: large chunks during initial load / burst ingestion,
+        // small chunks during steady-state to keep UI responsive.
+        val chunkSize = if (!initialLoadComplete || pendingKind1Events.size > ENRICHMENT_DRAIN_THRESHOLD) {
+            BURST_CHUNK_SIZE
+        } else {
+            STEADY_STATE_CHUNK_SIZE
+        }
         val batch = mutableListOf<PendingKind1Event>()
         var drained = 0
-        while (drained < MAX_FLUSH_CHUNK_SIZE) {
+        while (drained < chunkSize) {
             val item = pendingKind1Events.poll() ?: break
             batch.add(item)
             drained++
@@ -605,27 +633,24 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Fire counts enrichment immediately at ingestion time — don't wait for
-            // display filtering. The relay starts returning reactions/zaps/replies NOW,
-            // so by the time updateDisplayedNotes renders the card the data is already
-            // in NoteCountsRepository.countsByNoteId.
+            // ── Enrichment: counts, quotes, URL previews, profiles, NIP-11 ──
+            // During burst ingestion (queue still large), defer enrichment to avoid
+            // 1200 rounds of subscription fan-out. Accumulate notes and fire once
+            // when the queue drains below ENRICHMENT_DRAIN_THRESHOLD.
+            val queueStillLarge = pendingKind1Events.size > ENRICHMENT_DRAIN_THRESHOLD
+
             if (feedNotes.isNotEmpty()) {
-                val batchRelayMap = LinkedHashMap<String, List<String>>(feedNotes.size)
-                for (note in feedNotes) {
-                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                    val effectiveId = note.originalNoteId ?: note.id
-                    if (effectiveId !in batchRelayMap) {
-                        batchRelayMap[effectiveId] = relays
-                    }
-                    note.quotedEventIds.forEach { qid ->
-                        if (qid !in batchRelayMap) {
-                            batchRelayMap[qid] = relays
-                        }
-                    }
+                if (queueStillLarge) {
+                    // Defer: accumulate for later enrichment
+                    deferredEnrichmentNotes.addAll(feedNotes)
+                } else {
+                    // Steady-state: fire enrichment immediately
+                    // Include any previously deferred notes
+                    val enrichBatch = mutableListOf<Note>()
+                    while (true) { val n = deferredEnrichmentNotes.poll() ?: break; enrichBatch.add(n) }
+                    enrichBatch.addAll(feedNotes)
+                    fireEnrichmentForNotes(enrichBatch)
                 }
-                NoteCountsRepository.setNoteIdsOfInterest(batchRelayMap)
-                QuotedNoteCache.prefetchForNotes(feedNotes)
-                scheduleUrlPreviewPrefetch(feedNotes)
             }
 
             // Add pending notes
@@ -635,41 +660,42 @@ class NotesRepository private constructor() {
                     for (note in pendingNew) { pendingIndex.addNote(note) }
                 }
                 updateDisplayedNewNotesCount()
-                val pendingRelayMap = LinkedHashMap<String, List<String>>(pendingNew.size)
-                for (note in pendingNew) {
-                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                    val effectiveId = note.originalNoteId ?: note.id
-                    if (effectiveId !in pendingRelayMap) {
-                        pendingRelayMap[effectiveId] = relays
-                    }
-                    note.quotedEventIds.forEach { qid ->
-                        if (qid !in pendingRelayMap) {
-                            pendingRelayMap[qid] = relays
-                        }
-                    }
+                if (queueStillLarge) {
+                    deferredEnrichmentNotes.addAll(pendingNew)
+                } else {
+                    val enrichBatch = mutableListOf<Note>()
+                    while (true) { val n = deferredEnrichmentNotes.poll() ?: break; enrichBatch.add(n) }
+                    enrichBatch.addAll(pendingNew)
+                    fireEnrichmentForNotes(enrichBatch)
                 }
-                NoteCountsRepository.setNoteIdsOfInterest(pendingRelayMap)
-                QuotedNoteCache.prefetchForNotes(pendingNew)
-                scheduleUrlPreviewPrefetch(pendingNew)
             }
 
             // Always debounce the display update
             scheduleDisplayUpdate()
 
-            // Schedule ONE profile batch fetch for all pubkeys accumulated during this flush
-            val profileRelayUrls = getProfileRelayUrls()
-            if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {
-                scheduleBatchProfileRequest(profileRelayUrls)
-            }
+            // Profiles and NIP-11: also deferred during burst
+            if (!queueStillLarge) {
+                val profileRelayUrls = getProfileRelayUrls()
+                if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {
+                    scheduleBatchProfileRequest(profileRelayUrls)
+                }
 
-            // Collect unique relay URLs from this batch for debounced NIP-11 preload.
-            val nip11Cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
-            if (nip11Cache != null) {
-                val allRelayUrls = (feedNotes + pendingNew).flatMap { it.relayUrls }.distinct()
-                val uncached = allRelayUrls.filter { !nip11Cache.hasCachedRelayInfo(it) }
-                if (uncached.isNotEmpty()) {
-                    pendingNip11Urls.addAll(uncached)
-                    scheduleNip11Preload()
+                val nip11Cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+                if (nip11Cache != null) {
+                    val allRelayUrls = (feedNotes + pendingNew).flatMap { it.relayUrls }.distinct()
+                    val uncached = allRelayUrls.filter { !nip11Cache.hasCachedRelayInfo(it) }
+                    if (uncached.isNotEmpty()) {
+                        pendingNip11Urls.addAll(uncached)
+                        scheduleNip11Preload()
+                    }
+                }
+            } else {
+                // Accumulate NIP-11 URLs even during burst (cheap, no network)
+                val nip11Cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
+                if (nip11Cache != null) {
+                    val allRelayUrls = (feedNotes + pendingNew).flatMap { it.relayUrls }.distinct()
+                    val uncached = allRelayUrls.filter { !nip11Cache.hasCachedRelayInfo(it) }
+                    if (uncached.isNotEmpty()) pendingNip11Urls.addAll(uncached)
                 }
             }
 
@@ -689,6 +715,53 @@ class NotesRepository private constructor() {
             android.os.Trace.endSection()
         }
         } // processEventMutex.withLock
+    }
+
+    /**
+     * Fire counts, quoted-note, and URL preview enrichment for a batch of notes.
+     * Extracted from flushKind1Events so it can be called both inline (steady-state)
+     * and from [fireDeferredEnrichment] (after burst drains).
+     */
+    private fun fireEnrichmentForNotes(notes: List<Note>) {
+        if (notes.isEmpty()) return
+        val batchRelayMap = LinkedHashMap<String, List<String>>(notes.size)
+        for (note in notes) {
+            val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+            val effectiveId = note.originalNoteId ?: note.id
+            if (effectiveId !in batchRelayMap) {
+                batchRelayMap[effectiveId] = relays
+            }
+            note.quotedEventIds.forEach { qid ->
+                if (qid !in batchRelayMap) {
+                    batchRelayMap[qid] = relays
+                }
+            }
+        }
+        NoteCountsRepository.setNoteIdsOfInterest(batchRelayMap)
+        QuotedNoteCache.prefetchForNotes(notes)
+        scheduleUrlPreviewPrefetch(notes)
+    }
+
+    /**
+     * Drain all deferred enrichment notes and fire enrichment + profile + NIP-11
+     * in one shot. Called by the poller when the queue drops below [ENRICHMENT_DRAIN_THRESHOLD].
+     */
+    private fun fireDeferredEnrichment() {
+        val enrichBatch = mutableListOf<Note>()
+        while (true) { val n = deferredEnrichmentNotes.poll() ?: break; enrichBatch.add(n) }
+        if (enrichBatch.isNotEmpty()) {
+            Log.d(TAG, "🔶 Firing deferred enrichment for ${enrichBatch.size} accumulated notes")
+            fireEnrichmentForNotes(enrichBatch)
+        }
+        // Profiles
+        val profileRelayUrls = getProfileRelayUrls()
+        if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {
+            scheduleBatchProfileRequest(profileRelayUrls)
+        }
+        // NIP-11
+        if (pendingNip11Urls.isNotEmpty()) {
+            scheduleNip11Preload()
+        }
     }
 
     /** Schedule a debounced NIP-11 preload for relay URLs seen in feed notes.

@@ -103,6 +103,7 @@ object RelayCategorySyncRepository {
         val storageManager = RelayStorageManager(context)
         val merged = mergeCategories(diff.localCategories, diff.remoteCategories)
         storageManager.saveCategories(userPubkey, merged)
+        notifyNip42AllowedRelays(merged)
         _pendingCategoryDiff.value = null
         Log.d(TAG, "Accepted pending category diff: ${merged.size} categories merged")
     }
@@ -111,6 +112,19 @@ object RelayCategorySyncRepository {
     fun dismissPendingCategoryDiff() {
         _pendingCategoryDiff.value = null
         Log.d(TAG, "Dismissed pending category diff")
+    }
+
+    /**
+     * After categories are written to disk, notify the NIP-42 auth handler so
+     * relays in those categories can be authenticated. Without this, relays
+     * from kind-30002 sets fetched after login are silently excluded from AUTH.
+     */
+    private fun notifyNip42AllowedRelays(categories: List<RelayCategory>) {
+        val urls = categories.flatMap { it.relays }.map { it.url }
+        if (urls.isNotEmpty()) {
+            RelayConnectionStateMachine.getInstance().nip42AuthHandler.addAllowedRelayUrls(urls)
+            Log.d(TAG, "NIP-42: added ${urls.size} category relay URLs to allowed set")
+        }
     }
 
     private var fetchHandle: TemporarySubscriptionHandle? = null
@@ -340,6 +354,7 @@ object RelayCategorySyncRepository {
                     val merged = mergeCategories(localCategories, remoteCategories)
                     storageManager.saveCategories(userPubkey, merged)
                     _categoriesWrittenVersion.value++
+                    notifyNip42AllowedRelays(merged)
                     Log.d(TAG, "First sign-in: auto-applied ${remoteCategories.size} remote categories")
                     DiagnosticLog.sync(TAG, "MERGE (first sign-in): auto-applied ${remoteCategories.size} remote → ${merged.size} total")
                     return@launch

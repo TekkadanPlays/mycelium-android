@@ -86,6 +86,9 @@ class NotificationsRepository(
         private const val TARGET_FETCH_TIMEOUT_MS = 2500L
         private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 4000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
+        /** Notification ID modulus — expanded from 10k to 100k to reduce hash collisions
+         *  that cause unrelated notifications to silently stomp each other. */
+        private const val NOTIFICATION_ID_MODULUS = 100_000
 
 
         /** Maximum time to wait for profile/enrichment data before firing the notification anyway. */
@@ -299,6 +302,17 @@ class NotificationsRepository(
      *  write to clobber the first and silently drop a reaction/zap/repost. */
     private val consolidationLock = Any()
 
+    /** Consolidated notification IDs that have already fired a system notification in this session.
+     *  Prevents duplicate push notifications when a new actor arrives for the same aggregated
+     *  notification (e.g. 2nd person likes the same post). The first fire creates the tray entry;
+     *  subsequent events silently update it without re-playing sound/vibration. */
+    private val firedNotifIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+
+    /** True while processing events from [ingestEventAsHistorical]. Handlers check this flag
+     *  to skip push notification and auto-mark consolidated IDs as seen. */
+    @Volatile
+    private var isHistoricalIngestion = false
+
     private var prefs: SharedPreferences? = null
     @Volatile
     private var appContext: Context? = null
@@ -389,7 +403,7 @@ class NotificationsRepository(
         val title = "Mycelium"
         val body = "New private message"
         val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE +
-                (giftWrapId.hashCode() and 0x7FFFFFFF) % 10000
+                (giftWrapId.hashCode() and 0x7FFFFFFF) % NOTIFICATION_ID_MODULUS
 
         Log.d(TAG, "fireDmNotification: giftWrap=${giftWrapId.take(8)} account=${ownerPubkeyHex.take(8)}")
         social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
@@ -412,6 +426,8 @@ class NotificationsRepository(
         type: NotificationType, title: String, body: String, notifIdSuffix: String,
         eventEpochSec: Long = 0L, noteId: String? = null, rootNoteId: String? = null
     ) {
+        // Suppress entirely during deep-fetch historical ingestion
+        if (isHistoricalIngestion) return
         // Suppress historical replay: only fire for events created after session start
         if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) {
             Log.d(
@@ -424,6 +440,13 @@ class NotificationsRepository(
         }
         if (sessionStartEpochSec == Long.MAX_VALUE) {
             Log.d(TAG, "fireNotif SUPPRESSED (not enabled yet): type=$type suffix=${notifIdSuffix.take(8)}")
+            return
+        }
+        // Dedup: consolidated notifications (like:X, zap:X, repost:X) fire once per session.
+        // Subsequent events silently update the notification text without re-playing
+        // sound/vibration. This prevents notification spam for popular posts.
+        if (!firedNotifIds.add(notifIdSuffix)) {
+            Log.d(TAG, "fireNotif SUPPRESSED (already fired): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
         // NOTE: We intentionally do NOT gate on _seenIds here. seenIds tracks which
@@ -500,7 +523,7 @@ class NotificationsRepository(
                 NotificationType.BADGE_AWARD -> social.mycelium.android.services.NotificationChannelManager.CHANNEL_REACTIONS
             }
             val notifId =
-                social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+                social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % NOTIFICATION_ID_MODULUS
             Log.d(
                 TAG,
                 "fireNotif POSTING: type=$finalType channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${
@@ -574,7 +597,7 @@ class NotificationsRepository(
         val mgr = ctx.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager
             ?: return
         val notifId =
-            social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % 10000
+            social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % NOTIFICATION_ID_MODULUS
         mgr.cancel(notifId)
     }
 
@@ -948,6 +971,9 @@ class NotificationsRepository(
         if (ctx != null && notificationsById.isNotEmpty()) {
             scope.launch(Dispatchers.IO) { saveNotificationsToRoom(ctx) }
         }
+        // Reset session state
+        firedNotifIds.clear()
+        isHistoricalIngestion = false
         Log.d(TAG, "Notifications subscription stopped ($count handles)")
     }
 
@@ -1036,7 +1062,43 @@ class NotificationsRepository(
         if (!hasPTag && !hasETag && !hasQTag && !hasRepostETag) return
         // Suppress push notification by pre-marking the event ID as seen
         addSeenId(event.id)
-        handleEvent(event)
+        // Also pre-compute the consolidated ID for aggregated types and mark THAT as seen.
+        // Without this, the consolidated notification (like:X, zap:X, repost:X) appears
+        // as "unread" in the badge even though the underlying event was marked seen.
+        preMarkConsolidatedId(event)
+        // Set historical flag so handlers skip push notifications entirely
+        isHistoricalIngestion = true
+        try {
+            handleEvent(event)
+        } finally {
+            isHistoricalIngestion = false
+        }
+    }
+
+    /** Pre-compute and mark-as-seen the consolidated notification ID for aggregated event types.
+     *  For likes: "like:$eTag:$emoji", for reposts: "repost:$noteId", for zaps: "zap:$eTag". */
+    private fun preMarkConsolidatedId(event: Event) {
+        when (event.kind) {
+            NOTIFICATION_KIND_REACTION -> {
+                val eTag = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: return
+                val rawContent = event.content.ifBlank { "+" }
+                if (rawContent == "-") return
+                val emoji = when {
+                    rawContent == "+" -> "❤️"
+                    rawContent.startsWith(":") && rawContent.endsWith(":") -> rawContent
+                    else -> rawContent
+                }
+                addSeenId("like:$eTag:$emoji")
+            }
+            NOTIFICATION_KIND_REPOST, NOTIFICATION_KIND_GENERIC_REPOST -> {
+                val noteId = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: return
+                addSeenId("repost:$noteId")
+            }
+            NOTIFICATION_KIND_ZAP -> {
+                val eTag = event.tags.lastOrNull { it.size >= 2 && it[0] == "e" }?.get(1) ?: return
+                addSeenId("zap:$eTag")
+            }
+        }
     }
 
     private fun handleEvent(event: Event) {

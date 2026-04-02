@@ -1260,7 +1260,7 @@ fun DashboardScreen(
         derivedStateOf {
             val deduped = notesList.distinctBy { it.id }
             when (homeFeedState.homeSortOrder) {
-                HomeSortOrder.Latest -> deduped.sortedByDescending { it.timestamp }
+                HomeSortOrder.Latest -> deduped.sortedByDescending { it.repostTimestamp ?: it.timestamp }
                 HomeSortOrder.Popular -> deduped.sortedWith(
                     compareByDescending<Note> { note ->
                         val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]

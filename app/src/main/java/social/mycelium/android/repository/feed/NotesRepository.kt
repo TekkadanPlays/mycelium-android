@@ -751,8 +751,12 @@ class NotesRepository private constructor() {
     private fun fireEnrichmentForNotes(notes: List<Note>) {
         if (notes.isEmpty()) return
 
-        // ── Sort by timestamp descending: newest (top of feed) first ──
-        val sorted = notes.sortedByDescending { it.timestamp }
+        // ── Sort by feed-position timestamp: newest first ──
+        // For reposts (kind-6), the feed position is determined by the BOOST
+        // timestamp (repostTimestamp), not the original note's creation time.
+        // Without this, a boost of a week-old note would sort to the bottom
+        // of enrichment even though it appears at the top of the feed.
+        val sorted = notes.sortedByDescending { it.repostTimestamp ?: it.timestamp }
 
         // ── Split into viewport and background tiers ──
         val viewport: List<Note>
@@ -2620,6 +2624,12 @@ class NotesRepository private constructor() {
             synchronized(pendingNotesLock) { _pendingNewNotes.add(note); pendingIndex.addNote(note) }
             updateDisplayedNewNotesCount()
         }
+
+        // Fire enrichment for the repost: the original note needs counts (reactions,
+        // zaps, reposts), its quoted notes need prefetch, and its URLs need preview.
+        // Without this, boosted notes render with empty engagement data because the
+        // kind-6 path bypasses flushKind1Events (which normally triggers enrichment).
+        fireEnrichmentForNotes(listOf(note))
     }
 
     // ── Optimistic local rendering ────────────────────────────────────────────

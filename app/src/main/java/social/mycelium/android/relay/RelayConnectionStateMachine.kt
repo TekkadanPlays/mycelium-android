@@ -539,11 +539,11 @@ class RelayConnectionStateMachine {
                         since = sevenDaysAgo
                     )
                     val filterKind6 = if (kind1Filter != null) {
-                        Filter(kinds = listOf(6), authors = kind1Filter.authors, limit = kind1Filter.limit ?: GLOBAL_FEED_LIMIT, since = sevenDaysAgo)
+                        Filter(kinds = listOf(6), authors = kind1Filter.authors, limit = 150, since = sevenDaysAgo)
                     } else {
-                        Filter(kinds = listOf(6), limit = GLOBAL_FEED_LIMIT, since = sevenDaysAgo)
+                        Filter(kinds = listOf(6), limit = 150, since = sevenDaysAgo)
                     }
-                    val filterKind1011 = Filter(kinds = listOf(1011), limit = 200)
+                    val filterKind1011 = Filter(kinds = listOf(1011), limit = 50)
                     val filterKind30311 = Filter(kinds = listOf(30311), limit = 20)
                     val filterKind30023 = if (kind1Filter != null) {
                         Filter(kinds = listOf(30023), authors = kind1Filter.authors, limit = 50, since = sevenDaysAgo)
@@ -820,7 +820,7 @@ class RelayConnectionStateMachine {
         topicsSubId?.let { relayPool.closeSubscription(it) }
 
         val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
-        val topicsFilter = Filter(kinds = listOf(11, 1111), limit = 500, since = sevenDaysAgo)
+        val topicsFilter = Filter(kinds = listOf(11, 1111), limit = 200, since = sevenDaysAgo)
         val newSubId = "topics_" + CybinUtils.randomChars(6)
         topicsSubId = newSubId
 
@@ -1285,8 +1285,9 @@ class RelayConnectionStateMachine {
 
     companion object {
         private const val TAG = "RelayConnectionStateMachine"
-        /** Default kind-1 limit for global feed; higher = more notes, slightly slower first load. */
-        private const val GLOBAL_FEED_LIMIT = 800
+        /** Default kind-1 limit for global feed. Kept modest to avoid flooding the
+          * ingestion pipeline at startup; pagination backfills on scroll. */
+        private const val GLOBAL_FEED_LIMIT = 300
         private const val RETRY_DELAY_MS_FIRST = 2_000L
         private const val RETRY_DELAY_MS_SECOND = 5_000L
         private const val MAX_RETRIES = 3

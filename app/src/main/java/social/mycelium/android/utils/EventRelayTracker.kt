@@ -21,6 +21,10 @@ object EventRelayTracker {
     private const val MAX_TRACKED = 20_000
     private const val EVICT_BATCH = 4_000
 
+    /** Dirty flag: set when a relay URL is added that's NEW for an event (not just a duplicate).
+      * Consumed by updateDisplayedNotes to skip the O(n) enrichment pass when no new data exists. */
+    private val enrichmentDirty = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /**
      * Record that [relayUrl] delivered event [eventId].
      * Called from every event handler — even for duplicate/already-processed events.
@@ -31,7 +35,10 @@ object EventRelayTracker {
         val set = relaysByEvent.getOrPut(eventId) {
             java.util.Collections.synchronizedSet(mutableSetOf())
         }
-        set.add(normalized)
+        if (set.add(normalized)) {
+            // Truly new relay URL for this event — mark dirty for enrichment
+            enrichmentDirty.set(true)
+        }
         // Evict oldest entries if map grows too large
         if (relaysByEvent.size > MAX_TRACKED) {
             val iter = relaysByEvent.keys.iterator()
@@ -43,6 +50,9 @@ object EventRelayTracker {
             }
         }
     }
+
+    /** Returns true if new relay URLs have been added since the last call. Atomically clears the flag. */
+    fun consumeEnrichmentDirty(): Boolean = enrichmentDirty.getAndSet(false)
 
     /** Get all known relay URLs for an event. Returns empty list if unknown. */
     fun getRelays(eventId: String): List<String> =

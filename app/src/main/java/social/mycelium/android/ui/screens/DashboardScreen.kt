@@ -178,7 +178,15 @@ private fun DashboardFeedContent(
                 }
             }
         }
-        LaunchedEffect(engagementFilteredNotes) {
+        // Gate: only prefetch images once the feed has reached Live state.
+        // During burst ingestion (Loading), the decoder pool is better reserved for
+        // on-screen images. Prefetching 15 full-resolution images every 200ms during
+        // Loading saturates the decoder and causes the visible feed to stall.
+        val feedState by social.mycelium.android.repository.feed.NotesRepository.getInstance()
+            .feedSessionState.collectAsState()
+        val isFeedLive = feedState == social.mycelium.android.repository.feed.FeedSessionState.Live
+        LaunchedEffect(engagementFilteredNotes, isFeedLive) {
+            if (!isFeedLive) return@LaunchedEffect
             val prefetchCount = 15.coerceAtMost(engagementFilteredNotes.size)
             for (i in 0 until prefetchCount) {
                 engagementFilteredNotes[i].mediaUrls.forEach { url ->
@@ -198,7 +206,8 @@ private fun DashboardFeedContent(
         }
         // Prefetch profile metadata so display names / @mentions resolve before scrolling into view
         val profileCache = remember { social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance() }
-        LaunchedEffect(engagementFilteredNotes) {
+        LaunchedEffect(engagementFilteredNotes, isFeedLive) {
+            if (!isFeedLive) return@LaunchedEffect
             val prefetchCount = 20.coerceAtMost(engagementFilteredNotes.size)
             val pubkeys = mutableSetOf<String>()
             for (i in 0 until prefetchCount) {
@@ -216,6 +225,7 @@ private fun DashboardFeedContent(
         // that each subscribed to Compose's snapshot system independently.
         LaunchedEffect(listState) {
             var lastProfilePrefetchIdx = -1
+            var lastImagePrefetchTimeMs = 0L
             snapshotFlow {
                 val info = listState.layoutInfo
                 val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
@@ -226,20 +236,25 @@ private fun DashboardFeedContent(
                 viewModel.updateVisibleRange(firstVisible, lastVisible)
 
                 // 2. Image prefetch: 10 notes ahead of last visible
-                val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
-                for (i in (lastVisible + 1)..prefetchEnd) {
-                    val note = engagementFilteredNotes.getOrNull(i) ?: continue
-                    note.mediaUrls.forEach { url ->
-                        if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url) && prefetchedUrls.add(url)) {
-                            imageLoader.enqueue(
-                                coil.request.ImageRequest.Builder(context)
-                                    .data(url)
-                                    .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
-                                    .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                    .size(screenWidthPx, screenWidthPx)
-                                    .listener(prefetchListener)
-                                    .build()
-                            )
+                // Throttle: only fire every 300ms to prevent decoder flooding during fast scroll
+                val now = System.currentTimeMillis()
+                if (now - lastImagePrefetchTimeMs >= 300) {
+                    lastImagePrefetchTimeMs = now
+                    val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
+                    for (i in (lastVisible + 1)..prefetchEnd) {
+                        val note = engagementFilteredNotes.getOrNull(i) ?: continue
+                        note.mediaUrls.forEach { url ->
+                            if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url) && prefetchedUrls.add(url)) {
+                                imageLoader.enqueue(
+                                    coil.request.ImageRequest.Builder(context)
+                                        .data(url)
+                                        .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                                        .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+                                        .size(screenWidthPx, screenWidthPx)
+                                        .listener(prefetchListener)
+                                        .build()
+                                )
+                            }
                         }
                     }
                 }
@@ -247,11 +262,14 @@ private fun DashboardFeedContent(
                 // 3. Profile prefetch: debounce by skipping if position hasn't changed much
                 if (lastVisible > lastProfilePrefetchIdx + 3 || lastProfilePrefetchIdx == -1) {
                     lastProfilePrefetchIdx = lastVisible
+                    val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
                     val pubkeys = mutableSetOf<String>()
                     for (i in (lastVisible + 1)..prefetchEnd) {
                         val note = engagementFilteredNotes.getOrNull(i) ?: continue
                         pubkeys.add(note.author.id.lowercase())
-                        pubkeys.addAll(social.mycelium.android.utils.extractPubkeysFromContent(note.content))
+                        // Use pre-computed p-tag pubkeys instead of re-parsing content
+                        // with 5 regex patterns on each scroll event (50 regex scans → 0)
+                        note.mentionedPubkeys.forEach { pubkeys.add(it.lowercase()) }
                     }
                     val uncached = pubkeys.filter { profileCache.getAuthor(it) == null }
                     if (uncached.isNotEmpty()) {
@@ -260,25 +278,34 @@ private fun DashboardFeedContent(
                 }
             }
         }
-        // Infinite scroll: detect end-of-list and load older notes.
-        // Key on isLoadingOlder so the effect restarts when a load finishes — if the
-        // user is still at the bottom, the next page triggers immediately.
+        // Infinite scroll: robust pagination trigger.
+        // Multiple signals drive this: scroll position changes AND isLoadingOlder state changes.
+        // This ensures pagination fires even when the user is stationary at the bottom waiting
+        // for more content, and works regardless of how many items engagement filtering produces.
         val notesRepo = remember { social.mycelium.android.repository.feed.NotesRepository.getInstance() }
         val isLoadingOlder by notesRepo.isLoadingOlder.collectAsState()
         val paginationExhausted by notesRepo.paginationExhausted.collectAsState()
-        LaunchedEffect(listState, isLoadingOlder) {
-            snapshotFlow {
-                val layoutInfo = listState.layoutInfo
-                val totalItems = layoutInfo.totalItemsCount
-                val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
-                lastVisible to totalItems
-            }.collect { (lastVisible, totalItems) ->
-                // Pre-fetch aggressively: trigger 200 items before the bottom so
-                // the user effectively never sees the end of the feed. Events are
-                // cheap JSON; rendering is the bottleneck, not data.
-                if (totalItems > 200 && lastVisible >= totalItems - 200 && !isLoadingOlder && !paginationExhausted) {
-                    notesRepo.loadOlderNotes()
-                }
+
+        // Derived state: should we paginate right now?
+        // Re-evaluated whenever scroll position, loading state, or exhaustion changes.
+        val shouldPaginate by remember {
+            derivedStateOf {
+                if (isLoadingOlder || paginationExhausted) return@derivedStateOf false
+                val info = listState.layoutInfo
+                val totalItems = info.totalItemsCount
+                val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                if (totalItems < 2) return@derivedStateOf false
+                // Trigger when the user is within the last 20% of the list OR within
+                // 5 items of the bottom — whichever comes first. This handles both
+                // large feeds (20% = 100 notes buffer in a 500-item list) and small
+                // feeds (5-item threshold ensures pagination fires even with 15 items).
+                val threshold = maxOf(5, totalItems / 5)
+                lastVisible >= totalItems - threshold
+            }
+        }
+        LaunchedEffect(shouldPaginate) {
+            if (shouldPaginate) {
+                notesRepo.loadOlderNotes()
             }
         }
 
@@ -1258,13 +1285,11 @@ fun DashboardScreen(
     // Popular score = total reactions + zap count + reply count (simple cumulative; later becomes WoT-extensible)
     val sortedNotes by remember(notesList, homeFeedState.homeSortOrder) {
         derivedStateOf {
-            val deduped = notesList.distinctBy { it.id }
             when (homeFeedState.homeSortOrder) {
-                // Latest: data layer already maintains descending timestamp order
-                // (flushKind1Events, insertRepostNote both sort by repostTimestamp ?: timestamp).
-                // Skip the redundant O(n log n) sort on the main thread — only dedup for safety.
-                HomeSortOrder.Latest -> deduped
-                HomeSortOrder.Popular -> deduped.sortedWith(
+                // Latest: data layer guarantees unique IDs (FeedIndex) and descending
+                // timestamp order (flushKind1Events, insertRepostNote). Pass through directly.
+                HomeSortOrder.Latest -> notesList
+                HomeSortOrder.Popular -> notesList.sortedWith(
                     compareByDescending<Note> { note ->
                         val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                         val reactionCount = counts?.reactionAuthors?.values?.sumOf { it.size } ?: 0

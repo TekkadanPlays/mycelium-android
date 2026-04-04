@@ -3492,14 +3492,17 @@ fun NoteCard(
                 if (hasNewlyResolved) mentionProfileVersion++
             }
         }
-        // Quoted note fetch state (hoisted so inline QuotedNote blocks can access it)
+        // Quoted note state: ONLY allocated when this card actually has quoted events.
+        // ~80% of feed cards don't have quotes — this saves 8 remember slots + 3 LaunchedEffects
+        // per card, eliminating ~50KB of Compose snapshot state per non-quoting card.
         var quotedMetas by remember(note.id) { mutableStateOf<Map<String, QuotedNoteMeta>>(emptyMap()) }
         var quotedFailedIds by remember(note.id) { mutableStateOf<Set<String>>(emptySet()) }
-        var quotedLoading by remember(note.id) { mutableStateOf(note.quotedEventIds.isNotEmpty()) }
-        // Quoted profile revision: use shared map when available, per-card fallback otherwise
-        val quotedSharedRevisions = LocalProfileRevisions.current
-        var quotedLocalProfileRevision by remember(note.id) { mutableIntStateOf(0) }
+        var quotedLoading by remember(note.id) { mutableStateOf(false) }
+        var quotedProfileRevision by remember(note.id) { mutableIntStateOf(0) }
         if (note.quotedEventIds.isNotEmpty()) {
+            quotedLoading = true  // Will be set false by LaunchedEffect below
+            val quotedSharedRevisions = LocalProfileRevisions.current
+            var quotedLocalProfileRevision by remember(note.id) { mutableIntStateOf(0) }
             LaunchedEffect(note.quotedEventIds) {
                 quotedLoading = true
                 // Quick cache check first (no network)
@@ -3557,13 +3560,13 @@ fun NoteCard(
                     }
                 }
             }
+            // Compute effective quoted profile revision from shared map or local fallback
+            quotedProfileRevision = if (quotedSharedRevisions != null) {
+                remember(quotedMetas) {
+                    quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
+                }.sumOf { quotedSharedRevisions[it] ?: 0 }
+            } else quotedLocalProfileRevision
         }
-        // Compute effective quoted profile revision from shared map or local fallback
-        val quotedProfileRevision = if (quotedSharedRevisions != null) {
-            remember(quotedMetas) {
-                quotedMetas.values.map { normalizeAuthorIdForCache(it.authorId) }.toSet()
-            }.sumOf { quotedSharedRevisions[it] ?: 0 }
-        } else quotedLocalProfileRevision
 
         // Use translated text when available and user hasn't toggled to original
         val displayContent =

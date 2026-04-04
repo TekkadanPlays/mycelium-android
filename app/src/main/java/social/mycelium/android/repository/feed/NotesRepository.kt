@@ -546,6 +546,10 @@ class NotesRepository private constructor() {
                     Nip10ReplyDetector.getRootId(event)?.let { rootId ->
                         ThreadReplyCache.addReply(rootId, note)
                     }
+                    // Replies are only needed on-demand in thread view.
+                    // Skipping here prevents them from consuming feed cap space —
+                    // previously 77% of _notes were replies that got filtered in display.
+                    continue
                 }
 
                 newNotes.add(note)
@@ -1257,8 +1261,13 @@ class NotesRepository private constructor() {
 
     companion object {
         private const val TAG = "NotesRepository"
-        /** Max notes kept in memory; oldest dropped to keep feed bounded (scroll/layout performance). */
-        private const val MAX_NOTES_IN_MEMORY = 5000
+        /** Max notes kept in memory; oldest dropped to keep heap bounded.
+         *  With reply-skip, ~85% of internal notes pass display filter.
+         *  1000 base + 200 pagination cap = 1200 max → ~1020 displayed → ~192MB stable.
+         *  Going higher risks 256MB heap limit and GC death spiral. */
+        private const val MAX_NOTES_IN_MEMORY = 1000
+        /** Hard ceiling for pagination extra cap. Prevents unbounded growth. */
+        private const val MAX_PAGINATION_EXTRA_CAP = 200
         /** Limit for following feed; relays return only notes from followed authors so we can ask for more. */
         private const val FOLLOWING_FEED_LIMIT = 500
         /** Limit for global feed. */
@@ -1835,6 +1844,7 @@ class NotesRepository private constructor() {
             // Replaces 3 sequential .filter() calls (3× O(N)) with one pass (1× O(N)).
             var afterRelay = 0
             var afterFollow = 0
+            var afterReply = 0
             val filtered = ArrayList<Note>(minOf(allNotes.size, 500))
             for (note in allNotes) {
                 // 1. Relay match — notes must come from a user-configured relay.
@@ -1857,12 +1867,13 @@ class NotesRepository private constructor() {
                 afterFollow++
                 // 3. Reply filter
                 if (note.isReply) continue
+                afterReply++
                 // 4. Boost dedup: skip original if a repost version exists
                 if (note.originalNoteId == null && note.id in repostedOriginals) continue
                 filtered.add(note)
             }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
-                Log.d(TAG, "updateDisplayed: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=${filtered.size} (connectedRelays=${connectedRelays.size}, followEnabled=$followEnabled, followList=${currentFollowFilter?.size ?: 0})")
+                Log.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →final=${filtered.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
             }
             // Skip emission if the note ID list is identical — prevents unnecessary
             // LazyColumn re-layout that causes scroll jumps and nav bar reappearing.
@@ -2299,9 +2310,12 @@ class NotesRepository private constructor() {
                 "${it.removePrefix("wss://").removeSuffix("/").takeLast(20)}=${if (c != null) fmtMs(c) else "init"}"
             }}")
 
-        // Lower the age floor to accept events from the relay with the oldest cursor
-        val oldestCursorMs = perRelayCursorMs.values.minOrNull() ?: cursorMs
-        val pageFloorMs = oldestCursorMs - PAGINATION_PAGE_DAYS * 86_400_000L
+        // Lower the age floor based on HEALTHY relay cursors only (relays returning
+        // meaningful data). Zombie relays stuck at ancient timestamps (e.g. pickle at 11/30)
+        // must not pull the floor back months.
+        val healthyCursors = perRelayCursorMs.filter { it.key !in exhaustedPaginationRelays }
+        val oldestHealthyCursorMs = healthyCursors.values.minOrNull() ?: cursorMs
+        val pageFloorMs = oldestHealthyCursorMs - PAGINATION_PAGE_DAYS * 86_400_000L
         if (pageFloorMs < feedAgeFloorMs) {
             feedAgeFloorMs = pageFloorMs
         }
@@ -2355,16 +2369,27 @@ class NotesRepository private constructor() {
             // Update per-relay cursors from actual received data
             for ((relayUrl, oldest) in perRelayOldestMs) {
                 val current = perRelayCursorMs[relayUrl]
-                if (current == null || oldest < current) {
+                // Clamp cursor jump: if a relay jumps > MAX_CURSOR_JUMP_MS in one page,
+                // it's returning sparse ancient data (e.g. pickle jumping 03/14 → 11/30).
+                // Mark it exhausted instead of accepting the ancient cursor.
+                if (current != null && current - oldest > MAX_CURSOR_JUMP_MS) {
+                    exhaustedPaginationRelays.add(relayUrl)
+                    Log.w(TAG, "Relay cursor-clamped: ${relayUrl.removePrefix("wss://").removeSuffix("/")} " +
+                        "jumped ${fmtMs(current)} → ${fmtMs(oldest)} (>${MAX_CURSOR_JUMP_MS / 86_400_000L}d gap)")
+                } else if (current == null || oldest < current) {
                     perRelayCursorMs[relayUrl] = oldest
                 }
             }
-            // Mark relays that returned 0 events as exhausted
+            // Mark relays that returned too few events as exhausted.
+            // A relay returning < 5 events from a 50-limit request is effectively empty.
+            // This catches "zombie" relays like pickle that return 1 ancient event per page.
+            val MIN_USEFUL_EVENTS = 5
             for (relayUrl in activeRelays) {
+                if (relayUrl in exhaustedPaginationRelays) continue  // already handled by cursor-clamp
                 val count = perRelayEventCount[relayUrl] ?: 0
-                if (count == 0) {
+                if (count < MIN_USEFUL_EVENTS) {
                     exhaustedPaginationRelays.add(relayUrl)
-                    Log.w(TAG, "Relay exhausted: ${relayUrl.removePrefix("wss://").removeSuffix("/")} (0 events this page)")
+                    Log.w(TAG, "Relay exhausted: ${relayUrl.removePrefix("wss://").removeSuffix("/")} ($count < $MIN_USEFUL_EVENTS events this page)")
                 }
             }
 
@@ -2382,6 +2407,21 @@ class NotesRepository private constructor() {
                 if (paginationEmptyStreak >= 2) {
                     _paginationExhausted.value = true
                     Log.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty responses")
+                }
+            } else if (added == 0) {
+                // Received events but trimNotesToCap discarded them all — feed is at cap.
+                // Further pagination just wastes relay bandwidth.
+                paginationEmptyStreak++
+                if (paginationEmptyStreak >= 2) {
+                    _paginationExhausted.value = true
+                    Log.w(TAG, "Pagination stopped: $paginationEmptyStreak pages trimmed to 0 (cap reached, $received recv discarded)")
+                } else {
+                    val relayStats = activeRelays.joinToString { r ->
+                        val cnt = perRelayEventCount[r] ?: 0
+                        val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
+                        "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
+                    }
+                    Log.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
                 }
             } else {
                 paginationEmptyStreak = 0
@@ -2529,8 +2569,10 @@ class NotesRepository private constructor() {
     /** Keep only the newest notes to cap memory; list must be sorted by timestamp descending.
      *  Cap grows dynamically as the user paginates older notes so they don't get trimmed immediately. */
     private fun trimNotesToCap(notes: List<Note>): List<Note> {
-        val effectiveCap = MAX_NOTES_IN_MEMORY + paginationExtraCap
-        return if (notes.size <= effectiveCap) notes else notes.take(effectiveCap)
+        val effectiveCap = MAX_NOTES_IN_MEMORY + minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)
+        if (notes.size <= effectiveCap) return notes
+        Log.w(TAG, "Trimming feed: ${notes.size} → $effectiveCap (base=$MAX_NOTES_IN_MEMORY + paginationCap=${minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)})")
+        return notes.take(effectiveCap)
     }
 
     /**

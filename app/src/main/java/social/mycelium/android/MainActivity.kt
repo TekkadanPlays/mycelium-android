@@ -113,9 +113,10 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // registerComponentCallbacks(this) because it causes infinite recursion in
         // onConfigurationChanged on Android 15 foldable devices.
 
-        // Configure Coil with GIF decoder, optimized caching, and crossfade for smooth feed rendering.
-        // User-Agent header set via OkHttp interceptor so servers (e.g. Lemmy pictrs) don't 403.
-        // Coil 2.x bundles OkHttp internally; we configure it via callFactory without explicit import.
+        // Configure Coil: DISK-ONLY caching. Memory cache disabled to prevent
+        // Java heap exhaustion at high note counts. Each NoteCard has up to 18
+        // AsyncImage loads; at 2000+ notes with memory cache, decoded bitmaps
+        // accumulate to 200MB+ and trigger 935ms+ GC pauses.
         Coil.setImageLoader(
             ImageLoader.Builder(this)
                 .callFactory {
@@ -142,22 +143,16 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     add(coil.decode.VideoFrameDecoder.Factory())
                 }
                 .crossfade(100)
-                // INEXACT precision: Coil downsamples to the composable's measured size
-                // instead of decoding at full native resolution. A 4000×3000 image
-                // rendered at 1080px wide → decoded at ~1080px instead of 4000px.
-                // Saves ~90% of native bitmap memory per image.
                 .precision(coil.size.Precision.INEXACT)
-                // Allow hardware bitmaps: GPU-backed, lower memory, not counted in Java heap
                 .allowHardware(true)
-                // Allow RGB565 for opaque images: 2 bytes/pixel instead of 4 (ARGB_8888)
                 .allowRgb565(true)
-                .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                // DISABLED memory cache — disk-only. Re-decode from SSD on scroll-back.
+                // This eliminates the #1 heap consumer: decoded bitmaps held by Coil's LRU cache.
+                .memoryCachePolicy(coil.request.CachePolicy.DISABLED)
                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                .memoryCache {
-                    coil.memory.MemoryCache.Builder(this)
-                        .maxSizePercent(0.05) // 5% — native bitmap memory is the real pressure, not Java refs
-                        .build()
-                }
+                // Limit concurrent decode threads — prevents decode storms during fast scroll
+                .fetcherDispatcher(kotlinx.coroutines.Dispatchers.IO.limitedParallelism(2))
+                .decoderDispatcher(kotlinx.coroutines.Dispatchers.IO.limitedParallelism(2))
                 .diskCache {
                     coil.disk.DiskCache.Builder()
                         .directory(cacheDir.resolve("image_cache"))
@@ -167,6 +162,20 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 .build()
         )
 
+        // ── Heap diagnostic: logs every 15s at W-level (survives R8) ──
+        Thread {
+            while (true) {
+                Thread.sleep(15_000)
+                val rt = Runtime.getRuntime()
+                val usedMB = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
+                val maxMB = rt.maxMemory() / (1024 * 1024)
+                val pct = usedMB * 100 / maxMB
+                val feedSize = try {
+                    social.mycelium.android.repository.feed.NotesRepository.getInstance().notes.value.size
+                } catch (_: Exception) { -1 }
+                android.util.Log.w("HeapMonitor", "Heap: ${usedMB}MB/${maxMB}MB (${pct}%) | feed=$feedSize notes")
+            }
+        }.apply { isDaemon = true; name = "HeapMonitor"; start() }
         // Initialize relay health tracker (loads persisted blocklist before any connections)
         social.mycelium.android.relay.RelayHealthTracker.init(applicationContext)
 

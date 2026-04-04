@@ -127,6 +127,8 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                                     .build()
                             )
                         }
+                        // Cap concurrent image downloads — reduces native memory from HTTP buffers
+                        .connectionPool(okhttp3.ConnectionPool(5, 30, java.util.concurrent.TimeUnit.SECONDS))
                         .build()
                 }
                 .components {
@@ -140,11 +142,20 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                     add(coil.decode.VideoFrameDecoder.Factory())
                 }
                 .crossfade(100)
+                // INEXACT precision: Coil downsamples to the composable's measured size
+                // instead of decoding at full native resolution. A 4000×3000 image
+                // rendered at 1080px wide → decoded at ~1080px instead of 4000px.
+                // Saves ~90% of native bitmap memory per image.
+                .precision(coil.size.Precision.INEXACT)
+                // Allow hardware bitmaps: GPU-backed, lower memory, not counted in Java heap
+                .allowHardware(true)
+                // Allow RGB565 for opaque images: 2 bytes/pixel instead of 4 (ARGB_8888)
+                .allowRgb565(true)
                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                 .memoryCache {
                     coil.memory.MemoryCache.Builder(this)
-                        .maxSizePercent(0.10) // 10% of available app memory — tight to minimize GC pressure
+                        .maxSizePercent(0.05) // 5% — native bitmap memory is the real pressure, not Java refs
                         .build()
                 }
                 .diskCache {

@@ -329,6 +329,10 @@ class NotesRepository private constructor() {
             // notes. This prevents relays that ignore `since` from contaminating the feed
             // with ancient notes that corrupt the pagination cursor.
             val ageFloorMs = feedAgeFloorMs
+            // Hard absolute floor: always reject events older than 14 days regardless of
+            // mainSubscriptionFloorMs init state. This is the safety net for the race where
+            // events arrive before the subscription sets the floor (e.g. late prewarm echo).
+            val absoluteFloorMs = System.currentTimeMillis() - 14L * 86_400_000L
             var ageGateDropped = 0
             // Track which note IDs came from outbox events so they bypass the cutoff gate
             val outboxNoteIds = HashSet<String>()
@@ -354,6 +358,8 @@ class NotesRepository private constructor() {
                 // not the embedded original note's timestamp, since that's when the boost happened.
                 if (event.kind == 6 || event.kind == 16) {
                     val repostMs = event.createdAt * 1000L
+                    // Hard floor: always reject reposts older than 14 days
+                    if (repostMs < absoluteFloorMs) { ageGateDropped++; continue }
                     if (!isPagination && mainSubscriptionFloorMs > 0L && repostMs < mainSubscriptionFloorMs) {
                         ageGateDropped++
                         continue
@@ -378,6 +384,8 @@ class NotesRepository private constructor() {
                 // historical content. Ancient events from outbox relays that ignore
                 // `since` are dropped here.
                 val eventMs = event.createdAt * 1000L
+                // Hard floor: always reject events older than 14 days
+                if (eventMs < absoluteFloorMs) { ageGateDropped++; continue }
                 if (!isPagination && mainSubscriptionFloorMs > 0L && eventMs < mainSubscriptionFloorMs) {
                     ageGateDropped++
                     continue
@@ -762,7 +770,7 @@ class NotesRepository private constructor() {
                 Log.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges${if (ageGateDropped > 0) ", $ageGateDropped age-gated" else ""}")
             }
             if (ageGateDropped > 0) {
-                Log.d(TAG, "Age gate dropped $ageGateDropped events older than ${fmtMs(ageFloorMs)}")
+                Log.w(TAG, "Age gate dropped $ageGateDropped events (floor=${fmtMs(ageFloorMs)}, mainFloor=${fmtMs(mainSubscriptionFloorMs)}, absFloor=${fmtMs(absoluteFloorMs)})")
             }
 
             // ── Batch kind-6/16 reposts ──────────────────────────────────────────
@@ -1433,6 +1441,8 @@ class NotesRepository private constructor() {
                     return@withContext
                 }
                 val notes = mutableListOf<Note>()
+                val absoluteFloorMs = System.currentTimeMillis() - 14L * 86_400_000L
+                var cacheDropped = 0
                 for (entity in entities) {
                     if (entity.eventId in deletedEventIds) continue
                     try {
@@ -1441,6 +1451,10 @@ class NotesRepository private constructor() {
                         // event. convertEventToNote would display it as-is (broken text).
                         // Reposts are reconstructed from live relay data via handleKind6Repost.
                         if (event.kind == 6) continue
+                        // Hard age floor: reject events older than 14 days to prevent ancient
+                        // notes from previous pagination sessions appearing on cold start.
+                        val eventMs = event.createdAt * 1000L
+                        if (eventMs < absoluteFloorMs) { cacheDropped++; continue }
                         val note = convertEventToNote(event, entity.relayUrl ?: "")
                         // Restore merged relay URLs from the dedicated column (schema v3+)
                         val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
@@ -1456,6 +1470,7 @@ class NotesRepository private constructor() {
                         Log.w(TAG, "Feed cache: skip bad event ${entity.eventId.take(8)}: ${e.message}")
                     }
                 }
+                if (cacheDropped > 0) Log.w(TAG, "Feed cache: dropped $cacheDropped ancient events (>14d)")
                 if (notes.isNotEmpty() && _notes.value.isEmpty()) {
                     setNotes(notes.toImmutableList())
                     _displayedNotes.value = notes.toImmutableList()

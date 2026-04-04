@@ -350,7 +350,18 @@ class NotesRepository private constructor() {
                 val isPagination = pending.isPagination
                 val isOutbox = pending.isOutbox
                 // Route kind-6/16 reposts to batch handler (processed below, same mutex)
+                // Apply age gate to reposts too — use the repost timestamp (event.createdAt),
+                // not the embedded original note's timestamp, since that's when the boost happened.
                 if (event.kind == 6 || event.kind == 16) {
+                    val repostMs = event.createdAt * 1000L
+                    if (!isPagination && mainSubscriptionFloorMs > 0L && repostMs < mainSubscriptionFloorMs) {
+                        ageGateDropped++
+                        continue
+                    }
+                    if (isPagination && ageFloorMs > 0L && repostMs < ageFloorMs) {
+                        ageGateDropped++
+                        continue
+                    }
                     kind6Batch.add(pending)
                     continue
                 }
@@ -362,18 +373,18 @@ class NotesRepository private constructor() {
                 // Live subscription uses the fixed mainSubscriptionFloorMs so pagination
                 // can't widen the window for the main feed. Pagination events use the
                 // progressively-lowered feedAgeFloorMs.
-                // Outbox events bypass the age gate — they represent followed-user notes
-                // discovered late via NIP-65 and should always enter the feed.
-                if (!isOutbox) {
-                    val eventMs = event.createdAt * 1000L
-                    if (!isPagination && mainSubscriptionFloorMs > 0L && eventMs < mainSubscriptionFloorMs) {
-                        ageGateDropped++
-                        continue
-                    }
-                    if (isPagination && ageFloorMs > 0L && eventMs < ageFloorMs) {
-                        ageGateDropped++
-                        continue
-                    }
+                // Outbox events use the same mainSubscriptionFloorMs as live events —
+                // they represent recent notes from followed users' write relays, not
+                // historical content. Ancient events from outbox relays that ignore
+                // `since` are dropped here.
+                val eventMs = event.createdAt * 1000L
+                if (!isPagination && mainSubscriptionFloorMs > 0L && eventMs < mainSubscriptionFloorMs) {
+                    ageGateDropped++
+                    continue
+                }
+                if (isPagination && ageFloorMs > 0L && eventMs < ageFloorMs) {
+                    ageGateDropped++
+                    continue
                 }
 
                 if (isOutbox) {

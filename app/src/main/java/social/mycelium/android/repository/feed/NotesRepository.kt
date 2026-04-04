@@ -1263,13 +1263,13 @@ class NotesRepository private constructor() {
         private const val TAG = "NotesRepository"
         /** Max notes kept in memory; oldest dropped to keep heap bounded.
          *  With reply-skip, ~85% of internal notes pass display filter.
-         *  1000 base + 200 pagination cap = 1200 max → ~1020 displayed → ~192MB stable.
-         *  Going higher risks 256MB heap limit and GC death spiral. */
-        private const val MAX_NOTES_IN_MEMORY = 1000
+         *  706 displayed notes = 256MB (OOM). Safe zone: ~500 displayed.
+         *  600 base + 100 pagination cap = 700 max → ~595 displayed → ~140MB stable. */
+        private const val MAX_NOTES_IN_MEMORY = 600
         /** Hard ceiling for pagination extra cap. Prevents unbounded growth. */
-        private const val MAX_PAGINATION_EXTRA_CAP = 200
+        private const val MAX_PAGINATION_EXTRA_CAP = 100
         /** Limit for following feed; relays return only notes from followed authors so we can ask for more. */
-        private const val FOLLOWING_FEED_LIMIT = 500
+        private const val FOLLOWING_FEED_LIMIT = 300
         /** Limit for global feed. */
         private const val GLOBAL_FEED_LIMIT = 300
         private const val FEED_SINCE_DAYS = 7

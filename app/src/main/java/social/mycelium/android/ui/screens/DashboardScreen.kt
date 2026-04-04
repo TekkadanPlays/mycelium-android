@@ -309,6 +309,13 @@ private fun DashboardFeedContent(
             }
         }
 
+        // Report scroll position to NotesRepository so the interest-set window
+        // tracks the user's viewport. Debounced to avoid flooding during flings.
+        LaunchedEffect(listState) {
+            androidx.compose.runtime.snapshotFlow { listState.firstVisibleItemIndex }
+                .collect { index -> notesRepo.updateVisibleScrollPosition(index) }
+        }
+
         // Hoist global preferences once so each NoteCard doesn't subscribe independently
         val compactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
         val showSensitiveContent by social.mycelium.android.ui.settings.MediaPreferences.showSensitiveContent.collectAsState()

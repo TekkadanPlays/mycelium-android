@@ -358,12 +358,19 @@ class NotesRepository private constructor() {
                 // Accumulate relay URL in tracker — builds up across duplicate deliveries
                 if (relayUrl.isNotBlank()) EventRelayTracker.addRelay(event.id, relayUrl)
 
-                // Age gate: drop ancient events from the live subscription
+                // Age gate: separate floors for live vs pagination events.
+                // Live subscription uses the fixed mainSubscriptionFloorMs so pagination
+                // can't widen the window for the main feed. Pagination events use the
+                // progressively-lowered feedAgeFloorMs.
                 // Outbox events bypass the age gate — they represent followed-user notes
                 // discovered late via NIP-65 and should always enter the feed.
-                if (!isPagination && !isOutbox && ageFloorMs > 0L) {
+                if (!isOutbox) {
                     val eventMs = event.createdAt * 1000L
-                    if (eventMs < ageFloorMs) {
+                    if (!isPagination && mainSubscriptionFloorMs > 0L && eventMs < mainSubscriptionFloorMs) {
+                        ageGateDropped++
+                        continue
+                    }
+                    if (isPagination && ageFloorMs > 0L && eventMs < ageFloorMs) {
                         ageGateDropped++
                         continue
                     }
@@ -1163,10 +1170,14 @@ class NotesRepository private constructor() {
     private var feedCutoffTimestampMs: Long = 0L
     private var latestNoteTimestampAtOpen: Long = 0L
     private var initialLoadComplete: Boolean = false
-    /** Hard age floor (ms): events from the main subscription older than this are dropped.
-     *  Initialized to (now - FEED_SINCE_DAYS) when subscribing. loadOlderNotes lowers this
-     *  as the user paginates so older pages can come through. Prevents relays that ignore
-     *  the `since` filter from contaminating the feed with ancient notes. */
+    /** Fixed age floor for the main (live) subscription — never lowered by pagination.
+     *  Set at subscribe time to (now - FEED_SINCE_DAYS). Events from the live subscription
+     *  older than this are dropped, preventing relays that ignore `since` from contaminating
+     *  the feed with ancient notes. */
+    @Volatile private var mainSubscriptionFloorMs: Long = 0L
+    /** Pagination age floor (ms): starts equal to mainSubscriptionFloorMs but gets lowered
+     *  by each loadOlderNotes call so progressively older pages can pass through. Only
+     *  applies to events marked isPagination=true. */
     @Volatile private var feedAgeFloorMs: Long = 0L
     private val _pendingNewNotes = mutableListOf<Note>()
     private val pendingNotesLock = Any()
@@ -1692,6 +1703,21 @@ class NotesRepository private constructor() {
      *  data changes (relay merges, profile resolution) without new IDs. */
     @Volatile private var lastDisplayedNoteIdSet: Set<String> = emptySet()
 
+    /** Current scroll position (first visible item index) — set by DashboardScreen.
+     *  Used to scope interest registration to a sliding window around the viewport. */
+    @Volatile private var currentScrollPosition: Int = 0
+
+    /** Called by DashboardScreen when the user scrolls. Updates the viewport-scoped
+     *  interest window without triggering a full display update. */
+    fun updateVisibleScrollPosition(firstVisibleIndex: Int) {
+        currentScrollPosition = firstVisibleIndex
+    }
+
+    /** Size of the sliding interest window around the scroll position.
+     *  Notes outside this window still display (with cached counts) but
+     *  don't actively consume relay subscription slots. */
+    private val INTEREST_WINDOW_SIZE = 200
+
     private fun updateDisplayedNotes() {
         android.os.Trace.beginSection("NotesRepo.updateDisplayedNotes")
         try {
@@ -1706,20 +1732,32 @@ class NotesRepository private constructor() {
             // steady-state with no new relay data, this skips the entire pass.
             if (EventRelayTracker.consumeEnrichmentDirty()) {
                 val preEnrich = _notes.value
-                var enrichedCount = 0
-                val enriched = preEnrich.map { note ->
+                // First pass: identify indices that need enrichment (cheap — no allocation per note)
+                val dirtyIndices = mutableListOf<Int>()
+                for (i in preEnrich.indices) {
+                    val note = preEnrich[i]
                     val noteId = note.originalNoteId ?: note.id
                     val trackerId = if (noteId.startsWith("repost:")) noteId.removePrefix("repost:") else noteId
                     val existing = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                    val merged = EventRelayTracker.enrichRelayUrls(trackerId, existing)
-                    if (merged.size > existing.size) {
-                        enrichedCount++
-                        note.copy(relayUrls = merged)
-                    } else note
+                    if (EventRelayTracker.hasNewRelays(trackerId, existing.size)) {
+                        dirtyIndices.add(i)
+                    }
                 }
-                if (enrichedCount > 0) {
+                // Only rebuild list if there are actual changes
+                if (dirtyIndices.isNotEmpty()) {
+                    val enriched = preEnrich.toMutableList()
+                    for (i in dirtyIndices) {
+                        val note = enriched[i]
+                        val noteId = note.originalNoteId ?: note.id
+                        val trackerId = if (noteId.startsWith("repost:")) noteId.removePrefix("repost:") else noteId
+                        val existing = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                        val merged = EventRelayTracker.enrichRelayUrls(trackerId, existing)
+                        if (merged.size > existing.size) {
+                            enriched[i] = note.copy(relayUrls = merged)
+                        }
+                    }
                     setNotes(enriched.toImmutableList())
-                    Log.d(TAG, "\uD83D\uDD35 Tracker enrichment: $enrichedCount notes gained relay URLs")
+                    Log.d(TAG, "\uD83D\uDD35 Tracker enrichment: ${dirtyIndices.size} notes gained relay URLs (of ${preEnrich.size} total)")
                 }
             }
 
@@ -1820,17 +1858,22 @@ class NotesRepository private constructor() {
             }
             _displayedNotes.value = newList.toImmutableList()
             updateDisplayedNewNotesCount()
-            // Register note IDs for counts only when the ID set actually changes.
-            // Building the relay map + depth-2 scan is expensive (regex on every
-            // quoted note's content), so skip it on data-only updates (relay merges,
-            // profile arrivals) where the ID set is unchanged.
-            val newIdSet = buildSet(newList.size) {
-                for (note in newList) add(note.originalNoteId ?: note.id)
+            // Register note IDs for counts only when the windowed ID set changes.
+            // Use a sliding window around the scroll position instead of the full list
+            // so the relay subscription cost stays O(INTEREST_WINDOW_SIZE) regardless of
+            // feed depth. Notes outside the window keep their cached counts from
+            // _countsByNoteId — they just don't get active relay subscriptions.
+            val scrollPos = currentScrollPosition
+            val windowStart = maxOf(0, scrollPos - 30) // small lookback buffer
+            val windowEnd = minOf(newList.size, scrollPos + INTEREST_WINDOW_SIZE)
+            val windowNotes = if (windowEnd > windowStart) newList.subList(windowStart, windowEnd) else newList
+            val newIdSet = buildSet(windowNotes.size) {
+                for (note in windowNotes) add(note.originalNoteId ?: note.id)
             }
             if (newIdSet != lastDisplayedNoteIdSet) {
                 lastDisplayedNoteIdSet = newIdSet
-                val noteRelayMap = LinkedHashMap<String, List<String>>(newList.size)
-                for (note in newList) {
+                val noteRelayMap = LinkedHashMap<String, List<String>>(windowNotes.size)
+                for (note in windowNotes) {
                     val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
                     val effectiveId = note.originalNoteId ?: note.id
                     if (effectiveId !in noteRelayMap) {
@@ -2003,7 +2046,8 @@ class NotesRepository private constructor() {
         latestNoteTimestampAtOpen = feedCutoffTimestampMs
         // Age floor: drop events from the main subscription older than the subscription's since window.
         // This is the hard boundary — relays that ignore `since` can't contaminate the feed.
-        feedAgeFloorMs = System.currentTimeMillis() - FEED_SINCE_DAYS.toLong() * 86_400_000L
+        mainSubscriptionFloorMs = System.currentTimeMillis() - FEED_SINCE_DAYS.toLong() * 86_400_000L
+        feedAgeFloorMs = mainSubscriptionFloorMs
         paginationCursorMs = 0L
         paginationExtraCap = 0
         paginationEmptyStreak = 0

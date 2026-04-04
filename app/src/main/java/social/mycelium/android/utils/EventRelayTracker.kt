@@ -58,6 +58,13 @@ object EventRelayTracker {
     fun getRelays(eventId: String): List<String> =
         relaysByEvent[eventId]?.toList() ?: emptyList()
 
+    /** Cheap check: does this event have tracked relays beyond what the note already has?
+     *  Used by the optimized enrichment pass to skip notes that don't need a full merge. */
+    fun hasNewRelays(eventId: String, existingCount: Int): Boolean {
+        val tracked = relaysByEvent[eventId] ?: return false
+        return tracked.size > existingCount
+    }
+
     /** Merge tracked relays into a note's existing relay URLs list. */
     fun enrichRelayUrls(eventId: String, existing: List<String>): List<String> {
         val tracked = relaysByEvent[eventId] ?: return existing

@@ -358,8 +358,8 @@ class NotesRepository private constructor() {
                 // not the embedded original note's timestamp, since that's when the boost happened.
                 if (event.kind == 6 || event.kind == 16) {
                     val repostMs = event.createdAt * 1000L
-                    // Hard floor: always reject reposts older than 14 days
-                    if (repostMs < absoluteFloorMs) { ageGateDropped++; continue }
+                    // Hard floor: reject non-pagination reposts older than 14 days
+                    if (!isPagination && repostMs < absoluteFloorMs) { ageGateDropped++; continue }
                     if (!isPagination && mainSubscriptionFloorMs > 0L && repostMs < mainSubscriptionFloorMs) {
                         ageGateDropped++
                         continue
@@ -384,8 +384,8 @@ class NotesRepository private constructor() {
                 // historical content. Ancient events from outbox relays that ignore
                 // `since` are dropped here.
                 val eventMs = event.createdAt * 1000L
-                // Hard floor: always reject events older than 14 days
-                if (eventMs < absoluteFloorMs) { ageGateDropped++; continue }
+                // Hard floor: reject non-pagination events older than 14 days
+                if (!isPagination && eventMs < absoluteFloorMs) { ageGateDropped++; continue }
                 if (!isPagination && mainSubscriptionFloorMs > 0L && eventMs < mainSubscriptionFloorMs) {
                     ageGateDropped++
                     continue

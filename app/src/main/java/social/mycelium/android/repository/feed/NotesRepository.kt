@@ -1082,6 +1082,13 @@ class NotesRepository private constructor() {
     /** Raw unfiltered notes list — emits on every event batch + profile update. Use for fast UI; use displayedNotes for enrichment. */
     val allNotes: StateFlow<ImmutableList<Note>> = _notes.asStateFlow()
 
+    /** Notes loaded from Room via windowed paging. These live OUTSIDE _notes to avoid
+     *  the in-memory cap. updateDisplayedNotes() appends these after the filtered
+     *  in-memory portion so they survive enrichment/emission cycles. */
+    private val roomPaginatedNotes = java.util.Collections.synchronizedList(mutableListOf<Note>())
+    /** IDs of Room-paginated notes for O(1) dedup. */
+    private val roomPaginatedIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
     /** Persistent O(1) index over _notes. Updated incrementally on the hot path (flushKind1Events)
      *  and rebuilt on cold paths (mode switch, snapshot restore, clearNotes). */
     private val feedIndex = FeedIndex()
@@ -1253,6 +1260,9 @@ class NotesRepository private constructor() {
 
     // ── Event store (Room DB) — persists events for cold-start feed restoration ──
     @Volatile private var eventDao: social.mycelium.android.db.EventDao? = null
+    /** Room-backed windowed paging: loads feed pages from Room for unlimited scroll depth.
+     *  Initialized in prepareFeedCache() when eventDao becomes available. */
+    @Volatile private var feedWindowManager: FeedWindowManager? = null
     private val pendingEventObjects = java.util.concurrent.ConcurrentLinkedQueue<Triple<Event, String, Unit>>()
     private var eventStoreFlushJob: Job? = null
     private val EVENT_STORE_FLUSH_DEBOUNCE_MS = 2_000L
@@ -1429,6 +1439,10 @@ class NotesRepository private constructor() {
         if (appContext != null) return
         appContext = context.applicationContext
         eventDao = AppDatabase.getInstance(context.applicationContext).eventDao()
+        feedWindowManager = FeedWindowManager(
+            eventDao = eventDao!!,
+            entityToNote = { entity -> convertEntityToNote(entity) },
+        )
         QuotedNoteCache.roomEventDao = eventDao
         loadDeletedIdsFromDisk(context.applicationContext)
         scope.launch { loadFeedCacheFromRoom() }
@@ -1873,13 +1887,17 @@ class NotesRepository private constructor() {
                 if (note.originalNoteId == null && note.id in repostedOriginals) continue
                 filtered.add(note)
             }
-            if (filtered.size != _displayedNotes.value.size || filtered.isEmpty()) {
-                Log.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →final=${filtered.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
+            if (filtered.size != _displayedNotes.value.size || filtered.isEmpty() || roomPaginatedNotes.isNotEmpty()) {
+                Log.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →final=${filtered.size} +roomTail=${roomPaginatedNotes.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
             }
             // Skip emission if the note ID list is identical — prevents unnecessary
             // LazyColumn re-layout that causes scroll jumps and nav bar reappearing.
             val currentIds = _displayedNotes.value
-            val newList = filtered.toList()
+            // Append Room-paginated notes (deep history from Room, outside _notes cap)
+            val roomTail = if (roomPaginatedNotes.isNotEmpty()) {
+                synchronized(roomPaginatedNotes) { roomPaginatedNotes.toList() }
+            } else emptyList()
+            val newList = if (roomTail.isNotEmpty()) filtered.toList() + roomTail else filtered.toList()
             val idsMatch = newList.size == currentIds.size &&
                 newList.indices.all { i -> newList[i].id == currentIds[i].id }
             if (idsMatch) {
@@ -2210,56 +2228,45 @@ class NotesRepository private constructor() {
 
         _isLoadingOlder.value = true
 
-        // ── Room-first path: serve deep-fetched history instantly ──────────
-        // If the DeepHistoryFetcher has persisted events to Room, load them
-        // before hitting relays. This makes scrolling back through history
-        // instantaneous — no relay round-trip needed for cached windows.
-        val dao = eventDao
-        if (dao != null) {
+        // ── Room-backed windowed paging: load from Room into the Room tail ──
+        // Notes go to roomPaginatedNotes, which updateDisplayedNotes() always
+        // appends after the filtered in-memory portion. This prevents the
+        // in-memory cap from trimming paginated history.
+        val wm = feedWindowManager
+        if (wm != null) {
+            // Sync follow filter state
+            wm.followFilterEnabled = followFilterEnabled
+            wm.followPubkeys = authors ?: emptyList()
             scope.launch {
                 try {
-                    val roomEvents = if (authors != null) {
-                        dao.getOlderFeedEvents(authors, untilSec, PAGINATION_PAGE_SIZE)
-                    } else {
-                        dao.getOlderFeedEventsAll(untilSec, PAGINATION_PAGE_SIZE)
-                    }
-                    if (roomEvents.isNotEmpty()) {
-                        Log.d(TAG, "loadOlderNotes: Room-first hit — ${roomEvents.size} cached events")
-                        paginationExtraCap += roomEvents.size
-                        for (entity in roomEvents) {
-                            try {
-                                val event = Event.fromJson(entity.eventJson)
-                                // Seed tracker from ALL cached relay URLs (relayUrls column has merged multi-relay data)
-                                val allCachedUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
-                                val primaryUrl = entity.relayUrl ?: ""
-                                if (allCachedUrls.isNotEmpty()) {
-                                    allCachedUrls.forEach { url -> EventRelayTracker.addRelay(event.id, url.trim()) }
-                                } else if (primaryUrl.isNotBlank()) {
-                                    EventRelayTracker.addRelay(event.id, primaryUrl)
-                                }
-                                // Use primary URL for PendingKind1Event; the tracker enrichment
-                                // in updateDisplayedNotes will merge all URLs from the tracker.
-                                pendingKind1Events.add(PendingKind1Event(event, primaryUrl, isPagination = true))
-                            } catch (e: Exception) {
-                                // Skip malformed cached events
+                    val roomNotes = wm.loadPage(untilSec)
+                    if (roomNotes.isNotEmpty()) {
+                        // Dedup against in-memory and existing Room-paginated notes
+                        val existingMemIds = feedIndex.byId.keys
+                        val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
+                        if (newNotes.isNotEmpty()) {
+                            // Add to Room tail buffer
+                            for (note in newNotes) {
+                                roomPaginatedNotes.add(note)
+                                roomPaginatedIds.add(note.id)
                             }
+                            // Update cursor from oldest loaded note
+                            val oldestMs = newNotes.minOf { it.timestamp }
+                            if (paginationCursorMs == 0L || oldestMs < paginationCursorMs) {
+                                paginationCursorMs = oldestMs
+                            }
+                            if (oldestMs < feedAgeFloorMs) feedAgeFloorMs = oldestMs
+                            Log.w(TAG, "loadOlderNotes: Room served ${newNotes.size} notes, roomTail=${roomPaginatedNotes.size}, cursor=${fmtMs(paginationCursorMs)}")
+                            // Trigger display update to append Room tail
+                            updateDisplayedNotes()
+                        } else {
+                            Log.d(TAG, "loadOlderNotes: Room ${roomNotes.size} events all dupes")
                         }
-                        // Lower age floor so these events pass the age gate
-                        val oldestCachedMs = roomEvents.minOf { it.createdAt } * 1000L
-                        if (oldestCachedMs < feedAgeFloorMs) feedAgeFloorMs = oldestCachedMs
-                        flushKind1Events()
-                        val newSize = _notes.value.size
-                        // Update cursor from oldest cached event
-                        val oldestSec = roomEvents.minOf { it.createdAt }
-                        if (paginationCursorMs == 0L || oldestSec * 1000L < paginationCursorMs) {
-                            paginationCursorMs = oldestSec * 1000L
-                        }
-                        Log.d(TAG, "loadOlderNotes: Room served ${roomEvents.size} events, feed=$newSize, cursor=${fmtMs(paginationCursorMs)}")
                         _isLoadingOlder.value = false
                         return@launch
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Room-first pagination failed: ${e.message}")
+                    Log.e(TAG, "Room-backed pagination failed: ${e.message}", e)
                 }
                 // Room empty for this window — fall back to relay fetch
                 loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
@@ -3301,6 +3308,31 @@ class NotesRepository private constructor() {
         return cacheRelayUrls.filter { it.isNotBlank() }
     }
 
+    /**
+     * Convert a Room CachedEventEntity to a Note. Used by FeedWindowManager
+     * for Room-backed windowed paging. Parses the stored JSON, restores
+     * relay URLs, seeds the tracker, and runs through convertEventToNote.
+     *
+     * Returns null if the entity is a kind-6 repost (needs handleKind6Repost)
+     * or if conversion fails.
+     */
+    private fun convertEntityToNote(entity: social.mycelium.android.db.CachedEventEntity): Note? {
+        val event = Event.fromJson(entity.eventJson)
+        // Skip kind-6 reposts — they need handleKind6Repost for proper enrichment
+        if (event.kind == 6) return null
+        val note = convertEventToNote(event, entity.relayUrl ?: "")
+        // Skip replies (belt-and-suspenders — Room query already filters, but entity might be stale)
+        if (note.isReply) return null
+        // Restore merged relay URLs from the dedicated column
+        val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+        if (allUrls.isNotEmpty()) {
+            allUrls.forEach { url -> EventRelayTracker.addRelay(event.id, url) }
+        } else if (!entity.relayUrl.isNullOrBlank()) {
+            EventRelayTracker.addRelay(event.id, entity.relayUrl)
+        }
+        return if (allUrls.isNotEmpty()) note.copy(relayUrls = allUrls) else note
+    }
+
     private fun convertEventToNote(event: Event, relayUrl: String): Note {
         android.os.Trace.beginSection("NotesRepo.convertEventToNote")
         // Cache raw signed event JSON for NIP-18 reposts (kind-6 content field).
@@ -3437,6 +3469,10 @@ class NotesRepository private constructor() {
         perRelayCursorMs.clear()
         exhaustedPaginationRelays.clear()
         _paginationExhausted.value = false
+        // Clear Room-paginated tail
+        synchronized(roomPaginatedNotes) { roomPaginatedNotes.clear() }
+        roomPaginatedIds.clear()
+        feedWindowManager?.clear()
         _feedSessionState.value = FeedSessionState.Idle
         _hasEverLoadedFeed.value = false
         // Reset subscription guard so ensureSubscriptionToNotes re-applies after account switch

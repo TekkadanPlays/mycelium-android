@@ -2033,11 +2033,23 @@ class NotesRepository private constructor() {
         }
 
         if (_notes.value.isNotEmpty()) {
-            // Resume: keep existing feed; only set cutoff if not already set (avoid blocking all notes on re-subscribe).
+            // Resume: keep existing feed from Room cache; re-apply subscription without clearing.
             Log.d(TAG, "Restoring subscription for ${allUserRelayUrls.size} relays (keeping ${_notes.value.size} notes)")
+            // Initialize guards that were lost on process kill:
+            val now = System.currentTimeMillis()
             if (feedCutoffTimestampMs == 0L) {
-                feedCutoffTimestampMs = System.currentTimeMillis()
+                feedCutoffTimestampMs = now
             }
+            // Set the latest note timestamp so the pending gate works correctly:
+            // events newer than this go to "X new notes" instead of polluting the feed.
+            latestNoteTimestampAtOpen = _notes.value.maxOfOrNull { it.timestamp } ?: now
+            // Re-initialize age floor so the gate actually fires (was 0 after process kill)
+            if (mainSubscriptionFloorMs == 0L) {
+                mainSubscriptionFloorMs = now - FEED_SINCE_DAYS.toLong() * 86_400_000L
+                feedAgeFloorMs = mainSubscriptionFloorMs
+            }
+            // Mark initial load complete so new events go to pending, not directly to feed
+            initialLoadComplete = true
             applySubscriptionToStateMachine(allUserRelayUrls)
             // Mark feed as Live so UI scroll-to-top and other session-aware logic fires
             if (_feedSessionState.value != FeedSessionState.Live) {

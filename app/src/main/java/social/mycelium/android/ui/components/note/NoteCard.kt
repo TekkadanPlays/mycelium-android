@@ -71,6 +71,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
 import social.mycelium.android.ui.theme.NoteBodyTextStyle
 import social.mycelium.android.utils.buildNoteContentWithInlinePreviews
@@ -548,17 +549,22 @@ internal fun QuotedNoteBody(
                     var nestedMeta by remember(nestedEventId) { mutableStateOf(QuotedNoteCache.getCached(nestedEventId)) }
                     if (nestedMeta == null) {
                         LaunchedEffect(nestedEventId) {
-                            delay(300)
-                            val fetched = QuotedNoteCache.get(nestedEventId)
-                            nestedMeta = fetched
-                            // Register with NoteCountsRepository so counts are fetched
-                            if (fetched != null) {
-                                val relays = listOfNotNull(fetched.relayUrl).ifEmpty {
-                                    social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(nestedEventId)
+                            // Cache-only polling: prefetchForNotes handles the relay fetch.
+                            // Never initiate subscriptions from the composable layer.
+                            repeat(10) {
+                                delay(600)
+                                val cached = QuotedNoteCache.getCached(nestedEventId)
+                                if (cached != null) {
+                                    nestedMeta = cached
+                                    // Register via batched accumulator (no subscription thrash)
+                                    val relays = listOfNotNull(cached.relayUrl).ifEmpty {
+                                        social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(nestedEventId)
+                                    }
+                                    social.mycelium.android.repository.social.NoteCountsRepository.enqueueNoteIdOfInterest(
+                                        nestedEventId, relays
+                                    )
+                                    return@LaunchedEffect
                                 }
-                                social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(
-                                    mapOf(nestedEventId to relays)
-                                )
                             }
                         }
                     }
@@ -815,8 +821,12 @@ internal fun QuotedNoteContent(
             if (profileCache.getAuthor(normalized) == null) {
                 profileCache.requestProfiles(listOf(normalized), profileCache.getConfiguredRelayUrls())
             }
+            // .take(1): only recompose once when this author's profile first resolves.
+            // Without this, N quoted notes all listening to the global profileUpdated
+            // flow cause N² recompositions as each profile resolution triggers all N collectors.
             profileCache.profileUpdated
                 .filter { it == normalized }
+                .take(1)
                 .collect { authorProfileRevision++ }
         }
     }
@@ -3500,34 +3510,36 @@ fun NoteCard(
                 if (cached.isNotEmpty()) quotedMetas = quotedMetas + cached.toMap()
                 val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
                 if (uncachedIds.isNotEmpty()) {
-                    // Debounce: wait 250ms before network fetch so rapidly scrolled-past
-                    // cards don't waste subscription slots
-                    delay(250)
-                    // Launch all fetches concurrently so they land in the same batch
-                    val results = kotlinx.coroutines.coroutineScope {
-                        uncachedIds.map { id ->
-                            async { id to QuotedNoteCache.get(id) }
-                        }.map { it.await() }
-                    }
-                    val newFailed = mutableSetOf<String>()
-                    val fetched = results.mapNotNull { (id, meta) ->
-                        if (meta != null) id to meta
-                        else {
-                            newFailed.add(id); null
-                        }
-                    }
-                    if (fetched.isNotEmpty()) {
-                        quotedMetas = quotedMetas + fetched.toMap()
-                        // Register fetched quoted note IDs for counts subscription
-                        val countsMap = fetched.associate { (id, meta) ->
-                            val relays = listOfNotNull(meta.relayUrl).ifEmpty {
-                                QuotedNoteCache.getRelayHints(id)
+                    // Cache-only polling: prefetchForNotes handles relay fetch.
+                    // Poll cache every 600ms for up to 10 iterations.
+                    val resolved = mutableMapOf<String, QuotedNoteMeta>()
+                    val remaining = uncachedIds.toMutableSet()
+                    repeat(10) {
+                        delay(600)
+                        val iterator = remaining.iterator()
+                        while (iterator.hasNext()) {
+                            val id = iterator.next()
+                            val cached = QuotedNoteCache.getCached(id)
+                            if (cached != null) {
+                                resolved[id] = cached
+                                iterator.remove()
                             }
-                            id to relays
                         }
-                        social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(countsMap)
+                        if (remaining.isEmpty()) return@repeat
                     }
-                    if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
+                    if (resolved.isNotEmpty()) {
+                        quotedMetas = quotedMetas + resolved
+                        // Register via batched accumulator (collapses into single sub update)
+                        val countsMap = mutableMapOf<String, List<String>>()
+                        for ((noteId, noteMeta) in resolved) {
+                            val relays = listOfNotNull(noteMeta.relayUrl).ifEmpty {
+                                QuotedNoteCache.getRelayHints(noteId)
+                            }
+                            countsMap[noteId] = relays
+                        }
+                        social.mycelium.android.repository.social.NoteCountsRepository.enqueueNoteIdsOfInterest(countsMap)
+                    }
+                    if (remaining.isNotEmpty()) quotedFailedIds = quotedFailedIds + remaining
                 }
                 quotedLoading = false
             }

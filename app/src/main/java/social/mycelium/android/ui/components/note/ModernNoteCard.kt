@@ -555,35 +555,31 @@ private fun NoteCardContent(
                                     }
                                     val uncachedIds = note.quotedEventIds.filter { it !in quotedMetas }
                                     if (uncachedIds.isNotEmpty()) {
-                                        // Debounce: wait 250ms so rapidly scrolled-past cards don't waste slots
-                                        delay(250)
-                                        // Launch all fetches concurrently so they land in the same batch
-                                        val results =
-                                            kotlinx.coroutines.coroutineScope<List<Pair<String, QuotedNoteMeta?>>> {
-                                                uncachedIds.map { id ->
-                                                    async { id to QuotedNoteCache.get(id) }
-                                                }.map { it.await() }
+                                        // Cache-only polling: prefetchForNotes handles relay fetch.
+                                        val resolved = mutableMapOf<String, QuotedNoteMeta>()
+                                        val remaining = uncachedIds.toMutableSet()
+                                        repeat(10) {
+                                            delay(600)
+                                            val iter = remaining.iterator()
+                                            while (iter.hasNext()) {
+                                                val id = iter.next()
+                                                val cached = QuotedNoteCache.getCached(id)
+                                                if (cached != null) { resolved[id] = cached; iter.remove() }
                                             }
-                                        val newFailed = mutableSetOf<String>()
-                                        val newlyFetched = mutableListOf<Pair<String, QuotedNoteMeta>>()
-                                        results.forEach { (id, meta) ->
-                                            if (meta != null) {
-                                                quotedMetas = quotedMetas + (id to meta)
-                                                newlyFetched.add(id to meta)
-                                            }
-                                            else newFailed.add(id)
+                                            if (remaining.isEmpty()) return@repeat
                                         }
-                                        // Register fetched quoted note IDs for counts subscription
-                                        if (newlyFetched.isNotEmpty()) {
-                                            val countsMap = newlyFetched.associate { (id, meta) ->
-                                                val relays = listOfNotNull(meta.relayUrl).ifEmpty {
-                                                    QuotedNoteCache.getRelayHints(id)
+                                        if (resolved.isNotEmpty()) {
+                                            quotedMetas = quotedMetas + resolved
+                                            val countsMap = mutableMapOf<String, List<String>>()
+                                            for ((noteId, noteMeta) in resolved) {
+                                                val relays = listOfNotNull(noteMeta.relayUrl).ifEmpty {
+                                                    QuotedNoteCache.getRelayHints(noteId)
                                                 }
-                                                id to relays
+                                                countsMap[noteId] = relays
                                             }
-                                            social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(countsMap)
+                                            social.mycelium.android.repository.social.NoteCountsRepository.enqueueNoteIdsOfInterest(countsMap)
                                         }
-                                        if (newFailed.isNotEmpty()) quotedFailedIds = quotedFailedIds + newFailed
+                                        if (remaining.isNotEmpty()) quotedFailedIds = quotedFailedIds + remaining
                                     }
                                     quotedLoading = false
                                 }

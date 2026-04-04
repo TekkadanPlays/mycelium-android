@@ -195,18 +195,18 @@ object NoteCountsRepository {
 
     /**
      * Merge note IDs + their relay URLs into the feed interest set.
-     * Called both at ingestion time (per-batch, accumulates) and at display time
-     * (full set, acts as authoritative snapshot). Capped at 200 entries.
+     * Called at ingestion time and display time; accumulates entries.
+     * Capped at [MAX_INTEREST_IDS] entries — oldest-inserted evicted first.
      * @param noteRelays map of noteId → list of relay URLs where that note was seen
-     * @param replace if true, replaces the entire feed set (used by display-time call)
+     * @param replace if true, replaces the entire feed set (use sparingly)
      */
     fun setNoteIdsOfInterest(noteRelays: Map<String, List<String>>, replace: Boolean = false) {
         val merged = if (replace) noteRelays else {
             val m = LinkedHashMap<String, List<String>>(feedNoteRelays)
             m.putAll(noteRelays)
-            // Cap to 200 — evict oldest (first-inserted) entries
-            if (m.size > 200) {
-                val excess = m.size - 200
+            // Cap to MAX_INTEREST_IDS — evict oldest (first-inserted) entries
+            if (m.size > MAX_INTEREST_IDS) {
+                val excess = m.size - MAX_INTEREST_IDS
                 val iter = m.iterator()
                 repeat(excess) { iter.next(); iter.remove() }
             }
@@ -336,10 +336,8 @@ object NoteCountsRepository {
         scheduleSubscriptionUpdate()
     }
 
-    /** Minimum number of new (unseen) note IDs required to trigger a re-subscription.
-     *  Lowered from 5 → 1 so quoted note IDs (which arrive in small batches from
-     *  QuotedNoteCache prefetch) always trigger a counts subscription update. */
-    private const val RESUB_THRESHOLD = 1
+    /** Maximum note IDs in the feed interest set; oldest evicted first. */
+    private const val MAX_INTEREST_IDS = 300
 
     /** Pre-compiled regex for validating 64-char hex Nostr event IDs. */
     private val HEX_ID_REGEX = Regex("^[0-9a-f]{64}$")
@@ -348,6 +346,10 @@ object NoteCountsRepository {
      * Update counts subscription via CybinRelayPool (through RelayConnectionStateMachine).
      * Cancels any previous subscription and creates a new one with per-relay filters.
      * All event kinds (replies, reactions, zaps, reposts, votes) in a single subscription.
+     *
+     * Note: no minimum-new-ID threshold — the batched accumulator
+     * ([enqueueNoteIdOfInterest]) already debounces by 500ms, so every flush
+     * that reaches here represents a legitimate batch of new IDs.
      */
     private fun updateCountsSubscription(overrideMerged: Map<String, List<String>>? = null) {
         val merged = overrideMerged ?: (feedNoteRelays + topicNoteRelays + threadNoteRelays)
@@ -358,8 +360,6 @@ object NoteCountsRepository {
         }
         val mergedIds = merged.keys
         if (mergedIds == lastSubscribedNoteIds) return
-        val newIds = mergedIds - lastSubscribedNoteIds
-        if (newIds.size < RESUB_THRESHOLD && lastSubscribedNoteIds.isNotEmpty() && countsSubscriptionHandle != null) return
         lastSubscribedNoteIds = mergedIds
 
         // Validate note IDs: must be exactly 64 hex chars (Nostr event ID)
@@ -373,7 +373,7 @@ object NoteCountsRepository {
                 perRelayNoteIds.getOrPut(url) { mutableSetOf() }.add(noteId)
             }
         }
-        val allNoteIds = validMerged.keys.take(200).toList()
+        val allNoteIds = validMerged.keys.take(MAX_INTEREST_IDS).toList()
         for (fallback in FALLBACK_RELAYS) {
             perRelayNoteIds.getOrPut(fallback) { mutableSetOf() }.addAll(allNoteIds)
         }
@@ -394,7 +394,7 @@ object NoteCountsRepository {
         val engFilter = activeEngagementFilter
         val relayFilters = mutableMapOf<String, List<Filter>>()
         for ((relayUrl, noteIds) in cappedPerRelay) {
-            val noteIdList = noteIds.take(200).toList()
+            val noteIdList = noteIds.take(MAX_INTEREST_IDS).toList()
             if (noteIdList.isEmpty()) continue
             val eTags = mapOf("e" to noteIdList)
             val filters = when (engFilter) {
@@ -814,5 +814,54 @@ object NoteCountsRepository {
         _countsByNoteId.value = emptyMap()
         lastSubscribedNoteIds = emptySet()
         scheduleSubscriptionUpdate()
+    }
+
+    // ── Batched interest accumulator ─────────────────────────────────────────
+    // Collects individual note ID registrations (from UI LaunchedEffects,
+    // QuotedNoteCache depth-2 prefetch, etc.) and flushes them as a single
+    // setNoteIdsOfInterest call, collapsing N subscription recreations into 1.
+
+    private val pendingInterestIds = java.util.concurrent.ConcurrentLinkedQueue<Pair<String, List<String>>>()
+    private var interestFlushJob: Job? = null
+    private const val INTEREST_FLUSH_DEBOUNCE_MS = 500L
+
+    /**
+     * Enqueue a single note ID for eventual counts subscription registration.
+     * Call this from UI composables and cache callbacks instead of directly calling
+     * [setNoteIdsOfInterest], which regenerates the entire subscription.
+     *
+     * IDs are accumulated and flushed as one batch after [INTEREST_FLUSH_DEBOUNCE_MS],
+     * collapsing e.g. 40 individual quoted note resolutions into a single subscription update.
+     */
+    fun enqueueNoteIdOfInterest(noteId: String, relays: List<String>) {
+        if (noteId.isBlank()) return
+        pendingInterestIds.add(noteId to relays)
+        scheduleInterestFlush()
+    }
+
+    /**
+     * Enqueue multiple note IDs at once (convenience for batch registrations).
+     */
+    fun enqueueNoteIdsOfInterest(noteRelays: Map<String, List<String>>) {
+        for ((id, relays) in noteRelays) {
+            pendingInterestIds.add(id to relays)
+        }
+        if (noteRelays.isNotEmpty()) scheduleInterestFlush()
+    }
+
+    private fun scheduleInterestFlush() {
+        interestFlushJob?.cancel()
+        interestFlushJob = scope.launch {
+            delay(INTEREST_FLUSH_DEBOUNCE_MS)
+            val batch = LinkedHashMap<String, List<String>>()
+            while (true) {
+                val pair = pendingInterestIds.poll() ?: break
+                batch[pair.first] = pair.second
+            }
+            if (batch.isNotEmpty()) {
+                Log.d(TAG, "Interest flush: ${batch.size} accumulated note IDs → single subscription update")
+                setNoteIdsOfInterest(batch)
+            }
+        }
     }
 }

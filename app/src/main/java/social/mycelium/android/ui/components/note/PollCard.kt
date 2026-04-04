@@ -1020,7 +1020,12 @@ private fun RichPollOptionContent(
                         var meta by remember(eventId) { mutableStateOf(QuotedNoteCache.getCached(eventId)) }
                         if (meta == null) {
                             LaunchedEffect(eventId) {
-                                meta = QuotedNoteCache.get(eventId)
+                                // Cache-only polling: prefetchForNotes handles relay fetch
+                                repeat(10) {
+                                    kotlinx.coroutines.delay(600)
+                                    val cached = QuotedNoteCache.getCached(eventId)
+                                    if (cached != null) { meta = cached; return@LaunchedEffect }
+                                }
                             }
                         }
                         val m = meta

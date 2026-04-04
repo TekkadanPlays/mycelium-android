@@ -2373,15 +2373,21 @@ private fun ReplyContentBody(
                 }
                 LaunchedEffect(block.eventId) {
                     if (qMeta == null) {
-                        val fetched = social.mycelium.android.repository.cache.QuotedNoteCache.get(block.eventId)
-                        qMeta = fetched
-                        if (fetched != null) {
-                            val relays = listOfNotNull(fetched.relayUrl).ifEmpty {
-                                social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(block.eventId)
+                        // Cache-only polling: prefetchForNotes handles relay fetch.
+                        // Never initiate subscriptions from the composable layer.
+                        repeat(10) {
+                            kotlinx.coroutines.delay(600)
+                            val cached = social.mycelium.android.repository.cache.QuotedNoteCache.getCached(block.eventId)
+                            if (cached != null) {
+                                qMeta = cached
+                                val relays = listOfNotNull(cached.relayUrl).ifEmpty {
+                                    social.mycelium.android.repository.cache.QuotedNoteCache.getRelayHints(block.eventId)
+                                }
+                                social.mycelium.android.repository.social.NoteCountsRepository.enqueueNoteIdOfInterest(
+                                    block.eventId, relays
+                                )
+                                return@LaunchedEffect
                             }
-                            social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(
-                                mapOf(block.eventId to relays)
-                            )
                         }
                     }
                 }

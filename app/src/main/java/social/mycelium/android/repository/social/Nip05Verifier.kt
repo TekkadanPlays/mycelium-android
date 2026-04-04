@@ -10,6 +10,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -21,7 +23,11 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Fetches `https://<domain>/.well-known/nostr.json?name=<name>` and checks that
  * the returned `names[name]` matches the expected hex pubkey. Results are cached
- * with TTL: 1 hour for verified, 5 minutes for failed/error.
+ * with TTL: 1 hour for verified, 60 seconds for transient errors, 5 minutes for
+ * confirmed failures.
+ *
+ * Concurrency is limited via a semaphore so cold-start bulk verification doesn't
+ * flood HTTP connections — at most [MAX_CONCURRENT] checks run simultaneously.
  *
  * UI observes [verificationStates] (a Compose snapshot-state map) which triggers
  * recomposition when a verification result arrives.
@@ -29,6 +35,9 @@ import java.util.concurrent.ConcurrentHashMap
 object Nip05Verifier {
 
     private const val TAG = "Nip05Verifier"
+
+    /** Max concurrent HTTP checks to avoid flooding on cold-start bulk verification. */
+    private const val MAX_CONCURRENT = 4
 
     /** Verification result for a single pubkey's nip05 identifier. */
     enum class VerificationStatus {
@@ -45,6 +54,7 @@ object Nip05Verifier {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val client = MyceliumHttpClient.instance
+    private val httpSemaphore = Semaphore(MAX_CONCURRENT)
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -60,7 +70,7 @@ object Nip05Verifier {
     /**
      * Request verification for a pubkey's NIP-05 identifier.
      * If already cached and not expired, returns immediately.
-     * Otherwise kicks off a background HTTP fetch.
+     * Otherwise kicks off a background HTTP fetch (gated by semaphore).
      */
     fun verify(pubkeyHex: String, nip05: String) {
         // Check cache first
@@ -79,18 +89,24 @@ object Nip05Verifier {
         verificationStates[pubkeyHex] = VerificationStatus.VERIFYING
 
         scope.launch {
-            try {
-                val result = checkNip05(pubkeyHex, nip05)
-                val ttl = if (result) 60 * 60 * 1000L else 5 * 60 * 1000L // 1h / 5min
-                val status = if (result) VerificationStatus.VERIFIED else VerificationStatus.FAILED
-                cache[pubkeyHex] = CacheEntry(status, System.currentTimeMillis() + ttl)
-                verificationStates[pubkeyHex] = status
-            } catch (e: Exception) {
-                Log.w(TAG, "NIP-05 check failed for $nip05: ${e.message}")
-                cache[pubkeyHex] = CacheEntry(VerificationStatus.FAILED, System.currentTimeMillis() + 5 * 60 * 1000L)
-                verificationStates[pubkeyHex] = VerificationStatus.FAILED
-            } finally {
-                inflight.remove(pubkeyHex)
+            httpSemaphore.withPermit {
+                try {
+                    val result = checkNip05(pubkeyHex, nip05)
+                    val ttl = if (result) 60 * 60 * 1000L else 5 * 60 * 1000L // 1h / 5min
+                    val status = if (result) VerificationStatus.VERIFIED else VerificationStatus.FAILED
+                    cache[pubkeyHex] = CacheEntry(status, System.currentTimeMillis() + ttl)
+                    verificationStates[pubkeyHex] = status
+                } catch (e: Exception) {
+                    Log.w(TAG, "NIP-05 check failed for $nip05: ${e.message}")
+                    // Transient error: use short 60s TTL so it self-heals on next scroll-by
+                    cache[pubkeyHex] = CacheEntry(
+                        VerificationStatus.FAILED,
+                        System.currentTimeMillis() + 60 * 1000L
+                    )
+                    verificationStates[pubkeyHex] = VerificationStatus.FAILED
+                } finally {
+                    inflight.remove(pubkeyHex)
+                }
             }
         }
     }

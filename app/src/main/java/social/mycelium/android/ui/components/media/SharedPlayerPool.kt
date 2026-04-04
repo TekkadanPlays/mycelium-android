@@ -70,18 +70,23 @@ object SharedPlayerPool {
             return existing.player
         }
 
-        // Evict LRU unowned entries if at capacity
+        // Evict LRU entries if at capacity — hard cap, never exceed MAX_POOL_SIZE.
+        // First try to evict unowned entries. If all are owned (fast scroll scenario),
+        // force-evict the oldest owned entry rather than exceeding the pool size,
+        // which would exhaust hardware video codecs and stall the main thread.
         while (pool.size >= MAX_POOL_SIZE) {
             val lru = pool.entries
                 .filter { it.value.ownerCount <= 0 }
                 .minByOrNull { it.value.lastAccessTime }
+                ?: pool.entries // all owned — force-evict the oldest
+                    .minByOrNull { it.value.lastAccessTime }
             if (lru != null) {
                 pool.remove(lru.key)
                 VideoPositionCache.set(lru.value.url, lru.value.player.currentPosition)
+                lru.value.player.stop()
                 lru.value.player.release()
             } else {
-                // All entries are owned — allow over-limit rather than deadlock
-                break
+                break // shouldn't happen, but don't infinite loop
             }
         }
 

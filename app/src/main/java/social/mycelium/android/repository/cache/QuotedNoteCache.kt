@@ -8,6 +8,7 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
+import social.mycelium.android.pipeline.EnrichmentBudget
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -251,6 +252,9 @@ object QuotedNoteCache {
                                 ids = chunk,
                                 limit = chunk.size
                             )
+                            // Gate through EnrichmentBudget to prevent subscription fan-out
+                            EnrichmentBudget.quoteFetchSemaphore.acquire()
+                            EnrichmentBudget.activeOneShotSubs.incrementAndGet()
                             try {
                                 stateMachine.awaitOneShotSubscription(
                                     combinedRelays, filter, priority = SubscriptionPriority.NORMAL,
@@ -262,6 +266,9 @@ object QuotedNoteCache {
                                 }
                             } catch (e: Exception) {
                                 Log.e(TAG, "Prefetch relay fetch error: ${e.message}")
+                            } finally {
+                                EnrichmentBudget.activeOneShotSubs.decrementAndGet()
+                                EnrichmentBudget.quoteFetchSemaphore.release()
                             }
                         }
                         scheduleDiskSave()
@@ -292,10 +299,10 @@ object QuotedNoteCache {
         }
         if (nestedIds.isEmpty()) return
         Log.d(TAG, "Depth-2 prefetch: ${nestedIds.size} nested quoted notes")
-        // Register nested quoted IDs with NoteCountsRepository so counts
-        // (reactions, zaps, replies) are fetched proactively for depth-2 quotes.
+        // Register nested quoted IDs with NoteCountsRepository via batched
+        // accumulator so counts resolve without thrashing the subscription.
         val nestedRelayMap = nestedIds.associateWith { relays.take(3) }
-        social.mycelium.android.repository.social.NoteCountsRepository.setNoteIdsOfInterest(nestedRelayMap)
+        social.mycelium.android.repository.social.NoteCountsRepository.enqueueNoteIdsOfInterest(nestedRelayMap)
         // Phase 1: RawEventCache + Room
         val stillNeeded = mutableListOf<String>()
         for (nid in nestedIds) {
@@ -327,6 +334,9 @@ object QuotedNoteCache {
             if (effectiveRelays.isEmpty()) return
             val filter =
                 Filter(kinds = ACCEPTED_KINDS.toList(), ids = remaining.take(MAX_BATCH_SIZE), limit = remaining.size)
+            // Gate through EnrichmentBudget to prevent subscription fan-out
+            EnrichmentBudget.quoteFetchSemaphore.acquire()
+            EnrichmentBudget.activeOneShotSubs.incrementAndGet()
             try {
                 RelayConnectionStateMachine.getInstance().awaitOneShotSubscription(
                     effectiveRelays, filter, priority = SubscriptionPriority.LOW,
@@ -339,6 +349,9 @@ object QuotedNoteCache {
                 scheduleDiskSave()
             } catch (e: Exception) {
                 Log.w(TAG, "Depth-2 prefetch relay error: ${e.message}")
+            } finally {
+                EnrichmentBudget.activeOneShotSubs.decrementAndGet()
+                EnrichmentBudget.quoteFetchSemaphore.release()
             }
         }
     }

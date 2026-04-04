@@ -121,6 +121,8 @@ object PipelineDiagnostics {
             "│ flushes=${s.batchFlushes} avg=${s.avgFlushLatencyMs}ms " +
             "│ db commits=${s.dbCommits} rows=${s.dbRows}"
         )
+        // Also log subscription budget health
+        social.mycelium.android.pipeline.EnrichmentBudget.logSummary(tag)
     }
 
     /** Reset all counters (useful on account switch / logout). */

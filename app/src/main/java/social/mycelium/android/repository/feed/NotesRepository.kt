@@ -1687,6 +1687,11 @@ class NotesRepository private constructor() {
         }
     }
 
+    /** Tracks which note IDs were last sent to NoteCountsRepository.
+     *  Used to skip the expensive relay-map + depth-2 scan when only note
+     *  data changes (relay merges, profile resolution) without new IDs. */
+    @Volatile private var lastDisplayedNoteIdSet: Set<String> = emptySet()
+
     private fun updateDisplayedNotes() {
         android.os.Trace.beginSection("NotesRepo.updateDisplayedNotes")
         try {
@@ -1815,42 +1820,31 @@ class NotesRepository private constructor() {
             }
             _displayedNotes.value = newList.toImmutableList()
             updateDisplayedNewNotesCount()
-            // Fire counts subscription immediately — no debounce. Notes are already in
-            // feed-position order (newest first), so top-of-viewport notes appear first
-            // in the subscription filter and get enriched with reactions/zaps fastest.
-            // NoteCountsRepository has its own 200ms debounce to coalesce rapid updates.
-            val notes = newList.take(150)
-            val noteRelayMap = LinkedHashMap<String, List<String>>(notes.size)
-            for (note in notes) {
-                val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                val effectiveId = note.originalNoteId ?: note.id
-                if (effectiveId !in noteRelayMap) {
-                    noteRelayMap[effectiveId] = relays
-                }
-                note.quotedEventIds.forEach { qid ->
-                    if (qid !in noteRelayMap) {
-                        val cached = QuotedNoteCache.getCached(qid)
-                        noteRelayMap[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { relays }
+            // Register note IDs for counts only when the ID set actually changes.
+            // Building the relay map + depth-2 scan is expensive (regex on every
+            // quoted note's content), so skip it on data-only updates (relay merges,
+            // profile arrivals) where the ID set is unchanged.
+            val newIdSet = buildSet(newList.size) {
+                for (note in newList) add(note.originalNoteId ?: note.id)
+            }
+            if (newIdSet != lastDisplayedNoteIdSet) {
+                lastDisplayedNoteIdSet = newIdSet
+                val noteRelayMap = LinkedHashMap<String, List<String>>(newList.size)
+                for (note in newList) {
+                    val relays = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                    val effectiveId = note.originalNoteId ?: note.id
+                    if (effectiveId !in noteRelayMap) {
+                        noteRelayMap[effectiveId] = relays
+                    }
+                    note.quotedEventIds.forEach { qid ->
+                        if (qid !in noteRelayMap) {
+                            val cached = QuotedNoteCache.getCached(qid)
+                            noteRelayMap[qid] = listOfNotNull(cached?.relayUrl).ifEmpty { relays }
+                        }
                     }
                 }
+                NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap)
             }
-            // Depth-2: scan resolved depth-1 quoted notes for nested nostr: references
-            // so counts for recursively quoted notes survive the replace=true below.
-            val depth2Ids = mutableListOf<Pair<String, List<String>>>()
-            for ((qid, qRelays) in noteRelayMap.toMap()) {
-                val cached = QuotedNoteCache.getCached(qid) ?: continue
-                val nested = social.mycelium.android.utils.Nip19QuoteParser.extractQuotedEventIds(cached.fullContent)
-                for (nid in nested) {
-                    if (nid !in noteRelayMap) {
-                        val nestedCached = QuotedNoteCache.getCached(nid)
-                        depth2Ids.add(nid to (listOfNotNull(nestedCached?.relayUrl).ifEmpty { qRelays }))
-                    }
-                }
-            }
-            for ((nid, nRelays) in depth2Ids) {
-                noteRelayMap[nid] = nRelays
-            }
-            NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap, replace = true)
         } catch (e: Throwable) {
             Log.e(TAG, "updateDisplayedNotes failed: ${e.message}", e)
         } finally {

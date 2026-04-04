@@ -187,7 +187,7 @@ private fun DashboardFeedContent(
         val isFeedLive = feedState == social.mycelium.android.repository.feed.FeedSessionState.Live
         LaunchedEffect(engagementFilteredNotes, isFeedLive) {
             if (!isFeedLive) return@LaunchedEffect
-            val prefetchCount = 15.coerceAtMost(engagementFilteredNotes.size)
+            val prefetchCount = 5.coerceAtMost(engagementFilteredNotes.size)
             for (i in 0 until prefetchCount) {
                 engagementFilteredNotes[i].mediaUrls.forEach { url ->
                     if (!social.mycelium.android.utils.UrlDetector.isVideoUrl(url) && prefetchedUrls.add(url)) {
@@ -196,7 +196,7 @@ private fun DashboardFeedContent(
                                 .data(url)
                                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                .size(screenWidthPx, screenWidthPx)
+                                .size(screenWidthPx / 2, screenWidthPx / 2) // half-res for prefetch; full decode on visible
                                 .listener(prefetchListener)
                                 .build()
                         )
@@ -235,12 +235,12 @@ private fun DashboardFeedContent(
                 // 1. Report visible range to ViewModel for URL preview prefetch
                 viewModel.updateVisibleRange(firstVisible, lastVisible)
 
-                // 2. Image prefetch: 10 notes ahead of last visible
-                // Throttle: only fire every 300ms to prevent decoder flooding during fast scroll
+                // 2. Image prefetch: 4 notes ahead of last visible
+                // Throttle: only fire every 500ms to prevent decoder flooding during fast scroll
                 val now = System.currentTimeMillis()
-                if (now - lastImagePrefetchTimeMs >= 300) {
+                if (now - lastImagePrefetchTimeMs >= 500) {
                     lastImagePrefetchTimeMs = now
-                    val prefetchEnd = (lastVisible + 10).coerceAtMost(engagementFilteredNotes.size - 1)
+                    val prefetchEnd = (lastVisible + 4).coerceAtMost(engagementFilteredNotes.size - 1)
                     for (i in (lastVisible + 1)..prefetchEnd) {
                         val note = engagementFilteredNotes.getOrNull(i) ?: continue
                         note.mediaUrls.forEach { url ->
@@ -250,7 +250,7 @@ private fun DashboardFeedContent(
                                         .data(url)
                                         .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                         .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                        .size(screenWidthPx, screenWidthPx)
+                                        .size(screenWidthPx / 2, screenWidthPx / 2) // half-res for prefetch
                                         .listener(prefetchListener)
                                         .build()
                                 )
@@ -1343,7 +1343,7 @@ fun DashboardScreen(
     val activeHashtagFilter = homeFeedState.activeHashtagFilter
     val engagementFilteredNotes by remember(afterEngagementSort, activeHashtagFilter) {
         derivedStateOf {
-            if (activeHashtagFilter == null) afterEngagementSort
+            val filtered = if (activeHashtagFilter == null) afterEngagementSort
             else {
                 val tag = activeHashtagFilter.lowercase()
                 afterEngagementSort.filter { note ->
@@ -1351,6 +1351,11 @@ fun DashboardScreen(
                             note.hashtags.any { it.equals(tag, ignoreCase = true) }
                 }
             }
+            // Guard: distinctBy(id) prevents LazyColumn duplicate-key crash.
+            // The data layer (FeedIndex) should guarantee unique IDs, but edge cases
+            // (note arriving both standalone and inside kind-6 content, relay races)
+            // can slip through. First occurrence wins (preserves sort order).
+            filtered.distinctBy { it.id }
         }
     }
 

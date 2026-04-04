@@ -38,6 +38,46 @@ interface EventDao {
     @Query("SELECT * FROM cached_events WHERE kind = 1 AND createdAt < :untilSec ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getOlderFeedEventsAll(untilSec: Long, limit: Int = 500): List<CachedEventEntity>
 
+    // ── Windowed feed queries (Room-backed paging) ─────────────────────────
+
+    /** Windowed feed: root posts only for followed authors, ordered newest-first.
+     *  Uses the composite (isReply, kind, createdAt) index for efficient filtering.
+     *  [olderThanSec]: cursor timestamp — pass Long.MAX_VALUE for initial load.
+     *  Returns at most [limit] events older than the cursor. */
+    @Query("""
+        SELECT * FROM cached_events 
+        WHERE isReply = 0 AND kind IN (1, 6, 30023) 
+        AND pubkey IN (:pubkeys) AND createdAt < :olderThanSec 
+        ORDER BY createdAt DESC LIMIT :limit
+    """)
+    suspend fun getFeedWindow(pubkeys: List<String>, olderThanSec: Long, limit: Int = 80): List<CachedEventEntity>
+
+    /** Windowed feed: root posts only, all authors (global mode). */
+    @Query("""
+        SELECT * FROM cached_events 
+        WHERE isReply = 0 AND kind IN (1, 6, 30023) 
+        AND createdAt < :olderThanSec 
+        ORDER BY createdAt DESC LIMIT :limit
+    """)
+    suspend fun getFeedWindowAll(olderThanSec: Long, limit: Int = 80): List<CachedEventEntity>
+
+    /** Load events NEWER than a timestamp (for scroll-up / prepend). */
+    @Query("""
+        SELECT * FROM cached_events 
+        WHERE isReply = 0 AND kind IN (1, 6, 30023) 
+        AND pubkey IN (:pubkeys) AND createdAt > :newerThanSec 
+        ORDER BY createdAt ASC LIMIT :limit
+    """)
+    suspend fun getNewerFeedEvents(pubkeys: List<String>, newerThanSec: Long, limit: Int = 40): List<CachedEventEntity>
+
+    /** Count total root feed events for followed authors (for UI progress indicator). */
+    @Query("SELECT COUNT(*) FROM cached_events WHERE isReply = 0 AND kind IN (1, 6, 30023) AND pubkey IN (:pubkeys)")
+    suspend fun countRootFeedEvents(pubkeys: List<String>): Int
+
+    /** Count all root feed events (global mode). */
+    @Query("SELECT COUNT(*) FROM cached_events WHERE isReply = 0 AND kind IN (1, 6, 30023)")
+    suspend fun countRootFeedEventsAll(): Int
+
     /** Topic events (kind-11). */
     @Query("SELECT * FROM cached_events WHERE kind = 11 ORDER BY createdAt DESC LIMIT :limit")
     suspend fun getTopicEvents(limit: Int = 500): List<CachedEventEntity>

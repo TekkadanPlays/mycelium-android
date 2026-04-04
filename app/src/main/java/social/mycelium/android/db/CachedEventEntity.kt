@@ -18,6 +18,7 @@ import androidx.room.PrimaryKey
         Index(value = ["kind", "createdAt"]),
         Index(value = ["pubkey"]),
         Index(value = ["referencedEventId"]),
+        Index(value = ["isReply", "kind", "createdAt"]),
     ]
 )
 data class CachedEventEntity(
@@ -40,5 +41,8 @@ data class CachedEventEntity(
     /** Timestamp (ms) when this row was inserted/updated. For cache pruning. */
     val cachedAt: Long = System.currentTimeMillis(),
     /** Primary referenced event ID (first "e" tag). Used for poll response → poll lookups. */
-    val referencedEventId: String? = null
+    val referencedEventId: String? = null,
+    /** True if this kind-1 event is a reply (NIP-10). Used by windowed feed queries
+     *  to exclude replies at the SQL level without materializing Note objects. */
+    val isReply: Boolean = false
 )

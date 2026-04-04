@@ -9,7 +9,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [CachedProfileEntity::class, CachedNip65Entity::class, CachedFollowListEntity::class, CachedEventEntity::class, CachedNip11Entity::class, CachedEmojiPackEntity::class, CachedNotificationEntity::class],
-    version = 10,
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -91,6 +91,19 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Add isReply column for SQL-level reply filtering (windowed paging)
+                db.execSQL("ALTER TABLE cached_events ADD COLUMN isReply INTEGER NOT NULL DEFAULT 0")
+                // Composite index for windowed feed queries: WHERE isReply=0 AND kind IN (...) ORDER BY createdAt
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_cached_events_isReply_kind_createdAt ON cached_events(isReply, kind, createdAt)")
+                // Backfill: mark kind-1 events as replies if they have e-tags with root/reply markers.
+                // We can't run NIP-10 detection in SQL, so mark ALL kind-1 events with e-tags as
+                // potentially replies. The next cold-start will re-evaluate via convertEventToNote.
+                // For now, leave all as isReply=0 (default) — they'll be correctly set on next ingest.
+            }
+        }
+
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
@@ -101,7 +114,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "mycelium_cache.db"
                 )
-                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10)
+                    .addMigrations(MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11)
                     .fallbackToDestructiveMigration(true)
                     .build()
                     .also { INSTANCE = it }

@@ -1033,7 +1033,8 @@ class NotesRepository private constructor() {
                     createdAt = event.createdAt,
                     eventJson = event.toJson(), // O(1) for relay events via rawJson
                     relayUrl = normalizedUrl,
-                    relayUrls = allUrls
+                    relayUrls = allUrls,
+                    isReply = social.mycelium.android.utils.Nip10ReplyDetector.isReply(event)
                 ))
             }
             if (entities.isEmpty()) return@withContext

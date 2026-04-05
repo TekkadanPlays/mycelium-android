@@ -167,8 +167,8 @@ private fun DashboardFeedContent(
         // Notes outside this window get a lightweight PlaceholderNoteCard with zero
         // side effects (no LaunchedEffect, no collectAsState, no profile fetches).
         // Buffer: 10 above + 15 below viewport = ~30 full cards at any time.
-        val RENDER_BUFFER_ABOVE = 10
-        val RENDER_BUFFER_BELOW = 15
+        val RENDER_BUFFER_ABOVE = 5
+        val RENDER_BUFFER_BELOW = 8
         val renderWindow by remember {
             derivedStateOf {
                 val info = listState.layoutInfo
@@ -182,28 +182,14 @@ private fun DashboardFeedContent(
                 noteFirst..noteLast
             }
         }
-        // Prefetch images so they're warm before the user sees them
+        // Disk-only image prefetch: fetch images to disk cache without decoding bitmaps.
+        // Memory-cache prefetching (imageLoader.enqueue) was removed because it decoded
+        // bitmaps for notes the user may never scroll to, creating massive allocation
+        // pressure (hundreds of ~1MB bitmaps in-flight). Coil loads from disk cache in
+        // ~10ms when the card scrolls into view — no perceptible delay.
         val imageLoader = remember { coil.Coil.imageLoader(context) }
         val screenWidthPx = remember { context.resources.displayMetrics.widthPixels }
-        // Dedup set so we don't re-enqueue already-prefetched URLs
         val prefetchedUrls = remember { mutableSetOf<String>() }
-        // Also cache aspect ratios so media containers have correct size before scrolling into view
-        val prefetchListener = remember {
-            object : coil.request.ImageRequest.Listener {
-                override fun onSuccess(request: coil.request.ImageRequest, result: coil.request.SuccessResult) {
-                    val url = request.data as? String ?: return
-                    val w = result.drawable.intrinsicWidth
-                    val h = result.drawable.intrinsicHeight
-                    if (w > 0 && h > 0) {
-                        social.mycelium.android.utils.MediaAspectRatioCache.add(url, w, h)
-                    }
-                }
-            }
-        }
-        // Gate: only prefetch images once the feed has reached Live state.
-        // During burst ingestion (Loading), the decoder pool is better reserved for
-        // on-screen images. Prefetching 15 full-resolution images every 200ms during
-        // Loading saturates the decoder and causes the visible feed to stall.
         val feedState by social.mycelium.android.repository.feed.NotesRepository.getInstance()
             .feedSessionState.collectAsState()
         val isFeedLive = feedState == social.mycelium.android.repository.feed.FeedSessionState.Live
@@ -216,10 +202,9 @@ private fun DashboardFeedContent(
                         imageLoader.enqueue(
                             coil.request.ImageRequest.Builder(context)
                                 .data(url)
-                                .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                                .memoryCachePolicy(coil.request.CachePolicy.DISABLED)
                                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                .size(screenWidthPx / 2, screenWidthPx / 2) // half-res for prefetch; full decode on visible
-                                .listener(prefetchListener)
+                                .size(1, 1) // minimal decode — just fetches to disk cache
                                 .build()
                         )
                     }
@@ -257,8 +242,8 @@ private fun DashboardFeedContent(
                 // 1. Report visible range to ViewModel for URL preview prefetch
                 viewModel.updateVisibleRange(firstVisible, lastVisible)
 
-                // 2. Image prefetch: 4 notes ahead of last visible
-                // Throttle: only fire every 500ms to prevent decoder flooding during fast scroll
+                // 2. Image prefetch: 4 notes ahead of last visible — disk-only
+                // Throttle: only fire every 500ms to prevent flooding during fast scroll
                 val now = System.currentTimeMillis()
                 if (now - lastImagePrefetchTimeMs >= 500) {
                     lastImagePrefetchTimeMs = now
@@ -270,10 +255,9 @@ private fun DashboardFeedContent(
                                 imageLoader.enqueue(
                                     coil.request.ImageRequest.Builder(context)
                                         .data(url)
-                                        .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                                        .memoryCachePolicy(coil.request.CachePolicy.DISABLED)
                                         .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                        .size(screenWidthPx / 2, screenWidthPx / 2) // half-res for prefetch
-                                        .listener(prefetchListener)
+                                        .size(1, 1) // minimal decode — just fetches to disk cache
                                         .build()
                                 )
                             }

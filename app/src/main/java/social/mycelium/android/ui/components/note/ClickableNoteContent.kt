@@ -26,6 +26,9 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import androidx.compose.ui.platform.LocalContext
 
 /**
  * Renders note content text with click handling and long-press "Copy link" for URL spans.
@@ -45,6 +48,7 @@ fun ClickableNoteContent(
     var layoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
     var showCopyLinkMenu by remember { mutableStateOf(false) }
     var urlToCopy by remember { mutableStateOf<String?>(null) }
+    val emojiContext = LocalContext.current
 
     // Build inline content map for NIP-30 custom emoji
     val inlineContent = remember(emojiUrls) {
@@ -61,7 +65,9 @@ fun ClickableNoteContent(
                     )
                 ) {
                     AsyncImage(
-                        model = url,
+                        model = ImageRequest.Builder(emojiContext).data(url).size(64)
+                            .crossfade(false).memoryCachePolicy(CachePolicy.ENABLED)
+                            .diskCachePolicy(CachePolicy.ENABLED).build(),
                         contentDescription = shortcode.removeSurrounding(":"),
                         modifier = Modifier.fillMaxSize()
                     )

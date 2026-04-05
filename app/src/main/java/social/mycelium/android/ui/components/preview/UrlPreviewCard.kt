@@ -25,6 +25,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import social.mycelium.android.data.UrlPreviewInfo
 
 /** Size for inline thumbnail in note cards (top-right). */
@@ -94,8 +98,14 @@ fun Kind1LinkEmbedBlock(
                 if (previewInfo.imageUrl.isNotEmpty()) {
                     var imgFailed by remember(previewInfo.imageUrl) { mutableStateOf(false) }
                     if (!imgFailed) {
+                        val ctx = LocalContext.current
+                        val thumbPx = with(LocalDensity.current) { KIND1_EMBED_THUMBNAIL_DP.roundToPx() }
+                        val req = remember(previewInfo.imageUrlFullPath, thumbPx) {
+                            ImageRequest.Builder(ctx).data(previewInfo.imageUrlFullPath).size(thumbPx)
+                                .crossfade(false).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build()
+                        }
                         AsyncImage(
-                            model = previewInfo.imageUrlFullPath,
+                            model = req,
                             contentDescription = previewInfo.title.ifEmpty { "Link preview" },
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop,
@@ -195,6 +205,12 @@ fun UrlPreviewThumbnail(
 ) {
     val uriHandler = LocalUriHandler.current
     if (previewInfo.imageUrl.isEmpty()) return
+    val ctx = LocalContext.current
+    val thumbPx = with(LocalDensity.current) { size.roundToPx() }
+    val req = remember(previewInfo.imageUrlFullPath, thumbPx) {
+        ImageRequest.Builder(ctx).data(previewInfo.imageUrlFullPath).size(thumbPx)
+            .crossfade(false).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build()
+    }
     Box(
         modifier = modifier
             .size(size)
@@ -202,7 +218,7 @@ fun UrlPreviewThumbnail(
             .clickable { onUrlClick(previewInfo.url); uriHandler.openUri(previewInfo.url) }
     ) {
         AsyncImage(
-            model = previewInfo.imageUrlFullPath,
+            model = req,
             contentDescription = "Link preview",
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop
@@ -249,8 +265,14 @@ fun UrlPreviewCard(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (previewInfo.imageUrl.isNotEmpty()) {
+                val ctx = LocalContext.current
+                val inlinePx = with(LocalDensity.current) { 48.dp.roundToPx() }
+                val inlineReq = remember(previewInfo.imageUrlFullPath, inlinePx) {
+                    ImageRequest.Builder(ctx).data(previewInfo.imageUrlFullPath).size(inlinePx)
+                        .crossfade(false).memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build()
+                }
                 AsyncImage(
-                    model = previewInfo.imageUrlFullPath,
+                    model = inlineReq,
                     contentDescription = previewInfo.title.ifEmpty { "Preview" },
                     modifier = Modifier
                         .size(48.dp)

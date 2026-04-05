@@ -150,14 +150,15 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 }
                 .crossfade(100)
                 .precision(coil.size.Precision.INEXACT)
-                .allowHardware(true)
-                .allowRgb565(true)
-                // Bounded memory cache: 48MB LRU. Safe with viewport-gated rendering
-                // (~30 full cards active). Covers render window + recent scroll-back.
+                .allowHardware(false)
+                .allowRgb565(false)
+                // Bounded memory cache: fixed 32MB LRU. Viewport-gated rendering
+                // keeps ~30 full cards active. 32MB covers the render window + scroll-back
+                // without ballooning on largeHeap devices (0.15 × 512MB = 77MB was too large).
                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                 .memoryCache {
                     coil.memory.MemoryCache.Builder(this)
-                        .maxSizePercent(0.15) // ~48MB on a 320MB heap device
+                        .maxSizeBytes(32 * 1024 * 1024) // 32MB fixed cap
                         .build()
                 }
                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)

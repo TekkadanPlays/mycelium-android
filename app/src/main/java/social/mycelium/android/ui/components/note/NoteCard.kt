@@ -1221,8 +1221,8 @@ internal fun NoteMediaCarousel(
                     val hasCachedRatio = MediaAspectRatioCache.get(url) != null || mediaMeta[url]?.aspectRatio() != null
                     // Screen-width-aware decode: downsample large images during decode
                     // instead of loading full resolution (saves memory + decode time)
-                    val screenWidthPx = with(LocalDensity.current) {
-                        (LocalContext.current.resources.displayMetrics.widthPixels)
+                    val feedDecodePx = with(LocalDensity.current) {
+                        (LocalContext.current.resources.displayMetrics.widthPixels * 2 / 3)
                     }
                     val imagePainter = rememberAsyncImagePainter(
                         model = ImageRequest.Builder(imageContext)
@@ -1230,8 +1230,8 @@ internal fun NoteMediaCarousel(
                             .crossfade(!hasCachedRatio)
                             .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                             .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                            .size(screenWidthPx, screenWidthPx)
-                            .allowHardware(true)
+                            .size(feedDecodePx, feedDecodePx)
+                            .allowHardware(false)
                             .build()
                     )
                     val painterState = imagePainter.state

@@ -7,23 +7,20 @@ import coil.size.Dimension
 import coil.size.Size
 
 /**
- * Global Coil interceptor that caps decoded image dimensions to screen width.
+ * Global Coil interceptor that caps **unconstrained** image decodes to 2/3 screen width.
  *
- * Any [coil.request.ImageRequest] that arrives with [Size.ORIGINAL] (i.e. no
- * explicit `.size()` was set by the caller) is rewritten to decode at most
- * [maxDimensionPx] × [maxDimensionPx]. This prevents full-resolution decode
- * storms from the ~70 raw `AsyncImage` calls across the app that don't specify
- * a size (avatars in DMs, emoji pack icons, thread images, URL previews, etc.).
+ * Any [coil.request.ImageRequest] that arrives with [Size.ORIGINAL] or undefined
+ * dimensions (i.e. no explicit `.size()` was set by the caller) is rewritten to
+ * decode at most [capPx] × [capPx]. This catches the ~70 raw `AsyncImage` calls
+ * that don't specify a size (URL previews, DM avatars, thread images, etc.).
  *
- * Images that already have an explicit `.size()` (e.g. [ProfilePicture],
- * [NoteMediaCarousel]) are left untouched.
- *
- * Impact: a 4000×4000 JPEG that would decode to ~64MB ARGB_8888 now decodes
- * to ~4MB at 1080px, an **16× memory reduction** per uncapped image.
+ * Images that already have an explicit `.size()` (ProfilePicture at 120px,
+ * ReactionEmoji at 48px, NoteMediaCarousel at screenWidth) are left untouched —
+ * they control their own decode resolution for optimal memory use.
  */
 class ImageSizeCapInterceptor(context: Context) : Interceptor {
 
-    private val maxDimensionPx: Int = context.resources.displayMetrics.widthPixels
+    private val capPx: Int = context.resources.displayMetrics.widthPixels * 2 / 3
 
     override suspend fun intercept(chain: Interceptor.Chain): ImageResult {
         val request = chain.request
@@ -37,7 +34,7 @@ class ImageSizeCapInterceptor(context: Context) : Interceptor {
 
         return if (needsCap) {
             val capped = request.newBuilder()
-                .size(maxDimensionPx, maxDimensionPx)
+                .size(capPx, capPx)
                 .build()
             chain.proceed(capped)
         } else {

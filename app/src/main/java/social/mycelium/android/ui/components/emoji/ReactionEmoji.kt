@@ -10,6 +10,11 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 
 /**
  * Renders a reaction emoji: if the emoji is a NIP-30 custom emoji (:shortcode:) and
@@ -25,18 +30,28 @@ fun ReactionEmoji(
     style: TextStyle = TextStyle.Default,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    val sizePx = with(LocalDensity.current) { imageSize.roundToPx() }
     val url = customEmojiUrls[emoji]
     if (url != null) {
         // NIP-30 custom emoji with resolved URL
+        val request = remember(url, sizePx) {
+            ImageRequest.Builder(context).data(url).size(sizePx).crossfade(false)
+                .memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build()
+        }
         AsyncImage(
-            model = url,
+            model = request,
             contentDescription = emoji.removeSurrounding(":"),
             modifier = modifier.size(imageSize)
         )
     } else if (isImageUrl(emoji)) {
         // GIF/image reaction: content is a direct image URL
+        val request = remember(emoji, sizePx) {
+            ImageRequest.Builder(context).data(emoji).size(sizePx).crossfade(false)
+                .memoryCachePolicy(CachePolicy.ENABLED).diskCachePolicy(CachePolicy.ENABLED).build()
+        }
         AsyncImage(
-            model = emoji,
+            model = request,
             contentDescription = "Image reaction",
             modifier = modifier.size(imageSize)
         )

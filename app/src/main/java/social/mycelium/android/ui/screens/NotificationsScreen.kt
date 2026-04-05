@@ -14,6 +14,7 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -55,6 +56,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.take
 import java.util.Calendar
 import social.mycelium.android.ui.components.note.isMarkdown
 import social.mycelium.android.ui.components.note.EmbeddedArticlePreview
@@ -66,6 +68,11 @@ private enum class TimeGroup(val label: String) {
     YESTERDAY("Yesterday"),
     THIS_WEEK("This Week"),
     OLDER("Older")
+}
+
+private sealed class FlatNotifItem {
+    data class Header(val group: TimeGroup) : FlatNotifItem()
+    data class Entry(val notification: NotificationData) : FlatNotifItem()
 }
 
 private fun timeGroupFor(timestampMs: Long): TimeGroup {
@@ -398,6 +405,33 @@ fun NotificationsScreen(
             val grouped = groupedByTab[page]
             val pageListState = tabListStates.getOrElse(page) { tabListStates[0] }
 
+            // ── Viewport-gated rendering ──
+            // Flatten time-grouped notifications into a single indexed list so
+            // we can use itemsIndexed and gate full-card rendering to a window
+            // around the viewport. Off-screen items get a zero-side-effect placeholder.
+            val NOTIF_RENDER_BUFFER_ABOVE = 10
+            val NOTIF_RENDER_BUFFER_BELOW = 15
+            val notifRenderWindow by remember {
+                derivedStateOf {
+                    val info = pageListState.layoutInfo
+                    val firstVisible = info.visibleItemsInfo.firstOrNull()?.index ?: 0
+                    val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+                    (firstVisible - NOTIF_RENDER_BUFFER_ABOVE)..(lastVisible + NOTIF_RENDER_BUFFER_BELOW)
+                }
+            }
+
+            // Pre-flatten grouped notifications: [Header, Item, Item, Header, Item, ...]
+            // Recomputed only when the grouped map changes (tab switch, new notification).
+            val flatItems = remember(grouped) {
+                buildList {
+                    for (group in TimeGroup.entries) {
+                        val items = grouped[group] ?: continue
+                        add(FlatNotifItem.Header(group))
+                        items.forEach { add(FlatNotifItem.Entry(it)) }
+                    }
+                }
+            }
+
             LazyColumn(
                 state = pageListState,
                 modifier = Modifier.fillMaxSize(),
@@ -452,83 +486,98 @@ fun NotificationsScreen(
                         )
                     }
                 } else {
-                    // ── Default time-grouped view for all other tabs ──
-                    for (group in TimeGroup.entries) {
-                        val items = grouped[group] ?: continue
-                        stickyHeader(key = "header_${group.name}") {
-                            Surface(
-                                modifier = Modifier.fillMaxWidth(),
-                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                            ) {
-                                Text(
-                                    text = group.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                                )
+                    // ── Viewport-gated time-grouped view ──
+                    // Uses the pre-flattened list so each item has a known LazyColumn index.
+                    itemsIndexed(
+                        items = flatItems,
+                        key = { _, item -> when (item) {
+                            is FlatNotifItem.Header -> "header_${item.group.name}"
+                            is FlatNotifItem.Entry -> item.notification.id
+                        }},
+                        contentType = { index, item -> when {
+                            item is FlatNotifItem.Header -> "header"
+                            index !in notifRenderWindow -> "placeholder"
+                            else -> "notification"
+                        }}
+                    ) { index, item ->
+                        when (item) {
+                            is FlatNotifItem.Header -> {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                ) {
+                                    Text(
+                                        text = item.group.label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                }
                             }
-                        }
-
-                        items(
-                            items = items,
-                            key = { it.id }
-                        ) { notification ->
-                            val isSeen = notification.id in seenIds
-                            when {
-                                notification.type == NotificationType.POLL_VOTE -> {
-                                    PollVoteNotificationCard(
-                                        notification = notification,
-                                        isSeen = isSeen,
-                                        timeTick = timeTick,
-                                        onProfileClick = onProfileClick,
-                                        onClick = {
-                                            NotificationsRepository.markAsSeen(notification.id)
-                                            val target = notification.targetNote
-                                            if (target != null) onNoteClick(target)
-                                        }
-                                    )
+                            is FlatNotifItem.Entry -> {
+                                val notification = item.notification
+                                // ── Viewport gate: off-screen items get a lightweight placeholder ──
+                                if (index !in notifRenderWindow) {
+                                    PlaceholderNotificationRow(notification)
+                                    return@itemsIndexed
                                 }
-                                notification.type in listOf(
-                                    NotificationType.LIKE,
-                                    NotificationType.REPOST,
-                                    NotificationType.ZAP,
-                                    NotificationType.BADGE_AWARD
-                                ) -> {
-                                    CompactNotificationRow(
-                                        notification = notification,
-                                        isSeen = isSeen,
-                                        timeTick = timeTick,
-                                        onProfileClick = onProfileClick,
-                                        onClick = {
-                                            NotificationsRepository.markAsSeen(notification.id)
-                                            val target = notification.targetNote ?: notification.note
-                                            if (target != null && target.rootNoteId != null) {
-                                                onOpenThreadForRootId(target.rootNoteId!!, 1, null, target)
-                                            } else if (target != null) {
-                                                onNoteClick(target)
+                                val isSeen = notification.id in seenIds
+                                when {
+                                    notification.type == NotificationType.POLL_VOTE -> {
+                                        PollVoteNotificationCard(
+                                            notification = notification,
+                                            isSeen = isSeen,
+                                            timeTick = timeTick,
+                                            onProfileClick = onProfileClick,
+                                            onClick = {
+                                                NotificationsRepository.markAsSeen(notification.id)
+                                                val target = notification.targetNote
+                                                if (target != null) onNoteClick(target)
                                             }
-                                        }
-                                    )
-                                }
-                                else -> {
-                                    FullNotificationCard(
-                                        notification = notification,
-                                        isSeen = isSeen,
-                                        timeTick = timeTick,
-                                        onProfileClick = onProfileClick,
-                                        onClick = {
-                                            NotificationsRepository.markAsSeen(notification.id)
-                                            when {
-                                                (notification.type == NotificationType.REPLY || notification.type == NotificationType.COMMENT) && notification.rootNoteId != null ->
-                                                    onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
-                                                notification.type == NotificationType.MENTION && notification.note != null ->
-                                                    onNoteClick(notification.note!!)
-                                                notification.targetNote != null -> onNoteClick(notification.targetNote!!)
-                                                notification.note != null -> onNoteClick(notification.note!!)
+                                        )
+                                    }
+                                    notification.type in listOf(
+                                        NotificationType.LIKE,
+                                        NotificationType.REPOST,
+                                        NotificationType.ZAP,
+                                        NotificationType.BADGE_AWARD
+                                    ) -> {
+                                        CompactNotificationRow(
+                                            notification = notification,
+                                            isSeen = isSeen,
+                                            timeTick = timeTick,
+                                            onProfileClick = onProfileClick,
+                                            onClick = {
+                                                NotificationsRepository.markAsSeen(notification.id)
+                                                val target = notification.targetNote ?: notification.note
+                                                if (target != null && target.rootNoteId != null) {
+                                                    onOpenThreadForRootId(target.rootNoteId!!, 1, null, target)
+                                                } else if (target != null) {
+                                                    onNoteClick(target)
+                                                }
                                             }
-                                        }
-                                    )
+                                        )
+                                    }
+                                    else -> {
+                                        FullNotificationCard(
+                                            notification = notification,
+                                            isSeen = isSeen,
+                                            timeTick = timeTick,
+                                            onProfileClick = onProfileClick,
+                                            onClick = {
+                                                NotificationsRepository.markAsSeen(notification.id)
+                                                when {
+                                                    (notification.type == NotificationType.REPLY || notification.type == NotificationType.COMMENT) && notification.rootNoteId != null ->
+                                                        onOpenThreadForRootId(notification.rootNoteId!!, notification.replyKind ?: 1, notification.replyNoteId, notification.targetNote)
+                                                    notification.type == NotificationType.MENTION && notification.note != null ->
+                                                        onNoteClick(notification.note!!)
+                                                    notification.targetNote != null -> onNoteClick(notification.targetNote!!)
+                                                    notification.note != null -> onNoteClick(notification.note!!)
+                                                }
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -618,6 +667,43 @@ private fun AvatarRow(
     }
 }
 
+// ─── Lightweight placeholder for off-screen notification items ───────────────
+
+@Composable
+private fun PlaceholderNotificationRow(notification: NotificationData) {
+    val typeIcon = when (notification.type) {
+        NotificationType.LIKE -> Icons.Default.Favorite
+        NotificationType.REPOST -> Icons.Default.Repeat
+        NotificationType.ZAP -> Icons.Default.Bolt
+        NotificationType.REPLY, NotificationType.COMMENT -> Icons.AutoMirrored.Outlined.Reply
+        NotificationType.MENTION -> Icons.Outlined.AlternateEmail
+        NotificationType.BADGE_AWARD -> Icons.Default.MilitaryTech
+        NotificationType.POLL_VOTE -> Icons.Outlined.HowToVote
+        else -> Icons.Default.Notifications
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = typeIcon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+        )
+        Spacer(Modifier.width(12.dp))
+        Box(
+            modifier = Modifier
+                .height(14.dp)
+                .weight(1f)
+                .clip(RoundedCornerShape(4.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
+        )
+    }
+}
+
 // ─── Compact row for likes / zaps / reposts ──────────────────────────────────
 
 @Composable
@@ -639,9 +725,12 @@ private fun CompactNotificationRow(
     }
     LaunchedEffect(cacheKey) {
         if (cacheKey.isBlank()) return@LaunchedEffect
-        profileCache.profileUpdated
-            .filter { it == cacheKey }
-            .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+        kotlinx.coroutines.withTimeoutOrNull(5_000) {
+            profileCache.profileUpdated
+                .filter { it == cacheKey }
+                .take(1)
+                .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+        }
     }
 
     val emoji = notification.reactionEmoji
@@ -687,9 +776,15 @@ private fun CompactNotificationRow(
     var actorProfileRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(actorPubkeySet) {
         if (actorPubkeySet.size <= 1) return@LaunchedEffect
-        profileCache.profileUpdated
-            .filter { it in actorPubkeySet }
-            .collect { actorProfileRevision++ }
+        val needed = actorPubkeySet.count { profileCache.getAuthor(it) == null }
+        if (needed > 0) {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                profileCache.profileUpdated
+                    .filter { it in actorPubkeySet }
+                    .take(needed)
+                    .collect { actorProfileRevision++ }
+            }
+        }
     }
 
     NotificationCardShell(isSeen = isSeen, onClick = onClick) {
@@ -974,12 +1069,18 @@ private fun FullNotificationCard(
     var profileRevision by remember { mutableIntStateOf(0) }
     LaunchedEffect(relevantPubkeys) {
         if (relevantPubkeys.isEmpty()) return@LaunchedEffect
-        profileCache.profileUpdated
-            .filter { it in relevantPubkeys }
-            .collect {
-                if (it == cacheKey) displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor
-                profileRevision++
+        val needed = relevantPubkeys.count { profileCache.getAuthor(it) == null }
+        if (needed > 0) {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                profileCache.profileUpdated
+                    .filter { it in relevantPubkeys }
+                    .take(needed)
+                    .collect {
+                        if (it == cacheKey) displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor
+                        profileRevision++
+                    }
             }
+        }
     }
     @Suppress("UNUSED_EXPRESSION") profileRevision
 
@@ -1498,9 +1599,12 @@ private fun PollVoteNotificationCard(
     }
     LaunchedEffect(cacheKey) {
         if (cacheKey.isBlank()) return@LaunchedEffect
-        profileCache.profileUpdated
-            .filter { it == cacheKey }
-            .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+        kotlinx.coroutines.withTimeoutOrNull(5_000) {
+            profileCache.profileUpdated
+                .filter { it == cacheKey }
+                .take(1)
+                .collect { displayAuthor = profileCache.getAuthor(cacheKey) ?: displayAuthor }
+        }
     }
 
     val timeAgo = formatTimeAgo(notification.sortTimestamp, timeTick)

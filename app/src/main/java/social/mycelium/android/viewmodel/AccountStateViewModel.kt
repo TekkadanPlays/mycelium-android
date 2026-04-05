@@ -2,7 +2,7 @@ package social.mycelium.android.viewmodel
 
 import android.app.Activity
 import android.app.Application
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import social.mycelium.android.auth.AmberSignerManager
@@ -133,7 +133,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         if (npub != null) {
             prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + npub, complete).apply()
         }
-        Log.d("AccountStateViewModel", "onboardingComplete = $complete (persisted for $npub)")
+        MLog.d("AccountStateViewModel", "onboardingComplete = $complete (persisted for $npub)")
     }
 
     /** Check persisted onboarding status for a given npub. */
@@ -161,7 +161,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     init {
-        Log.d("AccountStateViewModel", "\uD83D\uDD10 Initializing AccountStateViewModel")
+        MLog.d("AccountStateViewModel", "\uD83D\uDD10 Initializing AccountStateViewModel")
 
         // Load saved accounts
         viewModelScope.launch {
@@ -173,7 +173,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             if (currentNpub != null) {
                 val account = _savedAccounts.value.find { it.npub == currentNpub }
                 if (account != null) {
-                    Log.d("AccountStateViewModel", "\uD83D\uDD10 Restoring account: ${account.toShortNpub()}")
+                    MLog.d("AccountStateViewModel", "\uD83D\uDD10 Restoring account: ${account.toShortNpub()}")
                     restoreAccount(account)
                 } else {
                     setGuestMode()
@@ -221,7 +221,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val updatedList = _savedAccounts.value.map { if (it.npub == account.npub) updatedAccount else it }
                 _savedAccounts.value = updatedList
                 saveSavedAccounts(updatedList)
-                Log.d("AccountStateViewModel", "\uD83D\uDD0D Profile updated: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
+                MLog.d("AccountStateViewModel", "\uD83D\uDD0D Profile updated: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
             }
             .launchIn(viewModelScope)
 
@@ -261,7 +261,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val updatedList = _savedAccounts.value.map { if (it.npub == account.npub) updatedAccount else it }
                 _savedAccounts.value = updatedList
                 saveSavedAccounts(updatedList)
-                Log.d("AccountStateViewModel", "\uD83D\uDD0D Disk cache restored profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
+                MLog.d("AccountStateViewModel", "\uD83D\uDD0D Disk cache restored profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
             }
         }
 
@@ -276,12 +276,12 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             _accountsRestored.filter { it }.first()
 
             amberSignerManager.state.collect { amberState ->
-                Log.d("AccountStateViewModel", "\uD83D\uDD10 Amber state changed: $amberState")
+                MLog.d("AccountStateViewModel", "\uD83D\uDD10 Amber state changed: $amberState")
 
                 when (amberState) {
                     is AmberState.LoggedIn -> {
                         if (restoreInProgress) {
-                            Log.d("AccountStateViewModel", "Amber LoggedIn during restore — skipping handleNewAmberLogin")
+                            MLog.d("AccountStateViewModel", "Amber LoggedIn during restore — skipping handleNewAmberLogin")
                         } else {
                             handleNewAmberLogin(amberState.pubKey)
                         }
@@ -307,13 +307,13 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val accounts = json.decodeFromString<List<AccountInfo>>(accountsJson)
                 // Keep accounts in the order they were added (don't sort by lastUsed)
                 _savedAccounts.value = accounts
-                Log.d("AccountStateViewModel", "\uD83D\uDD0E Loaded ${accounts.size} saved accounts")
+                MLog.d("AccountStateViewModel", "\uD83D\uDD0E Loaded ${accounts.size} saved accounts")
             } catch (e: Exception) {
-                Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to load accounts: ${e.message}")
+                MLog.e("AccountStateViewModel", "\uD83D\uDD0E Failed to load accounts: ${e.message}")
                 _savedAccounts.value = emptyList()
             }
         } else {
-            Log.d("AccountStateViewModel", "\uD83D\uDD0E No saved accounts found")
+            MLog.d("AccountStateViewModel", "\uD83D\uDD0E No saved accounts found")
             _savedAccounts.value = emptyList()
         }
     }
@@ -325,14 +325,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 .putString(PREF_ALL_ACCOUNTS, accountsJson)
                 .apply()
             _savedAccounts.value = accounts
-            Log.d("AccountStateViewModel", "\uD83D\uDD0E Saved ${accounts.size} accounts")
+            MLog.d("AccountStateViewModel", "\uD83D\uDD0E Saved ${accounts.size} accounts")
         } catch (e: Exception) {
-            Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to save accounts: ${e.message}")
+            MLog.e("AccountStateViewModel", "\uD83D\uDD0E Failed to save accounts: ${e.message}")
         }
     }
 
     private fun setGuestMode() {
-        Log.d("AccountStateViewModel", "\uD83D\uDD1D Setting guest mode")
+        MLog.d("AccountStateViewModel", "\uD83D\uDD1D Setting guest mode")
         _currentAccount.value = null
         NoteCountsRepository.currentUserPubkey = null
         social.mycelium.android.repository.sync.AccountScopedRegistry.setActiveAccount(null)
@@ -352,14 +352,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private suspend fun handleNewAmberLogin(hexPubkey: String) {
-        Log.d("AccountStateViewModel", "\uD83D\uDD10 Handling new Amber login: ${hexPubkey.take(16)}...")
+        MLog.d("AccountStateViewModel", "\uD83D\uDD10 Handling new Amber login: ${hexPubkey.take(16)}...")
 
         // Skip if this is just a signer recovery for the already-active account —
         // restoreAccount() already set up everything, no need to re-run (which would
         // reset _onboardingComplete and flash the sign-in flow).
         val currentHex = _currentAccount.value?.toHexKey()
         if (currentHex == hexPubkey && _accountsRestored.value) {
-            Log.d("AccountStateViewModel", "Amber login matches current account — skipping re-activation")
+            MLog.d("AccountStateViewModel", "Amber login matches current account — skipping re-activation")
             return
         }
 
@@ -367,7 +367,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val npub = try {
             hexPubkey.hexToByteArray().toNpub()
         } catch (e: Exception) {
-            Log.e("AccountStateViewModel", "\uD83D\uDD0E Failed to convert to npub: ${e.message}")
+            MLog.e("AccountStateViewModel", "\uD83D\uDD0E Failed to convert to npub: ${e.message}")
             return
         }
 
@@ -463,18 +463,18 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         // Check persisted onboarding status first, then fall back to relay existence
         if (isOnboardingPersistedFor(accountInfo.npub)) {
             _onboardingComplete.value = true
-            Log.d("AccountStateViewModel", "Returning user (Amber, persisted) — onboardingComplete = true")
+            MLog.d("AccountStateViewModel", "Returning user (Amber, persisted) — onboardingComplete = true")
         } else {
             val outbox = relayStorageManager.loadOutboxRelays(hexPubkey)
             val categories = relayStorageManager.loadCategories(hexPubkey)
             if (outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }) {
                 _onboardingComplete.value = true
                 prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + accountInfo.npub, true).apply()
-                Log.d("AccountStateViewModel", "Returning user (Amber, relays exist) — onboardingComplete = true")
+                MLog.d("AccountStateViewModel", "Returning user (Amber, relays exist) — onboardingComplete = true")
             }
         }
 
-        Log.d("AccountStateViewModel", "\uD83D\uDD10 Account activated: ${accountInfo.toShortNpub()}")
+        MLog.d("AccountStateViewModel", "\uD83D\uDD10 Account activated: ${accountInfo.toShortNpub()}")
 
         // Sync settings via NIP-78 (kind 30078)
         initSettingsSync(hexPubkey)
@@ -498,7 +498,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private suspend fun restoreAccountInternal(accountInfo: AccountInfo) {
-        Log.d("AccountStateViewModel", "\uD83D\uDD04 Switching to account: ${accountInfo.toShortNpub()}")
+        MLog.d("AccountStateViewModel", "\uD83D\uDD04 Switching to account: ${accountInfo.toShortNpub()}")
 
         // Idempotency: if the account being restored is already the active account,
         // skip the nuclear teardown. This prevents feed clearing when a new ViewModel
@@ -509,7 +509,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         val currentActivePubkey = NoteCountsRepository.currentUserPubkey
         val isSameAccount = incomingHex != null && incomingHex == currentActivePubkey
         if (isSameAccount) {
-            Log.d("AccountStateViewModel", "\uD83D\uDD04 Same account already active — skipping teardown")
+            MLog.d("AccountStateViewModel", "\uD83D\uDD04 Same account already active — skipping teardown")
             // Ensure registry knows this is the active account (ViewModel may have been re-created)
             social.mycelium.android.repository.sync.AccountScopedRegistry.getOrCreateScope(incomingHex, getApplication())
             social.mycelium.android.repository.sync.AccountScopedRegistry.setActiveAccount(incomingHex)
@@ -606,7 +606,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
             RelayConnectionStateMachine.getInstance().setNip42Signer(nip42Signer)
             updateNip42AllowedRelays(hexPubkey)
-            Log.d("AccountStateViewModel", "NIP-42 signer set: ${nip42Signer?.let { it::class.simpleName } ?: "null"}")
+            MLog.d("AccountStateViewModel", "NIP-42 signer set: ${nip42Signer?.let { it::class.simpleName } ?: "null"}")
 
             val userProfile = UserProfile(
                 pubkey = hexPubkey,
@@ -636,14 +636,14 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             // Restore persisted kind-3 before any relay fetch can overwrite with stale data
             ContactListRepository.restorePersistedKind3(hexPubkey)
 
-            Log.d("AccountStateViewModel", "\u2705 Switched to account: ${updatedAccount.getDisplayNameOrNpub()}")
+            MLog.d("AccountStateViewModel", "\u2705 Switched to account: ${updatedAccount.getDisplayNameOrNpub()}")
         }
 
         // Resolve onboarding status BEFORE publishing accountsRestored to prevent
         // a 1-frame flash where needsOnboarding=true shows the sign-in/onboarding UI.
         if (isOnboardingPersistedFor(updatedAccount.npub)) {
             _onboardingComplete.value = true
-            Log.d("AccountStateViewModel", "Returning user (persisted) — onboardingComplete = true")
+            MLog.d("AccountStateViewModel", "Returning user (persisted) — onboardingComplete = true")
         } else {
             val hex = updatedAccount.toHexKey()
             if (hex != null) {
@@ -653,7 +653,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     _onboardingComplete.value = true
                     // Persist for future — this account had relays before the persistence was added
                     prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + updatedAccount.npub, true).apply()
-                    Log.d("AccountStateViewModel", "Returning user (relays exist) — onboardingComplete = true")
+                    MLog.d("AccountStateViewModel", "Returning user (relays exist) — onboardingComplete = true")
                 }
             }
         }
@@ -680,7 +680,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     )
                     if (updated != null && updated != existing) {
                         _authState.update { it.copy(userProfile = updated) }
-                        Log.d("AccountStateViewModel", "\uD83D\uDD0D Applied disk-cached profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
+                        MLog.d("AccountStateViewModel", "\uD83D\uDD0D Applied disk-cached profile: picture=${author.avatarUrl?.take(40)}, name=${author.displayName}")
                     }
                 }
             }
@@ -713,7 +713,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 )
             }
         }
-        Log.d("AccountStateViewModel", "Settings sync: publish callback registered (outbox-only, fetch handled by StartupOrchestrator)")
+        MLog.d("AccountStateViewModel", "Settings sync: publish callback registered (outbox-only, fetch handled by StartupOrchestrator)")
     }
 
     /** Check if settings have already been applied for this account (first-login flag). */
@@ -741,7 +741,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      * Handle Amber login result
      */
     fun handleAmberLoginResult(resultCode: Int, data: android.content.Intent?) {
-        Log.d("AccountStateViewModel", "🔐 Handling Amber login result - resultCode: $resultCode")
+        MLog.d("AccountStateViewModel", "🔐 Handling Amber login result - resultCode: $resultCode")
         amberSignerManager.handleLoginResult(resultCode, data)
     }
 
@@ -766,7 +766,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     val privKeyBytes = try {
                         trimmed.bechToBytes()
                     } catch (e: Exception) {
-                        Log.e("AccountStateViewModel", "nsec bechToBytes failed", e)
+                        MLog.e("AccountStateViewModel", "nsec bechToBytes failed", e)
                         return "Invalid nsec key"
                     }
                     val hexPubkey = KeyPair(privKey = privKeyBytes).pubKey.toHexString()
@@ -807,7 +807,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 else -> return "Unrecognized key format. Use nsec1... or npub1..."
             }
         } catch (e: Exception) {
-            Log.e("AccountStateViewModel", "loginWithKey failed: ${e.message}", e)
+            MLog.e("AccountStateViewModel", "loginWithKey failed: ${e.message}", e)
             return "Login failed: ${e.message}"
         }
     }
@@ -875,19 +875,19 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             // a 1-frame flash where needsOnboarding=true shows the sign-in/onboarding UI.
             if (isOnboardingPersistedFor(accountInfo.npub)) {
                 _onboardingComplete.value = true
-                Log.d("AccountStateViewModel", "Returning user (key, persisted) — onboardingComplete = true")
+                MLog.d("AccountStateViewModel", "Returning user (key, persisted) — onboardingComplete = true")
             } else {
                 val outbox = relayStorageManager.loadOutboxRelays(hexPubkey)
                 val categories = relayStorageManager.loadCategories(hexPubkey)
                 if (outbox.isNotEmpty() || categories.any { it.relays.isNotEmpty() }) {
                     _onboardingComplete.value = true
                     prefs.edit().putBoolean(PREF_ONBOARDING_COMPLETE_PREFIX + accountInfo.npub, true).apply()
-                    Log.d("AccountStateViewModel", "Returning user (key, relays exist) — onboardingComplete = true")
+                    MLog.d("AccountStateViewModel", "Returning user (key, relays exist) — onboardingComplete = true")
                 }
             }
 
             _accountsRestored.value = true
-            Log.d("AccountStateViewModel", "Account activated via key login: ${accountInfo.toShortNpub()}")
+            MLog.d("AccountStateViewModel", "Account activated via key login: ${accountInfo.toShortNpub()}")
         }
     }
 
@@ -966,7 +966,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
         // For reposts, note.id is a synthetic "repost:xyz" composite — use the real event ID
         val targetNoteId = note.originalNoteId ?: note.id
-        Log.d("AccountStateViewModel", "sendReaction: emoji=$emoji, noteId=${targetNoteId.take(8)}, relays=${relaySet.size}")
+        MLog.d("AccountStateViewModel", "sendReaction: emoji=$emoji, noteId=${targetNoteId.take(8)}, relays=${relaySet.size}")
 
         val targetPubkey = normalizeAuthorIdForCache(note.author.id)
         val targetEvent = Event(
@@ -988,7 +988,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch {
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
                 is PublishResult.Success -> {
-                    Log.d("AccountStateViewModel", "sendReaction: published ${result.event.id.take(8)}")
+                    MLog.d("AccountStateViewModel", "sendReaction: published ${result.event.id.take(8)}")
                     ReactionsRepository.setLastReaction(note.id, emoji)
                     ReactionsRepository.persist(getApplication(), account.npub)
                     ReactionsRepository.recordEmoji(getApplication(), account.npub, emoji)
@@ -1005,7 +1005,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     ReactionsRepository.emitAnimation(note.id, emoji, success = true)
                 }
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "sendReaction failed: ${result.message}")
+                    MLog.e("AccountStateViewModel", "sendReaction failed: ${result.message}")
                     _toastMessage.value = "Reaction failed: ${result.message}"
                     // Emit failure animation — NoteCard will flash the red strobe
                     ReactionsRepository.emitAnimation(note.id, emoji, success = false)
@@ -1050,11 +1050,11 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     EmojiPackSelectionRepository.onPublished(result.event)
                     // Fetch the newly-added pack's content
                     EmojiPackRepository.fetchIfNeeded(author, dTag, listOfNotNull(relayHint))
-                    Log.d("AccountStateViewModel", "Emoji pack added: $author:$dTag")
+                    MLog.d("AccountStateViewModel", "Emoji pack added: $author:$dTag")
                     _toastMessage.value = "Emoji pack saved"
                 }
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "Failed to add emoji pack: ${result.message}")
+                    MLog.e("AccountStateViewModel", "Failed to add emoji pack: ${result.message}")
                     _toastMessage.value = "Failed to save emoji pack"
                 }
             }
@@ -1094,11 +1094,11 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 is PublishResult.Success -> {
                     EmojiPackSelectionRepository.onPublished(result.event)
                     EmojiPackSelectionRepository.rebuildMergedEmojis()
-                    Log.d("AccountStateViewModel", "Emoji pack removed: $author:$dTag")
+                    MLog.d("AccountStateViewModel", "Emoji pack removed: $author:$dTag")
                     _toastMessage.value = "Emoji pack removed"
                 }
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "Failed to remove emoji pack: ${result.message}")
+                    MLog.e("AccountStateViewModel", "Failed to remove emoji pack: ${result.message}")
                     _toastMessage.value = "Failed to remove emoji pack"
                 }
             }
@@ -1154,10 +1154,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     // Record vote only after successful signing + publish so the UI
                     // doesn't show a phantom vote if Amber rejects the signing request.
                     PollResponseRepository.recordLocalVote(pollNoteId, accountHex, selectedOptions)
-                    Log.d("AccountStateViewModel", "Poll vote published: ${result.eventId.take(8)} for poll ${pollNoteId.take(8)}")
+                    MLog.d("AccountStateViewModel", "Poll vote published: ${result.eventId.take(8)} for poll ${pollNoteId.take(8)}")
                 }
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "Poll vote failed: ${result.message}")
+                    MLog.e("AccountStateViewModel", "Poll vote failed: ${result.message}")
                     _toastMessage.value = "Vote failed: ${result.message}"
                 }
             }
@@ -1228,7 +1228,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     )
                     NotesRepository.getInstance().injectOwnNote(note)
                     NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
-                    Log.d("AccountStateViewModel", "Poll published: ${result.eventId.take(8)} with ${options.size} options")
+                    MLog.d("AccountStateViewModel", "Poll published: ${result.eventId.take(8)} with ${options.size} options")
                 }
                 is PublishResult.Error -> {
                     _toastMessage.value = "Poll publish failed: ${result.message}"
@@ -1295,7 +1295,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     )
                     NotesRepository.getInstance().injectOwnNote(note)
                     NotesRepository.getInstance().updatePublishState(result.event.id, social.mycelium.android.data.PublishState.Confirmed)
-                    Log.d("AccountStateViewModel", "Zap poll published: ${result.eventId.take(8)} with ${options.size} options")
+                    MLog.d("AccountStateViewModel", "Zap poll published: ${result.eventId.take(8)} with ${options.size} options")
                 }
                 is PublishResult.Error -> {
                     _toastMessage.value = "Zap poll publish failed: ${result.message}"
@@ -1415,7 +1415,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 val result = client.upload(context, uploadUri, signer, serverUrl, mimeType)
                 onResult(result.url, null)
             } catch (e: Exception) {
-                Log.e("AccountStateViewModel", "Media upload failed", e)
+                MLog.e("AccountStateViewModel", "Media upload failed", e)
                 onResult(null, e.message ?: "Upload failed")
             }
         }
@@ -1606,24 +1606,24 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         }
         val signer = getSignerOrNull()
         if (signer == null) {
-            Log.w("AccountStateViewModel", "publishLiveChatMessage: signer unavailable")
+            MLog.w("AccountStateViewModel", "publishLiveChatMessage: signer unavailable")
             _toastMessage.value = signerUnavailableMessage()
             return
         }
         if (relayUrls.isEmpty()) {
-            Log.w("AccountStateViewModel", "publishLiveChatMessage: no relays")
+            MLog.w("AccountStateViewModel", "publishLiveChatMessage: no relays")
             _toastMessage.value = "No relays selected"
             return
         }
-        Log.d("AccountStateViewModel", "publishLiveChatMessage: content='${content.take(30)}', addr=$activityAddress, relays=${relayUrls.size}")
+        MLog.d("AccountStateViewModel", "publishLiveChatMessage: content='${content.take(30)}', addr=$activityAddress, relays=${relayUrls.size}")
         viewModelScope.launch {
             val result = EventPublisher.publish(getApplication(), signer, relayUrls, kind = 1311, content = content) {
                 add(arrayOf("a", activityAddress))
             }
             when (result) {
-                is PublishResult.Success -> Log.d("AccountStateViewModel", "Chat published: ${result.eventId.take(8)}")
+                is PublishResult.Success -> MLog.d("AccountStateViewModel", "Chat published: ${result.eventId.take(8)}")
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "Chat publish failed: ${result.message}")
+                    MLog.e("AccountStateViewModel", "Chat publish failed: ${result.message}")
                     _toastMessage.value = "Chat failed: ${result.message}"
                 }
             }
@@ -1645,7 +1645,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             val template = TopicsPublishService.buildTopicEventTemplate(title, content, hashtags, emojiTags)
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
                 is PublishResult.Success -> {
-                    Log.d("AccountStateViewModel", "Topic published: ${result.eventId.take(8)}")
+                    MLog.d("AccountStateViewModel", "Topic published: ${result.eventId.take(8)}")
                     // Inject into TopicsRepository so "x new topics" counter updates immediately
                     TopicsRepository.getInstance(getApplication()).injectLocalTopic(result.event)
                 }
@@ -1679,7 +1679,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 rootThreadId, rootThreadPubkey, parentReplyId, parentReplyPubkey, content, taggedPubkeys, emojiTags
             )
             when (val result = EventPublisher.publish(getApplication(), signer, relaySet, template)) {
-                is PublishResult.Success -> Log.d("AccountStateViewModel", "Thread reply published: ${result.eventId.take(8)}")
+                is PublishResult.Success -> MLog.d("AccountStateViewModel", "Thread reply published: ${result.eventId.take(8)}")
                 is PublishResult.Error -> _toastMessage.value = "Reply failed: ${result.message}"
             }
         }
@@ -1728,7 +1728,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
             when (result) {
                 is PublishResult.Success -> {
-                    Log.d("AccountStateViewModel", "Kind-1 reply published: ${result.eventId.take(8)}")
+                    MLog.d("AccountStateViewModel", "Kind-1 reply published: ${result.eventId.take(8)}")
                     // Inject into ThreadReplyCache for instant display in thread view
                     val pubkey = currentAccount.value?.toHexKey()
                     val author = pubkey?.let { ProfileMetadataCache.getInstance().resolveAuthor(it) }
@@ -1835,7 +1835,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             when (result) {
                 is PublishResult.Success -> {
                     VoteRepository.persist(getApplication(), accountNpub)
-                    Log.d("AccountStateViewModel", "Vote published: ${noteId.take(8)} = $newVote")
+                    MLog.d("AccountStateViewModel", "Vote published: ${noteId.take(8)} = $newVote")
                 }
                 is PublishResult.Error -> {
                     // Revert optimistic vote on failure
@@ -1957,9 +1957,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 cacheRelayUrls = cacheRelayUrls
             )
             if (error != null) {
-                Log.e("AccountStateViewModel", "followUser failed: $error")
+                MLog.e("AccountStateViewModel", "followUser failed: $error")
             } else {
-                Log.d("AccountStateViewModel", "Followed ${targetPubkey.take(8)}...")
+                MLog.d("AccountStateViewModel", "Followed ${targetPubkey.take(8)}...")
             }
         }
         return null
@@ -1990,9 +1990,9 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 cacheRelayUrls = cacheRelayUrls
             )
             if (error != null) {
-                Log.e("AccountStateViewModel", "unfollowUser failed: $error")
+                MLog.e("AccountStateViewModel", "unfollowUser failed: $error")
             } else {
-                Log.d("AccountStateViewModel", "Unfollowed ${targetPubkey.take(8)}...")
+                MLog.d("AccountStateViewModel", "Unfollowed ${targetPubkey.take(8)}...")
             }
         }
         return null
@@ -2035,7 +2035,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     onProgress = { progress ->
                         when (progress) {
                             is social.mycelium.android.services.ZapProgress.InProgress -> {
-                                Log.d("AccountStateViewModel", "Zap progress: ${progress.step}")
+                                MLog.d("AccountStateViewModel", "Zap progress: ${progress.step}")
                             }
                             is social.mycelium.android.services.ZapProgress.Success -> {
                                 _zappedNoteIds.value = _zappedNoteIds.value + noteId
@@ -2055,7 +2055,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                     }
                 )
             } catch (e: Exception) {
-                Log.e("AccountStateViewModel", "Zap coroutine failed: ${e.message}", e)
+                MLog.e("AccountStateViewModel", "Zap coroutine failed: ${e.message}", e)
                 viewModelScope.launch(Dispatchers.Main.immediate) {
                     _toastMessage.value = "Zap failed: ${e.message?.take(80)}"
                 }
@@ -2072,7 +2072,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
      */
     fun logoutAccount(accountInfo: AccountInfo) {
         viewModelScope.launch {
-            Log.d("AccountStateViewModel", "👋 Logging out account: ${accountInfo.toShortNpub()}")
+            MLog.d("AccountStateViewModel", "👋 Logging out account: ${accountInfo.toShortNpub()}")
 
             // Clear all relay data and persisted onboarding flag for this account.
             // Onboarding flag must be cleared so re-login triggers the setup flow.
@@ -2081,7 +2081,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 // Destroy per-account scope (stops notification subscription, cancels coroutines)
                 social.mycelium.android.repository.sync.AccountScopedRegistry.removeScope(pubkey)
                 relayStorageManager.clearUserData(pubkey)
-                Log.d("AccountStateViewModel", "🗑️ Cleared relay data for account: ${accountInfo.toShortNpub()}")
+                MLog.d("AccountStateViewModel", "🗑️ Cleared relay data for account: ${accountInfo.toShortNpub()}")
             }
             prefs.edit().remove(PREF_ONBOARDING_COMPLETE_PREFIX + accountInfo.npub).apply()
             // Clear settings-applied flag so re-login fetches fresh settings
@@ -2105,7 +2105,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
 
                     // Clear guest relay data as well when switching to guest mode
                     relayStorageManager.clearUserData("guest")
-                    Log.d("AccountStateViewModel", "🗑️ Cleared guest relay data")
+                    MLog.d("AccountStateViewModel", "🗑️ Cleared guest relay data")
 
                     setGuestMode()
                 }
@@ -2265,7 +2265,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 )
                 _toastMessage.value = "NIP-65 relay list published"
             } catch (e: Exception) {
-                Log.e("AccountStateViewModel", "NIP-65 publish failed: ${e.message}", e)
+                MLog.e("AccountStateViewModel", "NIP-65 publish failed: ${e.message}", e)
                 _toastMessage.value = "Relay list publish failed: ${e.message?.take(80)}"
             }
         }
@@ -2306,11 +2306,11 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
             when (result) {
                 is PublishResult.Success -> {
-                    Log.d("AccountStateViewModel", "Indexer relay list published: ${result.eventId.take(8)}")
+                    MLog.d("AccountStateViewModel", "Indexer relay list published: ${result.eventId.take(8)}")
                     _toastMessage.value = "Indexer relay list published"
                 }
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "Indexer relay list publish failed: ${result.message}")
+                    MLog.e("AccountStateViewModel", "Indexer relay list publish failed: ${result.message}")
                     _toastMessage.value = "Indexer list publish failed: ${result.message}"
                 }
             }
@@ -2350,7 +2350,7 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
         note.relayUrl?.let { noteRelays.add(it) }
         val allRelays = noteRelays.mapNotNull { RelayUrlNormalizer.normalizeOrNull(it)?.url }.toSet()
 
-        Log.d("AccountStateViewModel", "deleteNote: eventId=${eventId.take(8)}, confirmedRelays=${allRelays.size}")
+        MLog.d("AccountStateViewModel", "deleteNote: eventId=${eventId.take(8)}, confirmedRelays=${allRelays.size}")
 
         viewModelScope.launch {
             // NIP-09 kind-5 deletion event to all relays where the note exists
@@ -2367,10 +2367,10 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
                 }
                 when (result) {
                     is PublishResult.Success -> {
-                        Log.d("AccountStateViewModel", "NIP-09 deletion published: ${result.eventId.take(8)} → ${allRelays.size} relays")
+                        MLog.d("AccountStateViewModel", "NIP-09 deletion published: ${result.eventId.take(8)} → ${allRelays.size} relays")
                     }
                     is PublishResult.Error -> {
-                        Log.e("AccountStateViewModel", "NIP-09 deletion failed: ${result.message}")
+                        MLog.e("AccountStateViewModel", "NIP-09 deletion failed: ${result.message}")
                         _toastMessage.value = "Deletion request failed: ${result.message}"
                     }
                 }
@@ -2421,11 +2421,11 @@ class AccountStateViewModel(application: Application) : AndroidViewModel(applica
             }
             when (result) {
                 is PublishResult.Success -> {
-                    Log.d("AccountStateViewModel", "Reaction deletion published: ${result.eventId.take(8)} for reaction ${reactionEventId.take(8)} on note ${noteId.take(8)}")
+                    MLog.d("AccountStateViewModel", "Reaction deletion published: ${result.eventId.take(8)} for reaction ${reactionEventId.take(8)} on note ${noteId.take(8)}")
                     _toastMessage.value = "Reaction removed"
                 }
                 is PublishResult.Error -> {
-                    Log.e("AccountStateViewModel", "Reaction deletion failed: ${result.message}")
+                    MLog.e("AccountStateViewModel", "Reaction deletion failed: ${result.message}")
                     _toastMessage.value = "Failed to remove reaction: ${result.message}"
                     // Re-inject the reaction since deletion failed
                     NoteCountsRepository.injectOwnReaction(noteId, emoji, accountHex, null, reactionEventId)

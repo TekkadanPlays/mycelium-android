@@ -4,7 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Process
-import android.util.Log
+import social.mycelium.android.debug.MLog
 
 /**
  * BroadcastReceiver that kills the app process when triggered from
@@ -20,7 +20,7 @@ class KillAppReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != ACTION_KILL_APP) return
-        Log.d(TAG, "Kill app requested — stopping service and killing process")
+        MLog.d(TAG, "Kill app requested — stopping service and killing process")
         // Stop the foreground service first
         context.stopService(Intent(context, RelayForegroundService::class.java))
         // Kill the process — Android will allow the user to relaunch from launcher

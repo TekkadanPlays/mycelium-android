@@ -3,7 +3,7 @@ package social.mycelium.android.services
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.util.Log
+import social.mycelium.android.debug.MLog
 
 /**
  * BroadcastReceiver triggered by AlarmManager when a scheduled note is due.
@@ -20,7 +20,7 @@ class ScheduleReceiver : BroadcastReceiver() {
         val action = intent.action
         val draftId = intent.getStringExtra(EXTRA_DRAFT_ID)
 
-        Log.d("ScheduleReceiver", "Received broadcast: $action for draft ${draftId?.take(8)}")
+        MLog.d("ScheduleReceiver", "Received broadcast: $action for draft ${draftId?.take(8)}")
 
         if (ACTION_PUBLISH_SCHEDULED == action && !draftId.isNullOrBlank()) {
             NoteScheduler.enqueueImmediate(context, draftId)

@@ -68,8 +68,13 @@ object DiagnosticLog {
         SYNC("sync.log"),
         STATE("state.log"),
         FEED("feed.log"),
+        AUTH("auth.log"),
+        NOTIFICATION("notification.log"),
+        WALLET("wallet.log"),
         GENERAL("general.log"),
     }
+
+    enum class Level { VERBOSE, DEBUG, INFO, WARN, ERROR }
 
     @Volatile
     private var logDir: File? = null
@@ -136,7 +141,17 @@ object DiagnosticLog {
     fun log(channel: Channel, source: String, message: String) {
         if (!BuildConfig.DEBUG || !initialized.get()) return
         val ts = timeFmt.format(Date())
-        val line = "$ts | ${channel.name.padEnd(7)} | ${source.padEnd(20).take(20)} | $message"
+        val line = "$ts | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $message"
+        pending.add(channel to line)
+    }
+
+    fun log(channel: Channel, level: Level, source: String, message: String) {
+        // In release builds, only persist WARN and ERROR
+        if (!BuildConfig.DEBUG && level.ordinal < Level.WARN.ordinal) return
+        if (!initialized.get()) return
+        val ts = timeFmt.format(Date())
+        val lvl = level.name.first()
+        val line = "$ts | $lvl | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $message"
         pending.add(channel to line)
     }
 
@@ -157,6 +172,15 @@ object DiagnosticLog {
 
     /** Convenience: log to GENERAL channel. */
     fun general(source: String, message: String) = log(Channel.GENERAL, source, message)
+
+    /** Convenience: log to AUTH channel. */
+    fun auth(source: String, message: String) = log(Channel.AUTH, source, message)
+
+    /** Convenience: log to NOTIFICATION channel. */
+    fun notification(source: String, message: String) = log(Channel.NOTIFICATION, source, message)
+
+    /** Convenience: log to WALLET channel. */
+    fun wallet(source: String, message: String) = log(Channel.WALLET, source, message)
 
     /**
      * Flush all pending entries to disk immediately.
@@ -189,6 +213,51 @@ object DiagnosticLog {
             } catch (_: Exception) {}
         }
         Log.d(TAG, "All diagnostic logs cleared")
+    }
+
+    // ── Read API (for DiagnosticLogViewerScreen) ────────────────────────────
+
+    /** Read all lines from a specific channel's log file. */
+    fun readChannel(channel: Channel): List<String> {
+        val dir = logDir ?: return emptyList()
+        flushPending()
+        val file = File(dir, channel.filename)
+        return try {
+            if (file.exists()) file.readLines() else emptyList()
+        } catch (e: Exception) {
+            listOf("Error reading ${channel.filename}: ${e.message}")
+        }
+    }
+
+    /** Read all lines from the combined all.log file. */
+    fun readAll(): List<String> {
+        val dir = logDir ?: return emptyList()
+        flushPending()
+        val file = File(dir, ALL_FILE)
+        return try {
+            if (file.exists()) file.readLines() else emptyList()
+        } catch (e: Exception) {
+            listOf("Error reading all.log: ${e.message}")
+        }
+    }
+
+    /** Build a single export string containing all channel logs for sharing/copying. */
+    fun buildExport(): String {
+        val dir = logDir ?: return "(DiagnosticLog not initialized)"
+        flushPending()
+        return buildString {
+            appendLine("=== Mycelium Diagnostic Log Export ===")
+            appendLine("Exported: ${dateFmt.format(Date())}")
+            appendLine()
+            for (ch in Channel.entries) {
+                val file = File(dir, ch.filename)
+                if (file.exists() && file.length() > 0) {
+                    appendLine("--- ${ch.name} (${ch.filename}) ---")
+                    appendLine(file.readText())
+                    appendLine()
+                }
+            }
+        }
     }
 
     // ── Internal ─────────────────────────────────────────────────────────────

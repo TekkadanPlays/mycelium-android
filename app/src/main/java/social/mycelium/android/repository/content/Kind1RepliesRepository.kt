@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.content
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.cache.ThreadReplyCache
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
@@ -45,7 +45,7 @@ import social.mycelium.android.repository.NotificationsRepository
  */
 class Kind1RepliesRepository {
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     init {
         // Observe locally-published replies from ThreadReplyCache and inject them into the
@@ -140,7 +140,7 @@ class Kind1RepliesRepository {
      * Set relay URLs for subsequent fetchRepliesForNote. Uses shared client; no separate connect.
      */
     fun connectToRelays(relayUrls: List<String>) {
-        Log.d(TAG, "Relay URLs set for Kind 1 replies: ${relayUrls.size}")
+        MLog.d(TAG, "Relay URLs set for Kind 1 replies: ${relayUrls.size}")
         connectedRelays = relayUrls
     }
 
@@ -148,7 +148,7 @@ class Kind1RepliesRepository {
      * Cancel all reply subscriptions and clear state. Does not disconnect the shared client.
      */
     fun disconnectAll() {
-        Log.d(TAG, "Cleaning up Kind 1 reply subscriptions")
+        MLog.d(TAG, "Cleaning up Kind 1 reply subscriptions")
         flushJob?.cancel()
         pendingEvents.clear()
         batchStartMs = 0L
@@ -173,7 +173,7 @@ class Kind1RepliesRepository {
         val buffered = pendingRelayConfirmations.remove(reply.id)
         val enrichedReply = if (buffered != null) {
             val merged = (reply.relayUrls + buffered).distinct()
-            Log.d(TAG, "📌 Applied ${buffered.size} buffered relay confirmations for ${reply.id.take(8)}")
+            MLog.d(TAG, "📌 Applied ${buffered.size} buffered relay confirmations for ${reply.id.take(8)}")
             reply.copy(relayUrls = merged)
         } else reply
         val updated = (current + enrichedReply).sortedBy { it.timestamp }
@@ -181,7 +181,7 @@ class Kind1RepliesRepository {
         // Also update internal cache for tree building
         val cacheMap = threadReplyCache.getOrPut(rootId) { mutableMapOf() }
         cacheMap[enrichedReply.id] = enrichedReply
-        Log.d(TAG, "Injected local reply ${reply.id.take(8)} into thread ${rootId.take(8)} (now ${updated.size} replies, ${enrichedReply.relayUrls.size} orbs)")
+        MLog.d(TAG, "Injected local reply ${reply.id.take(8)} into thread ${rootId.take(8)} (now ${updated.size} replies, ${enrichedReply.relayUrls.size} orbs)")
     }
 
     /**
@@ -200,7 +200,7 @@ class Kind1RepliesRepository {
                 val updated = replies.toMutableList()
                 updated[idx] = reply.copy(relayUrls = (existingUrls + relayUrl).distinct())
                 _replies.value = current + (rootId to updated)
-                Log.d(TAG, "Merged publish relay $relayUrl into reply ${eventId.take(8)}")
+                MLog.d(TAG, "Merged publish relay $relayUrl into reply ${eventId.take(8)}")
                 return
             }
         }
@@ -223,7 +223,7 @@ class Kind1RepliesRepository {
     ) {
         val targetRelays = relayUrls ?: connectedRelays
         if (targetRelays.isEmpty()) {
-            Log.w(TAG, "No relays available to fetch replies")
+            MLog.w(TAG, "No relays available to fetch replies")
             return
         }
 
@@ -257,7 +257,7 @@ class Kind1RepliesRepository {
             _replies.value = mapOf(noteId to sorted)
             updateThreadReplyCache(noteId, sorted)
             _isLoading.value = false
-            Log.d(TAG, "Emitted ${sorted.size} cached replies for note ${noteId.take(8)}... (instant)")
+            MLog.d(TAG, "Emitted ${sorted.size} cached replies for note ${noteId.take(8)}... (instant)")
             scheduleFetchMissingParents(noteId)
         } else if (noteId !in _replies.value || _replies.value[noteId].isNullOrEmpty()) {
             // Emit an empty entry so the ViewModel collector fires and clears stale UI,
@@ -277,7 +277,7 @@ class Kind1RepliesRepository {
                 (targetRelays + authorOutbox + authorInbox).distinct()
             )
 
-            Log.d(TAG, "Fetching Kind 1 replies for note ${noteId.take(8)}... from ${allRelays.size} relays (CybinRelayPool)")
+            MLog.d(TAG, "Fetching Kind 1 replies for note ${noteId.take(8)}... from ${allRelays.size} relays (CybinRelayPool)")
 
             // Subscribe for kind-1 replies + kind-7 reactions + kind-9735 zap receipts
             val replyFilter = Filter(kinds = listOf(1), tags = mapOf("e" to listOf(noteId)), limit = limit)
@@ -291,7 +291,7 @@ class Kind1RepliesRepository {
                 onEvent = { event, relayUrl ->
                     val count = rawEventCount.incrementAndGet()
                     if (count <= 5 || count % 10 == 0) {
-                        Log.d(TAG, "RAW event #$count for thread ${noteId.take(8)}: kind=${event.kind} id=${event.id.take(8)} from=$relayUrl")
+                        MLog.d(TAG, "RAW event #$count for thread ${noteId.take(8)}: kind=${event.kind} id=${event.id.take(8)} from=$relayUrl")
                     }
                     NotificationsRepository.ingestEvent(event)
                     NoteCountsRepository.onLiveEvent(event)
@@ -313,13 +313,13 @@ class Kind1RepliesRepository {
             // Clear loading after short window so UI shows live
             delay(INITIAL_LOAD_WINDOW_MS)
             _isLoading.value = false
-            Log.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} so far)")
+            MLog.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} so far)")
 
             // Schedule deep-fetch rounds for replies-to-replies
             scheduleDeepReplyFetch(allRelays, noteId, mutableSetOf(noteId), 0)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error fetching replies: ${e.message}", e)
+            MLog.e(TAG, "Error fetching replies: ${e.message}", e)
             _error.value = "Failed to load replies: ${e.message}"
             _isLoading.value = false
         }
@@ -349,7 +349,7 @@ class Kind1RepliesRepository {
 
             queriedIds.addAll(newIds)
             val newIdList = newIds.toList()
-            Log.d(TAG, "Deep-fetch round $round: querying ${newIdList.size} reply IDs across ${relayUrls.size} relays")
+            MLog.d(TAG, "Deep-fetch round $round: querying ${newIdList.size} reply IDs across ${relayUrls.size} relays")
 
             val deepReplyFilter = Filter(kinds = listOf(1), tags = mapOf("e" to newIdList), limit = 200)
             val deepCountsFilter = Filter(kinds = listOf(7, 9735), tags = mapOf("e" to newIdList), limit = 500)
@@ -396,7 +396,7 @@ class Kind1RepliesRepository {
                 val allETags = event.tags.filter { it.size >= 2 && it[0] == "e" }
                 val allEIds = allETags.map { it.getOrNull(1)?.take(8) ?: "?" }
                 val markers = allETags.map { tag -> "${tag.getOrNull(1)?.take(8)}:m=${tag.getOrNull(3) ?: "none"}/${tag.getOrNull(4) ?: ""}" }
-                Log.w(TAG, "REJECTED event ${event.id.take(8)} for thread ${noteId.take(8)}: " +
+                MLog.w(TAG, "REJECTED event ${event.id.take(8)} for thread ${noteId.take(8)}: " +
                     "threadParentIds=${threadParentIds.map { it.take(8) }}, " +
                     "allETags=$markers, cacheSize=${threadCache?.size ?: 0}")
                 return
@@ -408,7 +408,7 @@ class Kind1RepliesRepository {
             val reply = convertEventToNote(event, relayUrl)
             // Log nested replies (replyToId != root) for threading diagnostics
             if (reply.replyToId != null && reply.replyToId != reply.rootNoteId) {
-                Log.d(TAG, "Nested reply ${reply.id.take(8)} → parent=${reply.replyToId.take(8)} root=${reply.rootNoteId?.take(8)}")
+                MLog.d(TAG, "Nested reply ${reply.id.take(8)} → parent=${reply.replyToId.take(8)} root=${reply.rootNoteId?.take(8)}")
             }
 
             // Quick duplicate check against thread cache (fast O(1) lookup)
@@ -430,7 +430,7 @@ class Kind1RepliesRepository {
 
             scheduleFlush()
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling reply event: ${e.message}", e)
+            MLog.e(TAG, "Error handling reply event: ${e.message}", e)
         }
     }
 
@@ -515,7 +515,7 @@ class Kind1RepliesRepository {
             }
         }
         if (totalAdded > 0) {
-            Log.d(TAG, "Flushed batch: +$totalAdded replies (${batch.size} events processed)")
+            MLog.d(TAG, "Flushed batch: +$totalAdded replies (${batch.size} events processed)")
         }
     }
 
@@ -572,7 +572,7 @@ class Kind1RepliesRepository {
             return
         }
 
-        Log.d(TAG, "Flushing parent batch: ${parentIds.size} parents for thread ${rootNoteId.take(8)} (was ${parentIds.size} individual subs)")
+        MLog.d(TAG, "Flushing parent batch: ${parentIds.size} parents for thread ${rootNoteId.take(8)} (was ${parentIds.size} individual subs)")
 
         val parentFilter = Filter(kinds = listOf(1), ids = parentIds, limit = parentIds.size)
         val rsm = RelayConnectionStateMachine.getInstance()
@@ -595,7 +595,7 @@ class Kind1RepliesRepository {
                         val sorted = currentReplies.sortedBy { it.timestamp }
                         _replies.value = _replies.value + (rootNoteId to sorted)
                         updateThreadReplyCache(rootNoteId, sorted)
-                        Log.d(TAG, "Fetched missing parent ${event.id.take(8)}... for thread ${rootNoteId.take(8)}...")
+                        MLog.d(TAG, "Fetched missing parent ${event.id.take(8)}... for thread ${rootNoteId.take(8)}...")
                     }
                     pendingParentFetches[rootNoteId]?.remove(event.id)
                 }
@@ -607,7 +607,7 @@ class Kind1RepliesRepository {
         // Clean up unfetched parents
         val stillPending = parentIds.filter { pendingParentFetches[rootNoteId]?.contains(it) == true }
         if (stillPending.isNotEmpty()) {
-            Log.d(TAG, "Timeout: ${stillPending.size}/${parentIds.size} parents not found for thread ${rootNoteId.take(8)}")
+            MLog.d(TAG, "Timeout: ${stillPending.size}/${parentIds.size} parents not found for thread ${rootNoteId.take(8)}")
             // Mark timed-out parents as exhausted so they're never re-queued
             val exhausted = exhaustedParentIds.getOrPut(rootNoteId) { mutableSetOf() }
             stillPending.forEach {
@@ -778,7 +778,7 @@ class Kind1RepliesRepository {
                 try {
                     profileCache.requestProfiles(batch, urls)
                 } catch (e: Throwable) {
-                    Log.e(TAG, "Batch profile request failed: ${e.message}", e)
+                    MLog.e(TAG, "Batch profile request failed: ${e.message}", e)
                 }
                 if (pendingProfilePubkeys.isNotEmpty()) delay(200)
             }
@@ -877,7 +877,7 @@ class Kind1RepliesRepository {
             val allRelays = (relayUrls + connectedRelays).distinct()
             if (allRelays.isEmpty()) return@launch
 
-            Log.d(TAG, "Targeted fetch: reply ${targetReplyId.take(8)} for thread ${rootNoteId.take(8)}")
+            MLog.d(TAG, "Targeted fetch: reply ${targetReplyId.take(8)} for thread ${rootNoteId.take(8)}")
 
             val rsm = RelayConnectionStateMachine.getInstance()
             val visited = mutableSetOf<String>()
@@ -917,23 +917,23 @@ class Kind1RepliesRepository {
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Targeted fetch failed for ${fetchId.take(8)}: ${e.message}")
+                    MLog.w(TAG, "Targeted fetch failed for ${fetchId.take(8)}: ${e.message}")
                 }
 
                 val resolved = fetchedNote
                 if (resolved != null) {
-                    Log.d(TAG, "Targeted fetch: got ${fetchId.take(8)} (replyTo=${resolved.replyToId?.take(8)}, root=${resolved.rootNoteId?.take(8)})")
+                    MLog.d(TAG, "Targeted fetch: got ${fetchId.take(8)} (replyTo=${resolved.replyToId?.take(8)}, root=${resolved.rootNoteId?.take(8)})")
                     // Walk to parent
                     currentId = resolved.replyToId?.takeIf { it != rootNoteId && it.isNotBlank() }
                 } else {
-                    Log.w(TAG, "Targeted fetch: ${fetchId.take(8)} not found after 4s")
+                    MLog.w(TAG, "Targeted fetch: ${fetchId.take(8)} not found after 4s")
                     break
                 }
             }
 
             // Force a flush so any injected events are emitted immediately
             flushPendingEvents()
-            Log.d(TAG, "Targeted fetch complete: $hops hops, ${visited.size} events resolved")
+            MLog.d(TAG, "Targeted fetch complete: $hops hops, ${visited.size} events resolved")
         }
     }
 

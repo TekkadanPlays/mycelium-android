@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.sync
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,7 +46,7 @@ class AccountScope(
         notificationsRepository = NotificationsRepository(pubkeyHex, scope)
         notificationsRepository.init(appContext)
         initialized = true
-        Log.d(TAG, "AccountScope initialized for ${pubkeyHex.take(8)}")
+        MLog.d(TAG, "AccountScope initialized for ${pubkeyHex.take(8)}")
     }
 
     /**
@@ -58,7 +58,7 @@ class AccountScope(
             // noteCountsRepository has no lifecycle to stop
         }
         scope.cancel("AccountScope destroyed for ${pubkeyHex.take(8)}")
-        Log.d(TAG, "AccountScope destroyed for ${pubkeyHex.take(8)}")
+        MLog.d(TAG, "AccountScope destroyed for ${pubkeyHex.take(8)}")
     }
 
     companion object {
@@ -119,14 +119,14 @@ object AccountScopedRegistry {
                 scope = CoroutineScope(
                     Dispatchers.IO + SupervisorJob() +
                         CoroutineExceptionHandler { _, throwable ->
-                            Log.e(TAG, "Account ${pubkeyHex.take(8)} caught: ${throwable.message}", throwable)
+                            MLog.e(TAG, "Account ${pubkeyHex.take(8)} caught: ${throwable.message}", throwable)
                         }
                 ),
             )
             scope.initialize(appContext)
             scopes[pubkeyHex] = scope
             _allScopes.value = scopes.toMap()
-            Log.d(TAG, "Created scope for ${pubkeyHex.take(8)} (total: ${scopes.size})")
+            MLog.d(TAG, "Created scope for ${pubkeyHex.take(8)} (total: ${scopes.size})")
             return scope
         }
     }
@@ -154,7 +154,7 @@ object AccountScopedRegistry {
      */
     fun setActiveAccount(pubkeyHex: String?) {
         _activeAccountPubkey.value = pubkeyHex
-        Log.d(TAG, "Active account set to ${pubkeyHex?.take(8) ?: "null"}")
+        MLog.d(TAG, "Active account set to ${pubkeyHex?.take(8) ?: "null"}")
     }
 
     /**
@@ -168,7 +168,7 @@ object AccountScopedRegistry {
             if (_activeAccountPubkey.value == pubkeyHex) {
                 _activeAccountPubkey.value = null
             }
-            Log.d(TAG, "Removed scope for ${pubkeyHex.take(8)} (remaining: ${scopes.size})")
+            MLog.d(TAG, "Removed scope for ${pubkeyHex.take(8)} (remaining: ${scopes.size})")
         }
     }
 
@@ -181,7 +181,7 @@ object AccountScopedRegistry {
             scopes.clear()
             _allScopes.value = emptyMap()
             _activeAccountPubkey.value = null
-            Log.d(TAG, "All account scopes cleared")
+            MLog.d(TAG, "All account scopes cleared")
         }
     }
 

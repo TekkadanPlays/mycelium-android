@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.social
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -52,7 +52,7 @@ class ScopedModerationRepository private constructor() {
         val timestamp: Long
     )
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     // All moderation events indexed by ID (dedup)
     private val allEvents = mutableMapOf<String, ModerationEvent>()
@@ -121,7 +121,7 @@ class ScopedModerationRepository private constructor() {
         RelayConnectionStateMachine.getInstance().registerKind1011Handler { event ->
             handleModerationEvent(event)
         }
-        Log.d(TAG, "Kind-1011 handler registered")
+        MLog.d(TAG, "Kind-1011 handler registered")
     }
 
     /**
@@ -159,10 +159,10 @@ class ScopedModerationRepository private constructor() {
             }
             if (restored > 0) {
                 rebuildObservables()
-                Log.d(TAG, "Restored $restored moderation events from disk")
+                MLog.d(TAG, "Restored $restored moderation events from disk")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "loadFromDisk failed: ${e.message}", e)
+            MLog.e(TAG, "loadFromDisk failed: ${e.message}", e)
         }
     }
 
@@ -199,7 +199,7 @@ class ScopedModerationRepository private constructor() {
                 .putString(PREFS_KEY, arr.toString())
                 .apply()
         } catch (e: Exception) {
-            Log.e(TAG, "saveToDisk failed: ${e.message}", e)
+            MLog.e(TAG, "saveToDisk failed: ${e.message}", e)
         }
     }
 
@@ -279,7 +279,7 @@ class ScopedModerationRepository private constructor() {
 
         scheduleSaveToDisk()
 
-        Log.d(TAG, "Kind-1011 received: anchor=$anchor note=${targetNoteId?.take(8)} user=${targetPubkey?.take(8)} by=${event.pubKey.take(8)}")
+        MLog.d(TAG, "Kind-1011 received: anchor=$anchor note=${targetNoteId?.take(8)} user=${targetPubkey?.take(8)} by=${event.pubKey.take(8)}")
     }
 
     /**
@@ -344,7 +344,7 @@ class ScopedModerationRepository private constructor() {
         _moderationCount.value = allEvents.size
         _filterVersion.value++
         scheduleSaveToDisk()
-        Log.d(TAG, "Removed own flag: anchor=$anchor note=${noteId.take(8)} by=${userPubkey.take(8)}")
+        MLog.d(TAG, "Removed own flag: anchor=$anchor note=${noteId.take(8)} by=${userPubkey.take(8)}")
     }
 
     /**
@@ -367,7 +367,7 @@ class ScopedModerationRepository private constructor() {
         _filterMode.value = mode
         _filterVersion.value++
         saveSettingsToDisk()
-        Log.d(TAG, "Filter mode set to $mode")
+        MLog.d(TAG, "Filter mode set to $mode")
     }
 
     fun setFlagThreshold(threshold: Int) {
@@ -382,7 +382,7 @@ class ScopedModerationRepository private constructor() {
     fun setWotFollowSet(pubkeys: Set<String>) {
         wotFollowSet = pubkeys
         _filterVersion.value++
-        Log.d(TAG, "WoT follow set updated: ${pubkeys.size} pubkeys")
+        MLog.d(TAG, "WoT follow set updated: ${pubkeys.size} pubkeys")
     }
 
     // ── Show-Anyway Overrides ────────────────────────────────────────────
@@ -509,9 +509,9 @@ class ScopedModerationRepository private constructor() {
                     }
                 }
             }
-            Log.d(TAG, "Settings loaded: mode=${_filterMode.value} threshold=${_flagThreshold.value} overrides=${showAnywayOverrides.size}")
+            MLog.d(TAG, "Settings loaded: mode=${_filterMode.value} threshold=${_flagThreshold.value} overrides=${showAnywayOverrides.size}")
         } catch (e: Exception) {
-            Log.e(TAG, "loadSettingsFromDisk failed: ${e.message}", e)
+            MLog.e(TAG, "loadSettingsFromDisk failed: ${e.message}", e)
         }
     }
 
@@ -529,7 +529,7 @@ class ScopedModerationRepository private constructor() {
                     .putString(PREFS_KEY_OVERRIDES, overrides.toString())
                     .apply()
             } catch (e: Exception) {
-                Log.e(TAG, "saveSettingsToDisk failed: ${e.message}", e)
+                MLog.e(TAG, "saveSettingsToDisk failed: ${e.message}", e)
             }
         }
     }

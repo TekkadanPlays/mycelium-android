@@ -3,7 +3,7 @@ package social.mycelium.android.services
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner
 import io.ktor.client.HttpClient
@@ -66,7 +66,7 @@ class BlossomClient(
         }
 
         val hash = digest.digest().joinToString("") { "%02x".format(it) }
-        Log.d(TAG, "File hashed: ${hash.take(12)}... ($totalBytes bytes)")
+        MLog.d(TAG, "File hashed: ${hash.take(12)}... ($totalBytes bytes)")
         Pair(hash, totalBytes)
     }
 
@@ -146,7 +146,7 @@ class BlossomClient(
         // 2. Sign auth event
         val authEvent = signUploadAuth(signer, hash, size)
         val authHeader = encodeAuthHeader(authEvent)
-        Log.d(TAG, "Auth event signed: ${authEvent.id.take(8)}")
+        MLog.d(TAG, "Auth event signed: ${authEvent.id.take(8)}")
 
         // Helper: read file bytes from URI for upload body
         val fileBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
@@ -167,15 +167,15 @@ class BlossomClient(
             if (response.status.isSuccess()) {
                 val body = response.bodyAsText()
                 val result = parseUploadResponse(body, hash)
-                Log.d(TAG, "Upload success (PUT /upload): ${result.url}")
+                MLog.d(TAG, "Upload success (PUT /upload): ${result.url}")
                 return@withContext result
             } else {
                 lastError = "PUT /upload failed (${response.status.value}): ${response.bodyAsText()}"
-                Log.w(TAG, lastError)
+                MLog.w(TAG, lastError)
             }
         } catch (e: Exception) {
             lastError = "PUT /upload error: ${e.message}"
-            Log.w(TAG, lastError)
+            MLog.w(TAG, lastError)
         }
 
         // Strategy 2: POST /upload (some servers prefer POST)
@@ -189,11 +189,11 @@ class BlossomClient(
             if (response.status.isSuccess()) {
                 val body = response.bodyAsText()
                 val result = parseUploadResponse(body, hash)
-                Log.d(TAG, "Upload success (POST /upload): ${result.url}")
+                MLog.d(TAG, "Upload success (POST /upload): ${result.url}")
                 return@withContext result
             }
         } catch (e: Exception) {
-            Log.w(TAG, "POST /upload error: ${e.message}")
+            MLog.w(TAG, "POST /upload error: ${e.message}")
         }
 
         // Strategy 3: PUT /media (BUD spec alternative)
@@ -208,15 +208,15 @@ class BlossomClient(
             if (response.status.isSuccess()) {
                 val body = response.bodyAsText()
                 val result = parseUploadResponse(body, hash)
-                Log.d(TAG, "Upload success (PUT /media): ${result.url}")
+                MLog.d(TAG, "Upload success (PUT /media): ${result.url}")
                 return@withContext result
             } else {
                 lastError = "PUT /media failed (${response.status.value}): ${response.bodyAsText()}"
-                Log.w(TAG, lastError)
+                MLog.w(TAG, lastError)
             }
         } catch (e: Exception) {
             lastError = "PUT /media error: ${e.message}"
-            Log.w(TAG, lastError)
+            MLog.w(TAG, lastError)
         }
 
         throw Exception("Upload failed after all strategies: $lastError")
@@ -247,7 +247,7 @@ class BlossomClient(
                 header("Authorization", authHeader)
             }
             if (response.status.isSuccess()) {
-                Log.d(TAG, "Delete success: ${hash.take(12)}")
+                MLog.d(TAG, "Delete success: ${hash.take(12)}")
                 return@withContext true
             }
         } catch (_: Exception) { }
@@ -258,12 +258,12 @@ class BlossomClient(
                 header("Authorization", authHeader)
             }
             if (response.status.isSuccess()) {
-                Log.d(TAG, "Delete success (legacy): ${hash.take(12)}")
+                MLog.d(TAG, "Delete success (legacy): ${hash.take(12)}")
                 return@withContext true
             }
         } catch (_: Exception) { }
 
-        Log.w(TAG, "Delete failed for hash: ${hash.take(12)}")
+        MLog.w(TAG, "Delete failed for hash: ${hash.take(12)}")
         false
     }
 

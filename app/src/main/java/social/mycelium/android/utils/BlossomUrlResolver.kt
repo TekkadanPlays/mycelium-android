@@ -1,6 +1,6 @@
 package social.mycelium.android.utils
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -88,13 +88,13 @@ object BlossomUrlResolver {
     fun recordResolved(originalUrl: String, workingUrl: String) {
         resolvedCache[originalUrl] = workingUrl
         failedCache.remove(originalUrl)
-        Log.d(TAG, "Resolved blossom fallback: $originalUrl → $workingUrl")
+        MLog.d(TAG, "Resolved blossom fallback: $originalUrl → $workingUrl")
     }
 
     /** Record that all fallback servers were exhausted for this URL. */
     fun recordPermanentFailure(originalUrl: String) {
         failedCache[originalUrl] = System.currentTimeMillis()
-        Log.d(TAG, "All blossom servers exhausted for: $originalUrl")
+        MLog.d(TAG, "All blossom servers exhausted for: $originalUrl")
     }
 
     data class BlossomParts(val server: String, val hash: String, val ext: String)

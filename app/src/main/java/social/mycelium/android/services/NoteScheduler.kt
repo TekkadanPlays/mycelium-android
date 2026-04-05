@@ -5,7 +5,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
@@ -42,7 +42,7 @@ object NoteScheduler {
     fun schedule(context: Context, draft: Draft) {
         val scheduledAt = draft.scheduledAt ?: return
         if (draft.signedEventJson.isNullOrBlank()) {
-            Log.w(TAG, "Cannot schedule draft without signed event: ${draft.id.take(8)}")
+            MLog.w(TAG, "Cannot schedule draft without signed event: ${draft.id.take(8)}")
             return
         }
 
@@ -73,9 +73,9 @@ object NoteScheduler {
                     pendingIntent
                 )
             }
-            Log.d(TAG, "Alarm set for draft ${draft.id.take(8)} at $scheduledAt")
+            MLog.d(TAG, "Alarm set for draft ${draft.id.take(8)} at $scheduledAt")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to set alarm: ${e.message}")
+            MLog.e(TAG, "Failed to set alarm: ${e.message}")
             // If the scheduled time is in the past, publish immediately
             if (scheduledAt <= System.currentTimeMillis()) {
                 enqueueImmediate(context, draft.id)
@@ -102,7 +102,7 @@ object NoteScheduler {
             ExistingWorkPolicy.REPLACE,
             workRequest
         )
-        Log.d(TAG, "Immediate work enqueued for draft ${draftId.take(8)}")
+        MLog.d(TAG, "Immediate work enqueued for draft ${draftId.take(8)}")
     }
 
     /**
@@ -128,7 +128,7 @@ object NoteScheduler {
             ExistingWorkPolicy.REPLACE,
             workRequest
         )
-        Log.d(TAG, "Offline retry enqueued for draft ${draftId.take(8)}")
+        MLog.d(TAG, "Offline retry enqueued for draft ${draftId.take(8)}")
     }
 
     /**
@@ -155,7 +155,7 @@ object NoteScheduler {
         WorkManager.getInstance(context).cancelUniqueWork("scheduled_post_$draftId")
         WorkManager.getInstance(context).cancelUniqueWork("offline_retry_$draftId")
 
-        Log.d(TAG, "Cancelled all scheduling for draft ${draftId.take(8)}")
+        MLog.d(TAG, "Cancelled all scheduling for draft ${draftId.take(8)}")
     }
 
     /**
@@ -164,7 +164,7 @@ object NoteScheduler {
      */
     fun verifyAllScheduled(context: Context) {
         val pending = social.mycelium.android.repository.DraftsRepository.getPendingScheduledDrafts()
-        Log.d(TAG, "Verifying ${pending.size} scheduled drafts")
+        MLog.d(TAG, "Verifying ${pending.size} scheduled drafts")
 
         val now = System.currentTimeMillis()
         pending.forEach { draft ->

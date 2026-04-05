@@ -1,6 +1,6 @@
 package social.mycelium.android.viewmodel
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -148,12 +148,12 @@ class ThreadRepliesViewModel : ViewModel() {
      */
     fun loadRepliesForNote(note: Note, relayUrls: List<String>) {
         val previousNoteId = _uiState.value.note?.id
-        Log.d(TAG, "Loading replies for note ${note.id.take(8)}... from ${relayUrls.size} relays")
+        MLog.d(TAG, "Loading replies for note ${note.id.take(8)}... from ${relayUrls.size} relays")
 
         // Clear previous thread's state to prevent stale replies from showing
         if (previousNoteId != null && previousNoteId != note.id) {
             repository.clearRepliesForNote(previousNoteId)
-            Log.d(TAG, "Cleared previous thread ${previousNoteId.take(8)} before loading new one")
+            MLog.d(TAG, "Cleared previous thread ${previousNoteId.take(8)} before loading new one")
         }
 
         // Only wipe replies when switching to a different note.
@@ -181,7 +181,7 @@ class ThreadRepliesViewModel : ViewModel() {
                     authorPubkey = note.author.id
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading replies: ${e.message}", e)
+                MLog.e(TAG, "Error loading replies: ${e.message}", e)
                 _uiState.update { it.copy(error = "Failed to load replies: ${e.message}", isLoading = false) }
             }
         }
@@ -224,7 +224,7 @@ class ThreadRepliesViewModel : ViewModel() {
         // Cache total reply count for feed cards
         social.mycelium.android.repository.cache.ReplyCountCache.set(noteId, merged.size)
 
-        Log.d(TAG, "Updated replies state: ${merged.size} replies, ${threadedReplies.size} threads")
+        MLog.d(TAG, "Updated replies state: ${merged.size} replies, ${threadedReplies.size} threads")
     }
 
     /**

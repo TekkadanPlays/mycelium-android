@@ -1,7 +1,7 @@
 package social.mycelium.android.lightning
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 import fr.acinq.bitcoin.MnemonicCode
@@ -34,7 +34,7 @@ object SeedManager {
         val entropy = Lightning.randomBytes(16) // 128 bits = 12 words
         val mnemonics = MnemonicCode.toMnemonics(entropy)
         storeMnemonic(context, mnemonics)
-        Log.d(TAG, "Generated and stored new wallet seed (${mnemonics.size} words)")
+        MLog.d(TAG, "Generated and stored new wallet seed (${mnemonics.size} words)")
         return mnemonics
     }
 
@@ -61,6 +61,6 @@ object SeedManager {
     /** Delete the stored seed. This is irreversible. */
     fun deleteSeed(context: Context) {
         getPrefs(context).edit().remove(KEY_MNEMONIC).apply()
-        Log.w(TAG, "Wallet seed deleted from encrypted storage")
+        MLog.w(TAG, "Wallet seed deleted from encrypted storage")
     }
 }

@@ -2,7 +2,7 @@ package social.mycelium.android.repository.relay
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -43,7 +43,7 @@ class RelayRepository(private val context: Context) {
     private val sharedPrefs: SharedPreferences = context.getSharedPreferences(RELAYS_PREFS, Context.MODE_PRIVATE)
     private val httpClient = MyceliumHttpClient.instance
     private val nip11Cache = Nip11CacheManager.getInstance(context)
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     // StateFlow for reactive UI updates
     private val _relays = MutableStateFlow<List<UserRelay>>(emptyList())
@@ -97,7 +97,7 @@ class RelayRepository(private val context: Context) {
             // Persist to storage
             saveRelaysToStorage(updatedRelays)
 
-            Log.d(TAG, "✅ Added relay: $normalizedUrl (loading NIP-11 info)")
+            MLog.d(TAG, "✅ Added relay: $normalizedUrl (loading NIP-11 info)")
 
             // Fetch fresh NIP-11 information immediately in background
             scope.launch {
@@ -117,18 +117,18 @@ class RelayRepository(private val context: Context) {
                             }
                             _relays.value = updatedList
                             saveRelaysToStorage(updatedList)
-                            Log.d(TAG, "✅ Updated relay with fresh NIP-11 info: $normalizedUrl")
+                            MLog.d(TAG, "✅ Updated relay with fresh NIP-11 info: $normalizedUrl")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "⚠️ Failed to fetch NIP-11 info for $normalizedUrl: ${e.message}")
+                    MLog.w(TAG, "⚠️ Failed to fetch NIP-11 info for $normalizedUrl: ${e.message}")
                 }
             }
 
             Result.success(newRelay)
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to add relay: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to add relay: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -148,11 +148,11 @@ class RelayRepository(private val context: Context) {
             _relays.value = updatedRelays
             saveRelaysToStorage(updatedRelays)
 
-            Log.d(TAG, "🗑️ Removed relay: $url")
+            MLog.d(TAG, "🗑️ Removed relay: $url")
             Result.success(true)
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to remove relay: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to remove relay: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -177,11 +177,11 @@ class RelayRepository(private val context: Context) {
             _relays.value = updatedRelays
             saveRelaysToStorage(updatedRelays)
 
-            Log.d(TAG, "✅ Updated relay settings: $url (read=$read, write=$write)")
+            MLog.d(TAG, "✅ Updated relay settings: $url (read=$read, write=$write)")
             Result.success(updatedRelay)
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to update relay settings: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to update relay settings: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -204,7 +204,7 @@ class RelayRepository(private val context: Context) {
             val freshInfo = try {
                 nip11Cache.getRelayInfo(url, forceRefresh = true)
             } catch (e: Exception) {
-                Log.w(TAG, "⚠️ Failed to force refresh $url: ${e.message}")
+                MLog.w(TAG, "⚠️ Failed to force refresh $url: ${e.message}")
                 null
             }
 
@@ -221,11 +221,11 @@ class RelayRepository(private val context: Context) {
             _relays.value = updatedRelays
             saveRelaysToStorage(updatedRelays)
 
-            Log.d(TAG, "🔄 Refreshed relay info: $url")
+            MLog.d(TAG, "🔄 Refreshed relay info: $url")
             Result.success(updatedRelay)
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to refresh relay info: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to refresh relay info: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -248,11 +248,11 @@ class RelayRepository(private val context: Context) {
             val isConnected = response.status.isSuccess()
             updateConnectionStatus(url, if (isConnected) RelayConnectionStatus.CONNECTED else RelayConnectionStatus.ERROR)
 
-            Log.d(TAG, "🔍 Tested relay connection: $url -> $isConnected")
+            MLog.d(TAG, "🔍 Tested relay connection: $url -> $isConnected")
             Result.success(isConnected)
 
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to test relay connection: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to test relay connection: ${e.message}", e)
             updateConnectionStatus(url, RelayConnectionStatus.ERROR)
             Result.failure(e)
         }
@@ -286,20 +286,20 @@ class RelayRepository(private val context: Context) {
 
                 // Preload relay info for current relays
                 val currentRelays = _relays.value
-                Log.d(TAG, "📦 Preloading NIP-11 info for ${currentRelays.size} relays")
+                MLog.d(TAG, "📦 Preloading NIP-11 info for ${currentRelays.size} relays")
 
                 currentRelays.forEach { relay ->
                     try {
                         nip11Cache.getRelayInfo(relay.url)
                     } catch (e: Exception) {
-                        Log.w(TAG, "⚠️ Failed to preload ${relay.url}: ${e.message}")
+                        MLog.w(TAG, "⚠️ Failed to preload ${relay.url}: ${e.message}")
                     }
                 }
 
-                Log.d(TAG, "🎉 NIP-11 preload completed")
+                MLog.d(TAG, "🎉 NIP-11 preload completed")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Preload failed: ${e.message}", e)
+                MLog.e(TAG, "❌ Preload failed: ${e.message}", e)
             }
         }
     }
@@ -328,10 +328,10 @@ class RelayRepository(private val context: Context) {
             if (relaysJson != null) {
                 val relays = JSON.decodeFromString<List<UserRelay>>(relaysJson)
                 _relays.value = relays
-                Log.d(TAG, "💾 Loaded ${relays.size} relays from storage")
+                MLog.d(TAG, "💾 Loaded ${relays.size} relays from storage")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to load relays from storage: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to load relays from storage: ${e.message}", e)
         }
     }
 
@@ -344,9 +344,9 @@ class RelayRepository(private val context: Context) {
             sharedPrefs.edit()
                 .putString(RELAYS_KEY, relaysJson)
                 .apply()
-            Log.d(TAG, "💾 Saved ${relays.size} relays to storage")
+            MLog.d(TAG, "💾 Saved ${relays.size} relays to storage")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to save relays to storage: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to save relays to storage: ${e.message}", e)
         }
     }
 
@@ -359,10 +359,10 @@ class RelayRepository(private val context: Context) {
             val storageManager = RelayStorageManager(context)
             val cacheUrls = storageManager.loadIndexerRelays(pubkey).map { it.url }
             if (cacheUrls.isEmpty()) {
-                Log.d(TAG, "📡 No indexer relays for pubkey ${pubkey.take(8)}..., skipping NIP-65 fetch")
+                MLog.d(TAG, "📡 No indexer relays for pubkey ${pubkey.take(8)}..., skipping NIP-65 fetch")
                 return@withContext Result.success(emptyList())
             }
-            Log.d(TAG, "📡 Fetching NIP-65 relay list for pubkey: ${pubkey.take(8)}... from ${cacheUrls.size} indexer relays")
+            MLog.d(TAG, "📡 Fetching NIP-65 relay list for pubkey: ${pubkey.take(8)}... from ${cacheUrls.size} indexer relays")
             val filter = Filter(
                 kinds = listOf(10002),
                 authors = listOf(pubkey),
@@ -392,14 +392,14 @@ class RelayRepository(private val context: Context) {
             handle.cancel()
             val event = latestEventRef.get()
             if (event == null) {
-                Log.d(TAG, "📡 No kind 10002 event found for pubkey ${pubkey.take(8)}...")
+                MLog.d(TAG, "📡 No kind 10002 event found for pubkey ${pubkey.take(8)}...")
                 return@withContext Result.success(emptyList())
             }
             val relays = parseNip65RelayTags(event)
-            Log.d(TAG, "📡 NIP-65 parsed ${relays.size} relays for pubkey ${pubkey.take(8)}...")
+            MLog.d(TAG, "📡 NIP-65 parsed ${relays.size} relays for pubkey ${pubkey.take(8)}...")
             Result.success(relays)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to fetch relay list: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to fetch relay list: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -434,10 +434,10 @@ class RelayRepository(private val context: Context) {
             _relays.value = emptyList()
             _connectionStatus.value = emptyMap()
             sharedPrefs.edit().clear().apply()
-            Log.d(TAG, "🧹 Cleared all relays")
+            MLog.d(TAG, "🧹 Cleared all relays")
             Result.success(true)
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to clear relays: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to clear relays: ${e.message}", e)
             Result.failure(e)
         }
     }

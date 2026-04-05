@@ -2,7 +2,7 @@ package social.mycelium.android.repository
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -34,7 +34,7 @@ object CoinosRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() +
-            CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+            CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
 
     private val provider: CoinosApiProvider =
@@ -80,7 +80,7 @@ object CoinosRepository {
                 _username.value = savedUser
                 refreshBalance()
             }
-            Log.d(TAG, "init: mock=${isMockMode}, loggedIn=${_isLoggedIn.value}")
+            MLog.d(TAG, "init: mock=${isMockMode}, loggedIn=${_isLoggedIn.value}")
         }
     }
 
@@ -91,11 +91,11 @@ object CoinosRepository {
         _error.value = null
         scope.launch {
             try {
-                Log.d(TAG, "loginWithNostr: starting auth (mock=$isMockMode) for ${pubkey.take(8)}...")
+                MLog.d(TAG, "loginWithNostr: starting auth (mock=$isMockMode) for ${pubkey.take(8)}...")
 
                 // Step 1: Get challenge
                 val challenge = provider.fetchChallenge().getOrThrow()
-                Log.d(TAG, "Got challenge: ${challenge.take(8)}...")
+                MLog.d(TAG, "Got challenge: ${challenge.take(8)}...")
 
                 // Step 2: Sign kind-27235 event
                 val template = Event.build(27235, "") {
@@ -103,7 +103,7 @@ object CoinosRepository {
                 }
                 val signedEvent = signer.sign(template)
                 val eventJson = signedEvent.toJson()
-                Log.d(TAG, "Signed auth event: kind=${signedEvent.kind}, id=${signedEvent.id.take(8)}")
+                MLog.d(TAG, "Signed auth event: kind=${signedEvent.kind}, id=${signedEvent.id.take(8)}")
 
                 // Step 3: Authenticate
                 val authResult = provider.authenticate(eventJson, challenge).getOrThrow()
@@ -114,12 +114,12 @@ object CoinosRepository {
                     ?.putString(KEY_TOKEN, authResult.token)
                     ?.putString(KEY_USERNAME, authResult.username)
                     ?.apply()
-                Log.d(TAG, "Auth successful: ${authResult.username}")
+                MLog.d(TAG, "Auth successful: ${authResult.username}")
 
                 refreshBalanceInternal()
                 fetchTransactionsInternal()
             } catch (e: Exception) {
-                Log.e(TAG, "Auth error: ${e.message}", e)
+                MLog.e(TAG, "Auth error: ${e.message}", e)
                 _error.value = "Auth error: ${e.message}"
             } finally {
                 _isLoading.value = false
@@ -148,13 +148,13 @@ object CoinosRepository {
         val jwt = token ?: return
         provider.fetchUserInfo(jwt).onSuccess { info ->
             _balanceSats.value = info.balance
-            Log.d(TAG, "Balance: ${info.balance} sats")
+            MLog.d(TAG, "Balance: ${info.balance} sats")
         }.onFailure { e ->
             if (e.message?.contains("expired", ignoreCase = true) == true) {
                 _error.value = "Session expired. Please log in again."
                 logout()
             } else {
-                Log.e(TAG, "Balance fetch error: ${e.message}", e)
+                MLog.e(TAG, "Balance fetch error: ${e.message}", e)
             }
         }
     }
@@ -173,10 +173,10 @@ object CoinosRepository {
                 }
                 val invoice = provider.createInvoice(jwt, amountSats, memo).getOrThrow()
                 _lastInvoice.value = invoice
-                Log.d(TAG, "Invoice created: ${invoice.take(30)}...")
+                MLog.d(TAG, "Invoice created: ${invoice.take(30)}...")
                 refreshBalanceInternal()
             } catch (e: Exception) {
-                Log.e(TAG, "Invoice error: ${e.message}", e)
+                MLog.e(TAG, "Invoice error: ${e.message}", e)
                 _error.value = "Invoice error: ${e.message}"
             } finally {
                 _isLoading.value = false
@@ -197,11 +197,11 @@ object CoinosRepository {
                     return@launch
                 }
                 provider.payInvoice(jwt, bolt11).getOrThrow()
-                Log.d(TAG, "Payment sent successfully")
+                MLog.d(TAG, "Payment sent successfully")
                 refreshBalanceInternal()
                 fetchTransactionsInternal()
             } catch (e: Exception) {
-                Log.e(TAG, "Payment error: ${e.message}", e)
+                MLog.e(TAG, "Payment error: ${e.message}", e)
                 _error.value = "Payment error: ${e.message}"
             } finally {
                 _isLoading.value = false
@@ -219,9 +219,9 @@ object CoinosRepository {
         val jwt = token ?: return
         provider.fetchTransactions(jwt).onSuccess { txs ->
             _transactions.value = txs
-            Log.d(TAG, "Fetched ${txs.size} transactions")
+            MLog.d(TAG, "Fetched ${txs.size} transactions")
         }.onFailure { e ->
-            Log.e(TAG, "Transactions fetch error: ${e.message}", e)
+            MLog.e(TAG, "Transactions fetch error: ${e.message}", e)
         }
     }
 

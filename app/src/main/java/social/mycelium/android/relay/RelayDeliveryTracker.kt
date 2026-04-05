@@ -2,7 +2,7 @@ package social.mycelium.android.relay
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -167,7 +167,7 @@ object RelayDeliveryTracker {
                     stats[url] = decayed
                 }
             }
-            Log.d(TAG, "Decayed ${stats.size} relay stats (factor=$DECAY_FACTOR)")
+            MLog.d(TAG, "Decayed ${stats.size} relay stats (factor=$DECAY_FACTOR)")
         }
     }
 
@@ -190,9 +190,9 @@ object RelayDeliveryTracker {
             editor.putString(KEY_STATS, json.encodeToString(snapshot))
             editor.putString(KEY_AUTHOR_MISSES, json.encodeToString(missSnapshot))
             editor.apply()
-            Log.d(TAG, "Saved ${snapshot.size} relay stats + ${missSnapshot.size} author misses to disk")
+            MLog.d(TAG, "Saved ${snapshot.size} relay stats + ${missSnapshot.size} author misses to disk")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save relay delivery stats: ${e.message}")
+            MLog.e(TAG, "Failed to save relay delivery stats: ${e.message}")
         }
     }
 
@@ -251,7 +251,7 @@ object RelayDeliveryTracker {
                     stats.clear()
                     stats.putAll(loaded)
                 }
-                Log.d(TAG, "Loaded ${loaded.size} relay delivery stats from disk")
+                MLog.d(TAG, "Loaded ${loaded.size} relay delivery stats from disk")
             }
             val missRaw = prefs?.getString(KEY_AUTHOR_MISSES, null)
             if (missRaw != null) {
@@ -260,10 +260,10 @@ object RelayDeliveryTracker {
                     authorMisses.clear()
                     authorMisses.putAll(loadedMisses)
                 }
-                Log.d(TAG, "Loaded ${loadedMisses.size} author miss records from disk")
+                MLog.d(TAG, "Loaded ${loadedMisses.size} author miss records from disk")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load relay delivery stats: ${e.message}", e)
+            MLog.e(TAG, "Failed to load relay delivery stats: ${e.message}", e)
         }
     }
 

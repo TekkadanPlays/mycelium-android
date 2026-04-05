@@ -3,7 +3,7 @@ package social.mycelium.android.auth
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -160,22 +160,22 @@ class AmberSignerManager(private val context: Context) {
         if (_state.value is AmberState.LoggedIn) return
         val isLoggedIn = prefs.getBoolean(PREF_IS_LOGGED_IN, false)
         if (isLoggedIn) {
-            Log.d("AmberSignerManager", "Revalidating signer (current state: ${_state.value})")
+            MLog.i("AmberSignerManager", "Revalidating signer (current state: ${_state.value})")
             checkAmberInstallation()
         }
     }
 
     private fun checkAmberInstallation() {
         val installedSigners = getExternalSignersInstalled(context)
-        Log.d("AmberSignerManager", "🔍 Checking Amber installation. Found ${installedSigners.size} signers: $installedSigners")
+        MLog.i("AmberSignerManager", "🔍 Checking Amber installation. Found ${installedSigners.size} signers: $installedSigners")
 
         if (installedSigners.isEmpty()) {
-            Log.d("AmberSignerManager", "❌ No external signers installed")
+            MLog.i("AmberSignerManager", "❌ No external signers installed")
             _state.value = AmberState.NotInstalled
             return
         }
 
-        Log.d("AmberSignerManager", "✅ Amber or compatible signer is installed")
+        MLog.i("AmberSignerManager", "✅ Amber or compatible signer is installed")
 
         // Check if we have saved auth state
         val isLoggedIn = prefs.getBoolean(PREF_IS_LOGGED_IN, false)
@@ -183,7 +183,7 @@ class AmberSignerManager(private val context: Context) {
         val savedPackageName = prefs.getString(PREF_PACKAGE_NAME, AMBER_PACKAGE_NAME)
 
         if (isLoggedIn && !savedPubkey.isNullOrEmpty()) {
-            Log.d("AmberSignerManager", "🔐 Restoring saved Amber session: ${savedPubkey.take(16)}...")
+            MLog.i("AmberSignerManager", "🔐 Restoring saved Amber session: ${savedPubkey.take(16)}...")
 
             try {
                 // Convert npub to hex if needed
@@ -192,7 +192,7 @@ class AmberSignerManager(private val context: Context) {
                         val nip19 = com.example.cybin.nip19.Nip19Parser.uriToRoute(savedPubkey)
                         (nip19?.entity as? com.example.cybin.nip19.NPub)?.hex ?: savedPubkey
                     } catch (e: Exception) {
-                        Log.w("AmberSignerManager", "Failed to convert npub to hex: ${e.message}")
+                        MLog.w("AmberSignerManager", "Failed to convert npub to hex: ${e.message}")
                         savedPubkey
                     }
                 } else {
@@ -208,15 +208,15 @@ class AmberSignerManager(private val context: Context) {
 
                 currentSigner = signer
                 _state.value = AmberState.LoggedIn(hexPubkey, signer)
-                Log.d("AmberSignerManager", "✅ Successfully restored Amber session")
+                MLog.i("AmberSignerManager", "✅ Successfully restored Amber session")
             } catch (e: Exception) {
-                Log.w("AmberSignerManager", "❌ Failed to restore Amber session: ${e.message}")
+                MLog.w("AmberSignerManager", "❌ Failed to restore Amber session: ${e.message}")
                 // Clear invalid saved state
                 clearSavedAuthState()
                 _state.value = AmberState.NotLoggedIn
             }
         } else {
-            Log.d("AmberSignerManager", "🔐 No saved Amber session found")
+            MLog.i("AmberSignerManager", "🔐 No saved Amber session found")
             _state.value = AmberState.NotLoggedIn
         }
     }
@@ -232,7 +232,7 @@ class AmberSignerManager(private val context: Context) {
             .putString(PREF_USER_PUBKEY, pubkey)
             .putString(PREF_PACKAGE_NAME, packageName)
             .apply()
-        Log.d("AmberSignerManager", "💾 Saved Amber auth state: ${pubkey.take(16)}...")
+        MLog.i("AmberSignerManager", "💾 Saved Amber auth state: ${pubkey.take(16)}...")
     }
 
     /**
@@ -244,7 +244,7 @@ class AmberSignerManager(private val context: Context) {
             .remove(PREF_USER_PUBKEY)
             .remove(PREF_PACKAGE_NAME)
             .apply()
-        Log.d("AmberSignerManager", "🗑️ Cleared saved Amber auth state")
+        MLog.i("AmberSignerManager", "🗑️ Cleared saved Amber auth state")
     }
 
     fun createLoginIntent(): Intent {
@@ -263,17 +263,17 @@ class AmberSignerManager(private val context: Context) {
                 val packageName = data.getStringExtra("package") ?: AMBER_PACKAGE_NAME
 
                 if (pubkey != null) {
-                    Log.d("AmberSignerManager", "✅ Amber login successful: ${pubkey.take(16)}...")
+                    MLog.i("AmberSignerManager", "✅ Amber login successful: ${pubkey.take(16)}...")
 
                     // Convert npub to hex if needed
                     val hexPubkey = if (pubkey.startsWith("npub")) {
                         try {
                             val nip19 = com.example.cybin.nip19.Nip19Parser.uriToRoute(pubkey)
                             val hex = (nip19?.entity as? com.example.cybin.nip19.NPub)?.hex
-                            Log.d("AmberSignerManager", "🔄 Converted npub to hex: ${hex?.take(16)}...")
+                            MLog.i("AmberSignerManager", "🔄 Converted npub to hex: ${hex?.take(16)}...")
                             hex ?: pubkey
                         } catch (e: Exception) {
-                            Log.w("AmberSignerManager", "Failed to convert npub to hex: ${e.message}")
+                            MLog.w("AmberSignerManager", "Failed to convert npub to hex: ${e.message}")
                             pubkey
                         }
                     } else {
@@ -293,15 +293,15 @@ class AmberSignerManager(private val context: Context) {
                     // Save auth state for future app starts (save original npub/hex)
                     saveAuthState(hexPubkey, packageName)
                 } else {
-                    Log.e("AmberSignerManager", "❌ No pubkey in Amber response")
+                    MLog.e("AmberSignerManager", "❌ No pubkey in Amber response")
                     _state.value = AmberState.Error("No pubkey received from Amber")
                 }
             } else {
-                Log.w("AmberSignerManager", "❌ Amber login cancelled or failed")
+                MLog.w("AmberSignerManager", "❌ Amber login cancelled or failed")
                 _state.value = AmberState.Error("Login cancelled or failed")
             }
         } catch (e: Exception) {
-            Log.e("AmberSignerManager", "❌ Login error: ${e.message}", e)
+            MLog.e("AmberSignerManager", "❌ Login error: ${e.message}", e)
             _state.value = AmberState.Error("Login error: ${e.message}")
         }
     }
@@ -311,7 +311,7 @@ class AmberSignerManager(private val context: Context) {
         _state.value = AmberState.NotLoggedIn
         // Clear saved auth state
         clearSavedAuthState()
-        Log.d("AmberSignerManager", "👋 Logged out from Amber")
+        MLog.i("AmberSignerManager", "👋 Logged out from Amber")
     }
 
     /**
@@ -332,7 +332,7 @@ class AmberSignerManager(private val context: Context) {
         currentSigner = signer
         _state.value = AmberState.LoggedIn(hexPubkey, signer)
         saveAuthState(hexPubkey, packageName)
-        Log.d("AmberSignerManager", "Switched Amber signer to account: ${hexPubkey.take(16)}")
+        MLog.i("AmberSignerManager", "Switched Amber signer to account: ${hexPubkey.take(16)}")
     }
 
     fun getCurrentPubKey(): HexKey? {
@@ -354,7 +354,7 @@ class AmberSignerManager(private val context: Context) {
         val isLoggedIn = prefs.getBoolean(PREF_IS_LOGGED_IN, false)
         val savedPubkey = prefs.getString(PREF_USER_PUBKEY, null)
         if (isLoggedIn && !savedPubkey.isNullOrEmpty()) {
-            Log.w("AmberSignerManager", "Signer state is $currentState but saved credentials exist — attempting recovery")
+            MLog.w("AmberSignerManager", "Signer state is $currentState but saved credentials exist — attempting recovery")
             try {
                 val hexPubkey = if (savedPubkey.startsWith("npub")) {
                     val nip19 = com.example.cybin.nip19.Nip19Parser.uriToRoute(savedPubkey)
@@ -370,10 +370,10 @@ class AmberSignerManager(private val context: Context) {
                 )
                 currentSigner = signer
                 _state.value = AmberState.LoggedIn(hexPubkey, signer)
-                Log.d("AmberSignerManager", "Signer recovery successful — restored LoggedIn state")
+                MLog.i("AmberSignerManager", "Signer recovery successful — restored LoggedIn state")
                 return signer
             } catch (e: Exception) {
-                Log.e("AmberSignerManager", "Signer recovery failed: ${e.message}")
+                MLog.e("AmberSignerManager", "Signer recovery failed: ${e.message}")
             }
         }
 
@@ -386,11 +386,11 @@ class AmberSignerManager(private val context: Context) {
                     contentResolver = context.applicationContext.contentResolver
                 )
             } catch (e: Exception) {
-                Log.w("AmberSignerManager", "Failed to create on-demand signer: ${e.message}")
+                MLog.w("AmberSignerManager", "Failed to create on-demand signer: ${e.message}")
             }
         }
 
-        Log.w("AmberSignerManager", "Amber not available - state: $currentState, no saved credentials")
+        MLog.w("AmberSignerManager", "Amber not available - state: $currentState, no saved credentials")
         return null
     }
 }

@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
@@ -30,31 +30,31 @@ class ScheduledNoteWorker(
     override suspend fun doWork(): Result {
         val draftId = inputData.getString("draft_id")
         if (draftId.isNullOrBlank()) {
-            Log.w(TAG, "No draft_id in work data")
+            MLog.w(TAG, "No draft_id in work data")
             return Result.failure()
         }
 
         val draft = DraftsRepository.getDraft(draftId)
         if (draft == null) {
-            Log.w(TAG, "Draft not found: ${draftId.take(8)}")
+            MLog.w(TAG, "Draft not found: ${draftId.take(8)}")
             return Result.failure()
         }
 
         if (draft.isCompleted) {
-            Log.d(TAG, "Draft already completed: ${draftId.take(8)}")
+            MLog.d(TAG, "Draft already completed: ${draftId.take(8)}")
             return Result.success()
         }
 
         val signedJson = draft.signedEventJson
         if (signedJson.isNullOrBlank()) {
-            Log.w(TAG, "Draft has no signed event: ${draftId.take(8)}")
+            MLog.w(TAG, "Draft has no signed event: ${draftId.take(8)}")
             DraftsRepository.markFailed(draftId, "No signed event")
             return Result.failure()
         }
 
         val relayUrls = draft.relayUrls
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "Draft has no relay URLs: ${draftId.take(8)}")
+            MLog.w(TAG, "Draft has no relay URLs: ${draftId.take(8)}")
             DraftsRepository.markFailed(draftId, "No relay URLs")
             return Result.failure()
         }
@@ -77,11 +77,11 @@ class ScheduledNoteWorker(
             val relayManager = RelayConnectionStateMachine.getInstance()
             relayManager.send(event, normalized)
 
-            Log.d(TAG, "Scheduled note published: ${event.id.take(8)} → ${normalized.size} relays")
+            MLog.d(TAG, "Scheduled note published: ${event.id.take(8)} → ${normalized.size} relays")
             DraftsRepository.markCompleted(draftId)
             Result.success()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to publish scheduled note: ${e.message}", e)
+            MLog.e(TAG, "Failed to publish scheduled note: ${e.message}", e)
             DraftsRepository.markFailed(draftId, e.message ?: "Unknown error")
 
             // Retry — WorkManager will use exponential backoff

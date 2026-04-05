@@ -1,6 +1,6 @@
 package social.mycelium.android.ui.components.compose
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -249,7 +249,7 @@ class MentionSuggestionState(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "NIP-50 mention search failed: ${e.message}")
+                MLog.w(TAG, "NIP-50 mention search failed: ${e.message}")
             }
         }
     }

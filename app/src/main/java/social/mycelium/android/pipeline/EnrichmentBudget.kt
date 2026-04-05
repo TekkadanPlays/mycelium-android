@@ -1,6 +1,6 @@
 package social.mycelium.android.pipeline
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.sync.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -111,7 +111,7 @@ object EnrichmentBudget {
 
     fun logSummary(tag: String = TAG) {
         val s = snapshot()
-        Log.d(tag,
+        MLog.d(tag,
             "🎛️ Budget │ oneShot=${s.activeOneShot} temp=${s.activeTemp} " +
             "│ creates=${s.totalCreates} (${s.createsPerSec}/s) cancels=${s.totalCancels} " +
             "│ quoteSlots=${s.quoteSlotsAvailable}/${MAX_CONCURRENT_QUOTE_FETCHES}"

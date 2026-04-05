@@ -3,7 +3,7 @@ package social.mycelium.android.ui.navigation
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1104,7 +1104,7 @@ fun MyceliumNavigation(
             val targetAccount = accountStateViewModel.savedAccounts.value
                 .firstOrNull { it.toHexKey() == navAccountPubkey }
             if (targetAccount != null) {
-                Log.d(
+                MLog.d(
                     "MyceliumNav",
                     "Notification tap: switching from ${currentPubkey.take(8)} to ${navAccountPubkey.take(8)}"
                 )
@@ -1112,7 +1112,7 @@ fun MyceliumNavigation(
                 // Brief delay for account switch to propagate (registry + state flows)
                 kotlinx.coroutines.delay(500L)
             } else {
-                Log.w(
+                MLog.w(
                     "MyceliumNav",
                     "Notification tap: account ${navAccountPubkey.take(8)} not in saved accounts, skipping switch"
                 )
@@ -1184,7 +1184,7 @@ fun MyceliumNavigation(
             )
         )
         navController.navigate("notifications") { launchSingleTop = true }
-        Log.d(
+        MLog.d(
             "MyceliumNav",
             "Deep-link from notification: navigating to notifications overlay, type=${nav.notifType} notifFound=${notifData != null} cached=${cachedRoot != null} needsFetch=$needsAsyncFetch"
         )
@@ -1234,13 +1234,13 @@ fun MyceliumNavigation(
                     try {
                         activityLauncher.newResponse(data)
                     } catch (e: ClassCastException) {
-                        Log.e("MyceliumNavigation", "Amber response cast failed: ${e.message}")
+                        MLog.e("MyceliumNavigation", "Amber response cast failed: ${e.message}")
                     }
                 }
             } else {
                 // User rejected or Amber was cancelled — resume the waiting coroutine
                 // with an empty intent so it doesn't hang until timeout
-                Log.d("MyceliumNavigation", "Amber signing rejected/cancelled (resultCode=${result.resultCode})")
+                MLog.d("MyceliumNavigation", "Amber signing rejected/cancelled (resultCode=${result.resultCode})")
                 activityLauncher.newResponse(Intent())
             }
         }
@@ -1532,13 +1532,13 @@ fun MyceliumNavigation(
             .map { it.trim().removeSuffix("/") }
             .distinct()
 
-        Log.d(
+        MLog.d(
             "MyceliumNav",
             "Startup: categories=${categoryUrls.size}, outbox=${outboxUrls.size}, inbox=${inboxUrls.size}, total=${allUserRelayUrls.size}"
         )
 
         if (allUserRelayUrls.isEmpty()) {
-            Log.w("MyceliumNav", "Startup aborted: no relay URLs for ${pubkey.take(8)}")
+            MLog.w("MyceliumNav", "Startup aborted: no relay URLs for ${pubkey.take(8)}")
             return@LaunchedEffect
         }
 
@@ -1570,7 +1570,7 @@ fun MyceliumNavigation(
             accountStateViewModel.markSettingsApplied(pubkey)
         } else {
             social.mycelium.android.repository.sync.StartupOrchestrator.skipPhase0()
-            Log.d("MyceliumNav", "Phase 0: settings already applied or no signer — skipping")
+            MLog.d("MyceliumNav", "Phase 0: settings already applied or no signer — skipping")
         }
 
         // ── Phase 1: Follow list + Mute list (HIGH priority) ────────────
@@ -1582,7 +1582,7 @@ fun MyceliumNavigation(
         )
         phase1Deferred.await()
         val cachedFollowList = social.mycelium.android.repository.social.ContactListRepository.getCachedFollowList(pubkey)
-        Log.d("MyceliumNav", "Phase 1: follow list ready (${cachedFollowList?.size ?: 0} follows)")
+        MLog.d("MyceliumNav", "Phase 1: follow list ready (${cachedFollowList?.size ?: 0} follows)")
 
         // Deep history (LOW priority, batched) — start after brief yield to feed wiring; idempotent.
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
@@ -1661,7 +1661,7 @@ fun MyceliumNavigation(
             val bgAllUrls = (bgCategoryUrls + bgOutboxUrls + bgInboxUrls)
                 .map { it.trim().removeSuffix("/") }.distinct()
             if (bgAllUrls.isEmpty()) {
-                Log.d("MyceliumNav", "Background notif sub skipped for ${bgPubkey.take(8)}: no relays")
+                MLog.d("MyceliumNav", "Background notif sub skipped for ${bgPubkey.take(8)}: no relays")
                 continue
             }
             // Ensure the background account has a scope in the registry
@@ -1669,7 +1669,7 @@ fun MyceliumNavigation(
             val bgIndexerUrls = storageManager.loadIndexerRelays(bgPubkey).map { it.url }
             bgScope.notificationsRepository.setCacheRelayUrls(bgIndexerUrls)
             bgScope.notificationsRepository.startSubscription(bgPubkey, bgInboxUrls, bgOutboxUrls, bgCategoryUrls)
-            Log.d(
+            MLog.d(
                 "MyceliumNav",
                 "Background notif sub started for ${bgPubkey.take(8)}: inbox=${bgInboxUrls.size}, outbox=${bgOutboxUrls.size}"
             )
@@ -1925,7 +1925,7 @@ fun MyceliumNavigation(
                                 }
                             },
                             onThreadClick = { note, _ ->
-                                android.util.Log.d(
+                                MLog.d(
                                     "OverlayDebug",
                                     "onThreadClick: noteId=${note.id.take(12)} kind=${note.kind} isReply=${note.isReply} rootNoteId=${
                                         note.rootNoteId?.take(12)
@@ -1939,7 +1939,7 @@ fun MyceliumNavigation(
                                 val threadNote = if (note.originalNoteId != null) {
                                     note.copy(id = note.originalNoteId)
                                 } else note
-                                android.util.Log.d(
+                                MLog.d(
                                     "OverlayDebug",
                                     "  resolved threadNote: id=${threadNote.id.take(12)} isReply=${threadNote.isReply} rootNoteId=${
                                         threadNote.rootNoteId?.take(12)
@@ -2312,7 +2312,7 @@ fun MyceliumNavigation(
                         val urls = savedStateHandle?.get<ArrayList<String>>("selected_indexers")
                         if (urls != null) {
                             savedStateHandle.remove<ArrayList<String>>("selected_indexers")
-                            android.util.Log.d(
+                            MLog.d(
                                 "OnboardingNav",
                                 "Consumed ${urls.size} returned indexers: ${urls.take(3)}"
                             )
@@ -2477,7 +2477,7 @@ fun MyceliumNavigation(
                                     currentNote.relayUrls // also try relays where the current note was seen
                             val fetched = fetchNote(currentId, hints, currentNote.author.id)
                             if (fetched == null) {
-                                android.util.Log.d(
+                                MLog.d(
                                     "ThreadView",
                                     "Root walk-up: failed to fetch ${currentId.take(8)} (hop $hops, hints=${hints.size})"
                                 )
@@ -2504,7 +2504,7 @@ fun MyceliumNavigation(
                             resolvedRootNote = bestRoot
                             appViewModel.storeNoteForThread(bestRoot)
                             if (trueRoot == null) {
-                                android.util.Log.d(
+                                MLog.d(
                                     "ThreadView",
                                     "Root walk-up: true root not found, using deepest fetched ${bestRoot.id.take(8)} (kind=${bestRoot.kind})"
                                 )
@@ -4107,7 +4107,25 @@ fun MyceliumNavigation(
                             onBackClick = { navController.popBackStack() },
                             onEffectsLab = {
                                 navController.navigate("effects_lab") { launchSingleTop = true }
+                            },
+                            onMetricsDashboard = {
+                                navController.navigate("metrics_dashboard") { launchSingleTop = true }
+                            },
+                            onLogViewer = {
+                                navController.navigate("diagnostic_log_viewer") { launchSingleTop = true }
                             }
+                        )
+                    }
+
+                    composable("metrics_dashboard") {
+                        social.mycelium.android.ui.screens.MetricsDashboardScreen(
+                            onBackClick = { navController.popBackStack() }
+                        )
+                    }
+
+                    composable("diagnostic_log_viewer") {
+                        social.mycelium.android.ui.screens.DiagnosticLogViewerScreen(
+                            onBackClick = { navController.popBackStack() }
                         )
                     }
                 }
@@ -4248,7 +4266,7 @@ fun MyceliumNavigation(
                         selectionMode = isSelectionMode,
                         preSelectedUrls = preSelectedUrls,
                         onConfirmSelection = { urls ->
-                            android.util.Log.d(
+                            MLog.d(
                                 "DiscoveryNav",
                                 "onConfirmSelection: ${urls.size} URLs, prevEntry=${navController.previousBackStackEntry?.destination?.route}"
                             )

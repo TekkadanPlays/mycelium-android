@@ -1,7 +1,7 @@
 package social.mycelium.android.repository
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -97,9 +97,9 @@ object EmojiPackRepository {
                     loaded++
                 }
                 _packs.value = cache.toMap()
-                Log.d(TAG, "Loaded $loaded emoji packs from Room cache")
+                MLog.d(TAG, "Loaded $loaded emoji packs from Room cache")
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to load emoji packs from Room: ${e.message}")
+                MLog.w(TAG, "Failed to load emoji packs from Room: ${e.message}")
             }
         }
     }
@@ -119,7 +119,7 @@ object EmojiPackRepository {
                 )
                 dao.insert(entity)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to persist emoji pack to Room: ${e.message}")
+                MLog.w(TAG, "Failed to persist emoji pack to Room: ${e.message}")
             }
         }
     }
@@ -160,7 +160,7 @@ object EmojiPackRepository {
             try {
                 fetchEmojiPack(author, dTag, relayHints, address)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch emoji pack $address: ${e.message}")
+                MLog.e(TAG, "Failed to fetch emoji pack $address: ${e.message}")
             } finally {
                 pendingFetches.remove(address)
             }
@@ -190,7 +190,7 @@ object EmojiPackRepository {
             limit = 1
         )
 
-        Log.d(TAG, "Fetching emoji pack: author=${author.take(8)}, dTag=$dTag on ${relays.size} relays (hints=${relayHints.size}, outbox=${authorOutbox.size})")
+        MLog.d(TAG, "Fetching emoji pack: author=${author.take(8)}, dTag=$dTag on ${relays.size} relays (hints=${relayHints.size}, outbox=${authorOutbox.size})")
 
         val stateMachine = RelayConnectionStateMachine.getInstance()
         stateMachine.requestOneShotSubscription(
@@ -240,7 +240,7 @@ object EmojiPackRepository {
         cache[address] = pack
         _packs.value = cache.toMap()
         persistToRoom(address, pack)
-        Log.d(TAG, "Cached emoji pack '$name' ($address) with ${emojis.size} emojis")
+        MLog.d(TAG, "Cached emoji pack '$name' ($address) with ${emojis.size} emojis")
     }
 
     /**

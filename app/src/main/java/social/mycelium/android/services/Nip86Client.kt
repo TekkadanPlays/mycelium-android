@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.util.Base64
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.signer.NostrSigner
 import io.ktor.client.request.header
@@ -157,7 +157,7 @@ class Nip86Client(private val signer: NostrSigner) {
             val authEvent = try {
                 buildNip98AuthEvent(httpUrl, "POST", payloadHash)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to sign NIP-98 auth event (kind $NIP98_KIND) — Amber may lack permission: ${e.message}", e)
+                MLog.e(TAG, "Failed to sign NIP-98 auth event (kind $NIP98_KIND) — Amber may lack permission: ${e.message}", e)
                 return@withContext Nip86Result.Error("Signing failed (kind $NIP98_KIND) — re-login via Amber to grant permission")
             }
 
@@ -184,7 +184,7 @@ class Nip86Client(private val signer: NostrSigner) {
             // Guard against HTML responses (relay web frontend intercepting the POST)
             val trimmed = responseText.trimStart()
             if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
-                Log.w(TAG, "NIP-86 response is not JSON (starts with '${trimmed.take(20)}')")
+                MLog.w(TAG, "NIP-86 response is not JSON (starts with '${trimmed.take(20)}')")
                 return@withContext Nip86Result.Error("Relay returned HTML instead of JSON — NIP-86 management endpoint may not be configured")
             }
 
@@ -198,7 +198,7 @@ class Nip86Client(private val signer: NostrSigner) {
             Nip86Result.Success(parseResult(result))
 
         } catch (e: Exception) {
-            Log.e(TAG, "NIP-86 call '$method' to $relayUrl failed: ${e.message}", e)
+            MLog.e(TAG, "NIP-86 call '$method' to $relayUrl failed: ${e.message}", e)
             Nip86Result.Error(e.message?.take(120) ?: "Unknown error")
         }
     }

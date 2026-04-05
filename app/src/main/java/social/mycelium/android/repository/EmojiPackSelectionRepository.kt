@@ -1,6 +1,6 @@
 package social.mycelium.android.repository
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -85,7 +85,7 @@ object EmojiPackSelectionRepository {
         userPubkey = pubkey
         relayUrls = relays
         if (relays.isEmpty()) {
-            Log.w(TAG, "No relays provided for emoji pack selection fetch")
+            MLog.w(TAG, "No relays provided for emoji pack selection fetch")
             return
         }
 
@@ -166,7 +166,7 @@ object EmojiPackSelectionRepository {
      */
     fun onPublished(event: Event) {
         processSelectionEvent(event)
-        Log.d(TAG, "Updated selection after publish: ${_savedPacks.value.size} packs")
+        MLog.d(TAG, "Updated selection after publish: ${_savedPacks.value.size} packs")
     }
 
     // ── Internal: fetch and parse ───────────────────────────────────────
@@ -178,7 +178,7 @@ object EmojiPackSelectionRepository {
             limit = 1
         )
 
-        Log.d(TAG, "Fetching kind-10030 for ${pubkey.take(8)}… on ${relays.size} relays")
+        MLog.d(TAG, "Fetching kind-10030 for ${pubkey.take(8)}… on ${relays.size} relays")
         val lastEventAt = AtomicLong(0L)
 
         val fallbackRelays = (relays + listOf(
@@ -235,7 +235,7 @@ object EmojiPackSelectionRepository {
         }
 
         _savedPacks.value = packs
-        Log.d(TAG, "Parsed ${packs.size} saved emoji packs from kind-10030")
+        MLog.d(TAG, "Parsed ${packs.size} saved emoji packs from kind-10030")
     }
 
     /**
@@ -268,7 +268,7 @@ object EmojiPackSelectionRepository {
             }
             rebuildMergedEmojis()
             fetchingPacks.clear()
-            Log.d(TAG, "All saved pack contents fetched: ${_allSavedEmojis.value.size} total emojis")
+            MLog.d(TAG, "All saved pack contents fetched: ${_allSavedEmojis.value.size} total emojis")
         }
     }
 

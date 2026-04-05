@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.utils.ClientTagManager
 import com.example.cybin.core.Event
@@ -89,7 +89,7 @@ object EventPublisher {
             RelayConnectionStateMachine.getInstance().send(signed, normalized)
             RelayConnectionStateMachine.getInstance().nip42AuthHandler
                 .trackPublishedEvent(signed, normalized)
-            Log.d(TAG, "Kind-$kind published: ${signed.id.take(8)} → ${normalized.size} relays")
+            MLog.d(TAG, "Kind-$kind published: ${signed.id.take(8)} → ${normalized.size} relays")
             _publishedEvents.tryEmit(signed)
 
             // Track publish results per relay — store signed event for retry capability
@@ -102,7 +102,7 @@ object EventPublisher {
 
             PublishResult.Success(signed.id, signed)
         } catch (e: Exception) {
-            Log.e(TAG, "Kind-$kind publish failed: ${e.message}", e)
+            MLog.e(TAG, "Kind-$kind publish failed: ${e.message}", e)
             PublishResult.Error(e.message?.take(80) ?: "Unknown error")
         }
     }
@@ -136,7 +136,7 @@ object EventPublisher {
             RelayConnectionStateMachine.getInstance().send(signed, normalized)
             RelayConnectionStateMachine.getInstance().nip42AuthHandler
                 .trackPublishedEvent(signed, normalized)
-            Log.d(TAG, "Kind-${template.kind} published: ${signed.id.take(8)} → ${normalized.size} relays")
+            MLog.d(TAG, "Kind-${template.kind} published: ${signed.id.take(8)} → ${normalized.size} relays")
             _publishedEvents.tryEmit(signed)
 
             // Track publish results per relay — store signed event for retry capability
@@ -149,7 +149,7 @@ object EventPublisher {
 
             PublishResult.Success(signed.id, signed)
         } catch (e: Exception) {
-            Log.e(TAG, "Kind-${template.kind} publish failed: ${e.message}", e)
+            MLog.e(TAG, "Kind-${template.kind} publish failed: ${e.message}", e)
             PublishResult.Error(e.message?.take(80) ?: "Unknown error")
         }
     }

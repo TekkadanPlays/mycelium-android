@@ -1,6 +1,6 @@
 package social.mycelium.android.services
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import io.ktor.client.request.get
 import io.ktor.client.plugins.timeout
 import io.ktor.client.statement.bodyAsText
@@ -44,7 +44,7 @@ object LightningAddressResolver {
     fun resolveAddress(lud16: String): String? {
         val parts = lud16.trim().split("@")
         if (parts.size != 2) {
-            Log.w(TAG, "Invalid lud16 format: $lud16")
+            MLog.w(TAG, "Invalid lud16 format: $lud16")
             return null
         }
         val (user, domain) = parts
@@ -58,7 +58,7 @@ object LightningAddressResolver {
         return try {
             val response = httpClient.get(lnurlpUrl)
             if (!response.status.isSuccess()) {
-                Log.w(TAG, "LNURLp fetch failed: ${response.status}")
+                MLog.w(TAG, "LNURLp fetch failed: ${response.status}")
                 return null
             }
 
@@ -74,7 +74,7 @@ object LightningAddressResolver {
                 nostrPubkey = jsonObj["nostrPubkey"]?.jsonPrimitive?.content
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Error fetching LNURLp info: ${e.message}", e)
+            MLog.e(TAG, "Error fetching LNURLp info: ${e.message}", e)
             null
         }
     }
@@ -101,7 +101,7 @@ object LightningAddressResolver {
                     append("&nostr=${java.net.URLEncoder.encode(zapRequestJson, "UTF-8")}")
                 }
             }
-            Log.d(TAG, "Fetching invoice from: ${callbackUrl.take(60)}...")
+            MLog.d(TAG, "Fetching invoice from: ${callbackUrl.take(60)}...")
 
             val response = httpClient.get(invoiceUrl) {
                 // Use a shorter timeout for invoice fetching — if the LN provider
@@ -113,7 +113,7 @@ object LightningAddressResolver {
                 }
             }
             if (!response.status.isSuccess()) {
-                Log.w(TAG, "Invoice fetch failed: ${response.status}")
+                MLog.w(TAG, "Invoice fetch failed: ${response.status}")
                 return null
             }
 
@@ -125,20 +125,20 @@ object LightningAddressResolver {
             val status = jsonObj["status"]?.jsonPrimitive?.content
             if (status == "ERROR") {
                 val reason = jsonObj["reason"]?.jsonPrimitive?.content ?: "Unknown error"
-                Log.w(TAG, "Invoice fetch error: $reason")
+                MLog.w(TAG, "Invoice fetch error: $reason")
                 return null
             }
 
             val pr = jsonObj["pr"]?.jsonPrimitive?.content
             if (pr != null) {
-                Log.d(TAG, "Got invoice: ${pr.take(20)}...")
+                MLog.d(TAG, "Got invoice: ${pr.take(20)}...")
             } else {
-                Log.w(TAG, "Invoice response missing 'pr' field: ${responseBody.take(200)}")
+                MLog.w(TAG, "Invoice response missing 'pr' field: ${responseBody.take(200)}")
             }
             pr
         } catch (e: Exception) {
             val domain = callbackUrl.substringAfter("://").substringBefore("/")
-            Log.e(TAG, "Error fetching invoice from $domain: ${e.message}")
+            MLog.e(TAG, "Error fetching invoice from $domain: ${e.message}")
             null
         }
     }

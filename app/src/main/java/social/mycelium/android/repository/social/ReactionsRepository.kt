@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.social
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.BuildConfig
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -42,13 +42,13 @@ object ReactionsRepository {
     /** Emit a reaction animation event (call after publish succeeds or fails completely). */
     fun emitAnimation(noteId: String, emoji: String, success: Boolean) {
         _noteAnimations.tryEmit(NoteAnimationEvent(noteId, AnimationType.REACTION, success, emoji))
-        Log.d(TAG, "Animation emitted: noteId=${noteId.take(8)} type=REACTION emoji=$emoji success=$success")
+        MLog.d(TAG, "Animation emitted: noteId=${noteId.take(8)} type=REACTION emoji=$emoji success=$success")
     }
 
     /** Emit a boost or zap animation event. */
     fun emitAnimation(noteId: String, type: AnimationType, success: Boolean) {
         _noteAnimations.tryEmit(NoteAnimationEvent(noteId, type, success))
-        Log.d(TAG, "Animation emitted: noteId=${noteId.take(8)} type=$type success=$success")
+        MLog.d(TAG, "Animation emitted: noteId=${noteId.take(8)} type=$type success=$success")
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -150,7 +150,7 @@ object ReactionsRepository {
         // Only set if we don't already have a reaction stored (don't overwrite optimistic state)
         if (!lastReactionByNoteId.containsKey(noteId)) {
             lastReactionByNoteId[noteId] = emoji
-            Log.d(TAG, "Populated own reaction for ${noteId.take(8)}: $emoji")
+            MLog.d(TAG, "Populated own reaction for ${noteId.take(8)}: $emoji")
         }
     }
 

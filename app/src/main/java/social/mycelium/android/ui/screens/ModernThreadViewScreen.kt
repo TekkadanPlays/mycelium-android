@@ -1,5 +1,7 @@
 package social.mycelium.android.ui.screens
 
+
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.ui.components.note.NoteCardCallbacks
 import social.mycelium.android.ui.components.note.NoteCardOverrides
 import social.mycelium.android.ui.components.note.NoteCardConfig
@@ -75,6 +77,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.launch
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Comment
@@ -484,7 +487,7 @@ fun ModernThreadViewScreen(
             1 -> kind1RepliesViewModel.uiState.value.note?.id == note.id && kind1RepliesViewModel.uiState.value.replies.isNotEmpty()
             else -> threadRepliesViewModel.uiState.value.note?.id == note.id && threadRepliesViewModel.uiState.value.replies.isNotEmpty()
         }
-        android.util.Log.d(
+        MLog.d(
             "ThreadView",
             "note=${note.id.take(8)} replyKind=$replyKind relays=${resolvedUrls.size} alreadyLoaded=$alreadyLoaded relayUrls=${
                 resolvedUrls.take(3)
@@ -496,7 +499,7 @@ fun ModernThreadViewScreen(
                 1 -> threadRepliesViewModel.clearRepliesForNote(note.id)
                 else -> kind1RepliesViewModel.clearRepliesForNote(note.id)
             }
-            android.util.Log.d(
+            MLog.d(
                 "ThreadView",
                 "LOADING replies: note=${note.id.take(8)} replyKind=$replyKind via ${if (replyKind == 1) "kind1RepliesVM" else "threadRepliesVM"}"
             )
@@ -642,7 +645,7 @@ fun ModernThreadViewScreen(
     // solely on generic deep-fetch rounds (which may not discover deeply nested replies).
     LaunchedEffect(highlightReplyId) {
         if (highlightReplyId == null) return@LaunchedEffect
-        android.util.Log.d("ThreadHighlight", "Attempting to scroll to reply $highlightReplyId")
+        MLog.d("ThreadHighlight", "Attempting to scroll to reply $highlightReplyId")
 
         // Proactively fetch the target reply and its ancestor chain.
         // This runs concurrently with the polling loop below — whichever path
@@ -661,14 +664,14 @@ fun ModernThreadViewScreen(
             }
             val path = findPathToReplyId(threaded, highlightReplyId!!)
             if (path != null) {
-                android.util.Log.d("ThreadHighlight", "Found path to reply (${path.size} ancestors)")
+                MLog.d("ThreadHighlight", "Found path to reply (${path.size} ancestors)")
                 // Expand all ancestors so they're not collapsed
                 path.forEach { id -> commentStates[id] = CommentState(isCollapsed = false, isExpanded = true) }
 
                 // If reply is deeply nested, drill into sub-threads to reach it
                 val drillStack = computeDrillDownStack(threaded, highlightReplyId!!)
                 if (drillStack.isNotEmpty()) {
-                    android.util.Log.d("ThreadHighlight", "Drilling into sub-thread (stack=${drillStack.size})")
+                    MLog.d("ThreadHighlight", "Drilling into sub-thread (stack=${drillStack.size})")
                     rootReplyIdStack = drillStack
                 }
 
@@ -695,7 +698,7 @@ fun ModernThreadViewScreen(
                     // When in sub-thread mode, item(back_to_subthread)=2 shifts indices by 1
                     val headerItems = if (activeRoot != null) 3 else 2
                     val scrollIndex = headerItems + listIndex
-                    android.util.Log.d("ThreadHighlight", "Scrolling to index $scrollIndex (listIndex=$listIndex, headers=$headerItems)")
+                    MLog.d("ThreadHighlight", "Scrolling to index $scrollIndex (listIndex=$listIndex, headers=$headerItems)")
                     listState.animateScrollToItem(scrollIndex)
                     highlightedReplyId = highlightReplyId
                     highlightedPathIds = path.toSet()
@@ -709,20 +712,20 @@ fun ModernThreadViewScreen(
                     if (retryIndex >= 0) {
                         val retryScroll = headerItems + retryIndex
                         if (retryScroll != scrollIndex || !listState.isScrollInProgress) {
-                            android.util.Log.d("ThreadHighlight", "Secondary scroll to $retryScroll")
+                            MLog.d("ThreadHighlight", "Secondary scroll to $retryScroll")
                             listState.animateScrollToItem(retryScroll)
                         }
                     }
                     break
                 } else {
-                    android.util.Log.d("ThreadHighlight", "Reply found in tree but not in display list (activeRoot=$activeRoot, displayListSize=${activeDisplayList.size})")
+                    MLog.d("ThreadHighlight", "Reply found in tree but not in display list (activeRoot=$activeRoot, displayListSize=${activeDisplayList.size})")
                 }
             }
             // Reply not in tree yet — wait for replies to load and retry
             kotlinx.coroutines.delay(500)
         }
         if (!haveScrolledToHighlight) {
-            android.util.Log.w("ThreadHighlight", "Failed to scroll to reply $highlightReplyId after 12s")
+            MLog.w("ThreadHighlight", "Failed to scroll to reply $highlightReplyId after 12s")
         }
     }
 
@@ -2882,7 +2885,17 @@ private fun ReplyDetailsPanel(
                             profileCache.getConfiguredRelayUrls()
                         )
                     }
-                    LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) profileRevision++ } }
+                    LaunchedEffect(rxPubkeys) {
+                        kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                            val needed = rxPubkeys.count { profileCache.getAuthor(it) == null }
+                            if (needed > 0) {
+                                profileCache.profileUpdated
+                                    .filter { it in rxPubkeys }
+                                    .take(needed)
+                                    .collect { profileRevision++ }
+                            }
+                        }
+                    }
                     val rxResolvedAuthors = remember(latestReactions, profileRevision) {
                         latestReactions.map { (emoji, pubkey) -> Triple(emoji, pubkey, profileCache.resolveAuthor(pubkey)) }
                     }
@@ -2971,7 +2984,17 @@ private fun ReplyDetailsPanel(
                             profileCache.getConfiguredRelayUrls()
                         )
                     }
-                    LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
+                    LaunchedEffect(allZapPubkeys) {
+                        kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                            val needed = allZapPubkeys.count { profileCache.getAuthor(it) == null }
+                            if (needed > 0) {
+                                profileCache.profileUpdated
+                                    .filter { it in allZapPubkeys }
+                                    .take(needed)
+                                    .collect { zapProfileRevision++ }
+                            }
+                        }
+                    }
                     val zapResolvedAuthors = remember(detailZapAuthors, detailZapAmountByAuthor, zapProfileRevision) {
                         detailZapAuthors.sortedByDescending { detailZapAmountByAuthor[it] ?: 0L }
                             .take(3)

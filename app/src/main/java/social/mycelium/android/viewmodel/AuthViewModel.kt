@@ -1,7 +1,7 @@
 package social.mycelium.android.viewmodel
 
 import android.app.Application
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import social.mycelium.android.auth.AmberSignerManager
@@ -33,12 +33,12 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
             isLoading = false
         )
 
-        Log.d("AuthViewModel", "🔐 Initialized with guest mode")
+        MLog.d("AuthViewModel", "🔐 Initialized with guest mode")
 
         // Observe Amber state changes
         viewModelScope.launch {
             amberSignerManager.state.collect { amberState ->
-                Log.d("AuthViewModel", "🔐 Amber state changed: $amberState")
+                MLog.d("AuthViewModel", "🔐 Amber state changed: $amberState")
 
                 val newState = when (amberState) {
                     is AmberState.NotInstalled -> {
@@ -64,7 +64,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     is AmberState.LoggedIn -> {
-                        Log.d("AuthViewModel", "✅ User logged in with pubkey: ${amberState.pubKey.take(16)}...")
+                        MLog.d("AuthViewModel", "✅ User logged in with pubkey: ${amberState.pubKey.take(16)}...")
 
                         val userProfile = UserProfile(
                             pubkey = amberState.pubKey,
@@ -94,7 +94,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 _authState.value = newState
-                Log.d("AuthViewModel", "🔐 Auth state updated - isAuthenticated: ${newState.isAuthenticated}, isGuest: ${newState.isGuest}")
+                MLog.d("AuthViewModel", "🔐 Auth state updated - isAuthenticated: ${newState.isAuthenticated}, isGuest: ${newState.isGuest}")
             }
         }
     }
@@ -104,7 +104,7 @@ class AuthViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun handleLoginResult(resultCode: Int, data: android.content.Intent?) {
-        Log.d("AuthViewModel", "🔐 Handling login result - resultCode: $resultCode")
+        MLog.d("AuthViewModel", "🔐 Handling login result - resultCode: $resultCode")
         amberSignerManager.handleLoginResult(resultCode, data)
     }
 

@@ -1,6 +1,6 @@
 package social.mycelium.android.ui.components.media
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -56,7 +56,7 @@ object PipStreamManager {
         killCurrentPip()
         player.play() // Ensure playback continues in PiP
         _pipState.value = PipState(player, addressableId, title, hostName)
-        Log.d(TAG, "PiP started for live stream $addressableId")
+        MLog.d(TAG, "PiP started for live stream $addressableId")
     }
 
     /** Start PiP for a regular video URL. Removes the player from SharedPlayerPool
@@ -73,12 +73,12 @@ object PipStreamManager {
         VideoMuteCache.set(url, false) // Sync cache so fullscreen inherits unmuted state
         reservedVideoUrl = url // Reserve URL through PiP→fullscreen→PiP cycle
         _pipState.value = PipState(player, addressableId = url, title = null, hostName = null, videoUrl = url, instanceKey = instanceKey)
-        Log.d(TAG, "PiP started for video $url (instance=$instanceKey)")
+        MLog.d(TAG, "PiP started for video $url (instance=$instanceKey)")
     }
 
     private fun killCurrentPip() {
         _pipState.value?.let { old ->
-            Log.d(TAG, "Releasing previous PiP for ${old.addressableId}")
+            MLog.d(TAG, "Releasing previous PiP for ${old.addressableId}")
             old.player.stop()
             old.player.release()
         }
@@ -92,14 +92,14 @@ object PipStreamManager {
         // Clear the video surface so the PiP overlay's PlayerView releases the
         // decoder output, allowing the next screen's PlayerView to attach cleanly.
         state?.player?.clearVideoSurface()
-        Log.d(TAG, "PiP reclaimed for ${state?.addressableId}")
+        MLog.d(TAG, "PiP reclaimed for ${state?.addressableId}")
         return state
     }
 
     /** Dismiss PiP and release the player (user swiped it away or killed). */
     fun dismiss() {
         _pipState.value?.let {
-            Log.d(TAG, "PiP dismissed for ${it.addressableId}")
+            MLog.d(TAG, "PiP dismissed for ${it.addressableId}")
             it.player.stop()
             it.player.release()
         }
@@ -114,7 +114,7 @@ object PipStreamManager {
      */
     fun kill() {
         if (_pipState.value != null) {
-            Log.d(TAG, "PiP killed")
+            MLog.d(TAG, "PiP killed")
             dismiss()
         }
     }
@@ -127,7 +127,7 @@ object PipStreamManager {
         _pipState.value?.player?.let { player ->
             if (player.isPlaying) {
                 player.pause()
-                Log.d(TAG, "PiP paused (app backgrounded)")
+                MLog.d(TAG, "PiP paused (app backgrounded)")
             }
         }
     }
@@ -136,7 +136,7 @@ object PipStreamManager {
     fun resumeIfActive() {
         _pipState.value?.player?.let { player ->
             player.play()
-            Log.d(TAG, "PiP resumed (app foregrounded)")
+            MLog.d(TAG, "PiP resumed (app foregrounded)")
         }
     }
 

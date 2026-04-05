@@ -2,6 +2,8 @@
 
 package social.mycelium.android.ui.screens
 
+
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.ui.components.note.NoteCardCallbacks
 import social.mycelium.android.ui.components.note.NoteCardOverrides
 import social.mycelium.android.ui.components.note.NoteCardConfig
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
@@ -158,6 +161,25 @@ private fun DashboardFeedContent(
         val visibleKeys by remember {
             derivedStateOf {
                 listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
+            }
+        }
+        // ── Viewport render window: full NoteCard only for notes near the viewport ──
+        // Notes outside this window get a lightweight PlaceholderNoteCard with zero
+        // side effects (no LaunchedEffect, no collectAsState, no profile fetches).
+        // Buffer: 10 above + 15 below viewport = ~30 full cards at any time.
+        val RENDER_BUFFER_ABOVE = 10
+        val RENDER_BUFFER_BELOW = 15
+        val renderWindow by remember {
+            derivedStateOf {
+                val info = listState.layoutInfo
+                // visibleItemsInfo indices are LazyColumn item indices (includes header items).
+                // Note items start at index 1 (after "new_notes_counter").
+                val firstVisible = (info.visibleItemsInfo.firstOrNull()?.index ?: 0)
+                val lastVisible = (info.visibleItemsInfo.lastOrNull()?.index ?: 0)
+                // Convert to note-list indices (subtract 1 for the header item)
+                val noteFirst = maxOf(0, firstVisible - 1 - RENDER_BUFFER_ABOVE)
+                val noteLast = lastVisible - 1 + RENDER_BUFFER_BELOW
+                noteFirst..noteLast
             }
         }
         // Prefetch images so they're warm before the user sees them
@@ -354,7 +376,7 @@ private fun DashboardFeedContent(
             { n ->
                 val noteId = n.originalNoteId ?: n.id.removePrefix("repost:")
                 val authorHex = n.author.id
-                android.util.Log.d(
+                MLog.d(
                     "BoostDebug",
                     "stableOnBoost called: noteId=$noteId authorHex=${authorHex.take(12)} route=boost_relay_selection/$noteId/$authorHex"
                 )
@@ -498,11 +520,27 @@ private fun DashboardFeedContent(
                 }
             }
 
-            items(
+            itemsIndexed(
                 items = engagementFilteredNotes,
-                key = { it.id },
-                contentType = { if (it.kind == 30023) "article_card" else "note_card" }
-            ) { note ->
+                key = { _, note -> note.id },
+                contentType = { index, note ->
+                    if (index !in renderWindow) "placeholder_card"
+                    else if (note.kind == 30023) "article_card"
+                    else "note_card"
+                }
+            ) { index, note ->
+                // ── Viewport-gated rendering ──
+                // Notes outside the render window get a zero-side-effect placeholder.
+                // This eliminates ~14 LaunchedEffects + ~7 collectAsState per off-screen card.
+                if (index !in renderWindow) {
+                    social.mycelium.android.ui.components.note.PlaceholderNoteCard(
+                        note = note,
+                        onClick = { stableOnNoteClick(note) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    return@itemsIndexed
+                }
+
                 if (note.kind == 30023) {
                     social.mycelium.android.ui.components.note.ArticleCard(
                         note = note,
@@ -536,7 +574,7 @@ private fun DashboardFeedContent(
                         onNavigateToRelayList = onNavigateToRelayList,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    return@items
+                    return@itemsIndexed
                 }
                 val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                 NoteCard(

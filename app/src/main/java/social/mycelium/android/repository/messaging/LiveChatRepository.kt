@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.messaging
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.LiveChatMessage
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.TemporarySubscriptionHandle
@@ -52,7 +52,7 @@ class LiveChatRepository private constructor() {
         _messages.value = emptyList()
 
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "No relay URLs for live chat subscription")
+            MLog.w(TAG, "No relay URLs for live chat subscription")
             return
         }
 
@@ -69,7 +69,7 @@ class LiveChatRepository private constructor() {
             onEvent = { event -> handleChatEvent(event) }
         )
 
-        Log.d(TAG, "Subscribed to live chat for $activityAddress on ${relayUrls.size} relays")
+        MLog.d(TAG, "Subscribed to live chat for $activityAddress on ${relayUrls.size} relays")
     }
 
     /**

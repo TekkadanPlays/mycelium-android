@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.mutableStateMapOf
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -97,7 +97,7 @@ object Nip05Verifier {
                     cache[pubkeyHex] = CacheEntry(status, System.currentTimeMillis() + ttl)
                     verificationStates[pubkeyHex] = status
                 } catch (e: Exception) {
-                    Log.w(TAG, "NIP-05 check failed for $nip05: ${e.message}")
+                    MLog.w(TAG, "NIP-05 check failed for $nip05: ${e.message}")
                     // Transient error: use short 60s TTL so it self-heals on next scroll-by
                     cache[pubkeyHex] = CacheEntry(
                         VerificationStatus.FAILED,

@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.sync
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -105,12 +105,12 @@ object SettingsSyncManager {
 
                 when (result) {
                     is PublishResult.Success ->
-                        Log.d(TAG, "Settings published: ${result.eventId.take(8)}")
+                        MLog.d(TAG, "Settings published: ${result.eventId.take(8)}")
                     is PublishResult.Error ->
-                        Log.w(TAG, "Settings publish failed: ${result.message}")
+                        MLog.w(TAG, "Settings publish failed: ${result.message}")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Settings publish error: ${e.message}", e)
+                MLog.e(TAG, "Settings publish error: ${e.message}", e)
             }
         }
     }
@@ -123,7 +123,7 @@ object SettingsSyncManager {
         isApplyingRemote = true
         try {
             SyncedSettings.applyToLocalPreferences(remoteSettings)
-            Log.d(TAG, "Remote settings applied via orchestrator")
+            MLog.d(TAG, "Remote settings applied via orchestrator")
         } finally {
             isApplyingRemote = false
         }
@@ -141,10 +141,10 @@ object SettingsSyncManager {
         relayUrls: List<String>
     ) {
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "No relays for settings fetch")
+            MLog.w(TAG, "No relays for settings fetch")
             return
         }
-        Log.d(TAG, "fetchAndApplySettings: ${relayUrls.size} relays: ${relayUrls.take(3)}")
+        MLog.d(TAG, "fetchAndApplySettings: ${relayUrls.size} relays: ${relayUrls.take(3)}")
 
         scope.launch {
             try {
@@ -166,15 +166,15 @@ object SettingsSyncManager {
                         latestEvent = event
                     }
                 }
-                Log.d(TAG, "fetchAndApplySettings: subscription done, latestEvent=${latestEvent?.id?.take(8)}")
+                MLog.d(TAG, "fetchAndApplySettings: subscription done, latestEvent=${latestEvent?.id?.take(8)}")
 
                 val event = latestEvent
                 if (event == null) {
-                    Log.d(TAG, "No settings event found — using local defaults")
+                    MLog.d(TAG, "No settings event found — using local defaults")
                     return@launch
                 }
 
-                Log.d(TAG, "Found settings event: ${event.id.take(8)}, created=${event.createdAt}")
+                MLog.d(TAG, "Found settings event: ${event.id.take(8)}, created=${event.createdAt}")
 
                 // Decrypt content (NIP-44 encrypted to self).
                 // Try background-only first to avoid flashing Amber's visible activity;
@@ -182,25 +182,25 @@ object SettingsSyncManager {
                 val plaintext = if (signer is com.example.cybin.nip55.NostrSignerExternal) {
                     signer.nip44DecryptBackgroundOnly(event.content, userPubkey)
                         ?: run {
-                            Log.d(TAG, "Background decrypt unavailable — trying foreground decrypt")
+                            MLog.d(TAG, "Background decrypt unavailable — trying foreground decrypt")
                             signer.nip44Decrypt(event.content, userPubkey)
                         }
                 } else {
                     signer.nip44Decrypt(event.content, userPubkey)
                 }
                 val remoteSettings = SyncedSettings.fromJson(plaintext)
-                Log.d(TAG, "fetchAndApplySettings: parsed settings — compactMedia=${remoteSettings.compactMedia}, theme=${remoteSettings.theme}, accent=${remoteSettings.accent}")
+                MLog.d(TAG, "fetchAndApplySettings: parsed settings — compactMedia=${remoteSettings.compactMedia}, theme=${remoteSettings.theme}, accent=${remoteSettings.accent}")
 
                 // Apply to local preferences (with guard to prevent re-publish)
                 isApplyingRemote = true
                 try {
                     SyncedSettings.applyToLocalPreferences(remoteSettings)
-                    Log.d(TAG, "Remote settings applied successfully")
+                    MLog.d(TAG, "Remote settings applied successfully")
                 } finally {
                     isApplyingRemote = false
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Settings fetch/apply error: ${e.message}", e)
+                MLog.e(TAG, "Settings fetch/apply error: ${e.message}", e)
             }
         }
     }

@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.sync
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -71,17 +71,17 @@ object StartupOrchestrator {
     private const val TAG = "StartupOrchestrator"
 
     private fun logD(msg: String) {
-        Log.d(TAG, msg)
+        MLog.d(TAG, msg)
         DebugVerboseLog.record(DebugVerboseLog.Layer.STARTUP, TAG, msg)
     }
 
     private fun logW(msg: String) {
-        Log.w(TAG, msg)
+        MLog.w(TAG, msg)
         DebugVerboseLog.record(DebugVerboseLog.Layer.STARTUP, TAG, "[W] $msg")
     }
 
     private fun logE(msg: String, e: Throwable? = null) {
-        if (e != null) Log.e(TAG, msg, e) else Log.e(TAG, msg)
+        if (e != null) MLog.e(TAG, msg, e) else MLog.e(TAG, msg)
         val tail = e?.message?.let { " — $it" } ?: ""
         DebugVerboseLog.record(DebugVerboseLog.Layer.STARTUP, TAG, "[E] $msg$tail")
     }

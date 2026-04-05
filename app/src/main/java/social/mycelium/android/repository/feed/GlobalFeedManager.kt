@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.feed
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -48,7 +48,7 @@ class GlobalFeedManager private constructor() {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() +
-            CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+            CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
     private val relayStateMachine = RelayConnectionStateMachine.getInstance()
 
@@ -93,14 +93,14 @@ class GlobalFeedManager private constructor() {
         listDTags: Set<String> = emptySet()
     ) {
         if (hashtags.isEmpty() && listDTags.isEmpty()) {
-            Log.d(TAG, "No hashtags or lists for global enrichment — skipping")
+            MLog.d(TAG, "No hashtags or lists for global enrichment — skipping")
             return
         }
 
         // Idempotency: skip if already running with same params
         if (hashtags == lastHashtags && listDTags == lastListDTags &&
             _phase.value != Phase.IDLE && _phase.value != Phase.STOPPED) {
-            Log.d(TAG, "Global enrichment already active with same params, skipping")
+            MLog.d(TAG, "Global enrichment already active with same params, skipping")
             return
         }
 
@@ -109,7 +109,7 @@ class GlobalFeedManager private constructor() {
         lastHashtags = hashtags
         lastListDTags = listDTags
 
-        Log.d(TAG, "Starting global enrichment: ${hashtags.size} hashtags, ${listDTags.size} lists")
+        MLog.d(TAG, "Starting global enrichment: ${hashtags.size} hashtags, ${listDTags.size} lists")
         _phase.value = Phase.SUBSCRIBING
         _globalNotesReceived.value = 0
 
@@ -121,7 +121,7 @@ class GlobalFeedManager private constructor() {
                     // Fallback to hardcoded indexer relays from NotesRepository
                     val fallback = NotesRepository.getInstance().INDEXER_RELAYS
                     if (fallback.isEmpty()) {
-                        Log.w(TAG, "No indexer relays available — cannot start global enrichment")
+                        MLog.w(TAG, "No indexer relays available — cannot start global enrichment")
                         _phase.value = Phase.STOPPED
                         return@launch
                     }
@@ -131,7 +131,7 @@ class GlobalFeedManager private constructor() {
                 }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                Log.e(TAG, "Global enrichment failed: ${e.message}", e)
+                MLog.e(TAG, "Global enrichment failed: ${e.message}", e)
                 _phase.value = Phase.STOPPED
             }
         }
@@ -151,7 +151,7 @@ class GlobalFeedManager private constructor() {
         lastListDTags = null
         _phase.value = Phase.STOPPED
         _indexerRelayCount.value = 0
-        Log.d(TAG, "Global enrichment stopped")
+        MLog.d(TAG, "Global enrichment stopped")
     }
 
     // ── Internal ──
@@ -163,7 +163,7 @@ class GlobalFeedManager private constructor() {
     ) {
         val callback = onNoteReceived
         if (callback == null) {
-            Log.w(TAG, "No onNoteReceived callback — global notes will be dropped")
+            MLog.w(TAG, "No onNoteReceived callback — global notes will be dropped")
             _phase.value = Phase.ACTIVE
             return
         }
@@ -189,7 +189,7 @@ class GlobalFeedManager private constructor() {
                 }
             }
             totalRelays += indexerRelays.size
-            Log.d(TAG, "Hashtag subscription: #${hashtags.joinToString(", #")} on ${indexerRelays.size} indexers")
+            MLog.d(TAG, "Hashtag subscription: #${hashtags.joinToString(", #")} on ${indexerRelays.size} indexers")
         }
 
         // Subscribe for list member notes
@@ -214,15 +214,15 @@ class GlobalFeedManager private constructor() {
                     }
                 }
                 totalRelays += indexerRelays.size
-                Log.d(TAG, "List members subscription: ${cappedAuthors.size} authors from ${listDTags.size} lists on ${indexerRelays.size} indexers")
+                MLog.d(TAG, "List members subscription: ${cappedAuthors.size} authors from ${listDTags.size} lists on ${indexerRelays.size} indexers")
             } else {
-                Log.d(TAG, "Selected lists have no pubkeys — skipping list member subscription")
+                MLog.d(TAG, "Selected lists have no pubkeys — skipping list member subscription")
             }
         }
 
         _indexerRelayCount.value = totalRelays
         _phase.value = Phase.ACTIVE
-        Log.d(TAG, "Global enrichment active: $totalRelays relay subscriptions")
+        MLog.d(TAG, "Global enrichment active: $totalRelays relay subscriptions")
     }
 
     companion object {

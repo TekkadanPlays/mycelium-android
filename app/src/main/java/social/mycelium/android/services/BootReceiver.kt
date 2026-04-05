@@ -3,7 +3,7 @@ package social.mycelium.android.services
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.util.Log
+import social.mycelium.android.debug.MLog
 
 /**
  * Re-registers scheduled note alarms after device boot.
@@ -14,7 +14,7 @@ class BootReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-            Log.d("BootReceiver", "Device booted — verifying scheduled notes")
+            MLog.d("BootReceiver", "Device booted — verifying scheduled notes")
             social.mycelium.android.repository.DraftsRepository.init(context)
             // DraftsRepository needs a pubkey to load drafts — we defer to app startup
             // which will call verifyAllScheduled after restoring the session.

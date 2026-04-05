@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.cache
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
 import kotlinx.coroutines.CompletableDeferred
@@ -63,7 +63,7 @@ object ArticleEmbedCache {
         return try {
             val relays = (relayHints + userRelayUrls).distinct().filter { it.isNotBlank() }.take(8)
             if (relays.isEmpty()) {
-                Log.w(TAG, "No relays available to fetch article ${author.take(8)}:$dTag")
+                MLog.w(TAG, "No relays available to fetch article ${author.take(8)}:$dTag")
                 return null
             }
             val filter = Filter(
@@ -91,10 +91,10 @@ object ArticleEmbedCache {
                 null
             }
         } catch (_: CancellationException) {
-            Log.d(TAG, "Article fetch cancelled for ${author.take(8)}:$dTag")
+            MLog.d(TAG, "Article fetch cancelled for ${author.take(8)}:$dTag")
             null
         } catch (ex: Exception) {
-            Log.e(TAG, "Article fetch failed for ${author.take(8)}:$dTag: ${ex.message}")
+            MLog.e(TAG, "Article fetch failed for ${author.take(8)}:$dTag: ${ex.message}")
             failedKeys[key] = System.currentTimeMillis()
             null
         } finally {

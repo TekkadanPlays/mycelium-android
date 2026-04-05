@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.relay
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -228,7 +228,7 @@ class Nip86RelayManagementClient(private val relayWsUrl: String) {
                     val payloadHash = sha256Hex(rpcPayload)
                     nip98AuthHeader = "Nostr ${auth(relayWsUrl, method, payloadHash)}"
                 } catch (e: Exception) {
-                    Log.w(TAG, "Failed to generate NIP-98 auth for $method: ${e.message}")
+                    MLog.w(TAG, "Failed to generate NIP-98 auth for $method: ${e.message}")
                 }
             }
 
@@ -264,7 +264,7 @@ class Nip86RelayManagementClient(private val relayWsUrl: String) {
         } catch (e: Nip86ApiException) {
             Result.failure(e)
         } catch (e: Exception) {
-            Log.e(TAG, "RPC call $method failed: ${e.message}", e)
+            MLog.e(TAG, "RPC call $method failed: ${e.message}", e)
             Result.failure(Nip86ApiException("Network error: ${e.message}"))
         }
     }

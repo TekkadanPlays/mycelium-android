@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.feed
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -57,7 +57,7 @@ class OutboxFeedManager private constructor() {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() +
-            CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+            CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
     private val relayStateMachine = RelayConnectionStateMachine.getInstance()
 
@@ -132,16 +132,16 @@ class OutboxFeedManager private constructor() {
         inboxRelayUrls: List<String>
     ) {
         if (followedPubkeys.isEmpty()) {
-            Log.d(TAG, "No followed pubkeys — skipping outbox discovery")
+            MLog.d(TAG, "No followed pubkeys — skipping outbox discovery")
             return
         }
         if (indexerRelayUrls.isEmpty()) {
-            Log.w(TAG, "No indexer relays — cannot discover outbox relays")
+            MLog.w(TAG, "No indexer relays — cannot discover outbox relays")
             return
         }
         // Skip if already running with the same follow set
         if (followedPubkeys == lastStartedFollowSet && _phase.value != Phase.IDLE && _phase.value != Phase.STOPPED) {
-            Log.d(TAG, "Outbox feed already active for ${followedPubkeys.size} follows, skipping")
+            MLog.d(TAG, "Outbox feed already active for ${followedPubkeys.size} follows, skipping")
             return
         }
 
@@ -149,7 +149,7 @@ class OutboxFeedManager private constructor() {
         stop()
         lastStartedFollowSet = followedPubkeys
 
-        Log.d(TAG, "Starting outbox feed: ${followedPubkeys.size} follows, ${indexerRelayUrls.size} indexers")
+        MLog.d(TAG, "Starting outbox feed: ${followedPubkeys.size} follows, ${indexerRelayUrls.size} indexers")
         _phase.value = Phase.DISCOVERING
         _outboxNotesReceived.value = 0
         deliveredAuthors.clear()
@@ -167,7 +167,7 @@ class OutboxFeedManager private constructor() {
                 subscribeToOutboxRelays(followedPubkeys, inboxSet)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                Log.e(TAG, "Outbox feed failed: ${e.message}", e)
+                MLog.e(TAG, "Outbox feed failed: ${e.message}", e)
                 _phase.value = Phase.STOPPED
             }
         }
@@ -192,7 +192,7 @@ class OutboxFeedManager private constructor() {
         _discoveredAuthorCount.value = 0
         _activeOutboxRelays.value = emptyList()
         outboxRelayNoteCounts.clear()
-        Log.d(TAG, "Outbox feed stopped")
+        MLog.d(TAG, "Outbox feed stopped")
     }
 
     // ── Internal ──
@@ -211,7 +211,7 @@ class OutboxFeedManager private constructor() {
         }
 
         if (uncachedCount > 0) {
-            Log.d(TAG, "Discovering outbox relays: $uncachedCount/${followedPubkeys.size} uncached")
+            MLog.d(TAG, "Discovering outbox relays: $uncachedCount/${followedPubkeys.size} uncached")
             Nip65RelayListRepository.batchFetchRelayLists(followedPubkeys, indexerRelayUrls)
 
             // Wait for batch fetch to populate cache (poll with timeout)
@@ -226,12 +226,12 @@ class OutboxFeedManager private constructor() {
                 }
                 // Good enough when 90% are cached or all are done
                 if (cached >= followedPubkeys.size * 0.9 || cached >= followedPubkeys.size) {
-                    Log.d(TAG, "Discovery sufficient: $cached/${followedPubkeys.size} cached after ${waited}ms")
+                    MLog.d(TAG, "Discovery sufficient: $cached/${followedPubkeys.size} cached after ${waited}ms")
                     break
                 }
             }
         } else {
-            Log.d(TAG, "All ${followedPubkeys.size} followed users already have cached outbox relays")
+            MLog.d(TAG, "All ${followedPubkeys.size} followed users already have cached outbox relays")
         }
 
         val discovered = followedPubkeys.count {
@@ -239,7 +239,7 @@ class OutboxFeedManager private constructor() {
             relays != null && relays.isNotEmpty()
         }
         _discoveredAuthorCount.value = discovered
-        Log.d(TAG, "Discovery complete: $discovered/${followedPubkeys.size} authors have outbox relays")
+        MLog.d(TAG, "Discovery complete: $discovered/${followedPubkeys.size} authors have outbox relays")
     }
 
     /**
@@ -266,7 +266,7 @@ class OutboxFeedManager private constructor() {
         }
 
         if (relayToAuthors.isEmpty()) {
-            Log.d(TAG, "No additional outbox relays to subscribe to (all covered by inbox)")
+            MLog.d(TAG, "No additional outbox relays to subscribe to (all covered by inbox)")
             _phase.value = Phase.ACTIVE
             return
         }
@@ -275,9 +275,9 @@ class OutboxFeedManager private constructor() {
         val blockedCount = relayToAuthors.keys.count { RelayHealthTracker.isBlocked(it) }
         if (blockedCount > 0) {
             relayToAuthors.keys.removeAll { RelayHealthTracker.isBlocked(it) }
-            Log.d(TAG, "Blocklist pre-filter: removed $blockedCount blocked relays (${relayToAuthors.size} remaining)")
+            MLog.d(TAG, "Blocklist pre-filter: removed $blockedCount blocked relays (${relayToAuthors.size} remaining)")
             if (relayToAuthors.isEmpty()) {
-                Log.d(TAG, "All outbox relays are blocked — nothing to subscribe to")
+                MLog.d(TAG, "All outbox relays are blocked — nothing to subscribe to")
                 _phase.value = Phase.ACTIVE
                 return
             }
@@ -314,12 +314,12 @@ class OutboxFeedManager private constructor() {
             }
             val removedCount = beforeCount - filtered.size
             if (removedCount > 0) {
-                Log.d(TAG, "NIP-66 pre-filter: removed $removedCount dead/stale/auth-restricted relays " +
+                MLog.d(TAG, "NIP-66 pre-filter: removed $removedCount dead/stale/auth-restricted relays " +
                     "($beforeCount → ${filtered.size})")
             }
             filtered
         } else {
-            Log.d(TAG, "NIP-66 data not available — applying NIP-11 auth-only filter")
+            MLog.d(TAG, "NIP-66 data not available — applying NIP-11 auth-only filter")
             // NIP-66 dataset absent: fall back but still enforce auth guard via NIP-11 cache
             relayToAuthors.filterKeys { url ->
                 val knownAuthRequired = nip11Cache?.isAuthRequired(url) == true
@@ -329,7 +329,7 @@ class OutboxFeedManager private constructor() {
         }
 
         if (candidateRelays.isEmpty()) {
-            Log.d(TAG, "All outbox relays filtered out by NIP-66/NIP-11 — falling back to unfiltered (excluding auth-required)")
+            MLog.d(TAG, "All outbox relays filtered out by NIP-66/NIP-11 — falling back to unfiltered (excluding auth-required)")
             // Fall back to avoid zero coverage, but still strip auth/payment-required relays
             // regardless — we must never authenticate with relays the user didn't explicitly configure.
         }
@@ -379,13 +379,13 @@ class OutboxFeedManager private constructor() {
                 }
             }
             if (diversityRelays.isNotEmpty()) {
-                Log.d(TAG, "Diversity pass: added ${diversityRelays.size} relays for ${uncovered.size} uncovered authors")
+                MLog.d(TAG, "Diversity pass: added ${diversityRelays.size} relays for ${uncovered.size} uncovered authors")
             }
         }
 
         val ranked = greedyRanked + diversityRelays
         val totalAuthors = ranked.flatMap { it.value }.toSet().size
-        Log.d(TAG, "Subscribing to ${ranked.size} outbox relays covering $totalAuthors authors " +
+        MLog.d(TAG, "Subscribing to ${ranked.size} outbox relays covering $totalAuthors authors " +
             "(${relayToAuthors.size} total discovered, greedy=$MAX_OUTBOX_RELAYS + diversity=${diversityRelays.size})")
 
         // Coverage gap report: identify followed authors with NO outbox relay coverage
@@ -397,12 +397,12 @@ class OutboxFeedManager private constructor() {
             pk !in coveredByOutbox && !Nip65RelayListRepository.getCachedOutboxRelays(pk).isNullOrEmpty()
         }
         if (uncoveredAuthors.isNotEmpty()) {
-            Log.w(TAG, "⚠️ ${uncoveredAuthors.size} followed authors have NO outbox relay (no NIP-65): ${uncoveredAuthors.take(10).joinToString { it.take(8) + "…" }}")
+            MLog.w(TAG, "⚠️ ${uncoveredAuthors.size} followed authors have NO outbox relay (no NIP-65): ${uncoveredAuthors.take(10).joinToString { it.take(8) + "…" }}")
         }
         if (coveredByInboxOnly.isNotEmpty()) {
-            Log.w(TAG, "⚠️ ${coveredByInboxOnly.size} followed authors' outbox relays not in selected set (rely on inbox only): ${coveredByInboxOnly.take(10).joinToString { it.take(8) + "…" }}")
+            MLog.w(TAG, "⚠️ ${coveredByInboxOnly.size} followed authors' outbox relays not in selected set (rely on inbox only): ${coveredByInboxOnly.take(10).joinToString { it.take(8) + "…" }}")
         }
-        Log.d(TAG, "Coverage: ${coveredByOutbox.size}/${followedPubkeys.size} via outbox, ${followedPubkeys.size - uncoveredAuthors.size - coveredByInboxOnly.size} via inbox overlap")
+        MLog.d(TAG, "Coverage: ${coveredByOutbox.size}/${followedPubkeys.size} via outbox, ${followedPubkeys.size - uncoveredAuthors.size - coveredByInboxOnly.size} via inbox overlap")
 
         // Phase 5: Self-healing — add indexer fallback for chronically missed authors
         val missedAuthors = RelayDeliveryTracker.getMissedAuthors()
@@ -439,7 +439,7 @@ class OutboxFeedManager private constructor() {
                     limit = OUTBOX_PER_RELAY_LIMIT
                 )
             )
-            Log.d(TAG, "Indexer fallback: added $healingRelay for ${allFallbackAuthors.size} authors (${missedAuthors.size} missed + ${noNip65Authors.size} no-NIP-65)")
+            MLog.d(TAG, "Indexer fallback: added $healingRelay for ${allFallbackAuthors.size} authors (${missedAuthors.size} missed + ${noNip65Authors.size} no-NIP-65)")
         }
 
         // _outboxRelayCount is updated after the auth guard (below) with the final count.
@@ -466,7 +466,7 @@ class OutboxFeedManager private constructor() {
             val nip11Pay  = nip11Cache?.isPaymentRequired(url) == true
             val blocked   = nip66Auth || nip66Pay || nip11Auth || nip11Pay
             if (blocked) {
-                Log.w(TAG, "Auth guard: refusing outbox connection to $url " +
+                MLog.w(TAG, "Auth guard: refusing outbox connection to $url " +
                     "(nip66Auth=$nip66Auth pay=$nip66Pay | nip11Auth=$nip11Auth pay=$nip11Pay) — " +
                     "user has not consented to authenticate with this relay")
             }
@@ -474,7 +474,7 @@ class OutboxFeedManager private constructor() {
         }
         val removedByAuthGuard = relayFilters.size - authGuardedFilters.size
         if (removedByAuthGuard > 0) {
-            Log.w(TAG, "Auth guard: blocked $removedByAuthGuard auth/payment-required outbox relay(s) " +
+            MLog.w(TAG, "Auth guard: blocked $removedByAuthGuard auth/payment-required outbox relay(s) " +
                 "from connecting")
         }
         // Set the final relay count after auth guard filtering
@@ -507,7 +507,7 @@ class OutboxFeedManager private constructor() {
         // Subscribe using per-relay filter map — each relay only gets its relevant authors
         val callback = onNoteReceived
         if (callback == null) {
-            Log.w(TAG, "No onNoteReceived callback set — outbox notes will be dropped")
+            MLog.w(TAG, "No onNoteReceived callback set — outbox notes will be dropped")
             _phase.value = Phase.ACTIVE
             return
         }
@@ -532,7 +532,7 @@ class OutboxFeedManager private constructor() {
         }
 
         _phase.value = Phase.ACTIVE
-        Log.d(TAG, "Outbox subscriptions active: ${authGuardedFilters.size} relays" +
+        MLog.d(TAG, "Outbox subscriptions active: ${authGuardedFilters.size} relays" +
             if (removedByAuthGuard > 0) " ($removedByAuthGuard auth-required relays blocked)" else "")
 
         // Batch preload NIP-11 for all outbox relay URLs so relay orb icons
@@ -544,7 +544,7 @@ class OutboxFeedManager private constructor() {
         ranked.take(5).forEach { (url, authors) ->
             val stats = RelayDeliveryTracker.getStats()[url]
             val statsStr = if (stats != null) " (delivery: ${String.format("%.0f%%", stats.successRate * 100)})" else " (new)"
-            Log.d(TAG, "  ${url.removePrefix("wss://").removeSuffix("/")}: ${authors.size} authors$statsStr")
+            MLog.d(TAG, "  ${url.removePrefix("wss://").removeSuffix("/")}: ${authors.size} authors$statsStr")
         }
 
         // Schedule delivery measurement after events have had time to arrive
@@ -586,7 +586,7 @@ class OutboxFeedManager private constructor() {
             }
         }
 
-        Log.d(TAG, "Delivery measurement: $deliveredCount/${assignment.size} relays delivered " +
+        MLog.d(TAG, "Delivery measurement: $deliveredCount/${assignment.size} relays delivered " +
             "(${deliveredAuthors.size} unique authors seen)")
 
         // Record per-author outcomes for self-healing (Phase 5)
@@ -594,7 +594,7 @@ class OutboxFeedManager private constructor() {
         RelayDeliveryTracker.recordAuthorOutcomes(allAssignedAuthors, deliveredAuthors.toSet())
         val missedAuthors = RelayDeliveryTracker.getMissedAuthors()
         if (missedAuthors.isNotEmpty()) {
-            Log.d(TAG, "Self-healing: ${missedAuthors.size} authors chronically missed (≥${2} sessions)")
+            MLog.d(TAG, "Self-healing: ${missedAuthors.size} authors chronically missed (≥${2} sessions)")
         }
 
         // Persist stats to survive app restarts

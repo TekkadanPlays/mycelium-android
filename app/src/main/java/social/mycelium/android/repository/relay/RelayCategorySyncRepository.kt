@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.relay
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.debug.DiagnosticLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -44,7 +44,7 @@ object RelayCategorySyncRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
-            Log.e(TAG, "Coroutine failed: ${t.message}", t)
+            MLog.e(TAG, "Coroutine failed: ${t.message}", t)
         }
     )
 
@@ -71,13 +71,13 @@ object RelayCategorySyncRepository {
         storageManager.saveIndexerRelays(userPubkey, remoteRelays)
         storageManager.setIndexersConfirmed(userPubkey, true)
         _pendingIndexerDiff.value = null
-        Log.d(TAG, "Accepted pending indexer diff: ${remoteRelays.size} relays applied")
+        MLog.d(TAG, "Accepted pending indexer diff: ${remoteRelays.size} relays applied")
     }
 
     /** Dismiss a pending indexer diff — keeps local list, clears the banner. */
     fun dismissPendingIndexerDiff() {
         _pendingIndexerDiff.value = null
-        Log.d(TAG, "Dismissed pending indexer diff")
+        MLog.d(TAG, "Dismissed pending indexer diff")
     }
 
     // ── Relay Category Diff ──────────────────────────────────────────────────
@@ -105,13 +105,13 @@ object RelayCategorySyncRepository {
         storageManager.saveCategories(userPubkey, merged)
         notifyNip42AllowedRelays(merged)
         _pendingCategoryDiff.value = null
-        Log.d(TAG, "Accepted pending category diff: ${merged.size} categories merged")
+        MLog.d(TAG, "Accepted pending category diff: ${merged.size} categories merged")
     }
 
     /** Dismiss a pending category diff — keeps local categories, clears the banner. */
     fun dismissPendingCategoryDiff() {
         _pendingCategoryDiff.value = null
-        Log.d(TAG, "Dismissed pending category diff")
+        MLog.d(TAG, "Dismissed pending category diff")
     }
 
     /**
@@ -123,7 +123,7 @@ object RelayCategorySyncRepository {
         val urls = categories.flatMap { it.relays }.map { it.url }
         if (urls.isNotEmpty()) {
             RelayConnectionStateMachine.getInstance().nip42AuthHandler.addAllowedRelayUrls(urls)
-            Log.d(TAG, "NIP-42: added ${urls.size} category relay URLs to allowed set")
+            MLog.d(TAG, "NIP-42: added ${urls.size} category relay URLs to allowed set")
         }
     }
 
@@ -153,7 +153,7 @@ object RelayCategorySyncRepository {
         outboxRelayUrls: Set<String>,
     ) {
         if (outboxRelayUrls.isEmpty()) {
-            Log.w(TAG, "No outbox relays — skipping publish for '${category.name}'")
+            MLog.w(TAG, "No outbox relays — skipping publish for '${category.name}'")
             return
         }
         scope.launch {
@@ -183,10 +183,10 @@ object RelayCategorySyncRepository {
                 }
                 val msg = "Published category '${category.name}' (d=${category.id.take(8)}) " +
                     "with ${category.relays.size} relays → ${normalized.size} outbox relays"
-                Log.d(TAG, msg)
+                MLog.d(TAG, msg)
                 DiagnosticLog.sync(TAG, msg)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to publish category '${category.name}': ${e.message}", e)
+                MLog.e(TAG, "Failed to publish category '${category.name}': ${e.message}", e)
             }
         }
     }
@@ -237,10 +237,10 @@ object RelayCategorySyncRepository {
                     RelayHealthTracker.finalizePendingPublish(emptySigned.id)
                 }
 
-                Log.d(TAG, "Deleted category $categoryId (kind-5 + empty replacement)")
+                MLog.d(TAG, "Deleted category $categoryId (kind-5 + empty replacement)")
                 DiagnosticLog.sync(TAG, "DELETE category=$categoryId (kind-5 + empty replacement) → ${normalized.size} relays")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to delete category $categoryId: ${e.message}", e)
+                MLog.e(TAG, "Failed to delete category $categoryId: ${e.message}", e)
             }
         }
     }
@@ -267,7 +267,7 @@ object RelayCategorySyncRepository {
         context: android.content.Context,
     ) {
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "No relays to fetch from — skipping")
+            MLog.w(TAG, "No relays to fetch from — skipping")
             return
         }
 
@@ -320,13 +320,13 @@ object RelayCategorySyncRepository {
                         val removedNames = localCategories.filter { it.id in deletedDTags }.joinToString { "'${it.name}'" }
                         storageManager.saveCategories(userPubkey, purged)
                         _categoriesWrittenVersion.value++
-                        Log.d(TAG, "Purged ${localCategories.size - purged.size} locally-cached categories that were deleted remotely: $removedNames")
+                        MLog.d(TAG, "Purged ${localCategories.size - purged.size} locally-cached categories that were deleted remotely: $removedNames")
                         DiagnosticLog.sync(TAG, "PURGE: removed ${localCategories.size - purged.size} deleted categories from local: $removedNames")
                     }
                 }
 
                 if (collected.isEmpty()) {
-                    Log.d(TAG, "No relay sets found for ${userPubkey.take(8)}")
+                    MLog.d(TAG, "No relay sets found for ${userPubkey.take(8)}")
                     DiagnosticLog.sync(TAG, "FETCH RESULT: 0 relay sets for ${userPubkey.take(8)}")
                     return@launch
                 }
@@ -335,11 +335,11 @@ object RelayCategorySyncRepository {
                     .filter { it.relays.isNotEmpty() } // Skip empty/pruned categories
                 val fetchSummary = "Fetched ${remoteCategories.size} relay sets for ${userPubkey.take(8)}: " +
                     remoteCategories.joinToString { "'${it.name}'(${it.relays.size} relays: ${it.relays.joinToString(",") { r -> r.url.removePrefix("wss://").removeSuffix("/") }})" }
-                Log.d(TAG, fetchSummary)
+                MLog.d(TAG, fetchSummary)
                 DiagnosticLog.sync(TAG, "FETCH RESULT: $fetchSummary")
 
                 if (remoteCategories.isEmpty()) {
-                    Log.d(TAG, "All fetched relay sets were empty after filtering — nothing to merge")
+                    MLog.d(TAG, "All fetched relay sets were empty after filtering — nothing to merge")
                     return@launch
                 }
 
@@ -355,7 +355,7 @@ object RelayCategorySyncRepository {
                     storageManager.saveCategories(userPubkey, merged)
                     _categoriesWrittenVersion.value++
                     notifyNip42AllowedRelays(merged)
-                    Log.d(TAG, "First sign-in: auto-applied ${remoteCategories.size} remote categories")
+                    MLog.d(TAG, "First sign-in: auto-applied ${remoteCategories.size} remote categories")
                     DiagnosticLog.sync(TAG, "MERGE (first sign-in): auto-applied ${remoteCategories.size} remote → ${merged.size} total")
                     return@launch
                 }
@@ -371,7 +371,7 @@ object RelayCategorySyncRepository {
                 }
 
                 if (newFromRemote.isEmpty() && updatedFromRemote.isEmpty()) {
-                    Log.d(TAG, "Remote relay sets match local — no merge needed")
+                    MLog.d(TAG, "Remote relay sets match local — no merge needed")
                     DiagnosticLog.sync(TAG, "MERGE: remote matches local — no changes")
                     return@launch
                 }
@@ -385,14 +385,14 @@ object RelayCategorySyncRepository {
                 )
                 val diffMsg = "DIFF: ${newFromRemote.size} new [${newFromRemote.joinToString { it.name }}], " +
                     "${updatedFromRemote.size} updated [${updatedFromRemote.joinToString { it.name }}] — pending user confirmation"
-                Log.d(TAG, diffMsg)
+                MLog.d(TAG, diffMsg)
                 DiagnosticLog.sync(TAG, diffMsg)
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch relay sets: ${e.message}", e)
+                MLog.e(TAG, "Failed to fetch relay sets: ${e.message}", e)
             }
         }
 
-        Log.d(TAG, "Fetching relay sets for ${userPubkey.take(8)} from ${relayUrls.size} relays")
+        MLog.d(TAG, "Fetching relay sets for ${userPubkey.take(8)} from ${relayUrls.size} relays")
         DiagnosticLog.sync(TAG, "FETCH START: kind-30002 for ${userPubkey.take(8)} from ${relayUrls.size} relays: ${relayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") }}")
     }
 
@@ -432,7 +432,7 @@ object RelayCategorySyncRepository {
                 // Unmonitored relays (private, niche) pass through — benefit of the doubt
                 if (discovered == null) return@filter true
                 val alive = discovered.lastSeen >= sevenDaysAgoSecs
-                if (!alive) Log.d(TAG, "Pruned dead relay from category '$title': ${relay.url}")
+                if (!alive) MLog.d(TAG, "Pruned dead relay from category '$title': ${relay.url}")
                 alive
             }
 
@@ -546,7 +546,7 @@ object RelayCategorySyncRepository {
 
                 val event = bestEvent
                 if (event == null) {
-                    Log.d(TAG, "No indexer list (kind $KIND_INDEXER_LIST) found for ${userPubkey.take(8)}")
+                    MLog.d(TAG, "No indexer list (kind $KIND_INDEXER_LIST) found for ${userPubkey.take(8)}")
                     return@launch
                 }
 
@@ -570,7 +570,7 @@ object RelayCategorySyncRepository {
                         UserRelay(url = url, read = true, write = true, source = social.mycelium.android.data.RelaySource.NIP66_DISCOVERY)
                     }
                     storageManager.saveIndexerRelays(userPubkey, remoteRelays)
-                    Log.d(TAG, "Replaced indexer list: ${localIndexers.size} local → ${remoteRelays.size} from published kind-$KIND_INDEXER_LIST")
+                    MLog.d(TAG, "Replaced indexer list: ${localIndexers.size} local → ${remoteRelays.size} from published kind-$KIND_INDEXER_LIST")
                 } else if (!listsMatch) {
                     // User has confirmed their list — don't overwrite, emit a diff for the UI
                     val added = remoteNormalized - localNormalized
@@ -581,16 +581,16 @@ object RelayCategorySyncRepository {
                         added = added,
                         removed = removed,
                     )
-                    Log.d(TAG, "Indexer list differs from confirmed: +${added.size} -${removed.size} — pending user approval")
+                    MLog.d(TAG, "Indexer list differs from confirmed: +${added.size} -${removed.size} — pending user approval")
                 } else {
-                    Log.d(TAG, "Indexer list matches confirmed local list — no changes needed")
+                    MLog.d(TAG, "Indexer list matches confirmed local list — no changes needed")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch indexer list: ${e.message}", e)
+                MLog.e(TAG, "Failed to fetch indexer list: ${e.message}", e)
             }
         }
 
-        Log.d(TAG, "Fetching indexer list (kind $KIND_INDEXER_LIST) for ${userPubkey.take(8)}")
+        MLog.d(TAG, "Fetching indexer list (kind $KIND_INDEXER_LIST) for ${userPubkey.take(8)}")
     }
 
     // ── Bulk Publish ─────────────────────────────────────────────────────────
@@ -607,6 +607,6 @@ object RelayCategorySyncRepository {
         categories.forEach { category ->
             publishCategory(category, signer, outboxRelayUrls)
         }
-        Log.d(TAG, "Bulk-published ${categories.size} categories")
+        MLog.d(TAG, "Bulk-published ${categories.size} categories")
     }
 }

@@ -1,7 +1,7 @@
 package social.mycelium.android.viewmodel
 
 import android.app.Application
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -74,7 +74,7 @@ class AnnouncementsViewModel(application: Application) : AndroidViewModel(applic
             _uiState.update { it.copy(isLoading = false) }
         }
 
-        Log.d(TAG, "Subscribed to ${relays.size} announcement relays")
+        MLog.d(TAG, "Subscribed to ${relays.size} announcement relays")
     }
 
     fun refresh(pubkey: String) {

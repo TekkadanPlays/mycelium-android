@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.sync
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import android.util.LruCache
 import com.google.mlkit.nl.languageid.LanguageIdentification
 import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
@@ -101,7 +101,7 @@ object TranslationService {
                 cache.put(noteId, translationResult)
                 translationResult
             } catch (e: Exception) {
-                Log.e(TAG, "Translation failed: ${e.message}")
+                MLog.e(TAG, "Translation failed: ${e.message}")
                 null
             }
         }
@@ -111,7 +111,7 @@ object TranslationService {
         return try {
             awaitTask<String> { languageIdentifier.identifyLanguage(text).addOnCompleteListener(it) }
         } catch (e: Exception) {
-            Log.e(TAG, "Language identification failed: ${e.message}")
+            MLog.e(TAG, "Language identification failed: ${e.message}")
             null
         }
     }

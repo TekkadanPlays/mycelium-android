@@ -1,6 +1,6 @@
 package social.mycelium.android.cache.nip11
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import io.ktor.client.HttpClient
 import io.ktor.client.request.get
 import io.ktor.client.request.header
@@ -59,27 +59,27 @@ class Nip11Retriever(
                         if (responseBody.startsWith("{")) {
                             try {
                                 val relayInfo = json.decodeFromString<RelayInformation>(responseBody)
-                                Log.d(TAG, "Fetched NIP-11 info for $relayUrl: ${relayInfo.name}")
+                                MLog.d(TAG, "Fetched NIP-11 info for $relayUrl: ${relayInfo.name}")
                                 onInfo(relayInfo)
                             } catch (e: Exception) {
-                                Log.e(TAG, "Failed to parse NIP-11 for $relayUrl: $responseBody", e)
+                                MLog.e(TAG, "Failed to parse NIP-11 for $relayUrl: $responseBody", e)
                                 onError(relayUrl, ErrorCode.FAIL_TO_PARSE_RESULT, e.message)
                             }
                         } else {
-                            Log.w(TAG, "Invalid JSON response from $relayUrl")
+                            MLog.w(TAG, "Invalid JSON response from $relayUrl")
                             onError(relayUrl, ErrorCode.FAIL_TO_PARSE_RESULT, "Response is not JSON")
                         }
                     } else {
-                        Log.w(TAG, "HTTP error ${response.status} from $relayUrl")
+                        MLog.w(TAG, "HTTP error ${response.status} from $relayUrl")
                         onError(relayUrl, ErrorCode.FAIL_WITH_HTTP_STATUS, "HTTP ${response.status}")
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Network error fetching $relayUrl", e)
+                    MLog.e(TAG, "Network error fetching $relayUrl", e)
                     onError(relayUrl, ErrorCode.FAIL_TO_REACH_SERVER, e.message)
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Invalid URL $relayUrl", e)
+            MLog.e(TAG, "❌ Invalid URL $relayUrl", e)
             onError(relayUrl, ErrorCode.FAIL_TO_ASSEMBLE_URL, e.message)
         }
     }

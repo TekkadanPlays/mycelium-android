@@ -2,7 +2,7 @@ package social.mycelium.android.repository
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Draft
 import social.mycelium.android.data.DraftType
 import kotlinx.coroutines.CoroutineScope
@@ -61,7 +61,7 @@ object DraftsRepository {
             try {
                 json.decodeFromString<List<Draft>>(jsonString)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to decode drafts: ${e.message}")
+                MLog.w(TAG, "Failed to decode drafts: ${e.message}")
                 emptyList()
             }
         } else {
@@ -106,14 +106,14 @@ object DraftsRepository {
         }
         _drafts.value = existing.sortedByDescending { it.updatedAt }
         schedulePersist(pubkey)
-        Log.d(TAG, "Draft saved: ${draft.type} (${draft.id.take(8)})")
+        MLog.d(TAG, "Draft saved: ${draft.type} (${draft.id.take(8)})")
     }
 
     fun deleteDraft(draftId: String) {
         val pubkey = currentPubkey ?: return
         _drafts.update { it.filter { d -> d.id != draftId } }
         schedulePersist(pubkey)
-        Log.d(TAG, "Draft deleted: ${draftId.take(8)}")
+        MLog.d(TAG, "Draft deleted: ${draftId.take(8)}")
     }
 
     fun getDraft(draftId: String): Draft? {
@@ -172,7 +172,7 @@ object DraftsRepository {
             existing[idx] = existing[idx].copy(isCompleted = true, publishError = null, updatedAt = System.currentTimeMillis())
             _drafts.value = existing
             schedulePersist(pubkey)
-            Log.d(TAG, "Draft marked completed: ${draftId.take(8)}")
+            MLog.d(TAG, "Draft marked completed: ${draftId.take(8)}")
         }
     }
 
@@ -185,7 +185,7 @@ object DraftsRepository {
             existing[idx] = existing[idx].copy(publishError = error, updatedAt = System.currentTimeMillis())
             _drafts.value = existing
             schedulePersist(pubkey)
-            Log.w(TAG, "Draft marked failed: ${draftId.take(8)} — $error")
+            MLog.w(TAG, "Draft marked failed: ${draftId.take(8)} — $error")
         }
     }
 
@@ -194,7 +194,7 @@ object DraftsRepository {
         val pubkey = currentPubkey ?: return
         _drafts.update { it.filter { d -> !(d.isScheduled && d.isCompleted) } }
         schedulePersist(pubkey)
-        Log.d(TAG, "Cleared completed scheduled drafts")
+        MLog.d(TAG, "Cleared completed scheduled drafts")
     }
 
     // ── Relay sync tracking ────────────────────────────────────────────
@@ -216,7 +216,7 @@ object DraftsRepository {
             )
             _drafts.value = existing
             schedulePersist(pubkey)
-            Log.d(TAG, "Draft marked synced to ${relayUrls.size} relay(s): ${draftId.take(8)}")
+            MLog.d(TAG, "Draft marked synced to ${relayUrls.size} relay(s): ${draftId.take(8)}")
         }
     }
 

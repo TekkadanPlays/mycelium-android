@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.feed
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -117,11 +117,11 @@ object DeepHistoryFetcher {
     ) {
         if (_isRunning.value) return
         if (_exhausted.value) {
-            Log.d(TAG, "Already exhausted for $userPubkey — skipping")
+            MLog.d(TAG, "Already exhausted for $userPubkey — skipping")
             return
         }
         if (relayUrls.isEmpty() || followedPubkeys.isEmpty()) {
-            Log.w(TAG, "No relays or follows — skipping deep fetch")
+            MLog.w(TAG, "No relays or follows — skipping deep fetch")
             return
         }
 
@@ -133,7 +133,7 @@ object DeepHistoryFetcher {
         val relayHash = relayUrls.sorted().joinToString(",").hashCode()
         val storedHash = prefs.getInt(KEY_RELAY_HASH_PREFIX + shortKey, 0)
         if (storedHash != 0 && storedHash != relayHash) {
-            Log.d(TAG, "Relay set changed (hash $storedHash → $relayHash) — clearing exhaustion")
+            MLog.d(TAG, "Relay set changed (hash $storedHash → $relayHash) — clearing exhaustion")
             prefs.edit()
                 .remove(KEY_EXHAUSTED_PREFIX + shortKey)
                 .putInt(KEY_RELAY_HASH_PREFIX + shortKey, relayHash)
@@ -146,7 +146,7 @@ object DeepHistoryFetcher {
         // Check persisted exhaustion flag
         if (prefs.getBoolean(KEY_EXHAUSTED_PREFIX + shortKey, false)) {
             _exhausted.value = true
-            Log.d(TAG, "Persisted exhaustion flag set for $shortKey — skipping")
+            MLog.d(TAG, "Persisted exhaustion flag set for $shortKey — skipping")
             return
         }
 
@@ -158,10 +158,10 @@ object DeepHistoryFetcher {
             try {
                 runFetchLoop(context, userPubkey, followedPubkeys, relayUrls)
             } catch (e: Exception) {
-                Log.e(TAG, "Deep fetch failed: ${e.message}", e)
+                MLog.e(TAG, "Deep fetch failed: ${e.message}", e)
             } finally {
                 _isRunning.value = false
-                Log.d(TAG, "Session ended: ${_batchesCompleted.value} batches, ${_totalEventsPersisted.value} events")
+                MLog.d(TAG, "Session ended: ${_batchesCompleted.value} batches, ${_totalEventsPersisted.value} events")
             }
         }
     }
@@ -171,7 +171,7 @@ object DeepHistoryFetcher {
         fetchJob?.cancel()
         fetchJob = null
         _isRunning.value = false
-        Log.d(TAG, "Stopped by caller")
+        MLog.d(TAG, "Stopped by caller")
     }
 
     /** Reset the cursor and exhaustion flag for an account (e.g. account switch). */
@@ -186,7 +186,7 @@ object DeepHistoryFetcher {
         _exhausted.value = false
         _batchesCompleted.value = 0
         _totalEventsPersisted.value = 0
-        Log.d(TAG, "Reset cursor for $shortKey")
+        MLog.d(TAG, "Reset cursor for $shortKey")
     }
 
     /**
@@ -252,9 +252,9 @@ object DeepHistoryFetcher {
         if (cursorSec == 0L) {
             val oldestInRoom = eventDao.getOldestFeedEventTimestamp()
             cursorSec = oldestInRoom ?: (System.currentTimeMillis() / 1000)
-            Log.d(TAG, "Starting deep fetch from ${formatSec(cursorSec)} (oldest in Room)")
+            MLog.d(TAG, "Starting deep fetch from ${formatSec(cursorSec)} (oldest in Room)")
         } else {
-            Log.d(TAG, "Resuming deep fetch from ${formatSec(cursorSec)} (persisted cursor)")
+            MLog.d(TAG, "Resuming deep fetch from ${formatSec(cursorSec)} (persisted cursor)")
         }
 
         val followedAuthors = followedPubkeys.toList()
@@ -266,7 +266,7 @@ object DeepHistoryFetcher {
             var windowTotalEvents = 0
             var oldestEventInBatch = cursorSec
 
-            Log.d(TAG, "Window ${formatSec(windowStart)} → ${formatSec(cursorSec)} — fetching ${KIND_GROUPS.size} kind groups")
+            MLog.d(TAG, "Window ${formatSec(windowStart)} → ${formatSec(cursorSec)} — fetching ${KIND_GROUPS.size} kind groups")
 
             // Fetch each kind group for this time window
             for (group in KIND_GROUPS) {
@@ -311,7 +311,7 @@ object DeepHistoryFetcher {
                         events.add(event to relayUrl)
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "${group.label}: subscription failed: ${e.message}")
+                    MLog.w(TAG, "${group.label}: subscription failed: ${e.message}")
                 }
 
                 if (events.isNotEmpty()) {
@@ -333,7 +333,7 @@ object DeepHistoryFetcher {
                     try {
                         eventDao.insertAll(entities)
                     } catch (e: Exception) {
-                        Log.e(TAG, "${group.label}: Room insert failed: ${e.message}")
+                        MLog.e(TAG, "${group.label}: Room insert failed: ${e.message}")
                     }
 
                     // Replay notification-relevant events so they populate the notifications tab.
@@ -374,10 +374,10 @@ object DeepHistoryFetcher {
                             }
                         }
                         if (notifCount > 0) {
-                            Log.d(TAG, "  ${group.label}: replayed $notifCount events to notifications")
+                            MLog.d(TAG, "  ${group.label}: replayed $notifCount events to notifications")
                         }
                         if (dmCount > 0) {
-                            Log.d(TAG, "  ${group.label}: buffered $dmCount gift wraps for DMs")
+                            MLog.d(TAG, "  ${group.label}: buffered $dmCount gift wraps for DMs")
                         }
                     }
 
@@ -413,9 +413,9 @@ object DeepHistoryFetcher {
                                 // Don't let a single bad event kill the whole batch
                             }
                         }
-                        if (topicCount > 0) Log.d(TAG, "  ${group.label}: replayed $topicCount topics")
-                        if (commentCount > 0) Log.d(TAG, "  ${group.label}: replayed $commentCount comments (reply counts + notifications)")
-                        if (voteCount > 0) Log.d(TAG, "  ${group.label}: replayed $voteCount votes")
+                        if (topicCount > 0) MLog.d(TAG, "  ${group.label}: replayed $topicCount topics")
+                        if (commentCount > 0) MLog.d(TAG, "  ${group.label}: replayed $commentCount comments (reply counts + notifications)")
+                        if (voteCount > 0) MLog.d(TAG, "  ${group.label}: replayed $voteCount votes")
                     }
 
                     windowTotalEvents += events.size
@@ -424,9 +424,9 @@ object DeepHistoryFetcher {
                     if (events.size >= BATCH_LIMIT) {
                         val oldestInGroup = events.minOfOrNull { it.first.createdAt } ?: oldestEventInBatch
                         oldestEventInBatch = minOf(oldestEventInBatch, oldestInGroup)
-                        Log.d(TAG, "  ${group.label}: hit limit ${events.size}, oldest seen is ${formatSec(oldestInGroup)}")
+                        MLog.d(TAG, "  ${group.label}: hit limit ${events.size}, oldest seen is ${formatSec(oldestInGroup)}")
                     } else {
-                        Log.d(TAG, "  ${group.label}: ${events.size} events")
+                        MLog.d(TAG, "  ${group.label}: ${events.size} events")
                     }
                 }
 
@@ -437,17 +437,17 @@ object DeepHistoryFetcher {
                 delay(500L)
             }
 
-            Log.d(TAG, "Window complete: ${windowTotalEvents} events persisted (total: ${_totalEventsPersisted.value})")
+            MLog.d(TAG, "Window complete: ${windowTotalEvents} events persisted (total: ${_totalEventsPersisted.value})")
 
             if (windowTotalEvents == 0) {
                 consecutiveEmptyWindows++
                 if (cursorSec - WINDOW_SECONDS <= floorSec) {
-                    Log.d(TAG, "Reached 5-year floor with 0 events — exhausted")
+                    MLog.d(TAG, "Reached 5-year floor with 0 events — exhausted")
                     markExhausted(prefs, shortKey)
                     break
                 }
                 if (consecutiveEmptyWindows >= 6) {
-                    Log.d(TAG, "6 consecutive empty windows (6 months) with 0 events — exhausted")
+                    MLog.d(TAG, "6 consecutive empty windows (6 months) with 0 events — exhausted")
                     markExhausted(prefs, shortKey)
                     break
                 }
@@ -467,7 +467,7 @@ object DeepHistoryFetcher {
             saveCursor(prefs, shortKey, cursorSec)
 
             if (cursorSec <= floorSec) {
-                Log.d(TAG, "Reached 5-year floor — exhausted")
+                MLog.d(TAG, "Reached 5-year floor — exhausted")
                 markExhausted(prefs, shortKey)
                 break
             }

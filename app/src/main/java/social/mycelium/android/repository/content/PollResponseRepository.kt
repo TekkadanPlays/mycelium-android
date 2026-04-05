@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.content
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -49,7 +49,7 @@ object PollResponseRepository {
                     referencedEventId = pollId
                 ))
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to persist poll response ${event.id.take(8)}: ${e.message}")
+                MLog.w(TAG, "Failed to persist poll response ${event.id.take(8)}: ${e.message}")
             }
         }
     }
@@ -82,7 +82,7 @@ object PollResponseRepository {
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse cached poll response: ${e.message}")
+                MLog.w(TAG, "Failed to parse cached poll response: ${e.message}")
             }
         }
 
@@ -148,7 +148,7 @@ object PollResponseRepository {
                 val roomTally = loadTallyFromRoom(pollId, myPubkey)
                 if (roomTally != null) {
                     _tallies.value = _tallies.value + (pollId to roomTally.copy(isFetching = true))
-                    Log.d(TAG, "Poll $pollId: seeded ${roomTally.totalVoters} voters from Room cache")
+                    MLog.d(TAG, "Poll $pollId: seeded ${roomTally.totalVoters} voters from Room cache")
                 }
 
                 // ── Phase 2: Fetch from relays and persist to Room ──
@@ -194,9 +194,9 @@ object PollResponseRepository {
                 _tallies.value = _tallies.value + (pollId to tally)
                 fetchedPolls.add(pollId)
                 lastFetchTimeSec[pollId] = fetchStartSec
-                Log.d(TAG, "Poll $pollId: ${votersSeen.size} voters, ${votesByOption.size} options with votes")
+                MLog.d(TAG, "Poll $pollId: ${votersSeen.size} voters, ${votesByOption.size} options with votes")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch tally for $pollId: ${e.message}")
+                MLog.e(TAG, "Failed to fetch tally for $pollId: ${e.message}")
                 _tallies.value = _tallies.value + (pollId to PollTally(pollId, isFetching = false))
             } finally {
                 inFlightPolls.remove(pollId)
@@ -265,13 +265,13 @@ object PollResponseRepository {
                         totalVoters = current.totalVoters + newVoterCount
                     )
                     _tallies.value = _tallies.value + (pollId to updated)
-                    Log.d(TAG, "Poll $pollId delta refresh: +$newVoterCount new voters")
+                    MLog.d(TAG, "Poll $pollId delta refresh: +$newVoterCount new voters")
                 } else {
-                    Log.d(TAG, "Poll $pollId delta refresh: no new votes since $sinceSec")
+                    MLog.d(TAG, "Poll $pollId delta refresh: no new votes since $sinceSec")
                 }
                 lastFetchTimeSec[pollId] = refreshStartSec
             } catch (e: Exception) {
-                Log.w(TAG, "Poll $pollId delta refresh failed: ${e.message}")
+                MLog.w(TAG, "Poll $pollId delta refresh failed: ${e.message}")
             } finally {
                 inFlightPolls.remove(pollId)
             }
@@ -375,10 +375,10 @@ object PollResponseRepository {
             )
             _tallies.value = _tallies.value + (pollId to updated)
             persistEvent(event, pollId)
-            Log.d(TAG, "Live vote on poll ${pollId.take(8)}: +1 voter (${voterPubkey.take(8)})")
+            MLog.d(TAG, "Live vote on poll ${pollId.take(8)}: +1 voter (${voterPubkey.take(8)})")
         }
         liveSubscriptions[pollId] = handle
-        Log.d(TAG, "Live subscription opened for poll ${pollId.take(8)}")
+        MLog.d(TAG, "Live subscription opened for poll ${pollId.take(8)}")
         return handle
     }
 

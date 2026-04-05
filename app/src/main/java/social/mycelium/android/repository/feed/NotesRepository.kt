@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.feed
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.PublishState
@@ -96,7 +96,7 @@ class NotesRepository private constructor() {
     private val relayStateMachine = RelayConnectionStateMachine.getInstance()
     private val profileCache = ProfileMetadataCache.getInstance()
     private val topicRepliesRepo = TopicRepliesRepository.getInstance()
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     private var cacheRelayUrls = listOf<String>()
 
@@ -115,18 +115,40 @@ class NotesRepository private constructor() {
     private val pendingNip11Urls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var nip11PreloadJob: Job? = null
     private val NIP11_PRELOAD_DEBOUNCE_MS = 2000L
-    /** Max events to process per flush cycle during steady-state (live feed, post-initial-load).
-     *  Remaining events stay in the queue and are processed on the next poll iteration. */
-    private val STEADY_STATE_CHUNK_SIZE = 50
-    /** Max events to process per flush cycle during initial load / burst ingestion.
-     *  10× steady-state to drain 60k+ event queues in ~120 cycles instead of 1200+. */
-    private val BURST_CHUNK_SIZE = 500
-    /** Enrichment (counts, quotes, URL previews, profiles, NIP-11) is deferred until the
-     *  pending queue shrinks below this threshold. Prevents 1200 rounds of subscription
-     *  fan-out when ingesting 60k events — enrichment fires once when the queue is mostly drained. */
-    private val ENRICHMENT_DRAIN_THRESHOLD = 200
+    // ── Adaptive batching: relay-count-aware chunk sizing ───────────────────
+    // More relays = more concurrent event delivery = need larger batches.
+    // Base values are for ≤4 relays. Each additional relay adds ~10% capacity.
+
+    /** Base steady-state chunk size (≤4 relays). */
+    private val BASE_STEADY_CHUNK = 50
+    /** Base burst chunk size (≤4 relays). */
+    private val BASE_BURST_CHUNK = 500
+    /** Base enrichment drain threshold (≤4 relays). */
+    private val BASE_DRAIN_THRESHOLD = 200
+
+    /** Compute adaptive steady-state chunk size based on relay count.
+     *  Scales: 50 at 4 relays → 75 at 10 → 125 at 20 → caps at 200. */
+    private fun steadyStateChunkSize(): Int {
+        val relayCount = subscriptionRelays.size.coerceAtLeast(1)
+        return (BASE_STEADY_CHUNK * (1.0 + (relayCount - 4).coerceAtLeast(0) * 0.10)).toInt().coerceIn(BASE_STEADY_CHUNK, 200)
+    }
+
+    /** Compute adaptive burst chunk size based on relay count.
+     *  Scales: 500 at 4 relays → 750 at 10 → 1250 at 20 → caps at 2000. */
+    private fun burstChunkSize(): Int {
+        val relayCount = subscriptionRelays.size.coerceAtLeast(1)
+        return (BASE_BURST_CHUNK * (1.0 + (relayCount - 4).coerceAtLeast(0) * 0.10)).toInt().coerceIn(BASE_BURST_CHUNK, 2000)
+    }
+
+    /** Compute adaptive drain threshold based on relay count.
+     *  Scales: 200 at 4 relays → 300 at 10 → 500 at 20 → caps at 800. */
+    private fun enrichmentDrainThreshold(): Int {
+        val relayCount = subscriptionRelays.size.coerceAtLeast(1)
+        return (BASE_DRAIN_THRESHOLD * (1.0 + (relayCount - 4).coerceAtLeast(0) * 0.10)).toInt().coerceIn(BASE_DRAIN_THRESHOLD, 800)
+    }
+
     /** Notes awaiting enrichment (counts/quotes/URL previews). Accumulated across flush cycles
-     *  during burst ingestion and fired once when the queue drains below ENRICHMENT_DRAIN_THRESHOLD. */
+     *  during burst ingestion and fired once when the queue drains below the drain threshold. */
     private val deferredEnrichmentNotes = java.util.concurrent.ConcurrentLinkedQueue<Note>()
     /** During burst ingestion, throttle _notes.value StateFlow emissions to prevent
      *  Compose snapshot churn. Only emit if 200ms has passed since the last write. */
@@ -152,8 +174,8 @@ class NotesRepository private constructor() {
 
     init {
         if (BuildConfig.DEBUG) {
-            Log.i("MyceliumEvent", "Monitor enabled: kind-1 events will be logged here. Run: adb logcat -s MyceliumEvent")
-            Log.i(TAG, "MyceliumEvent monitor enabled (debug). Use logcat -s MyceliumEvent or -s NotesRepository")
+            MLog.i("MyceliumEvent", "Monitor enabled: kind-1 events will be logged here. Run: adb logcat -s MyceliumEvent")
+            MLog.i(TAG, "MyceliumEvent monitor enabled (debug). Use logcat -s MyceliumEvent or -s NotesRepository")
         }
         relayStateMachine.registerKind1Handler { event, relayUrl ->
             // Lock-free: enqueue and signal the poller. Never blocks, never drops.
@@ -172,14 +194,14 @@ class NotesRepository private constructor() {
         // Wire outbox feed events into the same ingestion pipeline
         // Mark as isOutbox=true so they bypass the cutoff gate and go directly to feed.
         outboxFeedManager.onNoteReceived = { event, relayUrl ->
-            Log.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
+            MLog.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
             EventRelayTracker.addRelay(event.id, relayUrl)
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             kind1Dirty.set(true)
         }
         // Wire global feed enrichment events (hashtag/list indexer subscriptions) into the pipeline.
         globalFeedManager.onNoteReceived = { event, relayUrl ->
-            Log.d(TAG, "\uD83C\uDF0D Global enrichment event: ${event.id.take(8)} from $relayUrl")
+            MLog.d(TAG, "\uD83C\uDF0D Global enrichment event: ${event.id.take(8)} from $relayUrl")
             EventRelayTracker.addRelay(event.id, relayUrl)
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = false))
             kind1Dirty.set(true)
@@ -198,7 +220,7 @@ class NotesRepository private constructor() {
      */
     fun startOutboxFeed(followedPubkeys: Set<String>, indexerRelayUrls: List<String>) {
         if (!followFilterEnabled || followedPubkeys.isEmpty()) {
-            Log.d(TAG, "Outbox feed skipped: followFilterEnabled=$followFilterEnabled, follows=${followedPubkeys.size}")
+            MLog.d(TAG, "Outbox feed skipped: followFilterEnabled=$followFilterEnabled, follows=${followedPubkeys.size}")
             return
         }
         outboxFeedManager.start(
@@ -231,9 +253,9 @@ class NotesRepository private constructor() {
      * no event loss — if enqueuers set kind1Dirty, the next poll iteration picks it up.
      *
      * Idle: polls every 100ms (sleeping, no CPU cost).
-     * Burst (queue > ENRICHMENT_DRAIN_THRESHOLD): processes large chunks (BURST_CHUNK_SIZE),
-     *   defers enrichment, uses 4ms inter-flush delay to drain fast.
-     * Steady-state: processes small chunks (STEADY_STATE_CHUNK_SIZE), fires enrichment
+     * Burst (queue > adaptive drain threshold): processes large chunks (relay-scaled),
+     *   defers enrichment, uses adaptive inter-flush delay to drain fast.
+     * Steady-state: processes small chunks (relay-scaled), fires enrichment
      *   immediately, yields one frame (~16ms) between chunks.
      */
     private fun startKind1FlushPoller() {
@@ -243,8 +265,11 @@ class NotesRepository private constructor() {
                     flushKind1Events()
                     // Adaptive inter-flush delay: tight during burst, relaxed in steady-state
                     val queueSize = pendingKind1Events.size
-                    if (queueSize > ENRICHMENT_DRAIN_THRESHOLD) {
-                        delay(4) // Burst: drain fast, UI can wait
+                    if (queueSize > enrichmentDrainThreshold()) {
+                        // Adaptive burst delay: scales down with relay count
+                        // More relays → more events → need tighter drain loop
+                        val burstDelay = if (subscriptionRelays.size > 10) 2L else 4L
+                        delay(burstDelay)
                     } else {
                         // Queue just drained below threshold — flush burst shadow
                         val shadow = burstShadowNotes
@@ -252,7 +277,7 @@ class NotesRepository private constructor() {
                             burstShadowNotes = null
                             _notes.value = shadow.toImmutableList()
                             lastEmissionMs = System.currentTimeMillis()
-                            Log.d(TAG, "Burst ended: flushed shadow list (${shadow.size} notes)")
+                            MLog.d(TAG, "Burst ended: flushed shadow list (${shadow.size} notes)")
                         }
                         // Fire accumulated enrichment
                         if (deferredEnrichmentNotes.isNotEmpty()) {
@@ -278,12 +303,13 @@ class NotesRepository private constructor() {
      * ConcurrentModificationException.
      */
     private suspend fun flushKind1Events() {
-        // Dynamic chunk sizing: large chunks during initial load / burst ingestion,
-        // small chunks during steady-state to keep UI responsive.
-        val chunkSize = if (!initialLoadComplete || pendingKind1Events.size > ENRICHMENT_DRAIN_THRESHOLD) {
-            BURST_CHUNK_SIZE
+        // Adaptive chunk sizing: scales with relay count. More relays = larger batches.
+        // Burst during initial load or when queue is backing up; steady-state otherwise.
+        val drainThreshold = enrichmentDrainThreshold()
+        val chunkSize = if (!initialLoadComplete || pendingKind1Events.size > drainThreshold) {
+            burstChunkSize()
         } else {
-            STEADY_STATE_CHUNK_SIZE
+            steadyStateChunkSize()
         }
         val batch = mutableListOf<PendingKind1Event>()
         var drained = 0
@@ -343,7 +369,7 @@ class NotesRepository private constructor() {
             val duplicateCount = batchEventIds.size - uniqueEventIds.size
             val relayDistribution = batchEventIds.groupBy { it.relayUrl }.mapValues { it.value.size }
             if (batchEventIds.isNotEmpty()) {
-                Log.d(TAG, "\uD83D\uDD35 BATCH: ${batchEventIds.size} events, ${uniqueEventIds.size} unique, $duplicateCount dupes, relays=${relayDistribution.entries.joinToString { "${it.key.takeLast(25)}=${it.value}" }}")
+                MLog.d(TAG, "\uD83D\uDD35 BATCH: ${batchEventIds.size} events, ${uniqueEventIds.size} unique, $duplicateCount dupes, relays=${relayDistribution.entries.joinToString { "${it.key.takeLast(25)}=${it.value}" }}")
             }
 
             // Separate kind-6/16 reposts for batch processing after kind-1
@@ -413,7 +439,7 @@ class NotesRepository private constructor() {
                         val existingUrls = existingRepost.relayUrls.ifEmpty { listOfNotNull(existingRepost.relayUrl) }
                         if (newUrl !in existingUrls) {
                             relayUpdates[repostId] = (existingUrls + newUrl)
-                            Log.d(TAG, "\uD83D\uDD35 Relay merge into repost: ${repostId.take(16)} += $newUrl")
+                            MLog.d(TAG, "\uD83D\uDD35 Relay merge into repost: ${repostId.take(16)} += $newUrl")
                         }
                     }
                     continue
@@ -467,7 +493,7 @@ class NotesRepository private constructor() {
                     val existingUrls = existing.relayUrls.ifEmpty { listOfNotNull(existing.relayUrl) }
                     if (newUrl != null && newUrl.isNotBlank() && newUrl !in existingUrls) {
                         relayUpdates[event.id] = existingUrls + newUrl
-                        Log.d(TAG, "\uD83D\uDD35 Relay merge: ${event.id.take(8)} += $newUrl")
+                        MLog.d(TAG, "\uD83D\uDD35 Relay merge: ${event.id.take(8)} += $newUrl")
                     }
                     continue
                 }
@@ -568,7 +594,7 @@ class NotesRepository private constructor() {
                     val staleNotes = _notes.value.filter { it.id in staleIds }
                     staleNotes.forEach { feedIndex.removeNote(it) }
                     _notes.value = _notes.value.filter { it.id !in staleIds }.toImmutableList()
-                    Log.d(TAG, "Removed ${staleIds.size} stale article versions replaced by newer events")
+                    MLog.d(TAG, "Removed ${staleIds.size} stale article versions replaced by newer events")
                 }
             }
 
@@ -630,7 +656,7 @@ class NotesRepository private constructor() {
 
                 // Apply relay URL merges to the merged list BEFORE emitting (coalesced single write)
                 val finalMerged = if (relayUpdates.isNotEmpty()) {
-                    Log.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges inline")
+                    MLog.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges inline")
                     merged.map { note ->
                         relayUpdates[note.id]?.let { urls ->
                             val updated = note.copy(relayUrls = urls)
@@ -646,7 +672,7 @@ class NotesRepository private constructor() {
                 // list and only emit to StateFlow every 200ms. This reduces emissions
                 // from ~250/sec to ~5/sec, preventing Compose snapshot churn.
                 val now = System.currentTimeMillis()
-                val queueStillLargeForEmission = pendingKind1Events.size > ENRICHMENT_DRAIN_THRESHOLD
+                val queueStillLargeForEmission = pendingKind1Events.size > enrichmentDrainThreshold()
                 if (queueStillLargeForEmission && (now - lastEmissionMs) < BURST_EMISSION_THROTTLE_MS) {
                     // Accumulate in shadow — skip StateFlow write
                     burstShadowNotes = finalMerged
@@ -658,7 +684,7 @@ class NotesRepository private constructor() {
                 }
                 advancePaginationCursor(feedNotes)
                 if (!initialLoadComplete && finalMerged.size % 50 == 0) {
-                    Log.d(TAG, "Initial load: ${finalMerged.size} notes so far")
+                    MLog.d(TAG, "Initial load: ${finalMerged.size} notes so far")
                 }
 
                 // Persist relay URL merges to Room (background, best-effort)
@@ -676,7 +702,7 @@ class NotesRepository private constructor() {
                 }
             } else if (relayUpdates.isNotEmpty()) {
                 // No new feed notes, but relay URL merges to apply
-                Log.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges (no new notes)")
+                MLog.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges (no new notes)")
                 val afterMerge = _notes.value
                 val updatedList = afterMerge.map { note ->
                     relayUpdates[note.id]?.let { urls ->
@@ -703,8 +729,8 @@ class NotesRepository private constructor() {
             // ── Enrichment: counts, quotes, URL previews, profiles, NIP-11 ──
             // During burst ingestion (queue still large), defer enrichment to avoid
             // 1200 rounds of subscription fan-out. Accumulate notes and fire once
-            // when the queue drains below ENRICHMENT_DRAIN_THRESHOLD.
-            val queueStillLarge = pendingKind1Events.size > ENRICHMENT_DRAIN_THRESHOLD
+            // when the queue drains below the adaptive drain threshold.
+            val queueStillLarge = pendingKind1Events.size > enrichmentDrainThreshold()
 
             if (feedNotes.isNotEmpty()) {
                 if (queueStillLarge) {
@@ -771,10 +797,10 @@ class NotesRepository private constructor() {
             }
 
             if (BuildConfig.DEBUG && batch.size > 5) {
-                Log.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges${if (ageGateDropped > 0) ", $ageGateDropped age-gated" else ""}")
+                MLog.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges${if (ageGateDropped > 0) ", $ageGateDropped age-gated" else ""}")
             }
             if (ageGateDropped > 0) {
-                Log.w(TAG, "Age gate dropped $ageGateDropped events (floor=${fmtMs(ageFloorMs)}, mainFloor=${fmtMs(mainSubscriptionFloorMs)}, absFloor=${fmtMs(absoluteFloorMs)})")
+                MLog.w(TAG, "Age gate dropped $ageGateDropped events (floor=${fmtMs(ageFloorMs)}, mainFloor=${fmtMs(mainSubscriptionFloorMs)}, absFloor=${fmtMs(absoluteFloorMs)})")
             }
 
             // ── Batch kind-6/16 reposts ──────────────────────────────────────────
@@ -785,13 +811,13 @@ class NotesRepository private constructor() {
                     handleKind6Repost(pending.event, pending.relayUrl)
                 }
                 if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "Processed ${kind6Batch.size} kind-6 reposts in batch")
+                    MLog.d(TAG, "Processed ${kind6Batch.size} kind-6 reposts in batch")
                 }
             }
 
             // Poller handles remaining events automatically — no continuation flush needed
         } catch (e: Throwable) {
-            Log.e(TAG, "flushKind1Events failed: ${e.message}", e)
+            MLog.e(TAG, "flushKind1Events failed: ${e.message}", e)
         } finally {
             PipelineDiagnostics.recordBatch(batch.size, System.currentTimeMillis() - flushStartMs)
             if (BuildConfig.DEBUG) PipelineDiagnostics.logSummary(TAG)
@@ -886,13 +912,13 @@ class NotesRepository private constructor() {
 
     /**
      * Drain all deferred enrichment notes and fire enrichment + profile + NIP-11
-     * in one shot. Called by the poller when the queue drops below [ENRICHMENT_DRAIN_THRESHOLD].
+     * in one shot. Called by the poller when the queue drops below the adaptive drain threshold.
      */
     private fun fireDeferredEnrichment() {
         val enrichBatch = mutableListOf<Note>()
         while (true) { val n = deferredEnrichmentNotes.poll() ?: break; enrichBatch.add(n) }
         if (enrichBatch.isNotEmpty()) {
-            Log.d(TAG, "🔶 Firing deferred enrichment for ${enrichBatch.size} accumulated notes")
+            MLog.d(TAG, "🔶 Firing deferred enrichment for ${enrichBatch.size} accumulated notes")
             fireEnrichmentForNotes(enrichBatch)
         }
         // Profiles
@@ -917,7 +943,7 @@ class NotesRepository private constructor() {
             val urls = pendingNip11Urls.toList()
             pendingNip11Urls.clear()
             if (urls.isNotEmpty()) {
-                Log.d(TAG, "NIP-11 preload: ${urls.size} new relay URLs from feed notes")
+                MLog.d(TAG, "NIP-11 preload: ${urls.size} new relay URLs from feed notes")
                 social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
                     ?.preloadRelayInfo(urls, scope)
             }
@@ -978,7 +1004,7 @@ class NotesRepository private constructor() {
                 }
             }
             if (prefetched > 0) {
-                Log.d(TAG, "URL preview prefetch: $prefetched URLs from ${batch.size} notes")
+                MLog.d(TAG, "URL preview prefetch: $prefetched URLs from ${batch.size} notes")
             }
         }
     }
@@ -1041,11 +1067,14 @@ class NotesRepository private constructor() {
             try {
                 dao.insertAll(entities)
                 PipelineDiagnostics.recordDbCommit(entities.size)
+                // Notify FeedWindowManager that Room has new data — enables
+                // Room-first freshness for pagination and cold-start restore.
+                feedWindowManager?.onRoomDataChanged()
                 if (entities.size > 20) {
-                    Log.d(TAG, "Event store: persisted ${entities.size} events (total=${dao.count()})")
+                    MLog.d(TAG, "Event store: persisted ${entities.size} events (total=${dao.count()})")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Event store flush failed: ${e.message}", e)
+                MLog.e(TAG, "Event store flush failed: ${e.message}", e)
             }
         }
     }
@@ -1062,7 +1091,7 @@ class NotesRepository private constructor() {
      */
     fun setCurrentUserPubkey(pubkey: String?) {
         currentUserPubkey = pubkey?.lowercase()
-        Log.d(TAG, "Set current user pubkey: ${pubkey?.take(8)}...")
+        MLog.d(TAG, "Set current user pubkey: ${pubkey?.take(8)}...")
     }
 
     /**
@@ -1084,10 +1113,13 @@ class NotesRepository private constructor() {
 
     /** Notes loaded from Room via windowed paging. These live OUTSIDE _notes to avoid
      *  the in-memory cap. updateDisplayedNotes() appends these after the filtered
-     *  in-memory portion so they survive enrichment/emission cycles. */
+     *  in-memory portion so they survive enrichment/emission cycles.
+     *  Capped at [MAX_ROOM_PAGINATED] to prevent unbounded memory growth. */
     private val roomPaginatedNotes = java.util.Collections.synchronizedList(mutableListOf<Note>())
     /** IDs of Room-paginated notes for O(1) dedup. */
     private val roomPaginatedIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    /** Max Room-paginated notes kept in memory. Older entries are trimmed. */
+    private val MAX_ROOM_PAGINATED = 500
 
     /** Persistent O(1) index over _notes. Updated incrementally on the hot path (flushKind1Events)
      *  and rebuilt on cold paths (mode switch, snapshot restore, clearNotes). */
@@ -1330,15 +1362,15 @@ class NotesRepository private constructor() {
     ) {
         val dao = eventDao
         if (dao == null) {
-            Log.w(TAG, "prewarmFeedCache: Room not initialized, skipping")
+            MLog.w(TAG, "prewarmFeedCache: Room not initialized, skipping")
             return
         }
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "prewarmFeedCache: no relay URLs, skipping")
+            MLog.w(TAG, "prewarmFeedCache: no relay URLs, skipping")
             return
         }
 
-        Log.d(TAG, "prewarmFeedCache: preloading $limit notes from ${relayUrls.size} relays (${followedPubkeys.size} follows)")
+        MLog.d(TAG, "prewarmFeedCache: preloading $limit notes from ${relayUrls.size} relays (${followedPubkeys.size} follows)")
         val startMs = System.currentTimeMillis()
 
         val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400L * FEED_SINCE_DAYS
@@ -1385,7 +1417,7 @@ class NotesRepository private constructor() {
 
         val events = receivedEvents.toList()
         if (events.isEmpty()) {
-            Log.d(TAG, "prewarmFeedCache: no events received after ${System.currentTimeMillis() - startMs}ms")
+            MLog.d(TAG, "prewarmFeedCache: no events received after ${System.currentTimeMillis() - startMs}ms")
             return
         }
 
@@ -1407,9 +1439,9 @@ class NotesRepository private constructor() {
         withContext(Dispatchers.IO) {
             try {
                 dao.insertAll(entities)
-                Log.d(TAG, "prewarmFeedCache: persisted ${entities.size} events in ${System.currentTimeMillis() - startMs}ms")
+                MLog.d(TAG, "prewarmFeedCache: persisted ${entities.size} events in ${System.currentTimeMillis() - startMs}ms")
             } catch (e: Exception) {
-                Log.e(TAG, "prewarmFeedCache: Room insert failed: ${e.message}", e)
+                MLog.e(TAG, "prewarmFeedCache: Room insert failed: ${e.message}", e)
             }
         }
 
@@ -1421,9 +1453,9 @@ class NotesRepository private constructor() {
             scope.launch {
                 try {
                     profileCache.requestProfiles(authorPubkeys, profileRelayUrls)
-                    Log.d(TAG, "prewarmFeedCache: queued ${authorPubkeys.size} profile fetches")
+                    MLog.d(TAG, "prewarmFeedCache: queued ${authorPubkeys.size} profile fetches")
                 } catch (e: Exception) {
-                    Log.w(TAG, "prewarmFeedCache: profile prefetch failed: ${e.message}")
+                    MLog.w(TAG, "prewarmFeedCache: profile prefetch failed: ${e.message}")
                 }
             }
         }
@@ -1452,7 +1484,7 @@ class NotesRepository private constructor() {
                 val prefs = context.applicationContext.getSharedPreferences("notes_feed_cache", Context.MODE_PRIVATE)
                 if (prefs.contains("feed_notes") || prefs.contains("feed_notes_following")) {
                     prefs.edit().clear().apply()
-                    Log.d(TAG, "Cleared legacy SharedPreferences feed cache")
+                    MLog.d(TAG, "Cleared legacy SharedPreferences feed cache")
                 }
             } catch (_: Exception) {}
         }
@@ -1499,10 +1531,10 @@ class NotesRepository private constructor() {
                         val restored = if (allUrls.isNotEmpty()) note.copy(relayUrls = allUrls) else note
                         if (!restored.isReply) notes.add(restored)
                     } catch (e: Exception) {
-                        Log.w(TAG, "Feed cache: skip bad event ${entity.eventId.take(8)}: ${e.message}")
+                        MLog.w(TAG, "Feed cache: skip bad event ${entity.eventId.take(8)}: ${e.message}")
                     }
                 }
-                if (cacheDropped > 0) Log.w(TAG, "Feed cache: dropped $cacheDropped ancient events (>14d)")
+                if (cacheDropped > 0) MLog.w(TAG, "Feed cache: dropped $cacheDropped ancient events (>14d)")
                 if (notes.isNotEmpty() && _notes.value.isEmpty()) {
                     setNotes(notes.toImmutableList())
                     _displayedNotes.value = notes.toImmutableList()
@@ -1512,13 +1544,13 @@ class NotesRepository private constructor() {
                     latestNoteTimestampAtOpen = notes.maxOfOrNull { it.timestamp } ?: now
                     _feedSessionState.value = FeedSessionState.Live
                     _hasEverLoadedFeed.value = true
-                    Log.d(TAG, "Restored ${notes.size} notes from Room event store")
+                    MLog.d(TAG, "Restored ${notes.size} notes from Room event store")
                     // Prefetch quoted notes for restored feed so cards render without spinners
                     QuotedNoteCache.prefetchForNotes(notes)
                     refreshAuthorsFromCache()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Load feed cache from Room failed: ${e.message}", e)
+                MLog.e(TAG, "Load feed cache from Room failed: ${e.message}", e)
             } finally {
                 _feedCacheChecked.value = true
             }
@@ -1569,7 +1601,7 @@ class NotesRepository private constructor() {
         // skip the subscription entirely — the ingestion filter will drop everything anyway,
         // and the subscription will be re-applied once the follow list loads.
         if (effectiveFilter == null && followFilterEnabled && !isGlobalMode) {
-            Log.w(TAG, "BLOCKED global subscription while in Following mode — waiting for follow list to load")
+            MLog.w(TAG, "BLOCKED global subscription while in Following mode — waiting for follow list to load")
             return
         }
         relayStateMachine.requestFeedChange(relayUrls, effectiveFilter)
@@ -1591,7 +1623,7 @@ class NotesRepository private constructor() {
      */
     fun setSubscriptionRelays(allUserRelayUrls: List<String>) {
         if (allUserRelayUrls.sorted() == subscriptionRelays.sorted()) return
-        Log.d(TAG, "Subscription relays set: ${allUserRelayUrls.size} relays (stay connected to all)")
+        MLog.d(TAG, "Subscription relays set: ${allUserRelayUrls.size} relays (stay connected to all)")
         subscriptionRelays = allUserRelayUrls
         // Keep the idempotency guard in sync so ensureSubscriptionToNotes doesn't
         // overwrite the state machine's subscription with a stale relay set.
@@ -1623,7 +1655,7 @@ class NotesRepository private constructor() {
     fun connectToRelays(displayFilterUrls: List<String>) {
         val normalized = displayFilterUrls.mapNotNull { RelayUrlNormalizer.normalizeOrNull(it)?.url }.distinct()
         connectedRelays = if (normalized.isNotEmpty()) normalized else displayFilterUrls
-        Log.d(TAG, "Display filter: ${connectedRelays.size} relay(s)")
+        MLog.d(TAG, "Display filter: ${connectedRelays.size} relay(s)")
         updateDisplayedNotes()
     }
 
@@ -1654,7 +1686,7 @@ class NotesRepository private constructor() {
         updateDisplayedNotes()
         if (subscriptionRelays.isNotEmpty()) {
             applySubscriptionToStateMachine(subscriptionRelays)
-            Log.d(TAG, "Custom list filter applied: ${normalized.size} authors")
+            MLog.d(TAG, "Custom list filter applied: ${normalized.size} authors")
         }
     }
 
@@ -1671,7 +1703,7 @@ class NotesRepository private constructor() {
         // (e.g. from ContactListRepository re-fetch or LaunchedEffect re-fire) would blank the feed.
         // Keep the existing filter; it will be overwritten once the real follow list arrives.
         if (effective == null && enabled && followFilter != null && !wasGlobal) {
-            Log.w(TAG, "setFollowFilter: ignoring null effective — keeping existing ${followFilter!!.size}-author filter")
+            MLog.w(TAG, "setFollowFilter: ignoring null effective — keeping existing ${followFilter!!.size}-author filter")
             return
         }
         followFilter = effective
@@ -1686,7 +1718,7 @@ class NotesRepository private constructor() {
             val currentNotes = _notes.value
             if (currentNotes.isNotEmpty()) {
                 followingNotesSnapshot = currentNotes
-                Log.d(TAG, "Saved ${currentNotes.size} following notes to memory snapshot")
+                MLog.d(TAG, "Saved ${currentNotes.size} following notes to memory snapshot")
             }
             // Stop outbox subscriptions so they don't inject followed-only notes into the global feed
             outboxFeedManager.stop()
@@ -1704,7 +1736,7 @@ class NotesRepository private constructor() {
             paginationEmptyStreak = 0
             _paginationExhausted.value = false
             feedCutoffTimestampMs = System.currentTimeMillis()
-            Log.d(TAG, "Entering Global mode — feed cleared, outbox stopped, live-only")
+            MLog.d(TAG, "Entering Global mode — feed cleared, outbox stopped, live-only")
             // Start global enrichment with user's subscribed hashtags and any active lists
             val hashtags = PeopleListRepository.subscribedHashtags.value
             val listDTags = emptySet<String>() // Will be updated from DashboardScreen
@@ -1728,7 +1760,7 @@ class NotesRepository private constructor() {
                 feedCutoffTimestampMs = now
                 latestNoteTimestampAtOpen = snapshot.maxOfOrNull { it.timestamp } ?: now
                 _feedSessionState.value = FeedSessionState.Live
-                Log.d(TAG, "Leaving Global mode — restored ${snapshot.size} following notes from memory")
+                MLog.d(TAG, "Leaving Global mode — restored ${snapshot.size} following notes from memory")
             } else {
                 setNotes(persistentListOf())
                 _displayedNotes.value = persistentListOf()
@@ -1739,7 +1771,7 @@ class NotesRepository private constructor() {
                 _paginationExhausted.value = false
                 feedCutoffTimestampMs = System.currentTimeMillis()
                 scope.launch { loadFeedCacheFromRoom() }
-                Log.d(TAG, "Leaving Global mode — no memory snapshot, restoring from Room")
+                MLog.d(TAG, "Leaving Global mode — no memory snapshot, restoring from Room")
             }
             // Stop global enrichment subscriptions when leaving global mode
             globalFeedManager.stop()
@@ -1752,7 +1784,7 @@ class NotesRepository private constructor() {
         if (subscriptionRelays.isNotEmpty()) {
             applySubscriptionToStateMachine(subscriptionRelays)
             val mode = if (enabled && !followFilter.isNullOrEmpty()) "following (${followFilter!!.size} authors)" else "global"
-            Log.d(TAG, "Re-subscribed: $mode")
+            MLog.d(TAG, "Re-subscribed: $mode")
         }
     }
 
@@ -1773,8 +1805,9 @@ class NotesRepository private constructor() {
 
     /** Size of the sliding interest window around the scroll position.
      *  Notes outside this window still display (with cached counts) but
-     *  don't actively consume relay subscription slots. */
-    private val INTEREST_WINDOW_SIZE = 200
+     *  don't actively consume relay subscription slots.
+     *  Matches the viewport render window (~30 full NoteCards + 20 buffer). */
+    private val INTEREST_WINDOW_SIZE = 50
 
     private fun updateDisplayedNotes() {
         android.os.Trace.beginSection("NotesRepo.updateDisplayedNotes")
@@ -1815,7 +1848,7 @@ class NotesRepository private constructor() {
                         }
                     }
                     setNotes(enriched.toImmutableList())
-                    Log.d(TAG, "\uD83D\uDD35 Tracker enrichment: ${dirtyIndices.size} notes gained relay URLs (of ${preEnrich.size} total)")
+                    MLog.d(TAG, "\uD83D\uDD35 Tracker enrichment: ${dirtyIndices.size} notes gained relay URLs (of ${preEnrich.size} total)")
                 }
             }
 
@@ -1846,7 +1879,7 @@ class NotesRepository private constructor() {
                         return
                     }
                     if (_displayedNotes.value.isNotEmpty()) {
-                        Log.w(TAG, "Follow filter temporarily empty, keeping ${_displayedNotes.value.size} displayed notes")
+                        MLog.w(TAG, "Follow filter temporarily empty, keeping ${_displayedNotes.value.size} displayed notes")
                         return
                     } else {
                         _displayedNotes.value = persistentListOf()
@@ -1888,7 +1921,7 @@ class NotesRepository private constructor() {
                 filtered.add(note)
             }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty() || roomPaginatedNotes.isNotEmpty()) {
-                Log.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →final=${filtered.size} +roomTail=${roomPaginatedNotes.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
+                MLog.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →final=${filtered.size} +roomTail=${roomPaginatedNotes.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
             }
             // Skip emission if the note ID list is identical — prevents unnecessary
             // LazyColumn re-layout that causes scroll jumps and nav bar reappearing.
@@ -1906,7 +1939,7 @@ class NotesRepository private constructor() {
                 val dataChanged = newList.indices.any { i -> newList[i] !== currentIds[i] }
                 if (dataChanged) {
                     val multiOrb = newList.count { it.relayUrls.size > 1 }
-                    Log.d(TAG, "\uD83D\uDD35 Display emit (data changed, IDs same): ${newList.size} notes, $multiOrb multi-orb")
+                    MLog.d(TAG, "\uD83D\uDD35 Display emit (data changed, IDs same): ${newList.size} notes, $multiOrb multi-orb")
                     _displayedNotes.value = newList.toImmutableList()
                 }
                 updateDisplayedNewNotesCount()
@@ -1915,10 +1948,10 @@ class NotesRepository private constructor() {
             // Log relay orb stats for diagnostics
             val multiOrb = newList.count { it.relayUrls.size > 1 }
             val singleOrb = newList.count { it.relayUrls.size == 1 }
-            Log.d(TAG, "\uD83D\uDD35 Display emit (IDs changed): ${newList.size} notes, $multiOrb multi-orb, $singleOrb single-orb")
+            MLog.d(TAG, "\uD83D\uDD35 Display emit (IDs changed): ${newList.size} notes, $multiOrb multi-orb, $singleOrb single-orb")
             if (newList.isNotEmpty()) {
                 val sample = newList.first()
-                Log.d(TAG, "\uD83D\uDD35   sample[0] ${sample.id.take(8)}: relayUrls=${sample.relayUrls}, relayUrl=${sample.relayUrl}")
+                MLog.d(TAG, "\uD83D\uDD35   sample[0] ${sample.id.take(8)}: relayUrls=${sample.relayUrls}, relayUrl=${sample.relayUrl}")
             }
             _displayedNotes.value = newList.toImmutableList()
             updateDisplayedNewNotesCount()
@@ -1953,7 +1986,7 @@ class NotesRepository private constructor() {
                 NoteCountsRepository.setNoteIdsOfInterest(noteRelayMap)
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "updateDisplayedNotes failed: ${e.message}", e)
+            MLog.e(TAG, "updateDisplayedNotes failed: ${e.message}", e)
         } finally {
             android.os.Trace.endSection()
         }
@@ -1990,7 +2023,7 @@ class NotesRepository private constructor() {
             }
             _newNotesCounts.value = NewNotesCounts(countAll, countFollowing, System.currentTimeMillis())
         } catch (e: Throwable) {
-            Log.e(TAG, "updateDisplayedNewNotesCount failed: ${e.message}", e)
+            MLog.e(TAG, "updateDisplayedNewNotesCount failed: ${e.message}", e)
             _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         }
     }
@@ -1999,7 +2032,7 @@ class NotesRepository private constructor() {
      * Disconnect from all relays (e.g. on screen exit). Delegates to shared state machine.
      */
     fun disconnectAll() {
-        Log.d(TAG, "Disconnecting from all relays")
+        MLog.d(TAG, "Disconnecting from all relays")
         outboxFeedManager.stop()
         kind1Dirty.set(false)
         pendingKind1Events.clear()
@@ -2037,14 +2070,14 @@ class NotesRepository private constructor() {
 
     suspend fun ensureSubscriptionToNotes(allUserRelayUrls: List<String>, limit: Int = 100) {
         if (allUserRelayUrls.isEmpty()) {
-            Log.w(TAG, "No relays configured")
+            MLog.w(TAG, "No relays configured")
             return
         }
         // Idempotency guard: skip only if we're already subscribed to the same relay set,
         // notes are loaded, AND the feed is Live (not still Loading from a previous call).
         val relaySet = allUserRelayUrls.toSet()
         if (relaySet == lastEnsuredRelaySet && _notes.value.isNotEmpty() && _feedSessionState.value == FeedSessionState.Live && RelayConnectionStateMachine.getInstance().isSubscriptionActive()) {
-            Log.d(TAG, "ensureSubscriptionToNotes: already active for ${relaySet.size} relays, skipping")
+            MLog.d(TAG, "ensureSubscriptionToNotes: already active for ${relaySet.size} relays, skipping")
             return
         }
         lastEnsuredRelaySet = relaySet
@@ -2055,16 +2088,16 @@ class NotesRepository private constructor() {
         // and this method would see _notes.value empty, fall through to subscribeToNotes(),
         // which wipes the feed — destroying Room-restored notes.
         if (!_feedCacheChecked.value) {
-            Log.d(TAG, "ensureSubscriptionToNotes: waiting for feed cache check to complete...")
+            MLog.d(TAG, "ensureSubscriptionToNotes: waiting for feed cache check to complete...")
             kotlinx.coroutines.withTimeoutOrNull(3000L) {
                 _feedCacheChecked.first { it }
             }
-            Log.d(TAG, "ensureSubscriptionToNotes: feed cache check done, notes=${_notes.value.size}")
+            MLog.d(TAG, "ensureSubscriptionToNotes: feed cache check done, notes=${_notes.value.size}")
         }
 
         if (_notes.value.isNotEmpty()) {
             // Resume: keep existing feed from Room cache; re-apply subscription without clearing.
-            Log.d(TAG, "Restoring subscription for ${allUserRelayUrls.size} relays (keeping ${_notes.value.size} notes)")
+            MLog.d(TAG, "Restoring subscription for ${allUserRelayUrls.size} relays (keeping ${_notes.value.size} notes)")
             // Initialize guards that were lost on process kill:
             val now = System.currentTimeMillis()
             if (feedCutoffTimestampMs == 0L) {
@@ -2100,7 +2133,7 @@ class NotesRepository private constructor() {
      */
     suspend fun subscribeToNotes(limit: Int = 100) {
         if (subscriptionRelays.isEmpty()) {
-            Log.w(TAG, "No subscription relays set")
+            MLog.w(TAG, "No subscription relays set")
             _isLoading.value = false
             initialLoadComplete = true
             return
@@ -2157,10 +2190,10 @@ class NotesRepository private constructor() {
                 _feedSessionState.value = FeedSessionState.Live
                 _hasEverLoadedFeed.value = true
                 updateDisplayedNotes()
-                Log.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded in ${waited}ms (feed cutoff at $feedCutoffTimestampMs)")
+                MLog.d(TAG, "Subscription active for ${subscriptionRelays.size} relays, ${_notes.value.size} notes loaded in ${waited}ms (feed cutoff at $feedCutoffTimestampMs)")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error subscribing to notes: ${e.message}", e)
+            MLog.e(TAG, "Error subscribing to notes: ${e.message}", e)
             _error.value = "Failed to load notes: ${e.message}"
             _isLoading.value = false
             initialLoadComplete = true
@@ -2190,11 +2223,11 @@ class NotesRepository private constructor() {
         val prev = paginationCursorMs
         if (prev == 0L || candidate < prev) {
             paginationCursorMs = candidate
-            Log.d(TAG, "Cursor advanced: ${fmtMs(prev)} → ${fmtMs(candidate)} (p5, absMin=${fmtMs(absMin)})")
+            MLog.d(TAG, "Cursor advanced: ${fmtMs(prev)} → ${fmtMs(candidate)} (p5, absMin=${fmtMs(absMin)})")
         } else if (absMin < prev) {
             // Stall: p5 didn't advance (outlier cluster), fall back to absolute min
             paginationCursorMs = absMin
-            Log.d(TAG, "Cursor stall-break: ${fmtMs(prev)} → ${fmtMs(absMin)} (absMin fallback)")
+            MLog.d(TAG, "Cursor stall-break: ${fmtMs(prev)} → ${fmtMs(absMin)} (absMin fallback)")
         }
     }
 
@@ -2250,23 +2283,33 @@ class NotesRepository private constructor() {
                                 roomPaginatedNotes.add(note)
                                 roomPaginatedIds.add(note.id)
                             }
+                            // Cap: trim oldest entries to prevent unbounded growth
+                            if (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
+                                synchronized(roomPaginatedNotes) {
+                                    while (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
+                                        val removed = roomPaginatedNotes.removeAt(roomPaginatedNotes.size - 1)
+                                        roomPaginatedIds.remove(removed.id)
+                                    }
+                                }
+                                MLog.d(TAG, "loadOlderNotes: trimmed roomTail to $MAX_ROOM_PAGINATED")
+                            }
                             // Update cursor from oldest loaded note
                             val oldestMs = newNotes.minOf { it.timestamp }
                             if (paginationCursorMs == 0L || oldestMs < paginationCursorMs) {
                                 paginationCursorMs = oldestMs
                             }
                             if (oldestMs < feedAgeFloorMs) feedAgeFloorMs = oldestMs
-                            Log.w(TAG, "loadOlderNotes: Room served ${newNotes.size} notes, roomTail=${roomPaginatedNotes.size}, cursor=${fmtMs(paginationCursorMs)}")
+                            MLog.w(TAG, "loadOlderNotes: Room served ${newNotes.size} notes, roomTail=${roomPaginatedNotes.size}, cursor=${fmtMs(paginationCursorMs)}")
                             // Trigger display update to append Room tail
                             updateDisplayedNotes()
                         } else {
-                            Log.d(TAG, "loadOlderNotes: Room ${roomNotes.size} events all dupes")
+                            MLog.d(TAG, "loadOlderNotes: Room ${roomNotes.size} events all dupes")
                         }
                         _isLoadingOlder.value = false
                         return@launch
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Room-backed pagination failed: ${e.message}", e)
+                    MLog.e(TAG, "Room-backed pagination failed: ${e.message}", e)
                 }
                 // Room empty for this window — fall back to relay fetch
                 loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
@@ -2290,7 +2333,7 @@ class NotesRepository private constructor() {
         // Filter out exhausted relays — they returned 0 events last time
         val activeRelays = relays.filter { it !in exhaustedPaginationRelays }
         if (activeRelays.isEmpty()) {
-            Log.w(TAG, "loadOlderNotes: all ${relays.size} relays exhausted — pagination done")
+            MLog.w(TAG, "loadOlderNotes: all ${relays.size} relays exhausted — pagination done")
             _paginationExhausted.value = true
             _isLoadingOlder.value = false
             return
@@ -2312,7 +2355,7 @@ class NotesRepository private constructor() {
             relayUrl to listOf(filter)
         }
 
-        Log.w(TAG, "loadOlderNotes: ${activeRelays.size}/${relays.size} active relays " +
+        MLog.w(TAG, "loadOlderNotes: ${activeRelays.size}/${relays.size} active relays " +
             "(${exhaustedPaginationRelays.size} exhausted), cursors: ${activeRelays.take(5).joinToString { 
                 val c = perRelayCursorMs[it]
                 "${it.removePrefix("wss://").removeSuffix("/").takeLast(20)}=${if (c != null) fmtMs(c) else "init"}"
@@ -2382,7 +2425,7 @@ class NotesRepository private constructor() {
                 // Mark it exhausted instead of accepting the ancient cursor.
                 if (current != null && current - oldest > MAX_CURSOR_JUMP_MS) {
                     exhaustedPaginationRelays.add(relayUrl)
-                    Log.w(TAG, "Relay cursor-clamped: ${relayUrl.removePrefix("wss://").removeSuffix("/")} " +
+                    MLog.w(TAG, "Relay cursor-clamped: ${relayUrl.removePrefix("wss://").removeSuffix("/")} " +
                         "jumped ${fmtMs(current)} → ${fmtMs(oldest)} (>${MAX_CURSOR_JUMP_MS / 86_400_000L}d gap)")
                 } else if (current == null || oldest < current) {
                     perRelayCursorMs[relayUrl] = oldest
@@ -2397,7 +2440,7 @@ class NotesRepository private constructor() {
                 val count = perRelayEventCount[relayUrl] ?: 0
                 if (count < MIN_USEFUL_EVENTS) {
                     exhaustedPaginationRelays.add(relayUrl)
-                    Log.w(TAG, "Relay exhausted: ${relayUrl.removePrefix("wss://").removeSuffix("/")} ($count < $MIN_USEFUL_EVENTS events this page)")
+                    MLog.w(TAG, "Relay exhausted: ${relayUrl.removePrefix("wss://").removeSuffix("/")} ($count < $MIN_USEFUL_EVENTS events this page)")
                 }
             }
 
@@ -2414,7 +2457,7 @@ class NotesRepository private constructor() {
                 paginationEmptyStreak++
                 if (paginationEmptyStreak >= 2) {
                     _paginationExhausted.value = true
-                    Log.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty responses")
+                    MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty responses")
                 }
             } else if (added == 0) {
                 // Received events but trimNotesToCap discarded them all — feed is at cap.
@@ -2422,14 +2465,14 @@ class NotesRepository private constructor() {
                 paginationEmptyStreak++
                 if (paginationEmptyStreak >= 2) {
                     _paginationExhausted.value = true
-                    Log.w(TAG, "Pagination stopped: $paginationEmptyStreak pages trimmed to 0 (cap reached, $received recv discarded)")
+                    MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak pages trimmed to 0 (cap reached, $received recv discarded)")
                 } else {
                     val relayStats = activeRelays.joinToString { r ->
                         val cnt = perRelayEventCount[r] ?: 0
                         val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
                         "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
                     }
-                    Log.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
+                    MLog.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
                 }
             } else {
                 paginationEmptyStreak = 0
@@ -2438,7 +2481,7 @@ class NotesRepository private constructor() {
                     val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
                     "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
                 }
-                Log.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
+                MLog.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
             }
             _isLoadingOlder.value = false
         }
@@ -2463,9 +2506,9 @@ class NotesRepository private constructor() {
             latestNoteTimestampAtOpen = _notes.value.maxOfOrNull { it.timestamp } ?: feedCutoffTimestampMs
             initialLoadComplete = true
             _isLoading.value = false
-            Log.d(TAG, "Subscription active for relay: $relayUrl (state machine)")
+            MLog.d(TAG, "Subscription active for relay: $relayUrl (state machine)")
         } catch (e: Exception) {
-            Log.e(TAG, "Error loading notes from relay: ${e.message}", e)
+            MLog.e(TAG, "Error loading notes from relay: ${e.message}", e)
             _error.value = "Failed to load notes from relay: ${e.message}"
             _isLoading.value = false
             initialLoadComplete = true
@@ -2477,7 +2520,7 @@ class NotesRepository private constructor() {
      */
     suspend fun subscribeToAuthorNotes(relayUrls: List<String>, authorPubkey: String, limit: Int = 50) {
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "No relays provided for author subscription")
+            MLog.w(TAG, "No relays provided for author subscription")
             return
         }
 
@@ -2504,9 +2547,9 @@ class NotesRepository private constructor() {
             latestNoteTimestampAtOpen = _notes.value.maxOfOrNull { it.timestamp } ?: feedCutoffTimestampMs
             initialLoadComplete = true
             _isLoading.value = false
-            Log.d(TAG, "Author subscription active (state machine)")
+            MLog.d(TAG, "Author subscription active (state machine)")
         } catch (e: Exception) {
-            Log.e(TAG, "Error subscribing to author notes: ${e.message}", e)
+            MLog.e(TAG, "Error subscribing to author notes: ${e.message}", e)
             _error.value = "Failed to load author notes: ${e.message}"
             _isLoading.value = false
             initialLoadComplete = true
@@ -2524,8 +2567,8 @@ class NotesRepository private constructor() {
     private fun logIncomingEventSummary(event: Event, relayUrl: String) {
         if (!eventLoggedOnce) {
             eventLoggedOnce = true
-            Log.i("MyceliumEvent", "Monitor active: first kind-1 received (you should see one line per note from here)")
-            Log.i(TAG, "MyceliumEvent: first kind-1 received")
+            MLog.i("MyceliumEvent", "Monitor active: first kind-1 received (you should see one line per note from here)")
+            MLog.i(TAG, "MyceliumEvent: first kind-1 received")
         }
         val id = event.id.take(8)
         val relay = relayUrl.takeLast(30).takeLast(25)
@@ -2543,10 +2586,10 @@ class NotesRepository private constructor() {
         val hasMarkdown = content.contains("**") || content.contains("##") || content.contains("```") ||
             Regex("\\[.+?]\\(.+?\\)").containsMatchIn(content)
         val line = "id=$id relay=…$relay len=$contentLen e=$eCount p=$pCount t=$tCount imeta=$imeta emoji=$emoji urls=${urls.size} img=$imageCount vid=$videoCount gif=$gifLike md=$hasMarkdown"
-        Log.i("MyceliumEvent", line)
+        MLog.i("MyceliumEvent", line)
         eventCountForSampling++
         if (eventCountForSampling % 20 == 0) {
-            Log.d(TAG, "Event sample: $line")
+            MLog.d(TAG, "Event sample: $line")
         }
         updateDebugEventStats(hasMarkdown, imageCount > 0, videoCount > 0, gifLike, imeta > 0, emoji > 0)
     }
@@ -2579,7 +2622,7 @@ class NotesRepository private constructor() {
     private fun trimNotesToCap(notes: List<Note>): List<Note> {
         val effectiveCap = MAX_NOTES_IN_MEMORY + minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)
         if (notes.size <= effectiveCap) return notes
-        Log.w(TAG, "Trimming feed: ${notes.size} → $effectiveCap (base=$MAX_NOTES_IN_MEMORY + paginationCap=${minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)})")
+        MLog.w(TAG, "Trimming feed: ${notes.size} → $effectiveCap (base=$MAX_NOTES_IN_MEMORY + paginationCap=${minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)})")
         return notes.take(effectiveCap)
     }
 
@@ -2602,7 +2645,7 @@ class NotesRepository private constructor() {
 
             // Skip relay echo of our own repost — already in feed via injectOwnRepost
             if (locallyPublishedIds.contains(event.id)) {
-                Log.d(TAG, "Skipping kind-6 echo of locally-published repost ${event.id.take(8)}")
+                MLog.d(TAG, "Skipping kind-6 echo of locally-published repost ${event.id.take(8)}")
                 return
             }
             val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
@@ -2620,7 +2663,7 @@ class NotesRepository private constructor() {
                 val jsonObj = try {
                     Json.parseToJsonElement(content) as? kotlinx.serialization.json.JsonObject
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse kind-6 repost JSON: ${e.message}")
+                    MLog.e(TAG, "Failed to parse kind-6 repost JSON: ${e.message}")
                     null
                 } ?: return
 
@@ -2730,7 +2773,7 @@ class NotesRepository private constructor() {
                 }.distinct().take(5)
 
                 if (fetchRelays.isEmpty()) {
-                    Log.w(TAG, "Kind-6 tag-only repost but no relays to fetch original note $originalNoteId")
+                    MLog.w(TAG, "Kind-6 tag-only repost but no relays to fetch original note $originalNoteId")
                     return
                 }
 
@@ -2751,7 +2794,7 @@ class NotesRepository private constructor() {
                 scheduleRepostBatchFlush()
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "Error handling kind-6 repost: ${e.message}", e)
+            MLog.e(TAG, "Error handling kind-6 repost: ${e.message}", e)
         }
     }
 
@@ -2919,7 +2962,7 @@ class NotesRepository private constructor() {
         val newList = (listOf(withState) + currentNotes.toImmutableList()).take(MAX_NOTES_IN_MEMORY).toImmutableList()
         setNotes(newList)
         scheduleDisplayUpdate()
-        Log.d(TAG, "Injected own note ${note.id.take(8)} (publishState=Sending)")
+        MLog.d(TAG, "Injected own note ${note.id.take(8)} (publishState=Sending)")
         return true
     }
 
@@ -2954,7 +2997,7 @@ class NotesRepository private constructor() {
                 )
                 setNotes(updated.sortedByDescending { it.repostTimestamp ?: it.timestamp }.toImmutableList())
                 scheduleDisplayUpdate()
-                Log.d(TAG, "Merged own repost into existing ${compositeId.take(16)} (now ${mergedAuthors.size} boosters)")
+                MLog.d(TAG, "Merged own repost into existing ${compositeId.take(16)} (now ${mergedAuthors.size} boosters)")
                 return
             }
 
@@ -2979,9 +3022,9 @@ class NotesRepository private constructor() {
             )
             setNotes((listOf(note) + notesAfterRemoval).take(MAX_NOTES_IN_MEMORY).toImmutableList())
             scheduleDisplayUpdate()
-            Log.d(TAG, "Injected own repost ${compositeId.take(16)} (${mergedAuthors.size} boosters, publishState=Sending)")
+            MLog.d(TAG, "Injected own repost ${compositeId.take(16)} (${mergedAuthors.size} boosters, publishState=Sending)")
         } catch (e: Throwable) {
-            Log.e(TAG, "injectOwnRepost failed: ${e.message}", e)
+            MLog.e(TAG, "injectOwnRepost failed: ${e.message}", e)
         }
     }
 
@@ -3002,7 +3045,7 @@ class NotesRepository private constructor() {
                 _pendingNewNotes.removeAll { it.id == eventId || it.originalNoteId == eventId }
             }
             scheduleDisplayUpdate()
-            Log.d(TAG, "Removed note ${eventId.take(8)} from feed (${currentNotes.size - filtered.size} entries)")
+            MLog.d(TAG, "Removed note ${eventId.take(8)} from feed (${currentNotes.size - filtered.size} entries)")
         }
         deletedEventIds.add(eventId)
         persistDeletedIds()
@@ -3017,10 +3060,10 @@ class NotesRepository private constructor() {
             val raw = prefs.getStringSet(DELETED_IDS_KEY, null)
             if (!raw.isNullOrEmpty()) {
                 deletedEventIds.addAll(raw)
-                Log.d(TAG, "Loaded ${raw.size} deleted event IDs from disk")
+                MLog.d(TAG, "Loaded ${raw.size} deleted event IDs from disk")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load deleted IDs: ${e.message}")
+            MLog.e(TAG, "Failed to load deleted IDs: ${e.message}")
         }
     }
 
@@ -3035,7 +3078,7 @@ class NotesRepository private constructor() {
                     .putStringSet(DELETED_IDS_KEY, trimmed)
                     .apply()
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to persist deleted IDs: ${e.message}")
+                MLog.e(TAG, "Failed to persist deleted IDs: ${e.message}")
             }
         }
     }
@@ -3064,7 +3107,7 @@ class NotesRepository private constructor() {
         _notes.value = updated.toImmutableList()
         feedIndex.updateNote(updated[index])
         scheduleDisplayUpdate()
-        Log.d(TAG, "Updated publishState for ${eventId.take(8)} → $state")
+        MLog.d(TAG, "Updated publishState for ${eventId.take(8)} → $state")
 
         // Auto-clear Confirmed state after a short delay so the progress line fades out
         if (state == PublishState.Confirmed) {
@@ -3116,7 +3159,7 @@ class NotesRepository private constructor() {
         _notes.value = updated.toImmutableList()
         feedIndex.updateNote(updated[index])
         scheduleDisplayUpdate()
-        Log.d(TAG, "Merged publish relay $relayUrl into ${eventId.take(8)} (now ${updatedUrls.size} orbs)")
+        MLog.d(TAG, "Merged publish relay $relayUrl into ${eventId.take(8)} (now ${updatedUrls.size} orbs)")
         // Persist to Room
         val dao = eventDao
         if (dao != null) {
@@ -3152,9 +3195,9 @@ class NotesRepository private constructor() {
                     repostTimestamp = repostTimestampMs
                 )
                 insertRepostNote(note, repostTimestampMs)
-                Log.d(TAG, "Injected local repost for ${originalNote.id.take(8)} by ${reposterPubkey.take(8)}")
+                MLog.d(TAG, "Injected local repost for ${originalNote.id.take(8)} by ${reposterPubkey.take(8)}")
             } catch (e: Throwable) {
-                Log.e(TAG, "injectLocalRepost failed: ${e.message}", e)
+                MLog.e(TAG, "injectLocalRepost failed: ${e.message}", e)
             }
         }
     }
@@ -3180,7 +3223,7 @@ class NotesRepository private constructor() {
         val allRelayUrls = batch.values.flatMap { it.fetchRelays }.distinct().take(8)
         if (allNoteIds.isEmpty() || allRelayUrls.isEmpty()) return
 
-        Log.d(TAG, "Flushing repost batch: ${allNoteIds.size} notes across ${allRelayUrls.size} relays (was ${allNoteIds.size} individual subs)")
+        MLog.d(TAG, "Flushing repost batch: ${allNoteIds.size} notes across ${allRelayUrls.size} relays (was ${allNoteIds.size} individual subs)")
 
         val filter = Filter(ids = allNoteIds, kinds = listOf(1), limit = allNoteIds.size)
         relayStateMachine.requestOneShotSubscriptionWithRelay(allRelayUrls, filter, priority = SubscriptionPriority.LOW,
@@ -3239,7 +3282,7 @@ class NotesRepository private constructor() {
                         insertRepostNote(note, pending.repostTimestampMs)
                     }
                 } catch (e: Throwable) {
-                    Log.e(TAG, "Error processing batched repost note: ${e.message}", e)
+                    MLog.e(TAG, "Error processing batched repost note: ${e.message}", e)
                 } finally {
                     pendingRepostFetches.remove(pending.compositeId)
                 }
@@ -3284,14 +3327,14 @@ class NotesRepository private constructor() {
                             pendingProfileRelayHints.remove(pk) ?: emptyList()
                         }.distinct()
                         if (batchHints.isNotEmpty()) {
-                            Log.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} indexer + ${batchHints.size} hint relays")
+                            MLog.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} indexer + ${batchHints.size} hint relays")
                             profileCache.requestProfileWithHints(batch, urls, batchHints)
                         } else {
-                            Log.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} relays")
+                            MLog.d(TAG, "Batch profile fetch: ${batch.size} pubkeys from ${urls.size} relays")
                             profileCache.requestProfiles(batch, urls)
                         }
                     } catch (e: Throwable) {
-                        Log.e(TAG, "Batch profile request failed: ${e.message}", e)
+                        MLog.e(TAG, "Batch profile request failed: ${e.message}", e)
                     }
                     // Small pause between batches to avoid overwhelming relays
                     if (pendingProfilePubkeys.isNotEmpty()) delay(200)
@@ -3345,13 +3388,18 @@ class NotesRepository private constructor() {
         if (profileCache.getAuthor(pubkeyHex) == null && profileRelayUrls.isNotEmpty()) {
             pendingProfilePubkeys.add(pubkeyHex.lowercase())
         }
-        // Request kind-0 for pubkeys mentioned in content (npub + nprofile + hex)
-        // nprofile relay hints are preserved so profiles not on indexer relays can be resolved
-        extractPubkeysWithHintsFromContent(event.content).forEach { (hex, relayHints) ->
-            if (profileCache.getAuthor(hex) == null && profileRelayUrls.isNotEmpty()) {
-                pendingProfilePubkeys.add(hex.lowercase())
-                if (relayHints.isNotEmpty()) {
-                    pendingProfileRelayHints[hex.lowercase()] = relayHints
+        // Request kind-0 for pubkeys mentioned in content (npub + nprofile + hex).
+        // Skip during burst ingestion: extractPubkeysWithHintsFromContent is regex-heavy
+        // and most mentioned pubkeys overlap across notes. The author's own pubkey (above)
+        // is always queued; content mentions are lower priority and can wait for steady state.
+        if (pendingProfilePubkeys.size < 200 && profileRelayUrls.isNotEmpty()) {
+            extractPubkeysWithHintsFromContent(event.content).forEach { (hex, relayHints) ->
+                val lowerHex = hex.lowercase()
+                if (profileCache.getAuthor(lowerHex) == null && lowerHex !in pendingProfilePubkeys) {
+                    pendingProfilePubkeys.add(lowerHex)
+                    if (relayHints.isNotEmpty()) {
+                        pendingProfileRelayHints[lowerHex] = relayHints
+                    }
                 }
             }
         }
@@ -3482,7 +3530,7 @@ class NotesRepository private constructor() {
         // Clear Room event store so old account's notes don't leak on next cold start
         scope.launch {
             try { eventDao?.deleteAll() } catch (e: Exception) {
-                Log.e(TAG, "Event store clear failed: ${e.message}", e)
+                MLog.e(TAG, "Event store clear failed: ${e.message}", e)
             }
         }
     }
@@ -3518,14 +3566,14 @@ class NotesRepository private constructor() {
             note.quotedEventIds.any { QuotedNoteCache.getCached(it) == null }
         }
         if (notesWithUnresolvedQuotes.isNotEmpty()) {
-            Log.d(TAG, "Re-prefetching ${notesWithUnresolvedQuotes.size} notes with unresolved quoted content")
+            MLog.d(TAG, "Re-prefetching ${notesWithUnresolvedQuotes.size} notes with unresolved quoted content")
             QuotedNoteCache.prefetchForNotes(notesWithUnresolvedQuotes)
         }
         updateDisplayedNotes()
         latestNoteTimestampAtOpen = merged.maxOfOrNull { it.timestamp } ?: 0L
         _newNotesCounts.value = NewNotesCounts(0, 0, System.currentTimeMillis())
         _feedSessionState.value = FeedSessionState.Live
-        Log.d(TAG, "Applied $pendingCount pending notes (total: ${merged.size})")
+        MLog.d(TAG, "Applied $pendingCount pending notes (total: ${merged.size})")
     }
 
     /**
@@ -3534,11 +3582,11 @@ class NotesRepository private constructor() {
      */
     suspend fun refresh() {
         if (subscriptionRelays.isEmpty()) {
-            Log.w(TAG, "Refresh skipped: no subscription relays")
+            MLog.w(TAG, "Refresh skipped: no subscription relays")
             updateDisplayedNotes()
             return
         }
-        Log.d(TAG, "Refresh: applying pending and re-subscribing (keeping ${_notes.value.size} notes)")
+        MLog.d(TAG, "Refresh: applying pending and re-subscribing (keeping ${_notes.value.size} notes)")
         applyPendingNotes()
         applySubscriptionToStateMachine(subscriptionRelays)
     }
@@ -3616,7 +3664,7 @@ class NotesRepository private constructor() {
             if (lastAt > 0 && System.currentTimeMillis() - lastAt >= settleMs) break
         }
         handle.cancel()
-        Log.d(TAG, "Batch fetch: requested=${noteIds.size}, found=${results.size} in ${waited}ms")
+        MLog.d(TAG, "Batch fetch: requested=${noteIds.size}, found=${results.size} in ${waited}ms")
         return results
     }
 
@@ -3697,11 +3745,11 @@ class NotesRepository private constructor() {
                     }
                     if (updatedCount > 0) {
                         setNotes(newNotes.toImmutableList())
-                        Log.d(TAG, "Profile batch: updated $updatedCount notes from ${authorMap.size} profiles")
+                        MLog.d(TAG, "Profile batch: updated $updatedCount notes from ${authorMap.size} profiles")
                         scheduleDisplayUpdate()
                     }
                 } catch (e: Throwable) {
-                    Log.e(TAG, "updateAuthorsInNotesBatch failed: ${e.message}", e)
+                    MLog.e(TAG, "updateAuthorsInNotesBatch failed: ${e.message}", e)
                 }
             }
         }
@@ -3744,7 +3792,7 @@ class NotesRepository private constructor() {
                         } else note
                     }
                     if (changedCount == 0) {
-                        Log.d(TAG, "refreshAuthorsFromCache: no author changes detected, skipping")
+                        MLog.d(TAG, "refreshAuthorsFromCache: no author changes detected, skipping")
                         return@launch
                     }
                     setNotes(updatedNotes.toImmutableList())
@@ -3758,9 +3806,9 @@ class NotesRepository private constructor() {
                         pendingIndex.rebuild(updated)
                     }
                     scheduleDisplayUpdate()
-                    Log.d(TAG, "refreshAuthorsFromCache: updated $changedCount/${_notes.value.size} notes with ${authorMap.size} profiles")
+                    MLog.d(TAG, "refreshAuthorsFromCache: updated $changedCount/${_notes.value.size} notes with ${authorMap.size} profiles")
                 } catch (e: Throwable) {
-                    Log.e(TAG, "refreshAuthorsFromCache failed: ${e.message}", e)
+                    MLog.e(TAG, "refreshAuthorsFromCache failed: ${e.message}", e)
                 }
             }
         }

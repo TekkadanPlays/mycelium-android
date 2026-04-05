@@ -2,7 +2,7 @@ package social.mycelium.android.viewmodel
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.cybin.core.Event
@@ -296,7 +296,7 @@ class SearchViewModel : ViewModel() {
                 return results
             }
         } catch (e: Exception) {
-            Log.d(TAG, "Bech32 parse failed for input: ${e.message}")
+            MLog.d(TAG, "Bech32 parse failed for input: ${e.message}")
         }
 
         // 64-char hex: could be pubkey or event id
@@ -764,7 +764,7 @@ class SearchViewModel : ViewModel() {
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.w(TAG, "NIP-50 event parse error: ${e.message}")
+                            MLog.w(TAG, "NIP-50 event parse error: ${e.message}")
                         }
                     }
                 )
@@ -792,7 +792,7 @@ class SearchViewModel : ViewModel() {
                 _uiState.update { it.copy(isLoadingRelay = false) }
 
             } catch (e: Exception) {
-                Log.w(TAG, "NIP-50 search failed: ${e.message}")
+                MLog.w(TAG, "NIP-50 search failed: ${e.message}")
                 _uiState.update { it.copy(isLoadingRelay = false) }
             }
         }

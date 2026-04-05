@@ -4,7 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -220,7 +220,7 @@ object RelayHealthTracker {
         synchronized(lock) {
             pendingPublishes[eventId] = PendingPublish(kind, relayUrls)
         }
-        Log.d(TAG, "Registered pending publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
+        MLog.d(TAG, "Registered pending publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
     }
 
     /**
@@ -251,7 +251,7 @@ object RelayHealthTracker {
             val rcsm = RelayConnectionStateMachine.getInstance()
             rcsm.send(event, relayUrls)
             rcsm.nip42AuthHandler.trackPublishedEvent(event, relayUrls)
-            Log.d(TAG, "Retry publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
+            MLog.d(TAG, "Retry publish ${eventId.take(8)} kind-$kind → ${relayUrls.size} relays")
 
             // Register fresh tracking for the retry
             registerPendingPublish(eventId, kind, relayUrls)
@@ -261,7 +261,7 @@ object RelayHealthTracker {
             }
             return true
         } catch (e: Exception) {
-            Log.e(TAG, "Retry publish failed for ${eventId.take(8)}: ${e.message}", e)
+            MLog.e(TAG, "Retry publish failed for ${eventId.take(8)}: ${e.message}", e)
             return false
         }
     }
@@ -355,14 +355,14 @@ object RelayHealthTracker {
 
         if (report.hasFailures) {
             _publishFailure.tryEmit(report)
-            Log.w(TAG, "Publish ${report.eventId.take(8)} kind-${report.kind}: " +
+            MLog.w(TAG, "Publish ${report.eventId.take(8)} kind-${report.kind}: " +
                 "${report.successCount}/${report.targetRelayCount} OK, ${report.failureCount} failed")
             // Record failures in per-relay health
             report.results.filter { !it.success }.forEach { result ->
                 recordPublishFailure(result.relayUrl, result.message)
             }
         } else {
-            Log.d(TAG, "Publish ${report.eventId.take(8)} kind-${report.kind}: " +
+            MLog.d(TAG, "Publish ${report.eventId.take(8)} kind-${report.kind}: " +
                 "${report.successCount}/${report.targetRelayCount} OK")
         }
     }
@@ -425,7 +425,7 @@ object RelayHealthTracker {
             // Unflag if it was flagged and now succeeds
             if (data.isFlagged) {
                 data.isFlagged = false
-                Log.i(TAG, "Relay $url unflagged after successful connection")
+                MLog.i(TAG, "Relay $url unflagged after successful connection")
             }
         }
         emitState()
@@ -461,23 +461,23 @@ object RelayHealthTracker {
                     autoBlockExpiry[url] = expiry
                 }
             } else {
-                Log.d(TAG, "Relay $url failure while OFFLINE — not counting toward consecutive failures")
+                MLog.d(TAG, "Relay $url failure while OFFLINE — not counting toward consecutive failures")
             }
         }
         if (nowFlagged) {
-            Log.w(TAG, "Relay $url FLAGGED after $FLAG_CONSECUTIVE_FAILURES consecutive failures: $error")
+            MLog.w(TAG, "Relay $url FLAGGED after $FLAG_CONSECUTIVE_FAILURES consecutive failures: $error")
         }
         if (nowAutoBlocked) {
             _blockedRelays.value = _blockedRelays.value + url
             _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
             persistBlockedRelays()
             persistAutoBlockExpiry()
-            Log.w(TAG, "Relay $url AUTO-BLOCKED for ${AUTO_BLOCK_DURATION_MS / 3600000}h after $AUTO_BLOCK_CONSECUTIVE_FAILURES consecutive failures")
+            MLog.w(TAG, "Relay $url AUTO-BLOCKED for ${AUTO_BLOCK_DURATION_MS / 3600000}h after $AUTO_BLOCK_CONSECUTIVE_FAILURES consecutive failures")
             // Cancel any pending reconnect and ensure socket stays closed
             try {
                 RelayConnectionStateMachine.getInstance().relayPool.disconnectRelay(url)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to cancel reconnect for auto-blocked relay: ${e.message}")
+                MLog.w(TAG, "Failed to cancel reconnect for auto-blocked relay: ${e.message}")
             }
         }
         emitState()
@@ -532,12 +532,12 @@ object RelayHealthTracker {
         persistBlockedRelays()
         persistAutoBlockExpiry()
         emitState()
-        Log.i(TAG, "Relay BLOCKED (manual): $url")
+        MLog.i(TAG, "Relay BLOCKED (manual): $url")
         // Immediately disconnect any open socket to this relay
         try {
             RelayConnectionStateMachine.getInstance().relayPool.disconnectRelay(url)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to disconnect blocked relay: ${e.message}")
+            MLog.w(TAG, "Failed to disconnect blocked relay: ${e.message}")
         }
     }
 
@@ -556,7 +556,7 @@ object RelayHealthTracker {
         persistBlockedRelays()
         persistAutoBlockExpiry()
         emitState()
-        Log.i(TAG, "Relay UNBLOCKED: $url — triggering reconnect")
+        MLog.i(TAG, "Relay UNBLOCKED: $url — triggering reconnect")
         // Clear pool-level blacklist + reconnect state for this relay, then
         // re-apply subscriptions so the relay immediately rejoins the feed.
         try {
@@ -564,7 +564,7 @@ object RelayHealthTracker {
             rcsm.relayPool.forceReconnect(url)
             rcsm.requestReconnectOnResume()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to trigger reconnect after unblock: ${e.message}")
+            MLog.w(TAG, "Failed to trigger reconnect after unblock: ${e.message}")
         }
     }
 
@@ -597,7 +597,7 @@ object RelayHealthTracker {
             persistBlockedRelays()
             persistAutoBlockExpiry()
             emitState()
-            expired.forEach { Log.i(TAG, "Relay auto-block EXPIRED, unblocked: $it") }
+            expired.forEach { MLog.i(TAG, "Relay auto-block EXPIRED, unblocked: $it") }
         }
     }
 
@@ -615,7 +615,7 @@ object RelayHealthTracker {
             data.consecutiveFailures = 0
         }
         emitState()
-        Log.i(TAG, "Relay manually unflagged: $url")
+        MLog.i(TAG, "Relay manually unflagged: $url")
     }
 
     /**
@@ -652,10 +652,10 @@ object RelayHealthTracker {
             persistBlockedRelays()
             persistAutoBlockExpiry()
             emitState()
-            Log.i(TAG, "Offline amnesty: unflagged $unflaggedCount relays, released $releasedAutoBlocks auto-blocks")
+            MLog.i(TAG, "Offline amnesty: unflagged $unflaggedCount relays, released $releasedAutoBlocks auto-blocks")
         } else {
             emitState()
-            Log.d(TAG, "Offline amnesty: no relays needed recovery")
+            MLog.d(TAG, "Offline amnesty: no relays needed recovery")
         }
     }
 
@@ -733,7 +733,7 @@ object RelayHealthTracker {
                 list.forEach { url ->
                     synchronized(lock) { getOrCreate(url).isBlocked = true }
                 }
-                Log.d(TAG, "Loaded ${list.size} blocked relays")
+                MLog.d(TAG, "Loaded ${list.size} blocked relays")
             }
             // Load auto-block expiry times
             val expiryRaw = prefs?.getString(KEY_AUTO_BLOCK_EXPIRY, null)
@@ -741,12 +741,12 @@ object RelayHealthTracker {
                 val map = json.decodeFromString<Map<String, Long>>(expiryRaw)
                 autoBlockExpiry.putAll(map)
                 _autoBlockExpiryMap.value = autoBlockExpiry.toMap()
-                Log.d(TAG, "Loaded ${map.size} auto-block expiry entries")
+                MLog.d(TAG, "Loaded ${map.size} auto-block expiry entries")
             }
             // Release any already-expired auto-blocks on startup
             releaseExpiredAutoBlocks()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load blocked relays: ${e.message}", e)
+            MLog.e(TAG, "Failed to load blocked relays: ${e.message}", e)
         }
     }
 
@@ -755,7 +755,7 @@ object RelayHealthTracker {
             val list = _blockedRelays.value.toList()
             prefs?.edit()?.putString(KEY_BLOCKED_RELAYS, json.encodeToString(list))?.apply()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to persist blocked relays: ${e.message}", e)
+            MLog.e(TAG, "Failed to persist blocked relays: ${e.message}", e)
         }
     }
 
@@ -763,7 +763,7 @@ object RelayHealthTracker {
         try {
             prefs?.edit()?.putString(KEY_AUTO_BLOCK_EXPIRY, json.encodeToString(autoBlockExpiry.toMap()))?.apply()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to persist auto-block expiry: ${e.message}", e)
+            MLog.e(TAG, "Failed to persist auto-block expiry: ${e.message}", e)
         }
     }
 }

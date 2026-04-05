@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -74,7 +74,7 @@ object NoteCountsRepository {
         set(value) {
             if (field != value) {
                 field = value
-                Log.d(TAG, "Engagement filter changed to: ${value ?: "none"} — retriggering counts")
+                MLog.d(TAG, "Engagement filter changed to: ${value ?: "none"} — retriggering counts")
                 retrigger()
             }
         }
@@ -139,10 +139,10 @@ object NoteCountsRepository {
         val updatedReactions = authors.keys.toList()
         snapshot[noteId] = counts.copy(reactions = updatedReactions, reactionAuthors = authors)
         _countsByNoteId.value = snapshot
-        Log.d(TAG, "Removed own reaction $emoji on ${noteId.take(8)} (event ${reactionEventId.take(8)})")
+        MLog.d(TAG, "Removed own reaction $emoji on ${noteId.take(8)} (event ${reactionEventId.take(8)})")
     }
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     private val _countsByNoteId = MutableStateFlow<Map<String, NoteCounts>>(emptyMap())
     val countsByNoteId: StateFlow<Map<String, NoteCounts>> = _countsByNoteId.asStateFlow()
@@ -214,7 +214,7 @@ object NoteCountsRepository {
         }
         // Skip if the note ID set is unchanged
         if (merged.size == feedNoteRelays.size && merged.keys == feedNoteRelays.keys) return
-        Log.d(TAG, "setNoteIdsOfInterest: ${merged.size} feed notes (${if (replace) "replace" else "+${noteRelays.size} merged"})")
+        MLog.d(TAG, "setNoteIdsOfInterest: ${merged.size} feed notes (${if (replace) "replace" else "+${noteRelays.size} merged"})")
         feedNoteRelays = merged
         scheduleSubscriptionUpdate()
     }
@@ -232,7 +232,7 @@ object NoteCountsRepository {
      */
     fun setTopicNoteIdsOfInterest(noteRelays: Map<String, List<String>>) {
         if (noteRelays.size == topicNoteRelays.size && noteRelays.keys == topicNoteRelays.keys) return
-        Log.d(TAG, "setTopicNoteIdsOfInterest: ${noteRelays.size} topic notes")
+        MLog.d(TAG, "setTopicNoteIdsOfInterest: ${noteRelays.size} topic notes")
         topicNoteRelays = noteRelays
         scheduleSubscriptionUpdate()
     }
@@ -267,7 +267,7 @@ object NoteCountsRepository {
         // Skip if exact same viewport IDs
         if (noteRelays.keys == viewportNoteRelays.keys) return
         viewportNoteRelays = noteRelays
-        Log.d(TAG, "setViewportNoteIds: ${noteRelays.size} viewport notes (NORMAL priority, immediate)")
+        MLog.d(TAG, "setViewportNoteIds: ${noteRelays.size} viewport notes (NORMAL priority, immediate)")
         updateViewportSubscription()
     }
 
@@ -331,7 +331,7 @@ object NoteCountsRepository {
      * Force re-trigger the counts subscription even if note IDs haven't changed.
      */
     fun retrigger() {
-        Log.d(TAG, "retrigger: forcing counts subscription update")
+        MLog.d(TAG, "retrigger: forcing counts subscription update")
         lastSubscribedNoteIds = emptySet()
         scheduleSubscriptionUpdate()
     }
@@ -386,7 +386,7 @@ object NoteCountsRepository {
                 .associate { it.key to it.value }
         } else perRelayNoteIds
 
-        Log.d(TAG, "Updating counts sub: ${mergedIds.size} notes across ${cappedPerRelay.size} relays (${perRelayNoteIds.size} total)")
+        MLog.d(TAG, "Updating counts sub: ${mergedIds.size} notes across ${cappedPerRelay.size} relays (${perRelayNoteIds.size} total)")
 
         // Build per-relay Cybin Filter maps.
         // When an engagement filter is active, boost the limit for the relevant kind
@@ -535,7 +535,7 @@ object NoteCountsRepository {
             }
         }
 
-        Log.d(TAG, "Flushed ${batch.size} count events (${changedReplyNoteIds.size} reply count updates)")
+        MLog.d(TAG, "Flushed ${batch.size} count events (${changedReplyNoteIds.size} reply count updates)")
     }
 
     private fun applyKind1Reply(event: Event, snapshot: MutableMap<String, NoteCounts>, changedReplyNoteIds: MutableSet<String>) {
@@ -642,7 +642,7 @@ object NoteCountsRepository {
         if (senderPubkey == currentUserPubkey && noteId.isNotBlank()) {
             _ownZappedNoteIds.add(noteId)
         }
-        if (amountSats > 0) Log.d(TAG, "Zap receipt ${event.id.take(8)}: ${amountSats} sats for note ${noteId.take(8)}")
+        if (amountSats > 0) MLog.d(TAG, "Zap receipt ${event.id.take(8)}: ${amountSats} sats for note ${noteId.take(8)}")
         val counts = snapshot[noteId] ?: NoteCounts()
         val authors = counts.zapAuthors.toMutableList()
         if (senderPubkey !in authors) authors.add(senderPubkey)
@@ -691,7 +691,7 @@ object NoteCountsRepository {
         if (bolt11 != null) {
             val sats = parseBolt11AmountSats(bolt11)
             if (sats > 0) return sats
-            Log.d(TAG, "bolt11 parsed 0 sats for ${event.id.take(8)}: ${bolt11.take(30)}...")
+            MLog.d(TAG, "bolt11 parsed 0 sats for ${event.id.take(8)}: ${bolt11.take(30)}...")
         }
         // Fallback: NIP-57 kind-9734 request in "description" tag may have "amount" in millisats
         val descJson = event.tags.firstOrNull { it.getOrNull(0) == "description" }?.getOrNull(1)
@@ -763,7 +763,7 @@ object NoteCountsRepository {
         } else counts.customEmojiUrls
         snapshot[noteId] = counts.copy(reactions = existing.toList(), reactionAuthors = authors, customEmojiUrls = emojiUrls)
         _countsByNoteId.value = snapshot
-        Log.d(TAG, "Optimistic reaction injected: $emoji on ${noteId.take(8)} by ${authorPubkey.take(8)}")
+        MLog.d(TAG, "Optimistic reaction injected: $emoji on ${noteId.take(8)} by ${authorPubkey.take(8)}")
     }
 
     /**
@@ -779,7 +779,7 @@ object NoteCountsRepository {
         snapshot[noteId] = counts.copy(repostCount = counts.repostCount + 1, repostAuthors = authors)
         _countsByNoteId.value = snapshot
         _ownBoostedNoteIds.add(noteId)
-        Log.d(TAG, "Optimistic repost injected: ${noteId.take(8)} by ${authorPubkey.take(8)}")
+        MLog.d(TAG, "Optimistic repost injected: ${noteId.take(8)} by ${authorPubkey.take(8)}")
     }
 
     /**
@@ -859,7 +859,7 @@ object NoteCountsRepository {
                 batch[pair.first] = pair.second
             }
             if (batch.isNotEmpty()) {
-                Log.d(TAG, "Interest flush: ${batch.size} accumulated note IDs → single subscription update")
+                MLog.d(TAG, "Interest flush: ${batch.size} accumulated note IDs → single subscription update")
                 setNoteIdsOfInterest(batch)
             }
         }

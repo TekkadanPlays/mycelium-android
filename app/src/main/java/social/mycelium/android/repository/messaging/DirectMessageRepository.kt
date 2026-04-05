@@ -2,7 +2,7 @@ package social.mycelium.android.repository.messaging
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.crypto.KeyPair
@@ -62,7 +62,7 @@ object DirectMessageRepository {
     private const val PREFS_KEY_DM_RELAYS = "dm_relay_urls"
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
-            Log.e(TAG, "Coroutine failed: ${t.message}", t)
+            MLog.e(TAG, "Coroutine failed: ${t.message}", t)
         }
     )
 
@@ -77,7 +77,7 @@ object DirectMessageRepository {
             val urls = saved.split(",").filter { it.isNotBlank() }
             if (urls.isNotEmpty() && _dmRelayUrls.value.isEmpty()) {
                 _dmRelayUrls.value = urls
-                Log.d(TAG, "init: restored ${urls.size} DM relays from prefs")
+                MLog.d(TAG, "init: restored ${urls.size} DM relays from prefs")
             }
         }
     }
@@ -155,7 +155,7 @@ object DirectMessageRepository {
      *  Called after the initial DM subscription replay has settled. */
     fun enableDmNotifications() {
         dmNotificationGateEpoch = System.currentTimeMillis() / 1000
-        Log.d(TAG, "DM notifications enabled for events after epoch=$dmNotificationGateEpoch")
+        MLog.d(TAG, "DM notifications enabled for events after epoch=$dmNotificationGateEpoch")
     }
 
     /** Cache of fetched inbox relays per pubkey (NIP-65 kind-10002 only — kind-10050 intentionally ignored). */
@@ -173,7 +173,7 @@ object DirectMessageRepository {
     fun setDmRelayUrls(urls: List<String>) {
         _dmRelayUrls.value = urls.map { it.trim().removeSuffix("/") }.distinct()
         persistDmRelayUrls()
-        Log.d(TAG, "DM relay list set: ${urls.size} relays")
+        MLog.d(TAG, "DM relay list set: ${urls.size} relays")
     }
 
     fun addDmRelay(url: String) {
@@ -219,10 +219,10 @@ object DirectMessageRepository {
         
         when (result) {
             is social.mycelium.android.services.PublishResult.Success -> {
-                Log.d(TAG, "DM relays (kind-10050) published: ${result.eventId.take(8)}")
+                MLog.d(TAG, "DM relays (kind-10050) published: ${result.eventId.take(8)}")
             }
             is social.mycelium.android.services.PublishResult.Error ->
-                Log.e(TAG, "DM relays publish failed: ${result.message}")
+                MLog.e(TAG, "DM relays publish failed: ${result.message}")
         }
     }
 
@@ -235,7 +235,7 @@ object DirectMessageRepository {
     fun setPeerDmRelayUrls(pubkey: String, urls: List<String>) {
         if (urls.isNotEmpty()) {
             peerDmRelays[pubkey] = urls
-            Log.d(TAG, "Peer DM relay list set for ${pubkey.take(8)}: ${urls.size} relays")
+            MLog.d(TAG, "Peer DM relay list set for ${pubkey.take(8)}: ${urls.size} relays")
         }
     }
 
@@ -268,7 +268,7 @@ object DirectMessageRepository {
 
         if (deferred) {
             _debugStatus.value = "Ready (deferred until DM page visit)"
-            Log.d(TAG, "startSubscription: credentials stored, subscription deferred")
+            MLog.d(TAG, "startSubscription: credentials stored, subscription deferred")
             return
         }
 
@@ -283,7 +283,7 @@ object DirectMessageRepository {
         val pubkey = userPubkey ?: return
         if (dmHandle != null) return // Already subscribed
         _hasUserUnlockedDMs.value = true
-        Log.d(TAG, "ensureSubscriptionStarted: user visited DM page, starting subscription")
+        MLog.d(TAG, "ensureSubscriptionStarted: user visited DM page, starting subscription")
         startRelaySubscription(pubkey)
         scope.launch {
             kotlinx.coroutines.delay(5_000)
@@ -300,7 +300,7 @@ object DirectMessageRepository {
     fun ensureSubscriptionForNotifications() {
         val pubkey = userPubkey ?: return
         if (dmHandle != null) return
-        Log.d(TAG, "ensureSubscriptionForNotifications: starting DM sub for push notifications")
+        MLog.d(TAG, "ensureSubscriptionForNotifications: starting DM sub for push notifications")
         startRelaySubscription(pubkey)
         scope.launch {
             kotlinx.coroutines.delay(12_000)
@@ -316,7 +316,7 @@ object DirectMessageRepository {
     fun startEarlyConnection() {
         val pubkey = userPubkey ?: return
         if (dmHandle != null) return
-        Log.d(TAG, "startEarlyConnection: proactively connecting to DM relays")
+        MLog.d(TAG, "startEarlyConnection: proactively connecting to DM relays")
         startRelaySubscription(pubkey)
     }
 
@@ -329,13 +329,13 @@ object DirectMessageRepository {
             _dmRelayUrls.collect { dmRelays ->
                 dmHandle?.cancel()
                 if (dmRelays.isEmpty()) {
-                    Log.w(TAG, "No NIP-17 DM relays configured! Halting DM subscription.")
+                    MLog.w(TAG, "No NIP-17 DM relays configured! Halting DM subscription.")
                     _debugStatus.value = "Awaiting NIP-17 Relay setup"
                     return@collect
                 }
 
                 _debugStatus.value = "Subscribing on ${dmRelays.size} relays..."
-                Log.d(TAG, "startRelaySubscription: pubkey=${pubkey.take(8)}, dmRelays=${dmRelays.size}")
+                MLog.d(TAG, "startRelaySubscription: pubkey=${pubkey.take(8)}, dmRelays=${dmRelays.size}")
 
                 // ── NIP-42: ensure DM relays are in the auth allowlist ──
                 // DM relays (kind-10050) are loaded during Phase 4 of startup, AFTER the
@@ -349,7 +349,7 @@ object DirectMessageRepository {
                     tags = mapOf("p" to listOf(pubkey)),
                     limit = 5000
                 )
-                Log.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, limit=5000 (no since)")
+                MLog.d(TAG, "Filter: kinds=[1059], #p=${pubkey.take(8)}, limit=5000 (no since)")
 
                 dmHandle = stateMachine.requestTemporarySubscriptionWithRelay(
                     dmRelays, filter, priority = SubscriptionPriority.NORMAL
@@ -357,7 +357,7 @@ object DirectMessageRepository {
                     bufferGiftWrap(event, relayUrl)
                 }
                 _debugStatus.value = "Listening on ${dmRelays.size} relays"
-                Log.d(TAG, "DM subscription started on ${dmRelays.size} relays for ${pubkey.take(8)}...")
+                MLog.d(TAG, "DM subscription started on ${dmRelays.size} relays for ${pubkey.take(8)}...")
             }
         }
 
@@ -369,7 +369,7 @@ object DirectMessageRepository {
                 val dm = messagesById[dmId] ?: return@collect
                 val updatedUrls = (dm.relayUrls + confirmation.relayUrl).distinct()
                 messagesById[dmId] = dm.copy(relayUrls = updatedUrls)
-                Log.d(TAG, "Relay OK for DM ${dmId.take(8)}: ${confirmation.relayUrl} (${updatedUrls.size} confirmed)")
+                MLog.d(TAG, "Relay OK for DM ${dmId.take(8)}: ${confirmation.relayUrl} (${updatedUrls.size} confirmed)")
                 refreshActiveMessages()
             }
         }
@@ -380,7 +380,7 @@ object DirectMessageRepository {
         dmHandle = null
         deepHistoryJob?.cancel()
         deepHistoryJob = null
-        Log.d(TAG, "DM subscription stopped")
+        MLog.d(TAG, "DM subscription stopped")
     }
 
     // ── Deep DM History Fetch ────────────────────────────────────────────────
@@ -403,11 +403,11 @@ object DirectMessageRepository {
         val pubkey = userPubkey ?: return
         val dmRelays = _dmRelayUrls.value
         if (dmRelays.isEmpty()) {
-            Log.w(TAG, "fetchDmHistory: no DM relays configured")
+            MLog.w(TAG, "fetchDmHistory: no DM relays configured")
             return
         }
         if (deepHistoryJob?.isActive == true) {
-            Log.d(TAG, "fetchDmHistory: already in progress")
+            MLog.d(TAG, "fetchDmHistory: already in progress")
             return
         }
 
@@ -423,7 +423,7 @@ object DirectMessageRepository {
                 ?: messagesById.values.minOfOrNull { it.createdAt }
                 ?: (System.currentTimeMillis() / 1000)
 
-            Log.d(TAG, "fetchDmHistory: starting backward pagination from $until on ${dmRelays.size} relays")
+            MLog.d(TAG, "fetchDmHistory: starting backward pagination from $until on ${dmRelays.size} relays")
 
             while (pagesCompleted < maxPages) {
                 var pageCount = 0
@@ -453,11 +453,11 @@ object DirectMessageRepository {
                 }
 
                 pagesCompleted++
-                Log.d(TAG, "fetchDmHistory: page $pagesCompleted fetched $pageCount events (oldest=$oldestInPage)")
+                MLog.d(TAG, "fetchDmHistory: page $pagesCompleted fetched $pageCount events (oldest=$oldestInPage)")
 
                 if (pageCount == 0) {
                     // No more history available
-                    Log.d(TAG, "fetchDmHistory: no more history, stopping after $pagesCompleted pages")
+                    MLog.d(TAG, "fetchDmHistory: no more history, stopping after $pagesCompleted pages")
                     break
                 }
 
@@ -470,7 +470,7 @@ object DirectMessageRepository {
 
             _isFetchingHistory.value = false
             _debugStatus.value = "${pendingGiftWraps.size} encrypted, ${messagesById.size} decrypted"
-            Log.d(TAG, "fetchDmHistory: complete — $pagesCompleted pages, ${pendingGiftWraps.size} pending decrypt")
+            MLog.d(TAG, "fetchDmHistory: complete — $pagesCompleted pages, ${pendingGiftWraps.size} pending decrypt")
         }
     }
 
@@ -494,7 +494,7 @@ object DirectMessageRepository {
         if (pendingGiftWraps.putIfAbsent(event.id, event) == null) {
             _pendingGiftWrapCount.value = pendingGiftWraps.size
             _debugStatus.value = "${pendingGiftWraps.size} encrypted, ${messagesById.size} decrypted"
-            Log.d(TAG, "Buffered gift wrap ${event.id.take(8)} (${pendingGiftWraps.size} pending)")
+            MLog.d(TAG, "Buffered gift wrap ${event.id.take(8)} (${pendingGiftWraps.size} pending)")
             if (event.createdAt >= dmNotificationGateEpoch) {
                 _newDmSignal.tryEmit(event.id)
             }
@@ -513,7 +513,7 @@ object DirectMessageRepository {
         if (decryptedIds.contains(event.id)) return
         if (pendingGiftWraps.putIfAbsent(event.id, event) == null) {
             _pendingGiftWrapCount.value = pendingGiftWraps.size
-            Log.d(TAG, "Deep-fetch buffered gift wrap ${event.id.take(8)} (${pendingGiftWraps.size} pending)")
+            MLog.d(TAG, "Deep-fetch buffered gift wrap ${event.id.take(8)} (${pendingGiftWraps.size} pending)")
         }
     }
 
@@ -538,18 +538,18 @@ object DirectMessageRepository {
         } else if (!_hasUserApprovedDecrypt.value &&
             !social.mycelium.android.ui.settings.DmPreferences.autoDecryptDMs.value) {
             // Neither user-confirmed nor auto-decrypt — do nothing
-            Log.d(TAG, "decryptPending: skipped — awaiting user confirmation")
+            MLog.d(TAG, "decryptPending: skipped — awaiting user confirmation")
             return
         }
         val signer = userSigner ?: return
         val myPubkey = userPubkey ?: return
         val pending = pendingGiftWraps.values.toList()
         if (pending.isEmpty()) {
-            Log.d(TAG, "decryptPending: nothing to decrypt")
+            MLog.d(TAG, "decryptPending: nothing to decrypt")
             return
         }
 
-        Log.d(TAG, "decryptPending: ${pending.size} events to decrypt")
+        MLog.d(TAG, "decryptPending: ${pending.size} events to decrypt")
         _isDecrypting.value = true
 
         scope.launch {
@@ -577,10 +577,10 @@ object DirectMessageRepository {
                     decryptedIds.add(event.id)
                 } catch (e: IllegalStateException) {
                     // Amber declined or failed — stop immediately, respect the user's choice
-                    Log.d(TAG, "decryptPending: Amber declined/failed — stopping (${e.message})")
+                    MLog.d(TAG, "decryptPending: Amber declined/failed — stopping (${e.message})")
                     declinedByUser = true
                 } catch (e: Exception) {
-                    Log.w(TAG, "decryptPending: error for ${event.id.take(8)}: ${e.message}")
+                    MLog.w(TAG, "decryptPending: error for ${event.id.take(8)}: ${e.message}")
                     errorCount++
                     // Non-decline failure (bad data) — remove from pending, don't retry
                     pendingGiftWraps.remove(event.id)
@@ -596,7 +596,7 @@ object DirectMessageRepository {
             }
             _debugStatus.value = "${pendingGiftWraps.size} encrypted, ${messagesById.size} decrypted" +
                     if (declinedByUser) " (user declined)" else ""
-            Log.d(
+            MLog.d(
                 TAG,
                 "decryptPending: done — $decryptedCount ok, $failedCount bad-format, $errorCount errors, ${pendingGiftWraps.size} still pending" +
                         if (declinedByUser) ", stopped by user decline" else ""
@@ -619,7 +619,7 @@ object DirectMessageRepository {
         val sealJson = signer.nip44Decrypt(event.content, event.pubKey)
         val seal = Event.fromJsonOrNull(sealJson)
         if (seal == null || seal.kind != KIND_SEAL) {
-            Log.w(
+            MLog.w(
                 TAG,
                 "Invalid seal in gift wrap ${event.id.take(8)}, wrapPubkey=${event.pubKey.take(12)}, decryptedLen=${sealJson.length}, preview=${
                     sealJson.take(120)
@@ -634,11 +634,11 @@ object DirectMessageRepository {
         val rumorJson = signer.nip44Decrypt(seal.content, seal.pubKey)
         val rumor = parseEventLenient(rumorJson)
         if (rumor == null) {
-            Log.w(TAG, "Failed to parse rumor JSON in seal from ${seal.pubKey.take(8)}, json=${rumorJson.take(80)}")
+            MLog.w(TAG, "Failed to parse rumor JSON in seal from ${seal.pubKey.take(8)}, json=${rumorJson.take(80)}")
             return null
         }
         if (rumor.kind != KIND_DM) {
-            Log.d(TAG, "Non-DM rumor kind=${rumor.kind} in seal from ${seal.pubKey.take(8)} (expected kind-$KIND_DM)")
+            MLog.d(TAG, "Non-DM rumor kind=${rumor.kind} in seal from ${seal.pubKey.take(8)} (expected kind-$KIND_DM)")
             return null
         }
 
@@ -659,11 +659,11 @@ object DirectMessageRepository {
         val existing = messagesById[canonicalId]
         if (existing != null) {
             val mergedRelays = (existing.relayUrls + relayUrls).distinct()
-            Log.d(TAG, "Merging relay echo for DM ${canonicalId.take(8)} (${mergedRelays.size} relays)")
+            MLog.d(TAG, "Merging relay echo for DM ${canonicalId.take(8)} (${mergedRelays.size} relays)")
             return existing.copy(relayUrls = mergedRelays)
         }
 
-        Log.d(TAG, "Decrypted DM from ${senderPubkey.take(8)}: ${rumor.content.take(30)}...")
+        MLog.d(TAG, "Decrypted DM from ${senderPubkey.take(8)}: ${rumor.content.take(30)}...")
         return DirectMessage(
             id = canonicalId,
             senderPubkey = senderPubkey,
@@ -704,7 +704,7 @@ object DirectMessageRepository {
                 val myPreferred = _dmRelayUrls.value
                 val targetPreferred = getPeerInboxRelays(recipientPubkey)
                 if (myPreferred.isEmpty() || targetPreferred.isEmpty()) {
-                    Log.e(TAG, "Cannot send DM. Missing kind-10050 DM relays. Mine: ${myPreferred.size}, Peer: ${targetPreferred.size}")
+                    MLog.e(TAG, "Cannot send DM. Missing kind-10050 DM relays. Mine: ${myPreferred.size}, Peer: ${targetPreferred.size}")
                     return@launch
                 }
                 val publishRelays = (myPreferred + targetPreferred).distinct().take(4)
@@ -740,7 +740,7 @@ object DirectMessageRepository {
                 // 3. Build kind 1059 gift wrap to RECIPIENT: encrypt seal with random key
                 // NIP-17: send to recipient's inbox relays (only strictly 10050)
                 val recipientInbox = targetPreferred.take(4)
-                Log.d(TAG, "Recipient ${recipientPubkey.take(8)} inbox relays: $recipientInbox")
+                MLog.d(TAG, "Recipient ${recipientPubkey.take(8)} inbox relays: $recipientInbox")
                 val recipientWrapId = sendGiftWrap(signedSeal, recipientPubkey, recipientInbox.toSet())
                 giftWrapToDmId[recipientWrapId] = signedSeal.id
 
@@ -756,7 +756,7 @@ object DirectMessageRepository {
                 val selfSignedSeal = signer.sign(selfSealTemplate)
                 // Self-wrap goes exclusively to DM configured relays
                 val senderRelays = myPreferred.take(4)
-                Log.d(TAG, "Self-wrap to ${senderRelays.size} relays")
+                MLog.d(TAG, "Self-wrap to ${senderRelays.size} relays")
                 val selfWrapId = sendGiftWrap(selfSignedSeal, senderPubkey, senderRelays.toSet())
                 giftWrapToDmId[selfWrapId] = signedSeal.id
 
@@ -776,9 +776,9 @@ object DirectMessageRepository {
                 rebuildConversations()
                 refreshActiveMessages()
 
-                Log.d(TAG, "Sent DM to ${recipientPubkey.take(8)}...")
+                MLog.d(TAG, "Sent DM to ${recipientPubkey.take(8)}...")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send DM: ${e.message}", e)
+                MLog.e(TAG, "Failed to send DM: ${e.message}", e)
             }
         }
     }
@@ -839,14 +839,14 @@ object DirectMessageRepository {
         try {
             kotlinx.coroutines.withTimeout(5000) { latch.await() }
         } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
-            Log.d(TAG, "Timeout fetching inbox relays for ${pubkey.take(8)}")
+            MLog.d(TAG, "Timeout fetching inbox relays for ${pubkey.take(8)}")
         }
         handle.cancel()
 
         val inbox = result ?: fallbackRelays.toList()
         val source = if (result != null) "kind-10002" else "fallback"
         inboxRelayCache[pubkey] = inbox
-        Log.d(TAG, "fetchInboxRelays(${pubkey.take(8)}): ${inbox.size} relays ($source)")
+        MLog.d(TAG, "fetchInboxRelays(${pubkey.take(8)}): ${inbox.size} relays ($source)")
         return inbox
     }
 
@@ -870,7 +870,7 @@ object DirectMessageRepository {
         )
         val signedWrap = randomSigner.sign(wrapTemplate)
         val stateMachine = RelayConnectionStateMachine.getInstance()
-        Log.d(
+        MLog.d(
             TAG,
             "Sending gift wrap ${signedWrap.id.take(8)} to ${recipientPubkey.take(8)} on ${relayUrls.size} relays: $relayUrls"
         )
@@ -899,7 +899,7 @@ object DirectMessageRepository {
         // Fetch profiles for peers we don't have cached, then rebuild after they arrive
         val missingPeers = grouped.keys.filter { profileCache.getAuthor(it) == null }
         if (missingPeers.isNotEmpty()) {
-            Log.d(TAG, "Requesting profiles for ${missingPeers.size} unknown DM peers")
+            MLog.d(TAG, "Requesting profiles for ${missingPeers.size} unknown DM peers")
             scope.launch {
                 profileCache.requestProfiles(missingPeers, userInboxRelays.ifEmpty { listOf("wss://purplepag.es") })
                 // requestProfiles is async (debounced batch) — schedule delayed rebuilds

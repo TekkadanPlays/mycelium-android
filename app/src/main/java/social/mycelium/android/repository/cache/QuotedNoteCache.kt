@@ -2,7 +2,7 @@ package social.mycelium.android.repository.cache
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.QuotedNoteMeta
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
@@ -115,7 +115,7 @@ object QuotedNoteCache {
         prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val storedVersion = prefs?.getInt(PREFS_VERSION_KEY, 1) ?: 1
         if (storedVersion < CURRENT_CACHE_VERSION) {
-            Log.d(TAG, "Cache version $storedVersion < $CURRENT_CACHE_VERSION — clearing stale entries")
+            MLog.d(TAG, "Cache version $storedVersion < $CURRENT_CACHE_VERSION — clearing stale entries")
             prefs?.edit()?.remove(PREFS_KEY)?.putInt(PREFS_VERSION_KEY, CURRENT_CACHE_VERSION)?.apply()
         }
         loadFromDisk()
@@ -203,13 +203,13 @@ object QuotedNoteCache {
             unresolved.add(id)
         }
         if (resolvedFromRaw > 0) {
-            Log.d(TAG, "Prefetch: $resolvedFromRaw quoted notes resolved from RawEventCache")
+            MLog.d(TAG, "Prefetch: $resolvedFromRaw quoted notes resolved from RawEventCache")
             scheduleDiskSave()
         }
         // Phase 2: check Room DB for persisted events
         // Phase 3: batch-fetch remaining from relays (async, but starts immediately)
         if (unresolved.isNotEmpty()) {
-            Log.d(TAG, "Prefetch: ${unresolved.size} quoted notes need relay fetch")
+            MLog.d(TAG, "Prefetch: ${unresolved.size} quoted notes need relay fetch")
             batchScope.launch {
                 // Try Room DB first
                 val dao = roomEventDao
@@ -228,12 +228,12 @@ object QuotedNoteCache {
                             }
                         }
                         if (fromRoom > 0) {
-                            Log.d(TAG, "Prefetch: $fromRoom quoted notes resolved from Room DB")
+                            MLog.d(TAG, "Prefetch: $fromRoom quoted notes resolved from Room DB")
                             unresolved.removeAll(roomEntities.map { it.eventId }.toSet())
                             scheduleDiskSave()
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Prefetch Room lookup failed: ${e.message}")
+                        MLog.w(TAG, "Prefetch Room lookup failed: ${e.message}")
                     }
                 }
                 // Remaining: fire relay fetch (no debounce — these are needed NOW)
@@ -242,7 +242,7 @@ object QuotedNoteCache {
                 val allHintRelays = unresolved.flatMap { relayHintsCache[it] ?: emptyList() }.distinct()
                 val combinedRelays = (allHintRelays + userRelayUrls).distinct().filter { it.isNotBlank() }.take(10)
                 if (stillNeeded.isNotEmpty()) {
-                    Log.d(TAG, "Prefetch: ${stillNeeded.size} quoted notes fetching from relays")
+                    MLog.d(TAG, "Prefetch: ${stillNeeded.size} quoted notes fetching from relays")
                     if (combinedRelays.isNotEmpty()) {
                         val stateMachine = RelayConnectionStateMachine.getInstance()
                         // Process in chunks so we never silently drop overflow events
@@ -265,7 +265,7 @@ object QuotedNoteCache {
                                     failedIds.remove(event.id)
                                 }
                             } catch (e: Exception) {
-                                Log.e(TAG, "Prefetch relay fetch error: ${e.message}")
+                                MLog.e(TAG, "Prefetch relay fetch error: ${e.message}")
                             } finally {
                                 EnrichmentBudget.activeOneShotSubs.decrementAndGet()
                                 EnrichmentBudget.quoteFetchSemaphore.release()
@@ -298,7 +298,7 @@ object QuotedNoteCache {
             }
         }
         if (nestedIds.isEmpty()) return
-        Log.d(TAG, "Depth-2 prefetch: ${nestedIds.size} nested quoted notes")
+        MLog.d(TAG, "Depth-2 prefetch: ${nestedIds.size} nested quoted notes")
         // Register nested quoted IDs with NoteCountsRepository via batched
         // accumulator so counts resolve without thrashing the subscription.
         val nestedRelayMap = nestedIds.associateWith { relays.take(3) }
@@ -348,7 +348,7 @@ object QuotedNoteCache {
                 }
                 scheduleDiskSave()
             } catch (e: Exception) {
-                Log.w(TAG, "Depth-2 prefetch relay error: ${e.message}")
+                MLog.w(TAG, "Depth-2 prefetch relay error: ${e.message}")
             } finally {
                 EnrichmentBudget.activeOneShotSubs.decrementAndGet()
                 EnrichmentBudget.quoteFetchSemaphore.release()
@@ -401,7 +401,7 @@ object QuotedNoteCache {
         return try {
             deferred.await()
         } catch (e: CancellationException) {
-            Log.d(TAG, "Quoted note fetch cancelled for ${eventId.take(8)} (scrolled away)")
+            MLog.d(TAG, "Quoted note fetch cancelled for ${eventId.take(8)} (scrolled away)")
             synchronized(pendingBatch) { pendingBatch.remove(eventId) }
             null
         } finally {
@@ -445,13 +445,13 @@ object QuotedNoteCache {
             batch = LinkedHashMap(pendingBatch)
             pendingBatch.clear()
         }
-        Log.d(TAG, "Flushing batch of ${batch.size} quoted note IDs")
+        MLog.d(TAG, "Flushing batch of ${batch.size} quoted note IDs")
 
         // Collect all relay hints + user relays into one set
         val allRelayHints = batch.values.flatMap { it.relayHints }.distinct()
         val relays = (allRelayHints + userRelayUrls).distinct().filter { it.isNotBlank() }.take(10)
         if (relays.isEmpty()) {
-            Log.w(TAG, "No relays available for batch fetch")
+            MLog.w(TAG, "No relays available for batch fetch")
             for ((_, entry) in batch) {
                 entry.deferred.complete(null)
                 inFlightIds.remove(entry.eventId)
@@ -482,7 +482,7 @@ object QuotedNoteCache {
                 entry.deferred.complete(meta)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Batch fetch error: ${e.message}")
+            MLog.e(TAG, "Batch fetch error: ${e.message}")
         }
 
         // Complete any unfulfilled deferreds as null (not found on any relay)
@@ -497,7 +497,7 @@ object QuotedNoteCache {
             inFlightIds.remove(id)
         }
         if (savedAny) scheduleDiskSave()
-        Log.d(TAG, "Batch complete: ${fulfilled.size}/${batch.size} found")
+        MLog.d(TAG, "Batch complete: ${fulfilled.size}/${batch.size} found")
     }
 
     /**
@@ -569,9 +569,9 @@ object QuotedNoteCache {
             synchronized(memoryCache) {
                 for (meta in list) memoryCache[meta.eventId] = meta
             }
-            Log.d(TAG, "Loaded ${list.size} quoted notes from disk cache")
+            MLog.d(TAG, "Loaded ${list.size} quoted notes from disk cache")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load disk cache: ${e.message}")
+            MLog.e(TAG, "Failed to load disk cache: ${e.message}")
         }
     }
 
@@ -592,9 +592,9 @@ object QuotedNoteCache {
             }
             val json = diskJson.encodeToString(entries)
             prefs?.edit()?.putString(PREFS_KEY, json)?.apply()
-            Log.d(TAG, "Saved ${entries.size} quoted notes to disk cache")
+            MLog.d(TAG, "Saved ${entries.size} quoted notes to disk cache")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save disk cache: ${e.message}")
+            MLog.e(TAG, "Failed to save disk cache: ${e.message}")
         }
     }
 }

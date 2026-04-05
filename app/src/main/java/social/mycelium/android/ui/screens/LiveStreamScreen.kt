@@ -1,7 +1,7 @@
 package social.mycelium.android.ui.screens
 
 import android.net.Uri
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -329,7 +329,7 @@ fun LiveStreamScreen(
     }
     DisposableEffect(activityAddress, chatSelectedRelayUrls) {
         val relays = chatSelectedRelayUrls.toList().ifEmpty { activity.relayUrls }
-        Log.d("LiveStreamScreen", "Chat subscribe: addr=$activityAddress, relays=${relays.size}: ${relays.joinToString()}")
+        MLog.d("LiveStreamScreen", "Chat subscribe: addr=$activityAddress, relays=${relays.size}: ${relays.joinToString()}")
         chatRepository.subscribe(activityAddress, relays)
         onDispose { chatRepository.unsubscribe() }
     }
@@ -337,7 +337,7 @@ fun LiveStreamScreen(
     // Back handler: hand off player to PiP if stream is playing AND auto-PiP is enabled
     val autoPipEnabled by social.mycelium.android.ui.settings.MediaPreferences.autoPipLiveActivities.collectAsState()
     val handleBack = {
-        Log.d("LiveStreamScreen", "handleBack: player=${player != null}, hasReceivedVideo=$hasReceivedVideo, showUnavailable=$showUnavailable, autoPipEnabled=$autoPipEnabled, handedOffToPip=$handedOffToPip")
+        MLog.d("LiveStreamScreen", "handleBack: player=${player != null}, hasReceivedVideo=$hasReceivedVideo, showUnavailable=$showUnavailable, autoPipEnabled=$autoPipEnabled, handedOffToPip=$handedOffToPip")
         if (player != null && hasReceivedVideo && !showUnavailable && autoPipEnabled) {
             handedOffToPip = true
             PipStreamManager.startPip(

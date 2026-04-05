@@ -1,6 +1,6 @@
 package social.mycelium.android.viewmodel
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -126,12 +126,12 @@ class Kind1RepliesViewModel : ViewModel() {
      */
     fun loadRepliesForNote(note: Note, relayUrls: List<String>) {
         val previousNoteId = _uiState.value.note?.id
-        Log.d(TAG, "Loading Kind 1 replies for note ${note.id.take(8)}... from ${relayUrls.size} relays")
+        MLog.d(TAG, "Loading Kind 1 replies for note ${note.id.take(8)}... from ${relayUrls.size} relays")
 
         // Clear previous thread's state to prevent stale replies from showing
         if (previousNoteId != null && previousNoteId != note.id) {
             repository.clearRepliesForNote(previousNoteId)
-            Log.d(TAG, "Cleared previous thread ${previousNoteId.take(8)} before loading new one")
+            MLog.d(TAG, "Cleared previous thread ${previousNoteId.take(8)} before loading new one")
         }
 
         // Only wipe replies when switching to a different note.
@@ -156,7 +156,7 @@ class Kind1RepliesViewModel : ViewModel() {
                     authorPubkey = note.author.id
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading replies: ${e.message}", e)
+                MLog.e(TAG, "Error loading replies: ${e.message}", e)
                 _uiState.update { it.copy(error = "Failed to load replies: ${e.message}", isLoading = false) }
             }
         }
@@ -210,7 +210,7 @@ class Kind1RepliesViewModel : ViewModel() {
         threadedReplies: List<ThreadedReply>
     ) {
         if (flatReplies.isEmpty()) {
-            Log.d(TAG, "TRACE [${rootId?.take(8)}]: 0 replies")
+            MLog.d(TAG, "TRACE [${rootId?.take(8)}]: 0 replies")
             return
         }
         val replyIds = flatReplies.map { it.id }.toSet()
@@ -236,18 +236,18 @@ class Kind1RepliesViewModel : ViewModel() {
         if (orphans.isNotEmpty()) {
             sb.append(", ${orphans.size} ORPHANS missing parents: ${missingParentIds.joinToString { it.take(8) }}")
         }
-        Log.d(TAG, sb.toString())
+        MLog.d(TAG, sb.toString())
 
         // Log chain structure for threads with nesting
         if (depth > 1) {
             fun traceChain(node: ThreadedReply, indent: String = "  ") {
                 val marker = if (node.isOrphan) " [ORPHAN]" else ""
-                Log.d(TAG, "${indent}├─ ${node.reply.id.take(8)} (L${node.level})${marker} → ${node.children.size} children")
+                MLog.d(TAG, "${indent}├─ ${node.reply.id.take(8)} (L${node.level})${marker} → ${node.children.size} children")
                 node.children.forEach { traceChain(it, "$indent  ") }
             }
             threadedReplies.forEach { root ->
                 if (root.children.isNotEmpty()) {
-                    Log.d(TAG, "CHAIN: ${root.reply.id.take(8)} (L0) → ${root.children.size} children")
+                    MLog.d(TAG, "CHAIN: ${root.reply.id.take(8)} (L0) → ${root.children.size} children")
                     root.children.forEach { traceChain(it) }
                 }
             }
@@ -291,7 +291,7 @@ class Kind1RepliesViewModel : ViewModel() {
                     reply.replyToId != noteId &&
                     reply.replyToId !in replyIds
                 if (isOrphan) {
-                    Log.d(TAG, "Orphan reply ${reply.id.take(8)} — parent ${reply.replyToId?.take(8)} not in ${replyIds.size} replies")
+                    MLog.d(TAG, "Orphan reply ${reply.id.take(8)} — parent ${reply.replyToId?.take(8)} not in ${replyIds.size} replies")
                 }
                 buildThreadedReply(reply).copy(isOrphan = isOrphan)
             }
@@ -299,7 +299,7 @@ class Kind1RepliesViewModel : ViewModel() {
         // Verify all replies are accounted for (no silently dropped replies)
         val threadedCount = countThreadedReplies(rootReplies)
         if (threadedCount != replies.size) {
-            Log.w(TAG, "Threading mismatch: ${replies.size} replies but $threadedCount in tree — ${replies.size - threadedCount} lost")
+            MLog.w(TAG, "Threading mismatch: ${replies.size} replies but $threadedCount in tree — ${replies.size - threadedCount} lost")
         }
 
         return when (_uiState.value.sortOrder) {

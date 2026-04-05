@@ -1,7 +1,7 @@
 package social.mycelium.android.utils
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.cache.Nip11CacheManager
 import social.mycelium.android.cache.ThreadReplyCache
 import social.mycelium.android.repository.cache.ProfileMetadataCache
@@ -28,9 +28,9 @@ object AppMemoryTrimmer {
      * waterfall that kills the relay orb experience. Only cleared at RUNNING_CRITICAL.
      */
     fun trimUiCaches(context: Context?) {
-        try { ThreadReplyCache.trimToSize(ThreadReplyCache.TRIM_SIZE_UI_HIDDEN) } catch (e: Throwable) { Log.w(TAG, "ThreadReplyCache trim failed", e) }
-        try { QuotedNoteCache.trimToSize(QuotedNoteCache.TRIM_SIZE_UI_HIDDEN) } catch (e: Throwable) { Log.w(TAG, "QuotedNoteCache trim failed", e) }
-        try { UrlPreviewCache.clear() } catch (e: Throwable) { Log.w(TAG, "UrlPreviewCache clear failed", e) }
+        try { ThreadReplyCache.trimToSize(ThreadReplyCache.TRIM_SIZE_UI_HIDDEN) } catch (e: Throwable) { MLog.w(TAG, "ThreadReplyCache trim failed", e) }
+        try { QuotedNoteCache.trimToSize(QuotedNoteCache.TRIM_SIZE_UI_HIDDEN) } catch (e: Throwable) { MLog.w(TAG, "QuotedNoteCache trim failed", e) }
+        try { UrlPreviewCache.clear() } catch (e: Throwable) { MLog.w(TAG, "UrlPreviewCache clear failed", e) }
     }
 
     /**
@@ -39,9 +39,9 @@ object AppMemoryTrimmer {
      */
     fun trimBackgroundCaches(level: Int, context: Context?) {
         trimUiCaches(context)
-        try { ThreadReplyCache.trimToSize(ThreadReplyCache.TRIM_SIZE_BACKGROUND) } catch (e: Throwable) { Log.w(TAG, "ThreadReplyCache background trim failed", e) }
-        try { QuotedNoteCache.trimToSize(QuotedNoteCache.TRIM_SIZE_BACKGROUND) } catch (e: Throwable) { Log.w(TAG, "QuotedNoteCache background trim failed", e) }
-        try { ProfileMetadataCache.getInstance().trimToSize(ProfileMetadataCache.TRIM_SIZE_BACKGROUND) } catch (e: Throwable) { Log.w(TAG, "ProfileMetadataCache trim failed", e) }
+        try { ThreadReplyCache.trimToSize(ThreadReplyCache.TRIM_SIZE_BACKGROUND) } catch (e: Throwable) { MLog.w(TAG, "ThreadReplyCache background trim failed", e) }
+        try { QuotedNoteCache.trimToSize(QuotedNoteCache.TRIM_SIZE_BACKGROUND) } catch (e: Throwable) { MLog.w(TAG, "QuotedNoteCache background trim failed", e) }
+        try { ProfileMetadataCache.getInstance().trimToSize(ProfileMetadataCache.TRIM_SIZE_BACKGROUND) } catch (e: Throwable) { MLog.w(TAG, "ProfileMetadataCache trim failed", e) }
         // Only wipe NIP-11 memory cache at RUNNING_CRITICAL (level 15) — last resort.
         // Auto-reload from Room so icons recover without a 14s network re-fetch.
         // TRIM_MEMORY_RUNNING_CRITICAL = 15 (deprecated constant, using raw value)
@@ -52,7 +52,7 @@ object AppMemoryTrimmer {
                     nip11.clearMemoryCache()
                     nip11.reloadFromDisk()
                 }
-            } catch (e: Throwable) { Log.w(TAG, "Nip11CacheManager trim failed", e) }
+            } catch (e: Throwable) { MLog.w(TAG, "Nip11CacheManager trim failed", e) }
         }
     }
 }

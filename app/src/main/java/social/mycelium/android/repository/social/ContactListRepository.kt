@@ -2,7 +2,7 @@ package social.mycelium.android.repository.social
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -86,12 +86,12 @@ object ContactListRepository {
                         val pubkeys = extractPubkeys(event)
                         cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
                         _followListUpdates.tryEmit(pubkeys)
-                        Log.d(TAG, "Restored kind-3 from Room for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
+                        MLog.d(TAG, "Restored kind-3 from Room for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
                         return
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Room restore failed: ${e.message}")
+                MLog.e(TAG, "Room restore failed: ${e.message}")
             }
         }
         // Fallback to SharedPreferences (migration path)
@@ -105,7 +105,7 @@ object ContactListRepository {
             val pubkeys = extractPubkeys(event)
             cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
             _followListUpdates.tryEmit(pubkeys)
-            Log.d(TAG, "Restored persisted kind-3 from SP for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
+            MLog.d(TAG, "Restored persisted kind-3 from SP for ${pubkey.take(8)}: ${pubkeys.size} follows, createdAt=${event.createdAt}")
             // Migrate to Room
             persistKind3ToRoom(pubkey, event, pubkeys)
         }
@@ -136,7 +136,7 @@ object ContactListRepository {
                     )
                 )
             } catch (e: Exception) {
-                Log.e(TAG, "Room persist kind-3 failed: ${e.message}")
+                MLog.e(TAG, "Room persist kind-3 failed: ${e.message}")
             }
         }
     }
@@ -229,7 +229,7 @@ object ContactListRepository {
                 tags = tags
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse persisted kind-3: ${e.message}")
+            MLog.e(TAG, "Failed to parse persisted kind-3: ${e.message}")
             null
         }
     }
@@ -243,7 +243,7 @@ object ContactListRepository {
         if (relayUrls.isEmpty()) return emptySet()
         if (!forceRefresh) {
             getCachedFollowList(pubkey)?.let { cached ->
-                Log.d(TAG, "Kind-3 cache hit for ${pubkey.take(8)}... (${cached.size} follows)")
+                MLog.d(TAG, "Kind-3 cache hit for ${pubkey.take(8)}... (${cached.size} follows)")
                 return cached
             }
         }
@@ -251,7 +251,7 @@ object ContactListRepository {
         // Deduplicate concurrent fetches: if another coroutine is already fetching, wait for it
         val existing = inFlightFetches[pubkey]
         if (existing != null) {
-            Log.d(TAG, "Kind-3 fetch already in-flight for ${pubkey.take(8)}..., waiting")
+            MLog.d(TAG, "Kind-3 fetch already in-flight for ${pubkey.take(8)}..., waiting")
             return try { existing.await() } catch (_: Exception) { emptySet() }
         }
 
@@ -262,7 +262,7 @@ object ContactListRepository {
             return try { prev.await() } catch (_: Exception) { emptySet() }
         }
         val distinctUrls = (KIND3_PRIORITY_RELAYS + relayUrls).distinct()
-        Log.d(TAG, "Fetching kind-3 for ${pubkey.take(8)}... from ${distinctUrls.size} relay(s)")
+        MLog.d(TAG, "Fetching kind-3 for ${pubkey.take(8)}... from ${distinctUrls.size} relay(s)")
         return try {
             val filter = Filter(
                 kinds = listOf(3),
@@ -294,7 +294,7 @@ object ContactListRepository {
                     cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
                     _followListUpdates.tryEmit(pubkeys)
                     deferred.complete(pubkeys)
-                    Log.d(TAG, "No relay kind-3 — using persisted (${pubkeys.size} follows)")
+                    MLog.d(TAG, "No relay kind-3 — using persisted (${pubkeys.size} follows)")
                     return pubkeys
                 }
                 return emptySet()
@@ -303,7 +303,7 @@ object ContactListRepository {
             // This prevents stale relay data from overwriting a local follow/unfollow.
             val persistedTs = getPersistedCreatedAt(pubkey)
             if (event.createdAt < persistedTs && latestKind3Event != null) {
-                Log.w(TAG, "Relay kind-3 is STALE (relay=${event.createdAt}, persisted=$persistedTs) — keeping local version")
+                MLog.w(TAG, "Relay kind-3 is STALE (relay=${event.createdAt}, persisted=$persistedTs) — keeping local version")
                 val persisted = latestKind3Event!!
                 val pubkeys = extractPubkeys(persisted)
                 cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
@@ -316,11 +316,11 @@ object ContactListRepository {
             val pubkeys = extractPubkeys(event)
             cacheEntry = CacheEntry(pubkey, pubkeys, System.currentTimeMillis())
             _followListUpdates.tryEmit(pubkeys)
-            Log.d(TAG, "Kind-3 parsed ${pubkeys.size} follows for ${pubkey.take(8)}..., contains cff1720e77bb: ${pubkeys.any { it.startsWith("cff1720e77bb") }}")
+            MLog.d(TAG, "Kind-3 parsed ${pubkeys.size} follows for ${pubkey.take(8)}..., contains cff1720e77bb: ${pubkeys.any { it.startsWith("cff1720e77bb") }}")
             deferred.complete(pubkeys)
             pubkeys
         } catch (e: Exception) {
-            Log.e(TAG, "Kind-3 fetch failed: ${e.message}", e)
+            MLog.e(TAG, "Kind-3 fetch failed: ${e.message}", e)
             val fallback = getCachedFollowList(pubkey) ?: emptySet()
             deferred.complete(fallback)
             fallback
@@ -361,7 +361,7 @@ object ContactListRepository {
             val signed = signer.sign(template)
 
             // Publish to outbox relays
-            Log.d(TAG, "Publishing follow kind-3 (createdAt=${signed.createdAt}) to ${outboxRelays.size} relays, tags=${signed.tags.size}")
+            MLog.d(TAG, "Publishing follow kind-3 (createdAt=${signed.createdAt}) to ${outboxRelays.size} relays, tags=${signed.tags.size}")
             RelayConnectionStateMachine.getInstance().send(signed, outboxRelays)
 
             // Update local cache + persist so it survives app restart
@@ -371,10 +371,10 @@ object ContactListRepository {
             currentFollows.add(targetPubkey.lowercase())
             cacheEntry = CacheEntry(myPubkey, currentFollows, System.currentTimeMillis())
             _followListUpdates.tryEmit(currentFollows.toSet())
-            Log.d(TAG, "Followed ${targetPubkey.take(8)}... — now following ${currentFollows.size}")
+            MLog.d(TAG, "Followed ${targetPubkey.take(8)}... — now following ${currentFollows.size}")
             null
         } catch (e: Exception) {
-            Log.e(TAG, "Follow failed: ${e.message}", e)
+            MLog.e(TAG, "Follow failed: ${e.message}", e)
             "Follow failed: ${e.message}"
         }
     }
@@ -409,7 +409,7 @@ object ContactListRepository {
             val signed = signer.sign(template)
 
             // Publish to outbox relays
-            Log.d(TAG, "Publishing unfollow kind-3 (createdAt=${signed.createdAt}) to ${outboxRelays.size} relays, tags=${signed.tags.size}")
+            MLog.d(TAG, "Publishing unfollow kind-3 (createdAt=${signed.createdAt}) to ${outboxRelays.size} relays, tags=${signed.tags.size}")
             RelayConnectionStateMachine.getInstance().send(signed, outboxRelays)
 
             // Update local cache + persist so it survives app restart
@@ -419,10 +419,10 @@ object ContactListRepository {
             currentFollows.remove(targetPubkey.lowercase())
             cacheEntry = CacheEntry(myPubkey, currentFollows, System.currentTimeMillis())
             _followListUpdates.tryEmit(currentFollows.toSet())
-            Log.d(TAG, "Unfollowed ${targetPubkey.take(8)}... — now following ${currentFollows.size}")
+            MLog.d(TAG, "Unfollowed ${targetPubkey.take(8)}... — now following ${currentFollows.size}")
             null
         } catch (e: Exception) {
-            Log.e(TAG, "Unfollow failed: ${e.message}", e)
+            MLog.e(TAG, "Unfollow failed: ${e.message}", e)
             "Unfollow failed: ${e.message}"
         }
     }

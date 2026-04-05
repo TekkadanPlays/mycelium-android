@@ -5,7 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.debug.DebugVerboseLog
 
@@ -40,7 +40,7 @@ class NetworkConnectivityMonitor(private val context: Context) {
             val now = System.currentTimeMillis()
             if (!hadNetwork && now - lastReconnectAtMs > DEBOUNCE_MS) {
                 lastReconnectAtMs = now
-                Log.i(TAG, "Network available after loss — granting amnesty and triggering relay reconnect")
+                MLog.i(TAG, "Network available after loss — granting amnesty and triggering relay reconnect")
                 if (BuildConfig.DEBUG) {
                     DebugVerboseLog.record(DebugVerboseLog.Layer.NETWORK, TAG, "onAvailable after loss → reconnect")
                 }
@@ -54,7 +54,7 @@ class NetworkConnectivityMonitor(private val context: Context) {
             val active = connectivityManager.activeNetwork
             if (active == null) {
                 hadNetwork = false
-                Log.d(TAG, "All networks lost")
+                MLog.d(TAG, "All networks lost")
                 if (BuildConfig.DEBUG) {
                     DebugVerboseLog.record(DebugVerboseLog.Layer.NETWORK, TAG, "onLost: no active network")
                 }
@@ -68,7 +68,7 @@ class NetworkConnectivityMonitor(private val context: Context) {
                 val now = System.currentTimeMillis()
                 if (now - lastReconnectAtMs > DEBOUNCE_MS) {
                     lastReconnectAtMs = now
-                    Log.i(TAG, "Network capabilities restored — granting amnesty and triggering relay reconnect")
+                    MLog.i(TAG, "Network capabilities restored — granting amnesty and triggering relay reconnect")
                     if (BuildConfig.DEBUG) {
                         DebugVerboseLog.record(DebugVerboseLog.Layer.NETWORK, TAG, "capabilities restored → reconnect")
                     }
@@ -109,9 +109,9 @@ class NetworkConnectivityMonitor(private val context: Context) {
                 .build()
             connectivityManager.registerNetworkCallback(request, networkCallback)
             isRegistered = true
-            Log.d(TAG, "Network connectivity monitor started")
+            MLog.d(TAG, "Network connectivity monitor started")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to register network callback: ${e.message}", e)
+            MLog.e(TAG, "Failed to register network callback: ${e.message}", e)
         }
     }
 
@@ -120,9 +120,9 @@ class NetworkConnectivityMonitor(private val context: Context) {
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
             isRegistered = false
-            Log.d(TAG, "Network connectivity monitor stopped")
+            MLog.d(TAG, "Network connectivity monitor stopped")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to unregister network callback: ${e.message}", e)
+            MLog.e(TAG, "Failed to unregister network callback: ${e.message}", e)
         }
     }
 }

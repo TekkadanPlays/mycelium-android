@@ -7,7 +7,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.repository.feed.NotesRepository
 import social.mycelium.android.ui.settings.NotificationPreferences
@@ -46,13 +46,13 @@ class RelayForegroundService : Service() {
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Mycelium::RelayService").apply {
             acquire()
         }
-        Log.d(TAG, "Wake lock acquired")
+        MLog.d(TAG, "Wake lock acquired")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Respect user preference — only run in ALWAYS_ON mode
         if (!NotificationPreferences.backgroundServiceEnabled) {
-            Log.d(TAG, "Connection mode is not ALWAYS_ON, stopping")
+            MLog.d(TAG, "Connection mode is not ALWAYS_ON, stopping")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -70,11 +70,11 @@ class RelayForegroundService : Service() {
                 startForeground(NotificationChannelManager.NOTIFICATION_ID_RELAY_SERVICE, notification)
             }
         } catch (e: SecurityException) {
-            Log.w(TAG, "Foreground start blocked: ${e.message}")
+            MLog.w(TAG, "Foreground start blocked: ${e.message}")
             stopSelf()
             return START_NOT_STICKY
         } catch (e: Exception) {
-            Log.w(TAG, "Foreground start failed: ${e.message}")
+            MLog.w(TAG, "Foreground start failed: ${e.message}")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -86,11 +86,11 @@ class RelayForegroundService : Service() {
         // Only launch coroutines once — duplicate startForegroundService() calls
         // (e.g. from onResume + applyConnectionModeScheduling) must not spawn extra collectors.
         if (initialized) {
-            Log.d(TAG, "Foreground service already initialized, skipping coroutine setup")
+            MLog.d(TAG, "Foreground service already initialized, skipping coroutine setup")
             return START_NOT_STICKY
         }
         initialized = true
-        Log.d(TAG, "Foreground service started (ALWAYS_ON mode)")
+        MLog.d(TAG, "Foreground service started (ALWAYS_ON mode)")
 
         // Enable Android push notifications after relay replay settles.
         // startSubscription() resets the push gate to Long.MAX_VALUE to suppress
@@ -103,10 +103,10 @@ class RelayForegroundService : Service() {
             for ((pubkey, scope) in scopes) {
                 if (scope.initialized) {
                     scope.notificationsRepository.enableAndroidNotifications()
-                    Log.d(TAG, "Push notifications enabled for account ${pubkey.take(8)}")
+                    MLog.d(TAG, "Push notifications enabled for account ${pubkey.take(8)}")
                 }
             }
-            Log.d(TAG, "Push notifications enabled from foreground service (${scopes.size} accounts)")
+            MLog.d(TAG, "Push notifications enabled from foreground service (${scopes.size} accounts)")
         }
 
         // Observe new note counts and update the service notification.
@@ -126,7 +126,7 @@ class RelayForegroundService : Service() {
         serviceScope.launch {
             NotificationPreferences.connectionMode.collectLatest { mode ->
                 if (mode != ConnectionMode.ALWAYS_ON) {
-                    Log.d(TAG, "Connection mode changed to $mode, stopping service")
+                    MLog.d(TAG, "Connection mode changed to $mode, stopping service")
                     stopSelf()
                 }
             }
@@ -141,11 +141,11 @@ class RelayForegroundService : Service() {
             wakeLock?.let {
                 if (it.isHeld) {
                     it.release()
-                    Log.d(TAG, "Wake lock released")
+                    MLog.d(TAG, "Wake lock released")
                 }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Wake lock release failed: ${e.message}")
+            MLog.w(TAG, "Wake lock release failed: ${e.message}")
         }
         wakeLock = null
         super.onDestroy()

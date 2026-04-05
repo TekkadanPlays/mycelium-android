@@ -2,7 +2,7 @@ package social.mycelium.android.repository
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.NotificationData
 import social.mycelium.android.data.NotificationType
@@ -59,7 +59,7 @@ class NotificationsRepository(
 
     private val scope = CoroutineScope(
         parentScope.coroutineContext + SupervisorJob(parentScope.coroutineContext[kotlinx.coroutines.Job]) +
-                CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+                CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
     private val profileCache = ProfileMetadataCache.getInstance()
 
@@ -360,10 +360,10 @@ class NotificationsRepository(
         // (multi-account) or become null when the key is absent (drops all feed cross-pollination
         // until startSubscription runs).
         myPubkeyHex = ownerPubkeyHex
-        Log.d(TAG, "init: myPubkeyHex bound to owner ${ownerPubkeyHex.take(8)}")
+        MLog.d(TAG, "init: myPubkeyHex bound to owner ${ownerPubkeyHex.take(8)}")
         // Restore "Read All" watermark so historical events stay seen across restarts
         markAllSeenEpochMs = prefs?.getLong(PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS, 0L) ?: 0L
-        if (markAllSeenEpochMs > 0) Log.d(TAG, "init: restored markAllSeenEpochMs=$markAllSeenEpochMs")
+        if (markAllSeenEpochMs > 0) MLog.d(TAG, "init: restored markAllSeenEpochMs=$markAllSeenEpochMs")
         // Restore persisted seen IDs so read state survives restarts.
         // Without this, every restart creates a burst of "new" notifications
         // for events between the watermark and now.
@@ -374,7 +374,7 @@ class NotificationsRepository(
      *  Called once the initial relay replay window has settled. */
     fun enableAndroidNotifications() {
         sessionStartEpochSec = System.currentTimeMillis() / 1000
-        Log.d(TAG, "Push notifications enabled for events after epoch=$sessionStartEpochSec")
+        MLog.d(TAG, "Push notifications enabled for events after epoch=$sessionStartEpochSec")
         startDmNotificationObserver()
     }
 
@@ -405,7 +405,7 @@ class NotificationsRepository(
         val notifId = social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE +
                 (giftWrapId.hashCode() and 0x7FFFFFFF) % NOTIFICATION_ID_MODULUS
 
-        Log.d(TAG, "fireDmNotification: giftWrap=${giftWrapId.take(8)} account=${ownerPubkeyHex.take(8)}")
+        MLog.d(TAG, "fireDmNotification: giftWrap=${giftWrapId.take(8)} account=${ownerPubkeyHex.take(8)}")
         social.mycelium.android.services.NotificationChannelManager.postSocialNotification(
             ctx,
             social.mycelium.android.services.NotificationChannelManager.CHANNEL_DMS,
@@ -430,7 +430,7 @@ class NotificationsRepository(
         if (isHistoricalIngestion) return
         // Suppress historical replay: only fire for events created after session start
         if (eventEpochSec > 0 && eventEpochSec < sessionStartEpochSec) {
-            Log.d(
+            MLog.d(
                 TAG,
                 "fireNotif SUPPRESSED (historical): type=$type epoch=$eventEpochSec < session=$sessionStartEpochSec suffix=${
                     notifIdSuffix.take(8)
@@ -439,14 +439,14 @@ class NotificationsRepository(
             return
         }
         if (sessionStartEpochSec == Long.MAX_VALUE) {
-            Log.d(TAG, "fireNotif SUPPRESSED (not enabled yet): type=$type suffix=${notifIdSuffix.take(8)}")
+            MLog.d(TAG, "fireNotif SUPPRESSED (not enabled yet): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
         // Dedup: consolidated notifications (like:X, zap:X, repost:X) fire once per session.
         // Subsequent events silently update the notification text without re-playing
         // sound/vibration. This prevents notification spam for popular posts.
         if (!firedNotifIds.add(notifIdSuffix)) {
-            Log.d(TAG, "fireNotif SUPPRESSED (already fired): type=$type suffix=${notifIdSuffix.take(8)}")
+            MLog.d(TAG, "fireNotif SUPPRESSED (already fired): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
         // NOTE: We intentionally do NOT gate on _seenIds here. seenIds tracks which
@@ -459,13 +459,13 @@ class NotificationsRepository(
         val ctx = appContext ?: return
         val prefs = social.mycelium.android.ui.settings.NotificationPreferences
         if (!prefs.pushEnabled.value) {
-            Log.d(TAG, "fireNotif SUPPRESSED (push disabled): type=$type suffix=${notifIdSuffix.take(8)}")
+            MLog.d(TAG, "fireNotif SUPPRESSED (push disabled): type=$type suffix=${notifIdSuffix.take(8)}")
             return
         }
         // Use per-account preference lookup so background accounts respect their own settings
         // (not the active account's in-memory state flows).
         if (!prefs.isNotificationAllowedForAccount(ownerPubkeyHex, type)) {
-            Log.d(
+            MLog.d(
                 TAG,
                 "fireNotif SUPPRESSED (channel disabled for ${ownerPubkeyHex.take(8)}): type=$type suffix=${
                     notifIdSuffix.take(8)
@@ -494,7 +494,7 @@ class NotificationsRepository(
                 }
                 // Notification may have been removed during enrichment
                 if (notificationsById[notifIdSuffix] == null) {
-                    Log.d(
+                    MLog.d(
                         TAG,
                         "fireNotif CANCELLED (removed during enrichment): type=$type suffix=${notifIdSuffix.take(8)}"
                     )
@@ -524,7 +524,7 @@ class NotificationsRepository(
             }
             val notifId =
                 social.mycelium.android.services.NotificationChannelManager.NOTIFICATION_ID_SOCIAL_BASE + (notifIdSuffix.hashCode() and 0x7FFFFFFF) % NOTIFICATION_ID_MODULUS
-            Log.d(
+            MLog.d(
                 TAG,
                 "fireNotif POSTING: type=$finalType channel=$channelId id=$notifId noteId=${noteId?.take(8)} account=${
                     ownerPubkeyHex.take(8)
@@ -560,7 +560,7 @@ class NotificationsRepository(
         }
         persistSeenIds()
         cancelAllSystemNotifications()
-        Log.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
+        MLog.d(TAG, "markAllAsSeen: watermark set to $markAllSeenEpochMs, seenIds=${_seenIds.value.size}")
     }
 
     /** Look up a NotificationData by the event/note ID (used for deep-link navigation from notification tap). */
@@ -623,7 +623,7 @@ class NotificationsRepository(
         subscriptionRelayUrls = allRelays
         cacheRelayUrls = allRelays
         if (old.sorted() != allRelays.sorted()) {
-            Log.d(TAG, "Notification relay URLs updated: ${old.size} → ${allRelays.size}")
+            MLog.d(TAG, "Notification relay URLs updated: ${old.size} → ${allRelays.size}")
         }
     }
 
@@ -668,7 +668,7 @@ class NotificationsRepository(
         if (saved != null && saved.isNotEmpty()) {
             _seenIdsBacking.addAll(saved)
             _seenIds.value = _seenIdsBacking.toSet()
-            Log.d(TAG, "Restored ${saved.size} seen IDs from disk")
+            MLog.d(TAG, "Restored ${saved.size} seen IDs from disk")
         }
     }
 
@@ -706,7 +706,7 @@ class NotificationsRepository(
         // Each NotificationsRepository instance is bound to ownerPubkeyHex.
         // Reject any attempt to start a subscription for a different pubkey.
         if (pubkey != ownerPubkeyHex) {
-            Log.e(
+            MLog.e(
                 TAG,
                 "startSubscription REJECTED: pubkey ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — use the correct account's repo"
             )
@@ -716,15 +716,15 @@ class NotificationsRepository(
             .map { it.trim().removeSuffix("/") }
             .distinct()
         if (allRelays.isEmpty() || pubkey.isBlank()) {
-            Log.w(TAG, "startSubscription: empty relays or pubkey")
+            MLog.w(TAG, "startSubscription: empty relays or pubkey")
             return
         }
         if (myPubkeyHex == pubkey && notificationHandles.isNotEmpty()) {
-            Log.d(TAG, "startSubscription: already active for ${pubkey.take(8)}..., skipping")
+            MLog.d(TAG, "startSubscription: already active for ${pubkey.take(8)}..., skipping")
             return
         }
         val isNewUser = myPubkeyHex != pubkey
-        Log.d(
+        MLog.d(
             TAG,
             "startSubscription: isNewUser=$isNewUser (myPubkeyHex=${myPubkeyHex?.take(8)}, pubkey=${pubkey.take(8)}), seenIds=${_seenIds.value.size}"
         )
@@ -789,7 +789,7 @@ class NotificationsRepository(
         val inboxHandle = stateMachine.requestTemporarySubscription(
             inboxUrls, inboxFilters, priority = SubscriptionPriority.HIGH,
             onEose = {
-                Log.d(TAG, "Phase 1 EOSE received — unblocking Phase 2/3 + re-enrichment")
+                MLog.d(TAG, "Phase 1 EOSE received — unblocking Phase 2/3 + re-enrichment")
                 phase1Eose.complete(Unit)
                 // Replay is done — unseen count can now reflect real state.
                 // emitSorted() already ran for each event, so the watermark auto-marking
@@ -799,7 +799,7 @@ class NotificationsRepository(
             }
         ) { event -> handleEvent(event) }
         notificationHandles.add(inboxHandle)
-        Log.d(TAG, "Phase 1: Deep inbox fetch on ${inboxUrls.size} relays (${inboxFilters.size} filters, HIGH)")
+        MLog.d(TAG, "Phase 1: Deep inbox fetch on ${inboxUrls.size} relays (${inboxFilters.size} filters, HIGH)")
 
         // ── Phase 2: Sweep non-inbox relays — starts after Phase 1 EOSE ──────
         val sweepUrls = (outboxRelayUrls + categoryRelayUrls)
@@ -838,16 +838,16 @@ class NotificationsRepository(
                 val sweepHandle = stateMachine.requestTemporarySubscription(
                     sweepUrls, sweepFilters, priority = SubscriptionPriority.HIGH,
                     onEose = {
-                        Log.d(TAG, "Phase 2 EOSE received — triggering sweep re-enrichment")
+                        MLog.d(TAG, "Phase 2 EOSE received — triggering sweep re-enrichment")
                         scope.launch { reEnrichOrphanedNotifications() }
                     }
                 ) { event -> handleEvent(event) }
                 notificationHandles.add(sweepHandle)
-                Log.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1mo, HIGH)")
+                MLog.d(TAG, "Phase 2: Sweep ${sweepUrls.size} non-inbox relays (since=1mo, HIGH)")
             }
         }
 
-        Log.d(
+        MLog.d(
             TAG, "Tiered notification sub started for ${pubkey.take(8)}...: " +
                     "inbox=${inboxUrls.size} (deep), sweep=${sweepUrls.size}"
         )
@@ -869,7 +869,7 @@ class NotificationsRepository(
             reclassifyQuotes()
             val extraFilters = mutableListOf<Filter>()
             if (topicIds.isNotEmpty()) {
-                Log.d(TAG, "Phase 3: Found ${topicIds.size} topics, adding thread replies filter")
+                MLog.d(TAG, "Phase 3: Found ${topicIds.size} topics, adding thread replies filter")
                 extraFilters.add(
                     Filter(
                         kinds = listOf(NOTIFICATION_KIND_TOPIC_REPLY),
@@ -879,7 +879,7 @@ class NotificationsRepository(
                 )
             }
             if (noteIds.isNotEmpty()) {
-                Log.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes + comment replies + repost filters")
+                MLog.d(TAG, "Phase 3: Found ${noteIds.size} notes, adding quotes + comment replies + repost filters")
                 extraFilters.add(
                     Filter(
                         kinds = listOf(NOTIFICATION_KIND_TEXT),
@@ -911,12 +911,12 @@ class NotificationsRepository(
                 val extraHandle = stateMachine.requestTemporarySubscription(
                     inboxUrls, extraFilters, priority = SubscriptionPriority.HIGH,
                     onEose = {
-                        Log.d(TAG, "Phase 3 EOSE received — triggering thread reply re-enrichment")
+                        MLog.d(TAG, "Phase 3 EOSE received — triggering thread reply re-enrichment")
                         scope.launch { reEnrichOrphanedNotifications() }
                     }
                 ) { event -> handleEvent(event) }
                 notificationHandles.add(extraHandle)
-                Log.d(TAG, "Phase 3: Thread reply + quote filters on ${inboxUrls.size} inbox relays")
+                MLog.d(TAG, "Phase 3: Thread reply + quote filters on ${inboxUrls.size} inbox relays")
             }
         }
 
@@ -924,7 +924,7 @@ class NotificationsRepository(
         scope.launch {
             delay(SWEEP_FALLBACK_DELAY_MS)
             if (!_replaySettled.value) {
-                Log.d(TAG, "Safety-net: unmasking badge (Phase 1 EOSE not received in ${SWEEP_FALLBACK_DELAY_MS}ms)")
+                MLog.d(TAG, "Safety-net: unmasking badge (Phase 1 EOSE not received in ${SWEEP_FALLBACK_DELAY_MS}ms)")
                 _replaySettled.value = true
             }
         }
@@ -941,7 +941,7 @@ class NotificationsRepository(
                 if (targetFetchValidationTick >= 10) {
                     targetFetchValidationTick = 0
                     if (targetFetchExhaustedIds.isNotEmpty()) {
-                        Log.d(TAG, "Continuous validation: clearing ${targetFetchExhaustedIds.size} exhausted fetches for retry")
+                        MLog.d(TAG, "Continuous validation: clearing ${targetFetchExhaustedIds.size} exhausted fetches for retry")
                         targetFetchExhaustedIds.clear()
                     }
                 }
@@ -974,7 +974,7 @@ class NotificationsRepository(
         // Reset session state
         firedNotifIds.clear()
         isHistoricalIngestion = false
-        Log.d(TAG, "Notifications subscription stopped ($count handles)")
+        MLog.d(TAG, "Notifications subscription stopped ($count handles)")
     }
 
     private val ACCEPTED_KINDS = setOf(
@@ -1108,7 +1108,7 @@ class NotificationsRepository(
         // This instance only processes events for ownerPubkeyHex.
         // Reject events from another account's subscription that leaked here.
         if (pubkey != ownerPubkeyHex) {
-            Log.w(
+            MLog.w(
                 TAG,
                 "handleEvent REJECTED: myPubkeyHex ${pubkey.take(8)} != owner ${ownerPubkeyHex.take(8)} — stale state"
             )
@@ -1383,7 +1383,7 @@ class NotificationsRepository(
             }
         }
         if (reclassified > 0) {
-            Log.d(TAG, "reclassifyQuotes: reclassified $reclassified replies → quotes")
+            MLog.d(TAG, "reclassifyQuotes: reclassified $reclassified replies → quotes")
             emitSorted()
         }
     }
@@ -1418,7 +1418,7 @@ class NotificationsRepository(
             }
         }
         if (reclassified > 0) {
-            Log.d(TAG, "reclassifyTopicReplies: reclassified $reclassified comments → thread replies")
+            MLog.d(TAG, "reclassifyTopicReplies: reclassified $reclassified comments → thread replies")
             emitSorted()
         }
     }
@@ -1564,7 +1564,7 @@ class NotificationsRepository(
         val targetsUs = reportedPubkey == pubkey
         val targetsOurNote = reportedNoteId != null && reportedNoteId in myNoteIds
         if (!targetsUs && !targetsOurNote) {
-            Log.d(
+            MLog.d(
                 TAG,
                 "Dropping irrelevant report ${event.id.take(8)}: p=${reportedPubkey?.take(8)}, e=${
                     reportedNoteId?.take(8)
@@ -1668,9 +1668,9 @@ class NotificationsRepository(
                 badgeImageUrl = imageUrl
             )
             emitSorted()
-            Log.d(TAG, "Enriched badge notification $notificationId: name=$name image=${imageUrl?.take(40)}")
+            MLog.d(TAG, "Enriched badge notification $notificationId: name=$name image=${imageUrl?.take(40)}")
         } catch (e: Exception) {
-            Log.e(TAG, "resolveBadgeDefinition failed: ${e.message}", e)
+            MLog.e(TAG, "resolveBadgeDefinition failed: ${e.message}", e)
         }
     }
 
@@ -1794,9 +1794,9 @@ class NotificationsRepository(
                 note = pollNote
             )
             emitSorted()
-            Log.d(TAG, "Enriched poll vote notification $notificationId: q=${question?.take(30)} opts=$optionLabels")
+            MLog.d(TAG, "Enriched poll vote notification $notificationId: q=${question?.take(30)} opts=$optionLabels")
         } catch (e: Exception) {
-            Log.e(TAG, "enrichPollVoteNotification failed: ${e.message}", e)
+            MLog.e(TAG, "enrichPollVoteNotification failed: ${e.message}", e)
         }
     }
 
@@ -2045,10 +2045,10 @@ class NotificationsRepository(
         val bolt11 = event.tags.firstOrNull { it.size >= 2 && it[0] == "bolt11" }?.get(1)
         if (bolt11 != null) {
             val sats = decodeBolt11Amount(bolt11)
-            Log.d(TAG, "parseZapAmount: bolt11 prefix=${bolt11.take(30)} decoded=$sats sats")
+            MLog.d(TAG, "parseZapAmount: bolt11 prefix=${bolt11.take(30)} decoded=$sats sats")
             if (sats > 0) return sats
         } else {
-            Log.d(TAG, "parseZapAmount: no bolt11 tag found, tags=${event.tags.map { it.firstOrNull() }}")
+            MLog.d(TAG, "parseZapAmount: no bolt11 tag found, tags=${event.tags.map { it.firstOrNull() }}")
         }
         // Try description tag (zap request JSON) which may contain amount
         val descTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "description" }?.get(1)
@@ -2056,12 +2056,12 @@ class NotificationsRepository(
             try {
                 val amountMatch = Regex(""""amount"\s*:\s*"?(\d+)"?""").find(descTag)
                 val milliSats = amountMatch?.groupValues?.get(1)?.toLongOrNull()
-                Log.d(TAG, "parseZapAmount: description amount match=$milliSats (milliSats)")
+                MLog.d(TAG, "parseZapAmount: description amount match=$milliSats (milliSats)")
                 if (milliSats != null && milliSats > 0) return milliSats / 1000
             } catch (_: Exception) {
             }
         }
-        Log.d(TAG, "parseZapAmount: returning 0 for event ${event.id.take(8)}")
+        MLog.d(TAG, "parseZapAmount: returning 0 for event ${event.id.take(8)}")
         return 0L
     }
 
@@ -2119,7 +2119,7 @@ class NotificationsRepository(
                 synchronized(topicIds) { topicIds.add(ev.id) }
             }
         }
-        Log.d(TAG, "fetchUserTopicIds: found ${topicIds.size} topics for ${pubkey.take(8)}...")
+        MLog.d(TAG, "fetchUserTopicIds: found ${topicIds.size} topics for ${pubkey.take(8)}...")
         return topicIds.distinct()
     }
 
@@ -2159,7 +2159,7 @@ class NotificationsRepository(
                 synchronized(noteIds) { noteIds.add(ev.id) }
             }
         }
-        Log.d(TAG, "fetchUserNoteIds: found ${noteIds.size} notes for ${pubkey.take(8)}...")
+        MLog.d(TAG, "fetchUserNoteIds: found ${noteIds.size} notes for ${pubkey.take(8)}...")
         return noteIds.distinct()
     }
 
@@ -2336,9 +2336,9 @@ class NotificationsRepository(
             val entities = notifications.map { it.toEntity(pubkey) }
             dao.upsertAll(entities)
             // Removed trimToNewest to allow unlimited depth of historical events
-            Log.d(TAG, "Saved ${entities.size} notifications to Room")
+            MLog.d(TAG, "Saved ${entities.size} notifications to Room")
         } catch (e: Exception) {
-            Log.e(TAG, "saveNotificationsToRoom failed: ${e.message}", e)
+            MLog.e(TAG, "saveNotificationsToRoom failed: ${e.message}", e)
         }
     }
 
@@ -2349,7 +2349,7 @@ class NotificationsRepository(
             val dao = social.mycelium.android.db.AppDatabase.getInstance(ctx).notificationDao()
             val entities = dao.getForOwner(pubkey)
             if (entities.isEmpty()) {
-                Log.d(TAG, "No cached notifications in Room for ${pubkey.take(8)}")
+                MLog.d(TAG, "No cached notifications in Room for ${pubkey.take(8)}")
                 return
             }
             var restored = 0
@@ -2361,10 +2361,10 @@ class NotificationsRepository(
             }
             if (restored > 0) {
                 emitSortedImmediate()
-                Log.d(TAG, "Restored $restored notifications from Room (${entities.size} total)")
+                MLog.d(TAG, "Restored $restored notifications from Room (${entities.size} total)")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "loadNotificationsFromRoom failed: ${e.message}", e)
+            MLog.e(TAG, "loadNotificationsFromRoom failed: ${e.message}", e)
         }
     }
 
@@ -2657,7 +2657,7 @@ class NotificationsRepository(
             val allNoteIds = batch.keys.toList()
             val maxRetry = batch.values.flatten().maxOfOrNull { it.retryCount } ?: 0
             val timeoutMs = if (maxRetry > 0) TARGET_FETCH_RETRY_TIMEOUT_MS else TARGET_FETCH_TIMEOUT_MS
-            Log.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (retry=$maxRetry, timeout=${timeoutMs}ms)")
+            MLog.d(TAG, "Flushing target note batch: ${allNoteIds.size} notes (retry=$maxRetry, timeout=${timeoutMs}ms)")
 
             // ── Step 1: Check local caches before hitting relays ──────────────
             val fetched = java.util.concurrent.ConcurrentHashMap<String, Note>()
@@ -2671,7 +2671,7 @@ class NotificationsRepository(
                     remainingIds.add(noteId)
                 }
             }
-            if (remainingIds.isNotEmpty()) Log.d(
+            if (remainingIds.isNotEmpty()) MLog.d(
                 TAG,
                 "In-memory cache hit ${fetched.size}/${allNoteIds.size}, checking Room for ${remainingIds.size}"
             )
@@ -2695,11 +2695,11 @@ class NotificationsRepository(
                         val roomHits = remainingIds.count { fetched.containsKey(it) }
                         if (roomHits > 0) {
                             remainingIds.removeAll(fetched.keys)
-                            Log.d(TAG, "Room cache hit $roomHits more, ${remainingIds.size} still need relay fetch")
+                            MLog.d(TAG, "Room cache hit $roomHits more, ${remainingIds.size} still need relay fetch")
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Room lookup failed: ${e.message}")
+                    MLog.w(TAG, "Room lookup failed: ${e.message}")
                 }
             }
 
@@ -2726,7 +2726,7 @@ class NotificationsRepository(
                         // Target note not fetched. Retry with longer timeout before giving up.
                         if (pending.retryCount < MAX_TARGET_FETCH_RETRIES) {
                             retryQueue.add(pending.copy(retryCount = pending.retryCount + 1))
-                            Log.d(
+                            MLog.d(
                                 TAG,
                                 "Re-queuing ${current.type} ${pending.notificationId.take(8)} for retry (attempt ${pending.retryCount + 1})"
                             )
@@ -2738,7 +2738,7 @@ class NotificationsRepository(
                             notificationsById[pending.notificationId] = current.copy(
                                 verificationStatus = social.mycelium.android.data.VerificationStatus.EXHAUSTED
                             )
-                            Log.d(
+                            MLog.d(
                                 TAG,
                                 "Target fetch exhausted for ${current.type} ${pending.notificationId.take(8)} — keeping without preview"
                             )
@@ -2754,7 +2754,7 @@ class NotificationsRepository(
                                     text = "${current.author?.displayName ?: "Someone"} mentioned you"
                                 )
                                 notificationsById[pending.notificationId] = mentionUpdate
-                                Log.d(
+                                MLog.d(
                                     TAG,
                                     "Reclassified ${pending.notificationId.take(8)} as MENTION (cited in content, target fetch exhausted)"
                                 )
@@ -2815,11 +2815,11 @@ class NotificationsRepository(
                     )
                 }
             }
-            if (unverifiedCount > 0) Log.d(TAG, "Marked $unverifiedCount false-positive notifications as UNVERIFIED after target fetch")
+            if (unverifiedCount > 0) MLog.d(TAG, "Marked $unverifiedCount false-positive notifications as UNVERIFIED after target fetch")
             emitSorted()
             // Re-queue unfetched reactions/reposts for a retry with longer timeout
             if (retryQueue.isNotEmpty()) {
-                Log.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")
+                MLog.d(TAG, "Re-queuing ${retryQueue.size} notifications for target fetch retry")
                 for (pending in retryQueue) {
                     pendingTargetFetches.getOrPut(pending.noteId) { CopyOnWriteArrayList() }.add(pending)
                 }
@@ -2852,7 +2852,7 @@ class NotificationsRepository(
             reEnrichZapSenderProfiles()
             return
         }
-        Log.d(TAG, "Phase 4: Re-enriching ${orphans.size} orphaned notifications (missing targetNote)")
+        MLog.d(TAG, "Phase 4: Re-enriching ${orphans.size} orphaned notifications (missing targetNote)")
         for (orphan in orphans) {
             val targetId = orphan.targetNoteId ?: continue
             fetchAndSetTargetNote(targetId, orphan.id) { d -> { note -> d.copy(targetNote = note) } }
@@ -2893,11 +2893,11 @@ class NotificationsRepository(
             }
             if (updated > 0) {
                 emitSorted()
-                Log.d(TAG, "Phase 4b: Updated $updated zap sender names from cache")
+                MLog.d(TAG, "Phase 4b: Updated $updated zap sender names from cache")
             }
             return
         }
-        Log.d(TAG, "Phase 4b: Re-enriching ${zapOrphans.size} zap sender profiles (${uncached.size} unique pubkeys)")
+        MLog.d(TAG, "Phase 4b: Re-enriching ${zapOrphans.size} zap sender profiles (${uncached.size} unique pubkeys)")
         val uncachedSet = uncached.map { it.lowercase() }.toSet()
         scope.launch {
             profileCache.requestProfiles(uncached, cacheRelayUrls)
@@ -2928,7 +2928,7 @@ class NotificationsRepository(
             }
             if (updated > 0) {
                 emitSorted()
-                Log.d(TAG, "Phase 4b: Updated $updated zap sender display names")
+                MLog.d(TAG, "Phase 4b: Updated $updated zap sender display names")
             }
         }
     }

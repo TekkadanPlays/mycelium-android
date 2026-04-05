@@ -1,6 +1,6 @@
 package social.mycelium.android.services
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsChannel
@@ -30,7 +30,7 @@ class UrlPreviewService {
      */
     suspend fun fetchPreview(url: String): UrlPreviewState = withContext(Dispatchers.IO) {
         try {
-            Log.d("UrlPreviewService", "Fetching preview for: $url")
+            MLog.d("UrlPreviewService", "Fetching preview for: $url")
             
             // Validate URL
             val validatedUrl = validateUrl(url) ?: return@withContext UrlPreviewState.Error("Invalid URL")
@@ -64,13 +64,13 @@ class UrlPreviewService {
                 mimeType = contentType
             )
             
-            Log.d("UrlPreviewService", "Successfully fetched preview: ${previewInfo.title}")
+            MLog.d("UrlPreviewService", "Successfully fetched preview: ${previewInfo.title}")
             UrlPreviewState.Loaded(previewInfo)
             
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e // propagate cancellation, don't swallow
         } catch (e: Exception) {
-            Log.e("UrlPreviewService", "Error fetching preview for $url", e)
+            MLog.e("UrlPreviewService", "Error fetching preview for $url", e)
             UrlPreviewState.Error(e.message ?: "Unknown error")
         }
     }
@@ -163,9 +163,9 @@ class UrlPreviewService {
                         authorName = json.optString("author_name", "")
                     }
                 } catch (e: Exception) {
-                    Log.w("UrlPreviewService", "YouTube oEmbed failed for $videoId: ${e.message}")
+                    MLog.w("UrlPreviewService", "YouTube oEmbed failed for $videoId: ${e.message}")
                 }
-                Log.d("UrlPreviewService", "YouTube preview: videoId=$videoId, title=$title, author=$authorName")
+                MLog.d("UrlPreviewService", "YouTube preview: videoId=$videoId, title=$title, author=$authorName")
                 UrlPreviewInfo(
                     url = canonicalUrl,
                     title = title,

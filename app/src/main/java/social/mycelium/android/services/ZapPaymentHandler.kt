@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Note
 import social.mycelium.android.repository.sync.NwcConfigRepository
 import social.mycelium.android.repository.cache.ProfileMetadataCache
@@ -57,7 +57,7 @@ object ZapPaymentHandler {
         outboxRelayUrls: Set<String> = emptySet(),
         onProgress: (ZapProgress) -> Unit
     ) = withContext(Dispatchers.IO) {
-        Log.d(TAG, "Zap started: note=${note.id.take(8)}, amount=$amountSats sats")
+        MLog.d(TAG, "Zap started: note=${note.id.take(8)}, amount=$amountSats sats")
         try {
             onProgress(ZapProgress.InProgress("Looking up Lightning address..."))
 
@@ -66,31 +66,31 @@ object ZapPaymentHandler {
             val author = ProfileMetadataCache.getInstance().resolveAuthor(authorHex)
             val lud16 = author.lud16
             if (lud16.isNullOrBlank()) {
-                Log.w(TAG, "Zap failed: author has no lud16 (hex=${authorHex.take(8)})")
+                MLog.w(TAG, "Zap failed: author has no lud16 (hex=${authorHex.take(8)})")
                 onProgress(ZapProgress.Failed("Author has no Lightning address (lud16)"))
                 return@withContext
             }
-            Log.d(TAG, "Zapping ${note.id.take(8)}: lud16=$lud16, amount=$amountSats sats, type=$zapType")
+            MLog.d(TAG, "Zapping ${note.id.take(8)}: lud16=$lud16, amount=$amountSats sats, type=$zapType")
 
             // 2. Resolve the LNURLp endpoint
             val payInfo = LightningAddressResolver.resolveLud16(lud16)
             if (payInfo == null) {
-                Log.w(TAG, "Zap failed: could not resolve LNURLp for $lud16")
+                MLog.w(TAG, "Zap failed: could not resolve LNURLp for $lud16")
                 onProgress(ZapProgress.Failed("Could not resolve Lightning address: $lud16"))
                 return@withContext
             }
-            Log.d(TAG, "LNURLp resolved: callback=${payInfo.callback.take(40)}...")
+            MLog.d(TAG, "LNURLp resolved: callback=${payInfo.callback.take(40)}...")
 
             val amountMillisats = amountSats * 1000L
 
             // Validate amount bounds
             if (amountMillisats < payInfo.minSendable) {
-                Log.w(TAG, "Zap failed: amount $amountSats below min ${payInfo.minSendable / 1000} sats")
+                MLog.w(TAG, "Zap failed: amount $amountSats below min ${payInfo.minSendable / 1000} sats")
                 onProgress(ZapProgress.Failed("Amount too low: min ${payInfo.minSendable / 1000} sats"))
                 return@withContext
             }
             if (amountMillisats > payInfo.maxSendable) {
-                Log.w(TAG, "Zap failed: amount $amountSats above max ${payInfo.maxSendable / 1000} sats")
+                MLog.w(TAG, "Zap failed: amount $amountSats above max ${payInfo.maxSendable / 1000} sats")
                 onProgress(ZapProgress.Failed("Amount too high: max ${payInfo.maxSendable / 1000} sats"))
                 return@withContext
             }
@@ -113,9 +113,9 @@ object ZapPaymentHandler {
 
                 if (zapRequest != null) {
                     zapRequestJson = ZapRequestBuilder.toJson(zapRequest)
-                    Log.d(TAG, "Zap request built: id=${zapRequest.id.take(8)}")
+                    MLog.d(TAG, "Zap request built: id=${zapRequest.id.take(8)}")
                 } else {
-                    Log.w(TAG, "Zap failed: ZapRequestBuilder.buildForNote returned null")
+                    MLog.w(TAG, "Zap failed: ZapRequestBuilder.buildForNote returned null")
                     onProgress(ZapProgress.Failed("Failed to build zap request"))
                     return@withContext
                 }
@@ -123,7 +123,7 @@ object ZapPaymentHandler {
 
             // 4. Fetch bolt11 invoice
             onProgress(ZapProgress.InProgress("Fetching invoice..."))
-            Log.d(TAG, "Fetching invoice from callback...")
+            MLog.d(TAG, "Fetching invoice from callback...")
             val bolt11 = LightningAddressResolver.fetchInvoice(
                 callbackUrl = payInfo.callback,
                 amountMillisats = amountMillisats,
@@ -131,51 +131,51 @@ object ZapPaymentHandler {
             )
 
             if (bolt11.isNullOrBlank()) {
-                Log.w(TAG, "Zap failed: fetchInvoice returned null/blank")
+                MLog.w(TAG, "Zap failed: fetchInvoice returned null/blank")
                 onProgress(ZapProgress.Failed("Failed to get Lightning invoice"))
                 return@withContext
             }
 
-            Log.d(TAG, "Got bolt11 invoice: ${bolt11.take(20)}...")
+            MLog.d(TAG, "Got bolt11 invoice: ${bolt11.take(20)}...")
 
             // 5. Pay the invoice — prefer embedded Phoenix wallet, fall back to NWC
             onProgress(ZapProgress.InProgress("Paying invoice..."))
 
             if (PhoenixWalletManager.isReady()) {
                 // Pay directly from the embedded Lightning node (non-custodial)
-                Log.d(TAG, "Paying via Phoenix embedded wallet...")
+                MLog.d(TAG, "Paying via Phoenix embedded wallet...")
                 val phoenixResult = PhoenixWalletManager.payInvoice(bolt11)
                 when (phoenixResult) {
                     is PaymentResult.Success -> {
-                        Log.d(TAG, "Zap successful via Phoenix! preimage=${phoenixResult.preimage.take(16)}")
+                        MLog.d(TAG, "Zap successful via Phoenix! preimage=${phoenixResult.preimage.take(16)}")
                         onProgress(ZapProgress.Success(phoenixResult.preimage))
                     }
                     is PaymentResult.Error -> {
-                        Log.w(TAG, "Phoenix payment failed: ${phoenixResult.message}")
+                        MLog.w(TAG, "Phoenix payment failed: ${phoenixResult.message}")
                         onProgress(ZapProgress.Failed(phoenixResult.message))
                     }
                 }
             } else if (NwcPaymentManager.isConfigured(context)) {
                 // Fall back to NWC (external wallet via Nostr Wallet Connect)
-                Log.d(TAG, "Phoenix not available, paying via NWC...")
+                MLog.d(TAG, "Phoenix not available, paying via NWC...")
                 val nwcResult = NwcPaymentManager.payInvoice(context, bolt11)
                 when (nwcResult) {
                     is NwcPaymentResult.Success -> {
-                        Log.d(TAG, "Zap successful via NWC! preimage=${nwcResult.preimage?.take(16)}")
+                        MLog.d(TAG, "Zap successful via NWC! preimage=${nwcResult.preimage?.take(16)}")
                         onProgress(ZapProgress.Success(nwcResult.preimage))
                     }
                     is NwcPaymentResult.Error -> {
-                        Log.w(TAG, "NWC payment failed: ${nwcResult.message}")
+                        MLog.w(TAG, "NWC payment failed: ${nwcResult.message}")
                         onProgress(ZapProgress.Failed(nwcResult.message))
                     }
                 }
             } else {
-                Log.w(TAG, "Zap failed: no payment method available")
+                MLog.w(TAG, "Zap failed: no payment method available")
                 onProgress(ZapProgress.Failed("No wallet available. Set up Lightning wallet or NWC in Settings."))
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Zap flow failed: ${e.message}", e)
+            MLog.e(TAG, "Zap flow failed: ${e.message}", e)
             onProgress(ZapProgress.Failed("Zap failed: ${e.message?.take(80)}"))
         }
     }

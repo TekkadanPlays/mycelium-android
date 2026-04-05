@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.feed
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import social.mycelium.android.data.Note
 import social.mycelium.android.db.CachedEventEntity
 import social.mycelium.android.db.EventDao
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Room-backed windowed feed manager. Provides unbounded scroll depth by
@@ -20,11 +21,11 @@ import social.mycelium.android.db.EventDao
  *
  * Architecture:
  * ```
- * Relay → flushKind1Events → Room (all events persisted)
- *                                ↓
+ * Relay -> flushKind1Events -> Room (all events persisted)
+ *                                |
  *         FeedWindowManager loads window from Room
- *                                ↓
- *         _windowNotes (80 notes in heap) → displayed in LazyColumn
+ *                                |
+ *         _windowNotes (80 notes in heap) -> displayed in LazyColumn
  * ```
  *
  * The manager is cursor-based: it tracks the oldest timestamp in the
@@ -50,7 +51,7 @@ class FeedWindowManager(
     private val _hasOlderInRoom = MutableStateFlow(true)
     val hasOlderInRoom: StateFlow<Boolean> = _hasOlderInRoom.asStateFlow()
 
-    /** Follow filter pubkeys — set by NotesRepository when follow mode changes. */
+    /** Follow filter pubkeys -- set by NotesRepository when follow mode changes. */
     @Volatile var followPubkeys: List<String> = emptyList()
     
     /** Whether follow filter is active. */
@@ -60,13 +61,16 @@ class FeedWindowManager(
     private val _isLoadingPage = MutableStateFlow(false)
     val isLoadingPage: StateFlow<Boolean> = _isLoadingPage.asStateFlow()
 
-    // ── Core operations ────────────────────────────────────────────────────
+    /** Dirty flag: set when Room receives new events, consumed by NotesRepository. */
+    private val _roomDirty = AtomicBoolean(false)
+
+    // -- Core operations --------------------------------------------------
 
     /**
      * Load a page of notes from Room older than [olderThanSec].
      * Returns the converted notes (empty if Room is exhausted).
      *
-     * This does NOT manage any window state — it's a pure Room query.
+     * This does NOT manage any window state -- it's a pure Room query.
      * NotesRepository decides what to do with the results (append to
      * _displayedNotes, merge with in-memory data, etc.).
      */
@@ -82,14 +86,14 @@ class FeedWindowManager(
                 try {
                     entityToNote(entity)
                 } catch (e: Exception) {
-                    Log.w(TAG, "Skip bad entity ${entity.eventId.take(8)}: ${e.message}")
+                    MLog.w(TAG, "Skip bad entity ${entity.eventId.take(8)}: ${e.message}")
                     null
                 }
             }
-            Log.d(TAG, "loadPage(older than ${fmtSec(olderThanSec)}): ${entities.size} entities → ${notes.size} notes")
+            MLog.d(TAG, "loadPage(older than ${fmtSec(olderThanSec)}): ${entities.size} entities -> ${notes.size} notes")
             return notes
         } catch (e: Exception) {
-            Log.e(TAG, "loadPage failed: ${e.message}", e)
+            MLog.e(TAG, "loadPage failed: ${e.message}", e)
             return emptyList()
         } finally {
             _isLoadingPage.value = false
@@ -117,7 +121,7 @@ class FeedWindowManager(
                 eventDao.countRootFeedEventsAll()
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Count query failed: ${e.message}")
+            MLog.w(TAG, "Count query failed: ${e.message}")
         }
     }
 
@@ -130,9 +134,76 @@ class FeedWindowManager(
     fun clear() {
         _hasOlderInRoom.value = true
         _totalRoomEvents.value = 0
+        _roomDirty.set(false)
     }
 
-    // ── Internal helpers ───────────────────────────────────────────────────
+    // ── Room-first freshness ─────────────────────────────────────────────────
+
+    /** Called by NotesRepository after flushEventStore() persists events to Room.
+     *  Marks the Room window as stale so the next display update can refresh. */
+    fun onRoomDataChanged() {
+        _roomDirty.set(true)
+        resetExhaustion()
+    }
+
+    /** Consume the dirty flag, returning true if Room data changed since last check. */
+    fun consumeRoomDirty(): Boolean = _roomDirty.getAndSet(false)
+
+    /**
+     * Refresh the newest page from Room. Used after Room data changes to ensure
+     * the pagination tail reflects the latest persisted events. Returns notes
+     * newer than [newerThanSec] (or all if Long.MIN_VALUE).
+     *
+     * This is the Room-first "freshness" path: when new events arrive and are
+     * persisted, calling this ensures the feed includes them even if they
+     * weren't in the original in-memory window.
+     */
+    suspend fun refreshNewestPage(newerThanSec: Long = Long.MIN_VALUE, limit: Int = pageSize): List<Note> {
+        return loadPage(Long.MAX_VALUE, limit)
+    }
+
+    /**
+     * Week-at-a-time backward reveal: load one week of events older than [olderThanSec].
+     * Returns all matching notes in that 7-day window. Used for explicit "load more history"
+     * actions rather than continuous pagination.
+     *
+     * The 7-day window size matches FEED_SINCE_DAYS in NotesRepository so each
+     * backward expansion reveals a consistent amount of content.
+     */
+    suspend fun weekExpand(olderThanSec: Long): List<Note> {
+        val weekAgoSec = olderThanSec - (7L * 86400)
+        _isLoadingPage.value = true
+        try {
+            val pubkeys = if (followFilterEnabled && followPubkeys.isNotEmpty()) followPubkeys else null
+            // Query events in the [weekAgoSec, olderThanSec) range
+            val entities = if (pubkeys != null) {
+                eventDao.getFeedWindow(pubkeys, olderThanSec, 200)
+            } else {
+                eventDao.getFeedWindowAll(olderThanSec, 200)
+            }
+            // Filter to only events within the week window
+            val weekEntities = entities.filter { it.createdAt >= weekAgoSec }
+            if (weekEntities.isEmpty()) {
+                _hasOlderInRoom.value = entities.isEmpty()
+                return emptyList()
+            }
+            val notes = weekEntities.mapNotNull { entity ->
+                try { entityToNote(entity) } catch (e: Exception) {
+                    MLog.w(TAG, "Skip bad entity ${entity.eventId.take(8)}: ${e.message}")
+                    null
+                }
+            }
+            MLog.d(TAG, "weekExpand(older than ${fmtSec(olderThanSec)}): ${weekEntities.size} entities → ${notes.size} notes (week floor=${fmtSec(weekAgoSec)})")
+            return notes
+        } catch (e: Exception) {
+            MLog.e(TAG, "weekExpand failed: ${e.message}", e)
+            return emptyList()
+        } finally {
+            _isLoadingPage.value = false
+        }
+    }
+
+    // ── Internal helpers ───────────────────────────────────────────────────────
 
     private suspend fun queryWindow(olderThanSec: Long, limit: Int): List<CachedEventEntity> {
         val pubkeys = if (followFilterEnabled && followPubkeys.isNotEmpty()) followPubkeys else null

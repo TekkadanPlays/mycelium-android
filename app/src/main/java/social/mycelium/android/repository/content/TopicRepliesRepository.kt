@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.content
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Note
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.core.Event
@@ -45,7 +45,7 @@ class TopicRepliesRepository private constructor() {
     init {
         // Listen to kind:1 events from NotesRepository
         // We'll check each note for I tags and e tags pointing to kind:11 topics
-        Log.d(TAG, "TopicRepliesRepository initialized - tracking kind:1 replies to kind:11 topics")
+        MLog.d(TAG, "TopicRepliesRepository initialized - tracking kind:1 replies to kind:11 topics")
     }
     
     /**
@@ -69,7 +69,7 @@ class TopicRepliesRepository private constructor() {
                 addNoteToAnchor(anchor, note)
             }
             
-            Log.d(TAG, "Tracked kind:1 reply ${note.id.take(8)} to topic $rootId with anchors: $anchors")
+            MLog.d(TAG, "Tracked kind:1 reply ${note.id.take(8)} to topic $rootId with anchors: $anchors")
             return true
         }
         
@@ -78,7 +78,7 @@ class TopicRepliesRepository private constructor() {
             anchors.forEach { anchor ->
                 addNoteToAnchor(anchor, note)
             }
-            Log.d(TAG, "Tracked kind:1 note ${note.id.take(8)} with anchors: $anchors")
+            MLog.d(TAG, "Tracked kind:1 note ${note.id.take(8)} with anchors: $anchors")
             return true
         }
         
@@ -179,6 +179,6 @@ class TopicRepliesRepository private constructor() {
     fun clearCache() {
         _repliesByTopicId.value = emptyMap()
         _notesByAnchor.value = emptyMap()
-        Log.d(TAG, "Cleared topic replies cache")
+        MLog.d(TAG, "Cleared topic replies cache")
     }
 }

@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.social
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -134,7 +134,7 @@ object VoteRepository {
         voters[pubkey] = VoteEntry(value, Long.MAX_VALUE)
 
         emitScoreUpdate()
-        Log.d(TAG, "Own vote set: ${noteId.take(8)} = $value (was $oldVote)")
+        MLog.d(TAG, "Own vote set: ${noteId.take(8)} = $value (was $oldVote)")
     }
 
     // ── Incoming event processing ───────────────────────────────────────
@@ -161,7 +161,7 @@ object VoteRepository {
         // If this is our own vote, update ownVoteByNoteId
         if (voterPubkey == currentUserPubkey && currentUserPubkey != null) {
             ownVoteByNoteId[noteId] = voteValue
-            Log.d(TAG, "Own vote from relay: ${noteId.take(8)} = $voteValue (ts=$createdAt)")
+            MLog.d(TAG, "Own vote from relay: ${noteId.take(8)} = $voteValue (ts=$createdAt)")
         }
 
         emitScoreUpdate()

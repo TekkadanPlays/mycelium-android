@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -56,7 +56,7 @@ object ProfileCountsRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() +
-                CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+                CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
 
     /** Per-pubkey counts exposed to UI. */
@@ -96,7 +96,7 @@ object ProfileCountsRepository {
         val indexerRelays = Nip65RelayListRepository.getIndexerRelayUrls(limit = 5)
         val allRelays = (indexerRelays + userRelayUrls).distinct().filter { it.isNotBlank() }
         if (allRelays.isEmpty()) {
-            Log.w(TAG, "No relays available for profile counts of ${pubkeyHex.take(8)}")
+            MLog.w(TAG, "No relays available for profile counts of ${pubkeyHex.take(8)}")
             updateCounts(pubkeyHex, ProfileCounts(null, null))
             return
         }
@@ -114,7 +114,7 @@ object ProfileCountsRepository {
             // Fast path: reuse ContactListRepository cache if available
             val cached = ContactListRepository.getCachedFollowList(pubkeyHex)
             if (cached != null) {
-                Log.d(TAG, "Following count for ${pubkeyHex.take(8)}: ${cached.size} (from ContactListRepository cache)")
+                MLog.d(TAG, "Following count for ${pubkeyHex.take(8)}: ${cached.size} (from ContactListRepository cache)")
                 mergeCounts(pubkeyHex, followingCount = cached.size, isLoadingFollowing = false)
                 return
             }
@@ -155,10 +155,10 @@ object ProfileCountsRepository {
                     .count()
             } else null
 
-            Log.d(TAG, "Following count for ${pubkeyHex.take(8)}: $count (from ${relayUrls.size} relays, ${collected.size} events)")
+            MLog.d(TAG, "Following count for ${pubkeyHex.take(8)}: $count (from ${relayUrls.size} relays, ${collected.size} events)")
             mergeCounts(pubkeyHex, followingCount = count, isLoadingFollowing = false)
         } catch (e: Exception) {
-            Log.e(TAG, "Following count fetch failed for ${pubkeyHex.take(8)}: ${e.message}")
+            MLog.e(TAG, "Following count fetch failed for ${pubkeyHex.take(8)}: ${e.message}")
             mergeCounts(pubkeyHex, followingCount = null, isLoadingFollowing = false)
         }
     }
@@ -174,7 +174,7 @@ object ProfileCountsRepository {
     private suspend fun fetchFollowerCount(pubkeyHex: String, relayUrls: List<String>) {
         try {
             if (relayUrls.isEmpty()) {
-                Log.w(TAG, "No indexer relays for follower count of ${pubkeyHex.take(8)}")
+                MLog.w(TAG, "No indexer relays for follower count of ${pubkeyHex.take(8)}")
                 mergeCounts(pubkeyHex, followerCount = null, isLoadingFollowers = false)
                 return
             }
@@ -222,10 +222,10 @@ object ProfileCountsRepository {
             handle.cancel()
 
             val count = uniqueAuthors.size.takeIf { it > 0 }
-            Log.d(TAG, "Follower count for ${pubkeyHex.take(8)}: $count (from ${relayUrls.size} indexer relays)")
+            MLog.d(TAG, "Follower count for ${pubkeyHex.take(8)}: $count (from ${relayUrls.size} indexer relays)")
             mergeCounts(pubkeyHex, followerCount = count, isLoadingFollowers = false)
         } catch (e: Exception) {
-            Log.e(TAG, "Follower count fetch failed for ${pubkeyHex.take(8)}: ${e.message}")
+            MLog.e(TAG, "Follower count fetch failed for ${pubkeyHex.take(8)}: ${e.message}")
             mergeCounts(pubkeyHex, followerCount = null, isLoadingFollowers = false)
         }
     }

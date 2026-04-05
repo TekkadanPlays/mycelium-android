@@ -1,6 +1,6 @@
 package social.mycelium.android.repository
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -145,7 +145,7 @@ class ProfileFeedRepository(
     fun start() {
         if (subscription != null) return
         if (relayUrls.isEmpty()) {
-            Log.w(TAG, "No relay URLs for profile feed ($authorPubkey)")
+            MLog.w(TAG, "No relay URLs for profile feed ($authorPubkey)")
             return
         }
 
@@ -161,7 +161,7 @@ class ProfileFeedRepository(
             limit = INITIAL_LOAD_SIZE
         )
 
-        Log.d(TAG, "Starting profile feed for ${authorPubkey.take(8)}… on ${relayUrls.size} relays")
+        MLog.d(TAG, "Starting profile feed for ${authorPubkey.take(8)}… on ${relayUrls.size} relays")
         val lastEventAt = AtomicLong(0L)
         subscription = RelayConnectionStateMachine.getInstance().requestTemporarySubscriptionWithRelay(
             relayUrls = relayUrls,
@@ -188,7 +188,7 @@ class ProfileFeedRepository(
             }
             flushEvents()
             _isLoading.value = false
-            Log.d(TAG, "Initial load: ${_notes.value.size} notes in ${waited}ms")
+            MLog.d(TAG, "Initial load: ${_notes.value.size} notes in ${waited}ms")
         }
     }
 
@@ -233,7 +233,7 @@ class ProfileFeedRepository(
             if (globalExhausted) {
                 _hasMore.value = false
                 _perTabHasMore.value = mapOf(TAB_NOTES to false, TAB_REPLIES to false, TAB_MEDIA to false)
-                Log.d(TAG, "Global exhaustion after $pagesLoaded pages")
+                MLog.d(TAG, "Global exhaustion after $pagesLoaded pages")
             } else {
                 // Check if this specific tab gained anything across all pages
                 val tabCountNow = countForTab(activeTab, _notes.value)
@@ -244,7 +244,7 @@ class ProfileFeedRepository(
                         val updated = _perTabHasMore.value.toMutableMap()
                         updated[activeTab] = false
                         _perTabHasMore.value = updated
-                        Log.d(TAG, "Tab $activeTab exhausted after ${TAB_EMPTY_PAGE_LIMIT} empty pages")
+                        MLog.d(TAG, "Tab $activeTab exhausted after ${TAB_EMPTY_PAGE_LIMIT} empty pages")
                     }
                 } else {
                     tabEmptyPageCount[activeTab] = 0
@@ -252,7 +252,7 @@ class ProfileFeedRepository(
             }
 
             _isLoadingMore.value = false
-            Log.d(TAG, "Load more (tab=$activeTab): total=${_notes.value.size}, pages=$pagesLoaded")
+            MLog.d(TAG, "Load more (tab=$activeTab): total=${_notes.value.size}, pages=$pagesLoaded")
         }
     }
 
@@ -270,7 +270,7 @@ class ProfileFeedRepository(
             until = untilSeconds
         )
 
-        Log.d(TAG, "Loading page: until=$untilSeconds (cursor=$cursorMs) from ${relayUrls.size} relays")
+        MLog.d(TAG, "Loading page: until=$untilSeconds (cursor=$cursorMs) from ${relayUrls.size} relays")
         loadMoreSubscription?.cancel()
         val lastEventAt = AtomicLong(0L)
         val rawEventCount = java.util.concurrent.atomic.AtomicInteger(0)
@@ -312,7 +312,7 @@ class ProfileFeedRepository(
         }
 
         val received = rawEventCount.get()
-        Log.d(TAG, "Page done: $received raw events, feed=${_notes.value.size}, cursor=$paginationCursorMs")
+        MLog.d(TAG, "Page done: $received raw events, feed=${_notes.value.size}, cursor=$paginationCursorMs")
         return received
     }
 
@@ -329,13 +329,13 @@ class ProfileFeedRepository(
         subscription?.pause()
         loadMoreSubscription?.cancel()
         loadMoreSubscription = null
-        Log.d(TAG, "Paused profile feed for ${authorPubkey.take(8)}…")
+        MLog.d(TAG, "Paused profile feed for ${authorPubkey.take(8)}…")
     }
 
     /** Resume a paused live subscription. */
     fun resume() {
         subscription?.resume()
-        Log.d(TAG, "Resumed profile feed for ${authorPubkey.take(8)}…")
+        MLog.d(TAG, "Resumed profile feed for ${authorPubkey.take(8)}…")
     }
 
     /** Stop all subscriptions and clean up. Call when leaving the profile screen. */
@@ -347,7 +347,7 @@ class ProfileFeedRepository(
         flushJob?.cancel()
         flushJob = null
         pendingEvents.clear()
-        Log.d(TAG, "Disposed profile feed for ${authorPubkey.take(8)}…")
+        MLog.d(TAG, "Disposed profile feed for ${authorPubkey.take(8)}…")
     }
 
     // ── Internal ────────────────────────────────────────────────────────
@@ -617,7 +617,7 @@ class ProfileFeedRepository(
                 try {
                     profileCache.requestProfiles(batch, relayUrls)
                 } catch (e: Throwable) {
-                    Log.e(TAG, "Batch profile request failed: ${e.message}")
+                    MLog.e(TAG, "Batch profile request failed: ${e.message}")
                 }
                 if (pendingProfilePubkeys.isNotEmpty()) delay(200)
             }
@@ -740,7 +740,7 @@ class ProfileFeedRepository(
             val jsonObj = try {
                 Json.parseToJsonElement(content) as? JsonObject
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to parse kind-6 repost JSON: ${e.message}")
+                MLog.e(TAG, "Failed to parse kind-6 repost JSON: ${e.message}")
                 null
             } ?: return null
 
@@ -828,7 +828,7 @@ class ProfileFeedRepository(
                 repostTimestamp = repostTimestampMs,
             )
         } catch (e: Throwable) {
-            Log.e(TAG, "Error handling kind-6 repost: ${e.message}", e)
+            MLog.e(TAG, "Error handling kind-6 repost: ${e.message}", e)
             return null
         }
     }

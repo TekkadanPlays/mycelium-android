@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.cache
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Author
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import com.example.cybin.relay.SubscriptionPriority
@@ -86,10 +86,13 @@ class ProfileMetadataCache {
         /** How long to wait before checking if any profiles arrived (early-out for disconnected relays).
          *  Increased from 2s — relays often need 1-2s just to connect, leaving no time for kind-0 to return. */
         private const val EARLY_PROBE_MS = 3500L
+
+        /** Max pending profile pubkeys in the internal queue. Oldest evicted first. */
+        private const val MAX_PENDING_PROFILES = 300
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
-        Log.e(
+        MLog.e(
             TAG,
             "Coroutine failed: ${t.message}",
             t
@@ -352,7 +355,16 @@ class ProfileMetadataCache {
         }
         if (needed.isEmpty()) return
 
-        internalPendingPubkeys.addAll(needed.map { normalizeKey(it) })
+        val normalized = needed.map { normalizeKey(it) }
+        internalPendingPubkeys.addAll(normalized)
+        // Cap queue to prevent unbounded growth during event storms
+        if (internalPendingPubkeys.size > MAX_PENDING_PROFILES) {
+            synchronized(internalPendingPubkeys) {
+                while (internalPendingPubkeys.size > MAX_PENDING_PROFILES) {
+                    internalPendingPubkeys.iterator().let { if (it.hasNext()) { it.next(); it.remove() } }
+                }
+            }
+        }
         if (cacheRelayUrls.isNotEmpty()) {
             // If relay list changed, reset backoff — new relays may be reachable
             if (cacheRelayUrls != internalPendingRelays) {
@@ -401,7 +413,7 @@ class ProfileMetadataCache {
                 // Circuit breaker tripped: instead of abandoning, wait for a relay to reconnect.
                 // When one does, reset the breaker and restart the batch so pending profiles resolve.
                 if (consecutiveEarlyOuts >= 5 && internalPendingPubkeys.isNotEmpty()) {
-                    Log.d(TAG, "Kind-0 circuit open — waiting for relay reconnect to resume ${internalPendingPubkeys.size} pending profiles")
+                    MLog.d(TAG, "Kind-0 circuit open — waiting for relay reconnect to resume ${internalPendingPubkeys.size} pending profiles")
                     scope.launch {
                         val stateMachine = social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
                         stateMachine.perRelayState.collect { perRelay ->
@@ -409,7 +421,7 @@ class ProfileMetadataCache {
                                 it == social.mycelium.android.relay.RelayEndpointStatus.Connected
                             }
                             if (connected > 0 && consecutiveEarlyOuts >= 5) {
-                                Log.d(TAG, "Kind-0 circuit reset: relay reconnected ($connected online), retrying ${internalPendingPubkeys.size} profiles")
+                                MLog.d(TAG, "Kind-0 circuit reset: relay reconnected ($connected online), retrying ${internalPendingPubkeys.size} profiles")
                                 consecutiveEarlyOuts = 0
                                 scheduleInternalBatch()
                                 return@collect
@@ -442,7 +454,17 @@ class ProfileMetadataCache {
         val allRelays = cacheRelayUrls.distinct()
         if (allRelays.isEmpty()) return
 
-        Log.d(TAG, "Fetching kind-0 for ${toFetch.size} pubkeys (${pubkeys.size - toFetch.size} already fresh) from ${allRelays.size} relays")
+        // Gate through EnrichmentBudget to prevent concurrent subscription storms
+        social.mycelium.android.pipeline.EnrichmentBudget.profileFetchSemaphore.acquire()
+        try {
+            fetchProfilesBatchInner(toFetch, allRelays)
+        } finally {
+            social.mycelium.android.pipeline.EnrichmentBudget.profileFetchSemaphore.release()
+        }
+    }
+
+    private suspend fun fetchProfilesBatchInner(toFetch: List<String>, allRelays: List<String>) {
+        MLog.d(TAG, "Fetching kind-0 for ${toFetch.size} pubkeys from ${allRelays.size} relays")
         val beforeCount = poolReceived.get()
 
         val filter = Filter(
@@ -487,7 +509,7 @@ class ProfileMetadataCache {
             // Hard cap: after 5 consecutive failures, stop retrying entirely.
             // Pubkeys stay in the queue and will be picked up when new notes trigger a fresh batch.
             if (consecutiveEarlyOuts >= 5) {
-                Log.d(
+                MLog.d(
                     TAG,
                     "Kind-0 early-out: 0/${toFetch.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts) — giving up, relays appear offline"
                 )
@@ -496,7 +518,7 @@ class ProfileMetadataCache {
             // Backoff delay before the while-loop retries: 0s, 1s, 2s, 4s, 8s cap
             val backoffMs = if (consecutiveEarlyOuts <= 1) 0L
             else (1000L * (1L shl (consecutiveEarlyOuts - 2).coerceAtMost(3))).coerceAtMost(8_000L)
-            Log.d(
+            MLog.d(
                 TAG,
                 "Kind-0 early-out: 0/${toFetch.size} after ${probeElapsed}ms (attempt $consecutiveEarlyOuts, next backoff ${backoffMs}ms), re-queued"
             )
@@ -513,13 +535,13 @@ class ProfileMetadataCache {
         delay(remainingMs)
 
         handle.cancel()
-        Log.d(TAG, "Kind-0 fetch done: ${batchReceived.get()}/${toFetch.size} profiles from ${allRelays.size} relays")
+        MLog.d(TAG, "Kind-0 fetch done: ${batchReceived.get()}/${toFetch.size} profiles from ${allRelays.size} relays")
 
         // ── Fallback: retry missing profiles on outbox/subscription relays ──
         val stillMissing = toFetch.filter { cache[normalizeKey(it)] == null }
         val fallback = fallbackRelayUrls.filter { it.isNotBlank() && it !in allRelays }
         if (stillMissing.isNotEmpty() && fallback.isNotEmpty()) {
-            Log.d(TAG, "Kind-0 fallback: ${stillMissing.size} missing, trying ${fallback.size} outbox relays")
+            MLog.d(TAG, "Kind-0 fallback: ${stillMissing.size} missing, trying ${fallback.size} outbox relays")
             val fbFilter = Filter(kinds = listOf(0), authors = stillMissing, limit = stillMissing.size)
             val fbReceived = AtomicInteger(0)
             RelayConnectionStateMachine.getInstance()
@@ -540,7 +562,7 @@ class ProfileMetadataCache {
                     }
                 }
             delay(KIND0_FETCH_TIMEOUT_MS + 500L)
-            Log.d(
+            MLog.d(
                 TAG,
                 "Kind-0 fallback done: ${fbReceived.get()}/${stillMissing.size} from ${fallback.size} outbox relays"
             )
@@ -582,7 +604,7 @@ class ProfileMetadataCache {
                 pronouns = pronouns?.takeIf { it.isNotBlank() }
             )
         } catch (e: Exception) {
-            Log.w(TAG, "Parse kind-0 content failed: ${e.message}")
+            MLog.w(TAG, "Parse kind-0 content failed: ${e.message}")
             null
         }
     }
@@ -681,7 +703,7 @@ class ProfileMetadataCache {
                             outboxRelayCache[pubkey] = nip65.writeRelays.split(",").filter { it.isNotBlank() }
                         }
                     }
-                    Log.d(TAG, "Restored ${profileEntities.size} profiles from Room DB (${restoredKeys.size} new)")
+                    MLog.d(TAG, "Restored ${profileEntities.size} profiles from Room DB (${restoredKeys.size} new)")
                     // Trigger NIP-05 verification for restored profiles so badges
                     // appear on cold start without waiting for relay-fetched kind-0.
                     var nip05Count = 0
@@ -692,7 +714,7 @@ class ProfileMetadataCache {
                             nip05Count++
                         }
                     }
-                    if (nip05Count > 0) Log.d(TAG, "Queued $nip05Count NIP-05 verifications for disk-restored profiles")
+                    if (nip05Count > 0) MLog.d(TAG, "Queued $nip05Count NIP-05 verifications for disk-restored profiles")
                     _diskCacheRestored.value = true
                     return@withContext
                 }
@@ -769,13 +791,13 @@ class ProfileMetadataCache {
                 if (nip65Migrated.isNotEmpty()) database.nip65Dao().upsertAll(nip65Migrated)
                 // Clear SharedPreferences after successful migration
                 prefs.edit().clear().apply()
-                Log.d(
+                MLog.d(
                     TAG,
                     "Migrated ${profiles.size} profiles from SharedPreferences to Room DB (${restoredKeys.size} new)"
                 )
                 _diskCacheRestored.value = true
             } catch (e: Exception) {
-                Log.e(TAG, "Load profile cache from disk failed: ${e.message}", e)
+                MLog.e(TAG, "Load profile cache from disk failed: ${e.message}", e)
             }
         }
     }
@@ -827,9 +849,9 @@ class ProfileMetadataCache {
                 val pruneMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
                 database.profileDao().deleteOlderThan(pruneMs)
                 database.nip65Dao().deleteOlderThan(pruneMs)
-                Log.d(TAG, "Saved ${profileEntities.size} profiles, ${nip65Entities.size} NIP-65 sets to Room DB")
+                MLog.d(TAG, "Saved ${profileEntities.size} profiles, ${nip65Entities.size} NIP-65 sets to Room DB")
             } catch (e: Exception) {
-                Log.e(TAG, "Save profile cache to Room DB failed: ${e.message}", e)
+                MLog.e(TAG, "Save profile cache to Room DB failed: ${e.message}", e)
             }
         }
     }

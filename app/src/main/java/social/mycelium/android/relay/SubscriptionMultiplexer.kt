@@ -1,6 +1,6 @@
 package social.mycelium.android.relay
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.CybinRelayPool
@@ -513,7 +513,7 @@ class SubscriptionMultiplexer private constructor(
                 cybinSubToFilterKey.clear()
                 _eoseReceived.value = emptySet()
                 eoseByRelay.clear()
-                Log.d(TAG, "Cleared all multiplexed subscriptions")
+                MLog.d(TAG, "Cleared all multiplexed subscriptions")
             }
         }
     }
@@ -546,7 +546,7 @@ class SubscriptionMultiplexer private constructor(
                 merged.cybinSub?.let { cybinSubToFilterKey.remove(it.id) }
                 merged.cybinSub?.close()
                 merged.cybinSub = null
-                Log.d(TAG, "Closed merged sub ${consumer.filterKey.hash.take(8)} (no consumers left)")
+                MLog.d(TAG, "Closed merged sub ${consumer.filterKey.hash.take(8)} (no consumers left)")
             } else {
                 // Recalculate priority from remaining consumers
                 val maxPriority = merged.consumerIds
@@ -608,7 +608,7 @@ class SubscriptionMultiplexer private constructor(
 
                     val relayCount = merged.relayFilterMap?.size ?: merged.relayUrls.size
                     val label = if (merged.relayFilterMap != null) "per-relay" else "uniform"
-                    Log.d(TAG, "${if (merged.needsRefresh) "Refreshed" else "Created"} merged sub ${key.hash.take(8)} " +
+                    MLog.d(TAG, "${if (merged.needsRefresh) "Refreshed" else "Created"} merged sub ${key.hash.take(8)} " +
                         "($label, ${merged.consumerIds.size} consumers, ${merged.priority.name}, $relayCount relays)")
                 }
             }
@@ -652,7 +652,7 @@ class SubscriptionMultiplexer private constructor(
         eventCallbacks[filterKey]?.let { callbacks ->
             for (cb in callbacks) {
                 try { cb(event, relayUrl) } catch (e: Exception) {
-                    Log.e(TAG, "Callback error for ${filterKey.hash.take(8)}: ${e.message}")
+                    MLog.e(TAG, "Callback error for ${filterKey.hash.take(8)}: ${e.message}")
                 }
             }
         }
@@ -689,7 +689,7 @@ class SubscriptionMultiplexer private constructor(
             // All relays caught up — mark all consumers as EOSE'd
             val consumerIds = merged.consumerIds.toSet()
             _eoseReceived.value = _eoseReceived.value + consumerIds
-            Log.d(TAG, "EOSE complete for merged sub ${merged.filterKey.hash.take(8)} " +
+            MLog.d(TAG, "EOSE complete for merged sub ${merged.filterKey.hash.take(8)} " +
                 "(${relaySet.size}/$totalRelays relays, ${consumerIds.size} consumers)")
         }
     }

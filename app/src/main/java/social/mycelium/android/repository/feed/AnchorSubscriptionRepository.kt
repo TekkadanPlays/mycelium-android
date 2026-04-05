@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.feed
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -84,7 +84,7 @@ class AnchorSubscriptionRepository private constructor() {
         // TODO: Decrypt private anchors from content field using NIP-44
         // For now, just track public subscriptions
         
-        Log.d("AnchorSubscriptionRepo", "Updated subscriptions for ${event.pubKey.take(8)}: ${publicAnchors.size} public anchors")
+        MLog.d("AnchorSubscriptionRepo", "Updated subscriptions for ${event.pubKey.take(8)}: ${publicAnchors.size} public anchors")
     }
     
     /**
@@ -92,7 +92,7 @@ class AnchorSubscriptionRepository private constructor() {
      */
     fun addLocalAnchor(anchor: String) {
         _subscribedAnchors.value = _subscribedAnchors.value + anchor
-        Log.d("AnchorSubscriptionRepo", "Optimistic add: $anchor (total: ${_subscribedAnchors.value.size})")
+        MLog.d("AnchorSubscriptionRepo", "Optimistic add: $anchor (total: ${_subscribedAnchors.value.size})")
     }
 
     /**
@@ -100,7 +100,7 @@ class AnchorSubscriptionRepository private constructor() {
      */
     fun removeLocalAnchor(anchor: String) {
         _subscribedAnchors.value = _subscribedAnchors.value - anchor
-        Log.d("AnchorSubscriptionRepo", "Optimistic remove: $anchor (total: ${_subscribedAnchors.value.size})")
+        MLog.d("AnchorSubscriptionRepo", "Optimistic remove: $anchor (total: ${_subscribedAnchors.value.size})")
     }
 
     /**
@@ -137,6 +137,6 @@ class AnchorSubscriptionRepository private constructor() {
             settleMs = 300L, maxWaitMs = 4_000L,
             onEvent = { event -> handleSubscriptionEvent(event) }
         )
-        Log.d("AnchorSubscriptionRepo", "Fetching kind:30073 (one-shot) for ${pubkey.take(8)} from ${relays.size} relays")
+        MLog.d("AnchorSubscriptionRepo", "Fetching kind:30073 (one-shot) for ${pubkey.take(8)} from ${relays.size} relays")
     }
 }

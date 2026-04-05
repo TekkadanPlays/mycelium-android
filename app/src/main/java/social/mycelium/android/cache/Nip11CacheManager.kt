@@ -1,7 +1,7 @@
 package social.mycelium.android.cache
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -124,7 +124,7 @@ class Nip11CacheManager(private val context: Context) {
             if (!forceRefresh) {
                 val cached = memoryCache[normalizedUrl]
                 if (cached != null && !isExpired(cached.timestamp)) {
-                    Log.d(TAG, "📋 Using cached NIP-11 data for $normalizedUrl")
+                    MLog.d(TAG, "📋 Using cached NIP-11 data for $normalizedUrl")
                     return@withContext cached.info
                 }
             }
@@ -151,7 +151,7 @@ class Nip11CacheManager(private val context: Context) {
             }
 
             try {
-                Log.d(TAG, "🌐 Fetching fresh NIP-11 data for $normalizedUrl")
+                MLog.d(TAG, "🌐 Fetching fresh NIP-11 data for $normalizedUrl")
                 val freshInfo = fetchRelayInfoFromNetwork(normalizedUrl)
                 if (freshInfo != null) {
                     cacheRelayInfo(normalizedUrl, freshInfo)
@@ -169,7 +169,7 @@ class Nip11CacheManager(private val context: Context) {
                 inFlight.remove(normalizedUrl)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "⚠️ Failed to get relay info for $url: ${e.message}")
+            MLog.w(TAG, "⚠️ Failed to get relay info for $url: ${e.message}")
             null
         }
     }
@@ -217,7 +217,7 @@ class Nip11CacheManager(private val context: Context) {
         scope.launch(Dispatchers.IO) {
             try {
                 val staleUrls = getStaleRelayUrls()
-                Log.d(TAG, "Refreshing ${staleUrls.size} stale relay info entries")
+                MLog.d(TAG, "Refreshing ${staleUrls.size} stale relay info entries")
                 val sem = Semaphore(8)
                 staleUrls.map { url ->
                     launch {
@@ -226,15 +226,15 @@ class Nip11CacheManager(private val context: Context) {
                                 val freshInfo = fetchRelayInfoFromNetwork(url)
                                 if (freshInfo != null) cacheRelayInfo(url, freshInfo)
                             } catch (e: Exception) {
-                                Log.w(TAG, "Failed to refresh $url: ${e.message}")
+                                MLog.w(TAG, "Failed to refresh $url: ${e.message}")
                             }
                         }
                     }
                 }.joinAll()
                 onComplete?.invoke()
-                Log.d(TAG, "Background refresh completed")
+                MLog.d(TAG, "Background refresh completed")
             } catch (e: Exception) {
-                Log.e(TAG, "Background refresh failed: ${e.message}", e)
+                MLog.e(TAG, "Background refresh failed: ${e.message}", e)
                 onComplete?.invoke()
             }
         }
@@ -251,7 +251,7 @@ class Nip11CacheManager(private val context: Context) {
             val staleSet = getStaleRelayUrls().toSet()
             val toFetch = urls.filter { !hasCachedRelayInfo(it) || it in staleSet }
             if (toFetch.isEmpty()) return@launch
-            Log.d(TAG, "Parallel NIP-11 preload: ${toFetch.size} relays (${urls.size - toFetch.size} cached)")
+            MLog.d(TAG, "Parallel NIP-11 preload: ${toFetch.size} relays (${urls.size - toFetch.size} cached)")
             val sem = Semaphore(8)
             toFetch.map { url ->
                 launch {
@@ -259,7 +259,7 @@ class Nip11CacheManager(private val context: Context) {
                         try {
                             getRelayInfo(url)
                         } catch (e: Exception) {
-                            Log.w(TAG, "Failed to preload $url: ${e.message}")
+                            MLog.w(TAG, "Failed to preload $url: ${e.message}")
                         }
                     }
                 }
@@ -282,7 +282,7 @@ class Nip11CacheManager(private val context: Context) {
         if (expiredUrls.isNotEmpty()) {
             val cutoffMs = System.currentTimeMillis() - CACHE_EXPIRY_HOURS * 60 * 60 * 1000L
             dbScope.launch { dao.deleteOlderThan(cutoffMs) }
-            Log.d(TAG, "Cleared ${expiredUrls.size} expired cache entries")
+            MLog.d(TAG, "Cleared ${expiredUrls.size} expired cache entries")
         }
     }
     
@@ -321,7 +321,7 @@ class Nip11CacheManager(private val context: Context) {
      */
     fun clearMemoryCache() {
         memoryCache.clear()
-        Log.d(TAG, "Cleared NIP-11 memory cache (Room unchanged)")
+        MLog.d(TAG, "Cleared NIP-11 memory cache (Room unchanged)")
     }
 
     /**
@@ -337,7 +337,7 @@ class Nip11CacheManager(private val context: Context) {
     fun clearAllCache() {
         memoryCache.clear()
         dbScope.launch { dao.deleteAll() }
-        Log.d(TAG, "Cleared all NIP-11 cache data")
+        MLog.d(TAG, "Cleared all NIP-11 cache data")
     }
     
     /**
@@ -359,22 +359,22 @@ class Nip11CacheManager(private val context: Context) {
                 if (responseBody.startsWith("{")) {
                     try {
                         val relayInfo = JSON.decodeFromString<RelayInformation>(responseBody)
-                        Log.d(TAG, "Fetched NIP-11 info for $url: ${relayInfo.name} icon=${relayInfo.icon?.take(80)}")
+                        MLog.d(TAG, "Fetched NIP-11 info for $url: ${relayInfo.name} icon=${relayInfo.icon?.take(80)}")
                         return@withContext relayInfo
                     } catch (parseEx: Exception) {
-                        Log.e(TAG, "NIP-11 JSON parse failed for $url: ${parseEx.message}\n  body=${responseBody.take(300)}")
+                        MLog.e(TAG, "NIP-11 JSON parse failed for $url: ${parseEx.message}\n  body=${responseBody.take(300)}")
                     }
                 } else {
-                    Log.w(TAG, "NIP-11 response for $url is not JSON: ${responseBody.take(120)}")
+                    MLog.w(TAG, "NIP-11 response for $url is not JSON: ${responseBody.take(120)}")
                 }
             } else {
-                Log.w(TAG, "NIP-11 HTTP ${response.status.value} for $url")
+                MLog.w(TAG, "NIP-11 HTTP ${response.status.value} for $url")
             }
             
             null
             
         } catch (e: Exception) {
-            Log.w(TAG, "NIP-11 fetch error for $url: ${e.message}")
+            MLog.w(TAG, "NIP-11 fetch error for $url: ${e.message}")
             null
         }
     }
@@ -400,7 +400,7 @@ class Nip11CacheManager(private val context: Context) {
                     fetchedAt = now
                 ))
             } catch (e: Exception) {
-                Log.w(TAG, "Room upsert failed for $url: ${e.message}")
+                MLog.w(TAG, "Room upsert failed for $url: ${e.message}")
             }
         }
     }
@@ -441,12 +441,12 @@ class Nip11CacheManager(private val context: Context) {
                         loaded++
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Skipping corrupt NIP-11 row: ${entity.relayUrl}: ${e.message}")
+                    MLog.w(TAG, "Skipping corrupt NIP-11 row: ${entity.relayUrl}: ${e.message}")
                 }
             }
-            Log.d(TAG, "Loaded $loaded NIP-11 entries from Room (${entities.size} rows)")
+            MLog.d(TAG, "Loaded $loaded NIP-11 entries from Room (${entities.size} rows)")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load NIP-11 cache from Room: ${e.message}", e)
+            MLog.e(TAG, "Failed to load NIP-11 cache from Room: ${e.message}", e)
         }
     }
 
@@ -481,7 +481,7 @@ class Nip11CacheManager(private val context: Context) {
 
                 if (entities.isNotEmpty()) {
                     dao.upsertAll(entities)
-                    Log.d(TAG, "Migrated ${entities.size} NIP-11 entries from SharedPreferences to Room")
+                    MLog.d(TAG, "Migrated ${entities.size} NIP-11 entries from SharedPreferences to Room")
                 }
             }
 
@@ -492,7 +492,7 @@ class Nip11CacheManager(private val context: Context) {
                 .remove(LEGACY_TIMESTAMPS_KEY)
                 .apply()
         } catch (e: Exception) {
-            Log.e(TAG, "SharedPreferences → Room migration failed: ${e.message}", e)
+            MLog.e(TAG, "SharedPreferences → Room migration failed: ${e.message}", e)
             // Mark as migrated anyway to avoid retrying a broken migration forever
             prefs.edit().putBoolean(LEGACY_MIGRATED_KEY, true).apply()
         }

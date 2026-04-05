@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -35,7 +35,7 @@ object PeopleListRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
-            Log.e(TAG, "Coroutine failed: ${t.message}", t)
+            MLog.e(TAG, "Coroutine failed: ${t.message}", t)
         }
     )
 
@@ -127,7 +127,7 @@ object PeopleListRepository {
             // Give the one-shot subscription time to settle
             kotlinx.coroutines.delay(9_000L)
             if (collected.isEmpty()) {
-                Log.d(TAG, "No people lists found for ${pubkey.take(8)}")
+                MLog.d(TAG, "No people lists found for ${pubkey.take(8)}")
                 return@launch
             }
             latestPeopleEvents.clear()
@@ -135,10 +135,10 @@ object PeopleListRepository {
             val effectiveSigner = signer ?: cachedSigner
             val lists = collected.values.mapNotNull { parsePeopleList(it, effectiveSigner) }
             _peopleLists.value = lists.sortedBy { it.title.lowercase() }
-            Log.d(TAG, "Fetched ${lists.size} people lists for ${pubkey.take(8)}: ${lists.map { "${it.title}(pub=${it.publicPubkeys.size},priv=${it.privatePubkeys.size})" }}")
+            MLog.d(TAG, "Fetched ${lists.size} people lists for ${pubkey.take(8)}: ${lists.map { "${it.title}(pub=${it.publicPubkeys.size},priv=${it.privatePubkeys.size})" }}")
         }
 
-        Log.d(TAG, "Fetching people lists for ${pubkey.take(8)} from ${relayUrls.size} relays")
+        MLog.d(TAG, "Fetching people lists for ${pubkey.take(8)} from ${relayUrls.size} relays")
     }
 
     /**
@@ -169,7 +169,7 @@ object PeopleListRepository {
                 }
             }
         }
-        Log.d(TAG, "Fetching hashtag list for ${pubkey.take(8)} from ${relayUrls.size} relays")
+        MLog.d(TAG, "Fetching hashtag list for ${pubkey.take(8)} from ${relayUrls.size} relays")
     }
 
     // ── Parsing ──────────────────────────────────────────────────────────────
@@ -205,11 +205,11 @@ object PeopleListRepository {
                         .map { it[1].lowercase() }
                         .toSet()
                     if (privatePubkeys.isNotEmpty()) {
-                        Log.d(TAG, "Decrypted ${privatePubkeys.size} private members for list '$title' (d=$dTag)")
+                        MLog.d(TAG, "Decrypted ${privatePubkeys.size} private members for list '$title' (d=$dTag)")
                     }
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to decrypt private tags for list '$title' (d=$dTag): ${e.message}")
+                MLog.w(TAG, "Failed to decrypt private tags for list '$title' (d=$dTag): ${e.message}")
             }
         }
 
@@ -244,7 +244,7 @@ object PeopleListRepository {
             }
             result
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse private tag JSON: ${e.message}")
+            MLog.w(TAG, "Failed to parse private tag JSON: ${e.message}")
             emptyList()
         }
     }
@@ -255,7 +255,7 @@ object PeopleListRepository {
             .map { it[1].lowercase() }
             .toSet()
         _subscribedHashtags.value = hashtags
-        Log.d(TAG, "Parsed hashtag list: ${hashtags.size} hashtags — $hashtags")
+        MLog.d(TAG, "Parsed hashtag list: ${hashtags.size} hashtags — $hashtags")
     }
 
     // ── Mutations ────────────────────────────────────────────────────────────
@@ -300,9 +300,9 @@ object PeopleListRepository {
                 parsePeopleList(signed, signer)?.let { newList ->
                     _peopleLists.value = (_peopleLists.value + newList).sortedBy { it.title.lowercase() }
                 }
-                Log.d(TAG, "Created people list '$title' (d=$dTag) with ${initialPubkeys.size} members (private=$isPrivate)")
+                MLog.d(TAG, "Created people list '$title' (d=$dTag) with ${initialPubkeys.size} members (private=$isPrivate)")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to create people list: ${e.message}", e)
+                MLog.e(TAG, "Failed to create people list: ${e.message}", e)
             }
         }
     }
@@ -322,7 +322,7 @@ object PeopleListRepository {
         scope.launch {
             try {
                 val existing = latestPeopleEvents[dTag] ?: run {
-                    Log.w(TAG, "No existing event for d=$dTag")
+                    MLog.w(TAG, "No existing event for d=$dTag")
                     return@launch
                 }
                 // Check both public and private members for duplicates
@@ -351,9 +351,9 @@ object PeopleListRepository {
                 RelayConnectionStateMachine.getInstance().send(signed, relayUrls)
                 latestPeopleEvents[dTag] = signed
                 refreshListsFromCache(signer)
-                Log.d(TAG, "Added ${pubkey.take(8)} to list d=$dTag (private=$isPrivate)")
+                MLog.d(TAG, "Added ${pubkey.take(8)} to list d=$dTag (private=$isPrivate)")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to add to people list: ${e.message}", e)
+                MLog.e(TAG, "Failed to add to people list: ${e.message}", e)
             }
         }
     }
@@ -388,9 +388,9 @@ object PeopleListRepository {
                 RelayConnectionStateMachine.getInstance().send(signed, relayUrls)
                 latestPeopleEvents[dTag] = signed
                 refreshListsFromCache(signer)
-                Log.d(TAG, "Removed ${pubkey.take(8)} from list d=$dTag")
+                MLog.d(TAG, "Removed ${pubkey.take(8)} from list d=$dTag")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to remove from people list: ${e.message}", e)
+                MLog.e(TAG, "Failed to remove from people list: ${e.message}", e)
             }
         }
     }
@@ -436,9 +436,9 @@ object PeopleListRepository {
 
                 latestPeopleEvents.remove(dTag)
                 _peopleLists.value = _peopleLists.value.filter { it.dTag != dTag }
-                Log.d(TAG, "Deleted people list d=$dTag (kind-5 + empty replacement)")
+                MLog.d(TAG, "Deleted people list d=$dTag (kind-5 + empty replacement)")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to delete people list: ${e.message}", e)
+                MLog.e(TAG, "Failed to delete people list: ${e.message}", e)
             }
         }
     }
@@ -465,9 +465,9 @@ object PeopleListRepository {
                 RelayConnectionStateMachine.getInstance().send(signed, relayUrls)
                 latestHashtagEvent = signed
                 _subscribedHashtags.value = _subscribedHashtags.value + normalized
-                Log.d(TAG, "Followed hashtag #$normalized")
+                MLog.d(TAG, "Followed hashtag #$normalized")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to follow hashtag: ${e.message}", e)
+                MLog.e(TAG, "Failed to follow hashtag: ${e.message}", e)
             }
         }
     }
@@ -494,9 +494,9 @@ object PeopleListRepository {
                 RelayConnectionStateMachine.getInstance().send(signed, relayUrls)
                 latestHashtagEvent = signed
                 _subscribedHashtags.value = _subscribedHashtags.value - normalized
-                Log.d(TAG, "Unfollowed hashtag #$normalized")
+                MLog.d(TAG, "Unfollowed hashtag #$normalized")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to unfollow hashtag: ${e.message}", e)
+                MLog.e(TAG, "Failed to unfollow hashtag: ${e.message}", e)
             }
         }
     }
@@ -521,7 +521,7 @@ object PeopleListRepository {
             val json = signer.nip44Decrypt(event.content, signer.pubKey)
             if (json.isNotBlank()) parseTagArrayJson(json) else emptyList()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to decrypt private tags: ${e.message}")
+            MLog.w(TAG, "Failed to decrypt private tags: ${e.message}")
             emptyList()
         }
     }

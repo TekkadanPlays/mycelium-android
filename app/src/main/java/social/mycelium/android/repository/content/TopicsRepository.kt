@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.content
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import android.util.LruCache
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.Note
@@ -103,7 +103,7 @@ data class HashtagStats(
 class TopicsRepository private constructor(context: Context) {
 
     private val appContext: Context = context.applicationContext
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
     private val relayStateMachine = RelayConnectionStateMachine.getInstance()
     private val profileCache = ProfileMetadataCache.getInstance()
 
@@ -375,7 +375,7 @@ class TopicsRepository private constructor(context: Context) {
             _topics.value = updated
             cacheDirty = true
             computeHashtagStatistics()
-            Log.d(TAG, "Applied reply counts to ${replyCountByTopicId.size} topics")
+            MLog.d(TAG, "Applied reply counts to ${replyCountByTopicId.size} topics")
         }
     }
 
@@ -407,7 +407,7 @@ class TopicsRepository private constructor(context: Context) {
         hasReceivedFirstEvent = false  // Reset so loading clears on first event from new relays
         // Start/restart dedicated topics subscription slot
         relayStateMachine.startTopicsSubscription(allUserRelayUrls)
-        Log.d(TAG, "Topics subscription relays set: ${allUserRelayUrls.size} relays (dedicated slot)")
+        MLog.d(TAG, "Topics subscription relays set: ${allUserRelayUrls.size} relays (dedicated slot)")
     }
 
     /**
@@ -417,11 +417,11 @@ class TopicsRepository private constructor(context: Context) {
         val normalizedUrls = displayFilterUrls.sorted()
         val currentUrls = connectedRelays.sorted()
         if (normalizedUrls == currentUrls) {
-            Log.d(TAG, "Topics display filter unchanged")
+            MLog.d(TAG, "Topics display filter unchanged")
             _isLoading.value = false // Always clear loading so we never get stuck on "Connecting to relays..."
             return
         }
-        Log.d(TAG, "Topics display filter: ${displayFilterUrls.size} relay(s)")
+        MLog.d(TAG, "Topics display filter: ${displayFilterUrls.size} relay(s)")
         connectedRelays = displayFilterUrls
         currentRelaySet = displayFilterUrls.map { normalizeUrl(it) }.toSet()
         _isLoading.value = false
@@ -432,7 +432,7 @@ class TopicsRepository private constructor(context: Context) {
      * Clear local state only. Does not disconnect shared client (Home/Topics share one connection).
      */
     fun disconnectAll() {
-        Log.d(TAG, "Clearing topics state (shared client stays connected)")
+        MLog.d(TAG, "Clearing topics state (shared client stays connected)")
         connectedRelays = emptyList()
         subscriptionRelays = emptyList()
         currentRelaySet = emptySet()
@@ -463,7 +463,7 @@ class TopicsRepository private constructor(context: Context) {
     ) {
         val targetRelays = relayUrls ?: connectedRelays
         if (targetRelays.isEmpty()) {
-            Log.w(TAG, "No relays available for topics display filter")
+            MLog.w(TAG, "No relays available for topics display filter")
             return
         }
 
@@ -476,9 +476,9 @@ class TopicsRepository private constructor(context: Context) {
         try {
             delay(TOPIC_FETCH_TIMEOUT_MS)
             _isLoading.value = false
-            Log.d(TAG, "📻 Topics display filter: ${targetRelays.size} relay(s) (subscription shared, events flow from state machine)")
+            MLog.d(TAG, "📻 Topics display filter: ${targetRelays.size} relay(s) (subscription shared, events flow from state machine)")
         } catch (e: Exception) {
-            Log.e(TAG, "Error in fetchTopics: ${e.message}", e)
+            MLog.e(TAG, "Error in fetchTopics: ${e.message}", e)
             _error.value = "Failed to load topics: ${e.message}"
             _isLoading.value = false
         }
@@ -496,7 +496,7 @@ class TopicsRepository private constructor(context: Context) {
                     topicsCutoffTimestampMs = System.currentTimeMillis()
                     _isLoading.value = false
                     _isReceivingEvents.value = true
-                    Log.d(TAG, "🎉 First topic received, clearing loading state")
+                    MLog.d(TAG, "🎉 First topic received, clearing loading state")
                 }
 
                 val topic = convertEventToTopicNote(event, relayUrl)
@@ -530,20 +530,20 @@ class TopicsRepository private constructor(context: Context) {
                         _pendingNewTopics.add(topic)
                         _newTopicsCount.value = _pendingNewTopics.size
                     }
-                    Log.d(TAG, "📬 New topic (pending): ${topic.title}")
+                    MLog.d(TAG, "📬 New topic (pending): ${topic.title}")
                 } else {
                     currentTopics[topic.id] = topic
                     _topics.value = currentTopics
                     cacheDirty = true
                     computeHashtagStatistics()
-                    Log.d(TAG, "✅ Added topic from relay: ${topic.title} (Total: ${currentTopics.size})")
+                    MLog.d(TAG, "✅ Added topic from relay: ${topic.title} (Total: ${currentTopics.size})")
                 }
 
                 // Buffer for deferred Room persistence
                 bufferEventForRoom(event, relayUrl)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling topic event: ${e.message}", e)
+            MLog.e(TAG, "Error handling topic event: ${e.message}", e)
         }
     }
 
@@ -570,7 +570,7 @@ class TopicsRepository private constructor(context: Context) {
             cacheDirty = true
             computeHashtagStatistics()
         }
-        Log.d(TAG, "Injected local topic: ${topic.title} (${topic.id.take(8)})")
+        MLog.d(TAG, "Injected local topic: ${topic.title} (${topic.id.take(8)})")
     }
 
     /**
@@ -628,7 +628,7 @@ class TopicsRepository private constructor(context: Context) {
             try {
                 val entities = eventDao.getTopicEvents(limit = 1000)
                 if (entities.isEmpty()) {
-                    Log.d(TAG, "hydrateFromRoom: no kind-11 events in Room")
+                    MLog.d(TAG, "hydrateFromRoom: no kind-11 events in Room")
                     return@launch
                 }
 
@@ -657,12 +657,12 @@ class TopicsRepository private constructor(context: Context) {
                     cacheDirty = true
                     computeHashtagStatistics()
                     enrichTopicRelayOrbs()
-                    Log.d(TAG, "hydrateFromRoom: loaded $addedCount new topics (total: ${current.size})")
+                    MLog.d(TAG, "hydrateFromRoom: loaded $addedCount new topics (total: ${current.size})")
                 } else {
-                    Log.d(TAG, "hydrateFromRoom: all ${entities.size} Room topics already in memory")
+                    MLog.d(TAG, "hydrateFromRoom: all ${entities.size} Room topics already in memory")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "hydrateFromRoom failed: ${e.message}", e)
+                MLog.e(TAG, "hydrateFromRoom failed: ${e.message}", e)
             }
         }
     }
@@ -694,7 +694,7 @@ class TopicsRepository private constructor(context: Context) {
         if (enrichedCount > 0) {
             _topics.value = updated
             cacheDirty = true
-            Log.d(TAG, "enrichTopicRelayOrbs: enriched $enrichedCount topics with additional relay URLs")
+            MLog.d(TAG, "enrichTopicRelayOrbs: enriched $enrichedCount topics with additional relay URLs")
         }
     }
 
@@ -712,7 +712,7 @@ class TopicsRepository private constructor(context: Context) {
         _topics.value = current
         cacheDirty = true
         computeHashtagStatistics()
-        Log.d(TAG, "Applied ${toMerge.size} pending topics")
+        MLog.d(TAG, "Applied ${toMerge.size} pending topics")
     }
 
     /** Schedule a batch profile fetch (debounced). Same pattern as NotesRepository. */
@@ -823,7 +823,7 @@ class TopicsRepository private constructor(context: Context) {
         // Update topics by hashtag map
         _topicsByHashtag.value = hashtagMap.mapValues { it.value.sortedByDescending { topic -> topic.timestamp } }
 
-        Log.d(TAG, "Computed stats for ${stats.size} hashtags")
+        MLog.d(TAG, "Computed stats for ${stats.size} hashtags")
     }
 
     /**
@@ -883,7 +883,7 @@ class TopicsRepository private constructor(context: Context) {
     suspend fun refresh(relayUrls: List<String>? = null) {
         // Reconnect if relays changed
         if (relayUrls != null && relayUrls != connectedRelays) {
-            Log.d(TAG, "🔄 Relays changed during refresh, reconnecting")
+            MLog.d(TAG, "🔄 Relays changed during refresh, reconnecting")
             connectToRelays(relayUrls)
         }
 
@@ -929,7 +929,7 @@ class TopicsRepository private constructor(context: Context) {
             Filter(kinds = listOf(11), limit = TOPICS_PAGE_SIZE, until = untilSec)
         }
 
-        Log.d(TAG, "loadOlderTopics: until=$untilSec hashtag=${forHashtag ?: "all"} from ${relays.size} relays")
+        MLog.d(TAG, "loadOlderTopics: until=$untilSec hashtag=${forHashtag ?: "all"} from ${relays.size} relays")
 
         val lastEventAt = AtomicLong(0L)
         val eventCount = AtomicInteger(0)
@@ -976,9 +976,9 @@ class TopicsRepository private constructor(context: Context) {
 
             if (received == 0) {
                 _topicsPaginationExhausted.value = true
-                Log.d(TAG, "Topics pagination exhausted: relay returned 0 events")
+                MLog.d(TAG, "Topics pagination exhausted: relay returned 0 events")
             } else {
-                Log.d(TAG, "Older topics loaded: $received received, total=${_topics.value.size}")
+                MLog.d(TAG, "Older topics loaded: $received received, total=${_topics.value.size}")
             }
             _isLoadingOlderTopics.value = false
         }
@@ -1067,7 +1067,7 @@ class TopicsRepository private constructor(context: Context) {
                         }
                         _topics.value = topicsMap
                         computeHashtagStatistics()
-                        Log.d(TAG, "💾 Loaded ${topicsMap.size} topics from Room")
+                        MLog.d(TAG, "💾 Loaded ${topicsMap.size} topics from Room")
                     }
 
                     // Load kind-1111 comments for reply count hydration
@@ -1086,12 +1086,12 @@ class TopicsRepository private constructor(context: Context) {
                         }
                         if (counted > 0) {
                             replyCountDirty = true
-                            Log.d(TAG, "💾 Hydrated reply counts from $counted comments in Room")
+                            MLog.d(TAG, "💾 Hydrated reply counts from $counted comments in Room")
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Failed to load from Room: ${e.message}", e)
+                MLog.e(TAG, "❌ Failed to load from Room: ${e.message}", e)
             }
         }
     }
@@ -1148,9 +1148,9 @@ class TopicsRepository private constructor(context: Context) {
             withContext(Dispatchers.IO) {
                 eventDao.insertAll(batch)
             }
-            Log.d(TAG, "💾 Flushed ${batch.size} events to Room (${batch.count { it.kind == 11 }} topics, ${batch.count { it.kind == 1111 }} comments)")
+            MLog.d(TAG, "💾 Flushed ${batch.size} events to Room (${batch.count { it.kind == 11 }} topics, ${batch.count { it.kind == 1111 }} comments)")
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Room flush failed: ${e.message}", e)
+            MLog.e(TAG, "❌ Room flush failed: ${e.message}", e)
         }
     }
 
@@ -1161,10 +1161,10 @@ class TopicsRepository private constructor(context: Context) {
         try {
             withContext(Dispatchers.IO) {
                 eventDao.deleteByKinds(listOf(11, 1111))
-                Log.d(TAG, "🧹 Cleared topics + comments from Room")
+                MLog.d(TAG, "🧹 Cleared topics + comments from Room")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "❌ Failed to clear persistent cache: ${e.message}", e)
+            MLog.e(TAG, "❌ Failed to clear persistent cache: ${e.message}", e)
         }
     }
 

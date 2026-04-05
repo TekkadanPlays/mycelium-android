@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
@@ -69,25 +69,25 @@ class RelayCheckWorker(
                 ExistingPeriodicWorkPolicy.UPDATE,
                 request
             )
-            Log.d(TAG, "Scheduled adaptive inbox check every ${intervalMinutes}min")
+            MLog.d(TAG, "Scheduled adaptive inbox check every ${intervalMinutes}min")
         }
 
         /** Cancel the periodic inbox check. Call when switching away from [ConnectionMode.ADAPTIVE]. */
         fun cancel(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
-            Log.d(TAG, "Cancelled adaptive inbox check")
+            MLog.d(TAG, "Cancelled adaptive inbox check")
         }
     }
 
     override suspend fun doWork(): Result {
         // Only run if still in Adaptive mode (user may have changed while job was queued)
         if (NotificationPreferences.connectionMode.value != ConnectionMode.ADAPTIVE) {
-            Log.d(TAG, "No longer in Adaptive mode, skipping")
+            MLog.d(TAG, "No longer in Adaptive mode, skipping")
             return Result.success()
         }
 
         val currentNpub = getCurrentAccountNpub() ?: run {
-            Log.d(TAG, "No current account, skipping")
+            MLog.d(TAG, "No current account, skipping")
             return Result.success()
         }
 
@@ -97,7 +97,7 @@ class RelayCheckWorker(
         } catch (e: Exception) { null }
 
         if (hexPubkey == null) {
-            Log.d(TAG, "Could not derive hex pubkey, skipping")
+            MLog.d(TAG, "Could not derive hex pubkey, skipping")
             return Result.success()
         }
 
@@ -116,7 +116,7 @@ class RelayCheckWorker(
             ?: emptyList()
 
         if (inboxRelays.isEmpty() && dmRelays.isEmpty()) {
-            Log.d(TAG, "No inbox or DM relays configured, skipping")
+            MLog.d(TAG, "No inbox or DM relays configured, skipping")
             return Result.success()
         }
 
@@ -125,7 +125,7 @@ class RelayCheckWorker(
             (System.currentTimeMillis() / 1000) - 1800
         }
 
-        Log.d(TAG, "Checking ${inboxRelays.size} inbox + ${dmRelays.size} DM relays since $sinceTimestamp (${hexPubkey.take(8)}...)")
+        MLog.d(TAG, "Checking ${inboxRelays.size} inbox + ${dmRelays.size} DM relays since $sinceTimestamp (${hexPubkey.take(8)}...)")
 
         try {
             val events = mutableListOf<com.example.cybin.core.Event>()
@@ -136,13 +136,13 @@ class RelayCheckWorker(
                 events.addAll(fetchDmEvents(dmRelays, hexPubkey, sinceTimestamp))
             }
             if (events.isNotEmpty()) {
-                Log.d(TAG, "Found ${events.size} new notification events")
+                MLog.d(TAG, "Found ${events.size} new notification events")
                 dispatchNotifications(events, hexPubkey)
             } else {
-                Log.d(TAG, "No new notification events")
+                MLog.d(TAG, "No new notification events")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Inbox check failed: ${e.message}", e)
+            MLog.e(TAG, "Inbox check failed: ${e.message}", e)
             return Result.retry()
         }
 

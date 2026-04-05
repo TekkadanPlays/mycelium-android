@@ -2,7 +2,7 @@ package social.mycelium.android.repository.relay
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.DiscoveredRelay
 import social.mycelium.android.data.RelayDiscoveryEvent
 import social.mycelium.android.data.RelayMonitorAnnouncement
@@ -68,7 +68,7 @@ object Nip66RelayDiscoveryRepository {
     )
 
     private val JSON = Json { ignoreUnknownKeys = true; prettyPrint = false }
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     /** All discovered relays keyed by normalized URL. */
     private val _discoveredRelays = MutableStateFlow<Map<String, DiscoveredRelay>>(emptyMap())
@@ -194,11 +194,11 @@ object Nip66RelayDiscoveryRepository {
 
         val ranked = scored.sortedByDescending { it.second }.map { it.first }.take(limit)
 
-        Log.d(TAG, "getRankedIndexers: ${candidates.size} candidates, userCountry=$userCountryCode " +
+        MLog.d(TAG, "getRankedIndexers: ${candidates.size} candidates, userCountry=$userCountryCode " +
             "(region=$userRegion), returning ${ranked.size}. Top 5:")
         ranked.take(5).forEachIndexed { i, r ->
             val s = scored.first { it.first.url == r.url }.second
-            Log.d(TAG, "  #${i+1}: ${r.url} score=$s country=${r.countryCode} monitors=${r.monitorCount}")
+            MLog.d(TAG, "  #${i+1}: ${r.url} score=$s country=${r.countryCode} monitors=${r.monitorCount}")
         }
 
         return ranked
@@ -266,7 +266,7 @@ object Nip66RelayDiscoveryRepository {
 
         // Skip network fetch if cache is fresh
         if (_hasFetched.value && cacheAge < CACHE_EXPIRY_MS) {
-            Log.d(TAG, "Discovery cache is fresh (${_discoveredRelays.value.size} relays), skipping fetch")
+            MLog.d(TAG, "Discovery cache is fresh (${_discoveredRelays.value.size} relays), skipping fetch")
             return
         }
 
@@ -277,13 +277,13 @@ object Nip66RelayDiscoveryRepository {
             // On cold start the relay pool hasn't connected yet ΓÇö poll until
             // at least one relay is connected, capped at 2s.
             if (_discoveredRelays.value.isEmpty() && !_hasFetched.value) {
-                Log.d(TAG, "Cold start ΓÇö polling for relay pool readiness")
+                MLog.d(TAG, "Cold start ΓÇö polling for relay pool readiness")
                 val poolDeadline = System.currentTimeMillis() + 2_000L
                 while (System.currentTimeMillis() < poolDeadline) {
                     try {
                         val pool = RelayConnectionStateMachine.getInstance().relayPool
                         if (pool.getConnectedCount() > 0) {
-                            Log.d(TAG, "Relay pool ready (${pool.getConnectedCount()} connected)")
+                            MLog.d(TAG, "Relay pool ready (${pool.getConnectedCount()} connected)")
                             break
                         }
                     } catch (_: Exception) { /* pool not initialized yet */ }
@@ -307,13 +307,13 @@ object Nip66RelayDiscoveryRepository {
     ) {
         val allRelays = (MONITOR_RELAYS + discoveryRelays).distinct()
         if (allRelays.isEmpty()) {
-            Log.w(TAG, "No relays to fetch discovery events from")
+            MLog.w(TAG, "No relays to fetch discovery events from")
             _isLoading.value = false
             return
         }
 
         try {
-            Log.d(TAG, "Fetching kind $KIND_RELAY_DISCOVERY from ${allRelays.size} relays")
+            MLog.d(TAG, "Fetching kind $KIND_RELAY_DISCOVERY from ${allRelays.size} relays")
 
             val rawEvents = mutableListOf<Event>()
             val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
@@ -358,7 +358,7 @@ object Nip66RelayDiscoveryRepository {
             fetchHandle = null
 
             val events = synchronized(rawEvents) { rawEvents.toList() }
-            Log.d(TAG, "Received ${events.size} kind-$KIND_RELAY_DISCOVERY events")
+            MLog.d(TAG, "Received ${events.size} kind-$KIND_RELAY_DISCOVERY events")
 
             if (events.isNotEmpty()) {
                 val parsed = events.mapNotNull { parseDiscoveryEvent(it) }
@@ -366,17 +366,17 @@ object Nip66RelayDiscoveryRepository {
                 _discoveredRelays.value = aggregated
                 saveToDisk(aggregated)
                 _hasFetched.value = true
-                Log.d(TAG, "Discovered ${aggregated.size} relays from ${parsed.size} monitor events")
+                MLog.d(TAG, "Discovered ${aggregated.size} relays from ${parsed.size} monitor events")
             } else {
                 // Mark as fetched even on empty results so the UI shows the empty state
                 // with retry button instead of an infinite loading spinner
                 _hasFetched.value = true
-                Log.w(TAG, "No events received ΓÇö relays may not be connected yet")
+                MLog.w(TAG, "No events received ΓÇö relays may not be connected yet")
             }
 
             _isLoading.value = false
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to fetch relay discovery: ${e.message}", e)
+            MLog.e(TAG, "Failed to fetch relay discovery: ${e.message}", e)
             _isLoading.value = false
         }
     }
@@ -390,7 +390,7 @@ object Nip66RelayDiscoveryRepository {
 
         scope.launch {
             try {
-                Log.d(TAG, "Fetching kind $KIND_MONITOR_ANNOUNCEMENT from ${discoveryRelays.size} relays")
+                MLog.d(TAG, "Fetching kind $KIND_MONITOR_ANNOUNCEMENT from ${discoveryRelays.size} relays")
 
                 val rawEvents = mutableListOf<Event>()
                 val filter = Filter(
@@ -425,9 +425,9 @@ object Nip66RelayDiscoveryRepository {
                 val monitors = events.mapNotNull { parseMonitorAnnouncement(it) }
                     .distinctBy { it.pubkey }
                 _monitors.value = monitors
-                Log.d(TAG, "Discovered ${monitors.size} relay monitors")
+                MLog.d(TAG, "Discovered ${monitors.size} relay monitors")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch monitors: ${e.message}", e)
+                MLog.e(TAG, "Failed to fetch monitors: ${e.message}", e)
             }
         }
     }
@@ -709,9 +709,9 @@ object Nip66RelayDiscoveryRepository {
                 ?.putString(CACHE_KEY_RELAYS, json)
                 ?.putLong(CACHE_KEY_TIMESTAMP, System.currentTimeMillis())
                 ?.apply()
-            Log.d(TAG, "Saved ${relays.size} discovered relays to disk")
+            MLog.d(TAG, "Saved ${relays.size} discovered relays to disk")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save discovery cache: ${e.message}")
+            MLog.e(TAG, "Failed to save discovery cache: ${e.message}")
         }
     }
 
@@ -720,7 +720,7 @@ object Nip66RelayDiscoveryRepository {
             val json = prefs?.getString(CACHE_KEY_RELAYS, null) ?: return
             val lastFetch = prefs?.getLong(CACHE_KEY_TIMESTAMP, 0L) ?: 0L
             if (System.currentTimeMillis() - lastFetch > CACHE_EXPIRY_MS) {
-                Log.d(TAG, "Discovery cache expired, will re-fetch")
+                MLog.d(TAG, "Discovery cache expired, will re-fetch")
                 return
             }
 
@@ -789,10 +789,10 @@ object Nip66RelayDiscoveryRepository {
             if (relays.isNotEmpty()) {
                 _discoveredRelays.value = relays
                 _hasFetched.value = true
-                Log.d(TAG, "Loaded ${relays.size} discovered relays from disk cache")
+                MLog.d(TAG, "Loaded ${relays.size} discovered relays from disk cache")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load discovery cache: ${e.message}")
+            MLog.e(TAG, "Failed to load discovery cache: ${e.message}")
         }
     }
 
@@ -805,7 +805,7 @@ object Nip66RelayDiscoveryRepository {
         if (_isLoading.value) return
         val lastFetch = prefs?.getLong(CACHE_KEY_TIMESTAMP, 0L) ?: 0L
         if (System.currentTimeMillis() - lastFetch < CACHE_EXPIRY_MS) return
-        Log.d(TAG, "Cache stale, refreshing in background")
+        MLog.d(TAG, "Cache stale, refreshing in background")
         fetchRelayDiscovery()
     }
 

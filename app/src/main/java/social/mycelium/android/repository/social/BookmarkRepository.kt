@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -29,7 +29,7 @@ object BookmarkRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
-            Log.e(TAG, "Coroutine failed: ${t.message}", t)
+            MLog.e(TAG, "Coroutine failed: ${t.message}", t)
         }
     )
 
@@ -69,7 +69,7 @@ object BookmarkRepository {
                 }
             }
         }
-        Log.d(TAG, "Fetching bookmarks (one-shot) for ${pubkey.take(8)} on ${relayUrls.size} relays")
+        MLog.d(TAG, "Fetching bookmarks (one-shot) for ${pubkey.take(8)} on ${relayUrls.size} relays")
     }
 
     private fun parseBookmarks(event: Event) {
@@ -85,7 +85,7 @@ object BookmarkRepository {
 
         _bookmarkedNoteIds.value = noteIds
         _bookmarkedHashtags.value = hashtags
-        Log.d(TAG, "Parsed bookmarks: ${noteIds.size} notes, ${hashtags.size} hashtags")
+        MLog.d(TAG, "Parsed bookmarks: ${noteIds.size} notes, ${hashtags.size} hashtags")
     }
 
     /**
@@ -96,15 +96,15 @@ object BookmarkRepository {
             try {
                 val current = _bookmarkedNoteIds.value
                 if (noteId in current) {
-                    Log.d(TAG, "Already bookmarked ${noteId.take(8)}")
+                    MLog.d(TAG, "Already bookmarked ${noteId.take(8)}")
                     return@launch
                 }
                 val updated = current + noteId
                 publishBookmarks(updated, _bookmarkedHashtags.value, signer, relayUrls)
                 _bookmarkedNoteIds.value = updated
-                Log.d(TAG, "Bookmarked ${noteId.take(8)}")
+                MLog.d(TAG, "Bookmarked ${noteId.take(8)}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to add bookmark: ${e.message}", e)
+                MLog.e(TAG, "Failed to add bookmark: ${e.message}", e)
             }
         }
     }
@@ -118,9 +118,9 @@ object BookmarkRepository {
                 val updated = _bookmarkedNoteIds.value - noteId
                 publishBookmarks(updated, _bookmarkedHashtags.value, signer, relayUrls)
                 _bookmarkedNoteIds.value = updated
-                Log.d(TAG, "Removed bookmark ${noteId.take(8)}")
+                MLog.d(TAG, "Removed bookmark ${noteId.take(8)}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to remove bookmark: ${e.message}", e)
+                MLog.e(TAG, "Failed to remove bookmark: ${e.message}", e)
             }
         }
     }
@@ -140,7 +140,7 @@ object BookmarkRepository {
         val signed = signer.sign(template)
         RelayConnectionStateMachine.getInstance().send(signed, relayUrls)
         latestBookmarkEvent = signed
-        Log.d(TAG, "Published bookmarks with ${noteIds.size} notes")
+        MLog.d(TAG, "Published bookmarks with ${noteIds.size} notes")
     }
 
     fun clearAll() {

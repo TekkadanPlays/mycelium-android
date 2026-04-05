@@ -1,6 +1,6 @@
 package social.mycelium.android.viewmodel
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -253,13 +253,13 @@ class DashboardViewModel : ViewModel() {
                             )
                         }
                     } catch (e: Throwable) {
-                        Log.e(TAG, "Notes collect failed: ${e.message}", e)
+                        MLog.e(TAG, "Notes collect failed: ${e.message}", e)
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
-                Log.e(TAG, "Notes flow failed: ${e.message}", e)
+                MLog.e(TAG, "Notes flow failed: ${e.message}", e)
             }
         }
 
@@ -299,14 +299,14 @@ class DashboardViewModel : ViewModel() {
                         } catch (e: kotlinx.coroutines.CancellationException) {
                             // Normal: enrichment cancelled by newer scroll position
                         } catch (e: Throwable) {
-                            Log.e(TAG, "Prefetch enrichment failed: ${e.message}", e)
+                            MLog.e(TAG, "Prefetch enrichment failed: ${e.message}", e)
                         }
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
-                Log.e(TAG, "Enrichment flow failed: ${e.message}", e)
+                MLog.e(TAG, "Enrichment flow failed: ${e.message}", e)
             }
         }
 
@@ -331,7 +331,7 @@ class DashboardViewModel : ViewModel() {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
-                Log.e(TAG, "Loading flow failed: ${e.message}", e)
+                MLog.e(TAG, "Loading flow failed: ${e.message}", e)
             }
         }
 
@@ -345,7 +345,7 @@ class DashboardViewModel : ViewModel() {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
-                Log.e(TAG, "Error flow failed: ${e.message}", e)
+                MLog.e(TAG, "Error flow failed: ${e.message}", e)
             }
         }
 
@@ -359,7 +359,7 @@ class DashboardViewModel : ViewModel() {
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Normal: viewModelScope cancelled
             } catch (e: Throwable) {
-                Log.e(TAG, "NewNotesCounts flow failed: ${e.message}", e)
+                MLog.e(TAG, "NewNotesCounts flow failed: ${e.message}", e)
             }
         }
     }
@@ -432,12 +432,12 @@ class DashboardViewModel : ViewModel() {
         when {
             itemId.startsWith("relay_category:") -> {
                 val categoryId = itemId.removePrefix("relay_category:")
-                Log.d(TAG, "Category clicked: $categoryId")
+                MLog.d(TAG, "Category clicked: $categoryId")
                 // This will be handled by passing relay URLs from the UI layer
             }
             itemId.startsWith("relay:") -> {
                 val relayUrl = itemId.removePrefix("relay:")
-                Log.d(TAG, "Relay clicked: $relayUrl")
+                MLog.d(TAG, "Relay clicked: $relayUrl")
                 setDisplayFilterOnly(listOf(relayUrl))
             }
             itemId == "profile" -> openProfile("current_user")
@@ -448,7 +448,7 @@ class DashboardViewModel : ViewModel() {
                 // Handle logout - handled in UI layer
             }
             else -> {
-                Log.d(TAG, "Unknown sidebar item: $itemId")
+                MLog.d(TAG, "Unknown sidebar item: $itemId")
             }
         }
     }
@@ -482,7 +482,7 @@ class DashboardViewModel : ViewModel() {
      */
     fun loadNotesFromFavoriteCategory(allUserRelayUrls: List<String>, displayUrls: List<String>) {
         if (allUserRelayUrls.isEmpty()) {
-            Log.d(TAG, "No relays configured for favorite category")
+            MLog.d(TAG, "No relays configured for favorite category")
             _uiState.update { it.copy(notes = persistentListOf(), hasRelays = false, isLoadingFromRelays = false) }
             return
         }
@@ -493,7 +493,7 @@ class DashboardViewModel : ViewModel() {
         val allSet = allUserRelayUrls.toSet()
         val displaySet = displayUrls.toSet()
         if (allSet == lastLoadAllRelays && displaySet == lastLoadDisplayRelays && _uiState.value.notes.isNotEmpty()) {
-            Log.d(TAG, "loadNotesFromFavoriteCategory: idempotent skip (same relays, ${_uiState.value.notes.size} notes)")
+            MLog.d(TAG, "loadNotesFromFavoriteCategory: idempotent skip (same relays, ${_uiState.value.notes.size} notes)")
             return
         }
         lastLoadAllRelays = allSet
@@ -507,7 +507,7 @@ class DashboardViewModel : ViewModel() {
         loadNotesJob?.cancel()
         loadNotesJob = viewModelScope.launch {
             delay(LOAD_NOTES_DEBOUNCE_MS)
-            Log.d(TAG, "Loading notes: subscription=${allUserRelayUrls.size} relays, display=${displayUrls.size} relay(s)")
+            MLog.d(TAG, "Loading notes: subscription=${allUserRelayUrls.size} relays, display=${displayUrls.size} relay(s)")
             // Only show loading indicator when feed is empty (cold start).
             // When notes exist from cache, resubscription happens silently.
             if (_uiState.value.notes.isEmpty()) {
@@ -517,7 +517,7 @@ class DashboardViewModel : ViewModel() {
                 notesRepository.ensureSubscriptionToNotes(allUserRelayUrls, limit = 100)
                 _uiState.update { it.copy(isLoadingFromRelays = false) }
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading notes from relays: ${e.message}", e)
+                MLog.e(TAG, "Error loading notes from relays: ${e.message}", e)
                 _uiState.update { it.copy(error = "Failed to load notes: ${e.message}", isLoadingFromRelays = false) }
             }
         }

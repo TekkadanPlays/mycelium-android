@@ -1,7 +1,7 @@
 package social.mycelium.android.lightning
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import fr.acinq.bitcoin.ByteVector32
 import fr.acinq.bitcoin.Crypto
 import fr.acinq.bitcoin.TxId
@@ -46,7 +46,7 @@ class FileChannelsDb(private val dir: File) : ChannelsDb {
                 val result = Serialization.deserialize(file.readBytes())
                 (result as? Serialization.DeserializationResult.Success)?.state
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to deserialize channel ${file.name}: ${e.message}")
+                MLog.e(TAG, "Failed to deserialize channel ${file.name}: ${e.message}")
                 null
             }
         } ?: emptyList()

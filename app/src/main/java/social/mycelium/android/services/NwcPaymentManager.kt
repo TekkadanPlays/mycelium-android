@@ -1,7 +1,7 @@
 package social.mycelium.android.services
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.repository.sync.NwcConfig
 import social.mycelium.android.repository.sync.NwcConfigRepository
 import com.example.cybin.core.Event
@@ -62,7 +62,7 @@ object NwcPaymentManager {
         context: Context,
         bolt11: String
     ): NwcPaymentResult = withContext(Dispatchers.IO) {
-        Log.d(TAG, "payInvoice called, bolt11 length=${bolt11.length}")
+        MLog.d(TAG, "payInvoice called, bolt11 length=${bolt11.length}")
         val config = NwcConfigRepository.getConfig(context)
         if (config.pubkey.isBlank() || config.relay.isBlank() || config.secret.isBlank()) {
             return@withContext NwcPaymentResult.Error("NWC not configured. Set up Wallet Connect in Settings.")
@@ -77,7 +77,7 @@ object NwcPaymentManager {
         val secretBytes = config.secret.hexToByteArray()
         val nwcSigner = NostrSignerInternal(KeyPair(privKey = secretBytes))
 
-        Log.d(TAG, "NWC signer=${nwcSigner.pubKey.take(8)}, wallet=${config.pubkey.take(8)}, relay=${config.relay}")
+        MLog.d(TAG, "NWC signer=${nwcSigner.pubKey.take(8)}, wallet=${config.pubkey.take(8)}, relay=${config.relay}")
 
         val paymentRequest = LnZapPaymentRequestEvent.create(
             lnInvoice = bolt11,
@@ -85,7 +85,7 @@ object NwcPaymentManager {
             signer = nwcSigner,
             useNip44 = false,
         )
-        Log.d(TAG, "Request id=${paymentRequest.id.take(12)}")
+        MLog.d(TAG, "Request id=${paymentRequest.id.take(12)}")
 
         val responseDeferred = CompletableDeferred<NwcPaymentResult>()
         val relayAccepted = CompletableDeferred<Boolean>()
@@ -94,7 +94,7 @@ object NwcPaymentManager {
             var finalResult: NwcPaymentResult? = null
 
             wsClient.webSocket(config.relay) {
-                Log.d(TAG, "Connected to ${config.relay}")
+                MLog.d(TAG, "Connected to ${config.relay}")
 
                 val subId = "nwc_${System.currentTimeMillis()}"
 
@@ -107,7 +107,7 @@ object NwcPaymentManager {
                             }
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Read error: ${e.message}")
+                        MLog.w(TAG, "Read error: ${e.message}")
                         if (!relayAccepted.isCompleted) relayAccepted.complete(false)
                         if (!responseDeferred.isCompleted) {
                             responseDeferred.complete(NwcPaymentResult.Error("Connection lost"))
@@ -134,7 +134,7 @@ object NwcPaymentManager {
                     relayAccepted.await()
                 }
                 if (accepted == null) {
-                    Log.w(TAG, "Relay did not acknowledge event within ${RELAY_OK_TIMEOUT_MS / 1000}s")
+                    MLog.w(TAG, "Relay did not acknowledge event within ${RELAY_OK_TIMEOUT_MS / 1000}s")
                     readerJob.cancel()
                     finalResult = NwcPaymentResult.Error("Relay unresponsive")
                 } else if (accepted == false) {
@@ -147,7 +147,7 @@ object NwcPaymentManager {
                     finalResult = responseDeferred.getCompleted()
                 } else {
                     // Phase 2: Relay accepted — wait for wallet response
-                    Log.d(TAG, "Relay accepted, waiting for wallet response...")
+                    MLog.d(TAG, "Relay accepted, waiting for wallet response...")
                     val result = withTimeoutOrNull(WALLET_RESPONSE_TIMEOUT_MS) {
                         responseDeferred.await()
                     }
@@ -159,11 +159,11 @@ object NwcPaymentManager {
 
             if (finalResult != null) return finalResult!!
 
-            Log.w(TAG, "Wallet did not respond within ${WALLET_RESPONSE_TIMEOUT_MS / 1000}s")
+            MLog.w(TAG, "Wallet did not respond within ${WALLET_RESPONSE_TIMEOUT_MS / 1000}s")
             return NwcPaymentResult.Error("Wallet did not respond — may be offline")
 
         } catch (e: Exception) {
-            Log.e(TAG, "NWC payment failed: ${e.message}", e)
+            MLog.e(TAG, "NWC payment failed: ${e.message}", e)
             return NwcPaymentResult.Error("Payment failed: ${e.message?.take(80)}")
         }
     }
@@ -181,13 +181,13 @@ object NwcPaymentManager {
             when (val msg = NostrProtocol.parseRelayMessage(raw)) {
                 is NostrProtocol.RelayMessage.EventMsg -> {
                     if (msg.subscriptionId == subId && msg.event.kind == LnZapPaymentResponseEvent.KIND) {
-                        Log.d(TAG, "Got kind-23195 id=${msg.event.id.take(12)}")
+                        MLog.d(TAG, "Got kind-23195 id=${msg.event.id.take(12)}")
                         processResponse(msg.event, signer, requestId, responseDeferred)
                     }
                 }
                 is NostrProtocol.RelayMessage.Ok -> {
                     if (msg.eventId == requestId) {
-                        Log.d(TAG, "OK: accepted=${msg.success}${if (msg.message.isNotEmpty()) " msg=${msg.message}" else ""}")
+                        MLog.d(TAG, "OK: accepted=${msg.success}${if (msg.message.isNotEmpty()) " msg=${msg.message}" else ""}")
                         if (msg.success) {
                             if (!relayAccepted.isCompleted) relayAccepted.complete(true)
                         } else {
@@ -200,22 +200,22 @@ object NwcPaymentManager {
                 }
                 is NostrProtocol.RelayMessage.EndOfStoredEvents -> {}
                 is NostrProtocol.RelayMessage.Closed -> {
-                    Log.w(TAG, "CLOSED: ${msg.message}")
+                    MLog.w(TAG, "CLOSED: ${msg.message}")
                     if (!responseDeferred.isCompleted) {
                         responseDeferred.complete(NwcPaymentResult.Error("Subscription closed: ${msg.message.take(60)}"))
                     }
                     if (!relayAccepted.isCompleted) relayAccepted.complete(false)
                 }
                 is NostrProtocol.RelayMessage.Notice -> {
-                    Log.w(TAG, "NOTICE: ${msg.message}")
+                    MLog.w(TAG, "NOTICE: ${msg.message}")
                 }
                 is NostrProtocol.RelayMessage.Auth -> {
-                    Log.w(TAG, "AUTH required by NWC relay")
+                    MLog.w(TAG, "AUTH required by NWC relay")
                 }
                 else -> {}
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Parse error: ${e.message}")
+            MLog.w(TAG, "Parse error: ${e.message}")
         }
     }
 
@@ -229,19 +229,19 @@ object NwcPaymentManager {
         try {
             val responseRequestId = LnZapPaymentResponseEvent.requestId(event)
             if (responseRequestId != null && responseRequestId != requestId) {
-                Log.d(TAG, "Skipping stale response (${responseRequestId.take(12)} != ${requestId.take(12)})")
+                MLog.d(TAG, "Skipping stale response (${responseRequestId.take(12)} != ${requestId.take(12)})")
                 return
             }
 
             val response = LnZapPaymentResponseEvent.decrypt(event, signer)
             when (response) {
                 is PayInvoiceSuccessResponse -> {
-                    Log.d(TAG, "SUCCESS preimage=${response.result?.preimage?.take(16)}")
+                    MLog.d(TAG, "SUCCESS preimage=${response.result?.preimage?.take(16)}")
                     deferred.complete(NwcPaymentResult.Success(response.result?.preimage))
                 }
                 is PayInvoiceErrorResponse -> {
                     val msg = response.error?.message ?: response.error?.code?.name ?: "Unknown error"
-                    Log.w(TAG, "PAYMENT ERROR: $msg")
+                    MLog.w(TAG, "PAYMENT ERROR: $msg")
                     deferred.complete(NwcPaymentResult.Error(msg))
                 }
                 else -> {
@@ -249,7 +249,7 @@ object NwcPaymentManager {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Decrypt error: ${e.message}")
+            MLog.e(TAG, "Decrypt error: ${e.message}")
             if (!deferred.isCompleted) {
                 deferred.complete(NwcPaymentResult.Error("Failed to decrypt response"))
             }

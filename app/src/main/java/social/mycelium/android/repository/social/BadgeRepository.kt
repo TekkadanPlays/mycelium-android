@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -37,7 +37,7 @@ object BadgeRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() +
-            CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) }
+            CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) }
     )
 
     /**
@@ -129,7 +129,7 @@ object BadgeRepository {
             // Pick the latest kind 30008 event
             val profileBadgesEvent = profileBadgesEvents.maxByOrNull { it.createdAt }
             if (profileBadgesEvent == null) {
-                Log.d(TAG, "No kind 30008 profile_badges event for ${pubkeyHex.take(8)}")
+                MLog.d(TAG, "No kind 30008 profile_badges event for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
             }
@@ -141,12 +141,12 @@ object BadgeRepository {
                 .distinct()
 
             if (awardEventIds.isEmpty()) {
-                Log.d(TAG, "Kind 30008 has no e-tags for ${pubkeyHex.take(8)}")
+                MLog.d(TAG, "Kind 30008 has no e-tags for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
             }
 
-            Log.d(TAG, "Found ${awardEventIds.size} badge award refs for ${pubkeyHex.take(8)}")
+            MLog.d(TAG, "Found ${awardEventIds.size} badge award refs for ${pubkeyHex.take(8)}")
 
             // ── Step 2+3: Fetch kind 8 awards and kind 30009 definitions concurrently ──
             data class DefRef(val awardEventId: String, val awardedBy: String, val awardedAt: Long, val aTagValue: String)
@@ -179,18 +179,18 @@ object BadgeRepository {
             delay(2_000L) // wait for EOSE-based auto-close + buffer
 
             if (awardEvents.isEmpty()) {
-                Log.d(TAG, "No kind 8 award events fetched for ${pubkeyHex.take(8)}")
+                MLog.d(TAG, "No kind 8 award events fetched for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
             }
 
             if (defRefs.isEmpty()) {
-                Log.d(TAG, "No badge definition a-tags in award events for ${pubkeyHex.take(8)}")
+                MLog.d(TAG, "No badge definition a-tags in award events for ${pubkeyHex.take(8)}")
                 emitBadges(pubkeyHex, emptyList())
                 return
             }
 
-            Log.d(TAG, "Resolving ${defRefs.size} badge definitions for ${pubkeyHex.take(8)}")
+            MLog.d(TAG, "Resolving ${defRefs.size} badge definitions for ${pubkeyHex.take(8)}")
 
             // Parse a-tag values to build filters: "30009:<author>:<d-tag>"
             data class DefKey(val author: String, val dTag: String)
@@ -246,10 +246,10 @@ object BadgeRepository {
                 )
             }.distinctBy { it.definitionId }
 
-            Log.d(TAG, "Resolved ${badges.size} badges for ${pubkeyHex.take(8)}")
+            MLog.d(TAG, "Resolved ${badges.size} badges for ${pubkeyHex.take(8)}")
             emitBadges(pubkeyHex, badges)
         } catch (e: Exception) {
-            Log.e(TAG, "fetchBadges failed for ${pubkeyHex.take(8)}: ${e.message}", e)
+            MLog.e(TAG, "fetchBadges failed for ${pubkeyHex.take(8)}: ${e.message}", e)
             emitBadges(pubkeyHex, emptyList())
         }
     }

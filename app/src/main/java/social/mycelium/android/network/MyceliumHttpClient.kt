@@ -1,6 +1,6 @@
 package social.mycelium.android.network
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.HttpRedirect
@@ -91,7 +91,7 @@ object MyceliumHttpClient {
             install(Logging) {
                 logger = object : Logger {
                     override fun log(message: String) {
-                        Log.d(TAG, message)
+                        MLog.d(TAG, message)
                     }
                 }
                 level = LogLevel.NONE // Set to LogLevel.HEADERS or LogLevel.BODY for debugging

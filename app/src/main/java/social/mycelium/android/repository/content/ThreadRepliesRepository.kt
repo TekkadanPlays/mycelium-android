@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.content
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.ThreadReply
 import com.example.cybin.relay.SubscriptionPriority
@@ -39,7 +39,7 @@ import social.mycelium.android.repository.NotificationsRepository
  */
 class ThreadRepliesRepository {
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
     private val relayStateMachine = RelayConnectionStateMachine.getInstance()
 
     // Displayed replies for a specific note ID (shown in UI)
@@ -96,7 +96,7 @@ class ThreadRepliesRepository {
      * Set relay URLs for subsequent fetchRepliesForNote. Connection happens when subscription is created (subscription-first so client knows which relays to use).
      */
     fun connectToRelays(relayUrls: List<String>) {
-        Log.d(TAG, "Relay URLs set for thread replies: ${relayUrls.size}")
+        MLog.d(TAG, "Relay URLs set for thread replies: ${relayUrls.size}")
         connectedRelays = relayUrls
     }
 
@@ -104,7 +104,7 @@ class ThreadRepliesRepository {
      * Cancel all reply subscriptions and clear state. Does not disconnect the shared client.
      */
     fun disconnectAll() {
-        Log.d(TAG, "Cleaning up kind 1111 reply subscriptions")
+        MLog.d(TAG, "Cleaning up kind 1111 reply subscriptions")
         activeSubscriptions.values.forEach { it.cancel() }
         activeSubscriptions.clear()
         connectedRelays = emptyList()
@@ -131,7 +131,7 @@ class ThreadRepliesRepository {
     ) {
         val baseRelays = relayUrls ?: connectedRelays
         if (baseRelays.isEmpty()) {
-            Log.w(TAG, "No relays available to fetch replies")
+            MLog.w(TAG, "No relays available to fetch replies")
             return
         }
         // Enrich with author's outbox + inbox relays if available (NIP-65 kind-10002)
@@ -145,7 +145,7 @@ class ThreadRepliesRepository {
             (baseRelays + authorOutbox + authorInbox).distinct()
         )
         if (authorOutbox.isNotEmpty() || authorInbox.isNotEmpty()) {
-            Log.d(TAG, "Enriched relays: ${baseRelays.size} base + ${authorOutbox.size} outbox + ${authorInbox.size} inbox = ${targetRelays.size} total")
+            MLog.d(TAG, "Enriched relays: ${baseRelays.size} base + ${authorOutbox.size} outbox + ${authorInbox.size} inbox = ${targetRelays.size} total")
         }
 
         // Cancel ALL active subscriptions first to stop stale events from arriving
@@ -176,7 +176,7 @@ class ThreadRepliesRepository {
         try {
             // For kind-11 topics and kind-1 notes, fetch kind-1 replies alongside kind-1111
             val replyKinds = if (rootKind == 11 || rootKind == 1) listOf(1, 1111) else listOf(1111)
-            Log.d(TAG, "Fetching kind $replyKinds replies for note ${noteId.take(8)}... from ${targetRelays.size} relays (shared client)")
+            MLog.d(TAG, "Fetching kind $replyKinds replies for note ${noteId.take(8)}... from ${targetRelays.size} relays (shared client)")
 
             // Create filters for replies (NIP-22 root can be "e" or "E")
             val lowerFilter = Filter(
@@ -210,7 +210,7 @@ class ThreadRepliesRepository {
             _isLoading.value = false
             initialLoadComplete = true
             replyCutoffTimestampMs = System.currentTimeMillis()
-            Log.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} displayed, cutoff set)")
+            MLog.d(TAG, "Replies live for note ${noteId.take(8)}... (${getRepliesForNote(noteId).size} displayed, cutoff set)")
 
             // Prefetch quoted notes from reply content so embedded quotes render without spinners
             val allQuotedIds = getRepliesForNote(noteId).flatMap { reply ->
@@ -226,7 +226,7 @@ class ThreadRepliesRepository {
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "Error fetching replies: ${e.message}", e)
+            MLog.e(TAG, "Error fetching replies: ${e.message}", e)
             _error.value = "Failed to load replies: ${e.message}"
             _isLoading.value = false
         }
@@ -277,7 +277,7 @@ class ThreadRepliesRepository {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error handling reply event: ${e.message}", e)
+            MLog.e(TAG, "Error handling reply event: ${e.message}", e)
         }
     }
 
@@ -298,7 +298,7 @@ class ThreadRepliesRepository {
             _pendingReplies.getOrPut(noteId) { mutableListOf() }.add(reply)
         }
         updatePendingCounts(noteId)
-        Log.d(TAG, "📬 Pending reply from ${reply.author.displayName}: ${reply.content.take(40)}...")
+        MLog.d(TAG, "📬 Pending reply from ${reply.author.displayName}: ${reply.content.take(40)}...")
     }
 
     /**
@@ -316,7 +316,7 @@ class ThreadRepliesRepository {
                 val updated = replies.toMutableList()
                 updated[idx] = reply.copy(relayUrls = reply.relayUrls + relayUrl)
                 _replies.value = current + (noteId to updated)
-                Log.d(TAG, "Merged publish relay $relayUrl into reply ${eventId.take(8)}")
+                MLog.d(TAG, "Merged publish relay $relayUrl into reply ${eventId.take(8)}")
                 return
             }
         }
@@ -368,7 +368,7 @@ class ThreadRepliesRepository {
         toMerge.filter { it.id !in existingIds }.forEach { currentReplies.add(it) }
         _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
         updatePendingCounts(noteId)
-        Log.d(TAG, "Applied ${toMerge.size} pending replies for ${noteId.take(8)}")
+        MLog.d(TAG, "Applied ${toMerge.size} pending replies for ${noteId.take(8)}")
     }
 
     /**
@@ -390,7 +390,7 @@ class ThreadRepliesRepository {
         toMerge.filter { it.id !in existingIds }.forEach { currentReplies.add(it) }
         _replies.value = _replies.value + (noteId to currentReplies.sortedBy { it.timestamp })
         updatePendingCounts(noteId)
-        Log.d(TAG, "Applied ${toMerge.size} pending replies for parent ${parentId.take(8)} in ${noteId.take(8)}")
+        MLog.d(TAG, "Applied ${toMerge.size} pending replies for parent ${parentId.take(8)} in ${noteId.take(8)}")
     }
 
     /** Clear all pending replies and reset counts. */
@@ -480,9 +480,9 @@ class ThreadRepliesRepository {
             for (url in buffered) {
                 mergePublishRelayUrl(event.id, url)
             }
-            Log.d(TAG, "📌 Applied ${buffered.size} buffered relay confirmations for ${event.id.take(8)}")
+            MLog.d(TAG, "📌 Applied ${buffered.size} buffered relay confirmations for ${event.id.take(8)}")
         }
-        Log.d(TAG, "📌 Injected local reply: ${event.id.take(8)} into thread ${rootNoteId.take(8)}")
+        MLog.d(TAG, "📌 Injected local reply: ${event.id.take(8)} into thread ${rootNoteId.take(8)}")
     }
 
     /**

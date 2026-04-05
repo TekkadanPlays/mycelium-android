@@ -1,6 +1,6 @@
 package social.mycelium.android.services
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -42,7 +42,7 @@ object LnurlResolver {
 
             // Step 1: Resolve LNURL endpoint
             val lnurlEndpoint = "https://$domain/.well-known/lnurlp/$user"
-            Log.d(TAG, "Resolving LNURL: $lnurlEndpoint")
+            MLog.d(TAG, "Resolving LNURL: $lnurlEndpoint")
 
             val metaJson = httpGet(lnurlEndpoint)
                 ?: return@withContext LnurlResult.Error("Failed to reach $domain")
@@ -67,7 +67,7 @@ object LnurlResolver {
             val invoiceUrl = "${callback}${separator}amount=$amountMillisats" +
                 if (comment.isNotBlank()) "&comment=${java.net.URLEncoder.encode(comment, "UTF-8")}" else ""
 
-            Log.d(TAG, "Fetching invoice: $invoiceUrl")
+            MLog.d(TAG, "Fetching invoice: $invoiceUrl")
             val invoiceJson = httpGet(invoiceUrl)
                 ?: return@withContext LnurlResult.Error("Failed to fetch invoice")
             val invoiceObj = JSONObject(invoiceJson)
@@ -79,10 +79,10 @@ object LnurlResolver {
             val bolt11 = invoiceObj.optString("pr")
             if (bolt11.isBlank()) return@withContext LnurlResult.Error("No invoice in response")
 
-            Log.d(TAG, "Got invoice: ${bolt11.take(20)}...")
+            MLog.d(TAG, "Got invoice: ${bolt11.take(20)}...")
             LnurlResult.Invoice(bolt11)
         } catch (e: Exception) {
-            Log.e(TAG, "fetchInvoice failed: ${e.message}", e)
+            MLog.e(TAG, "fetchInvoice failed: ${e.message}", e)
             LnurlResult.Error("Failed: ${e.message?.take(60)}")
         }
     }
@@ -99,11 +99,11 @@ object LnurlResolver {
             if (conn.responseCode == 200) {
                 conn.inputStream.bufferedReader().readText()
             } else {
-                Log.w(TAG, "HTTP ${conn.responseCode} for $urlString")
+                MLog.w(TAG, "HTTP ${conn.responseCode} for $urlString")
                 null
             }
         } catch (e: Exception) {
-            Log.e(TAG, "httpGet failed for $urlString: ${e.message}")
+            MLog.e(TAG, "httpGet failed for $urlString: ${e.message}")
             null
         }
     }

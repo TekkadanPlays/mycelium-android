@@ -1,6 +1,6 @@
 package social.mycelium.android.repository
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -42,7 +42,7 @@ class RealCoinosApiProvider : CoinosApiProvider {
 
     override suspend fun authenticate(eventJson: String, challenge: String): Result<AuthResult> = runCatching {
         val payload = """{"event":$eventJson,"challenge":"$challenge"}"""
-        Log.d(TAG, "POST /nostrAuth body=${payload.take(200)}...")
+        MLog.d(TAG, "POST /nostrAuth body=${payload.take(200)}...")
         val resp = httpClient.post("$BASE_URL/nostrAuth") {
             header("User-Agent", USER_AGENT)
             setBody(TextContent(payload, ContentType.Application.Json))

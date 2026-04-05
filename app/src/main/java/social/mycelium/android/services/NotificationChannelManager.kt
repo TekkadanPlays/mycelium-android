@@ -1,5 +1,7 @@
 package social.mycelium.android.services
 
+
+import social.mycelium.android.debug.MLog
 import android.app.NotificationChannel
 import android.app.NotificationChannelGroup
 import android.app.NotificationManager
@@ -282,7 +284,7 @@ object NotificationChannelManager {
             NotificationManagerCompat.from(context).notify(notificationId, notification)
         } catch (e: SecurityException) {
             // POST_NOTIFICATIONS permission not granted
-            android.util.Log.w("NotificationChannelMgr", "Cannot post notification: ${e.message}")
+            MLog.w("NotificationChannelMgr", "Cannot post notification: ${e.message}")
         }
     }
 

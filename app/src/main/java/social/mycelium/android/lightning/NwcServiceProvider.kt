@@ -1,7 +1,7 @@
 package social.mycelium.android.lightning
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.core.hexToByteArray
@@ -71,8 +71,8 @@ object NwcServiceProvider {
         serviceSigner = signer
         nwcRelay = getRelay(context)
 
-        Log.d(TAG, "Starting NWC service provider, pubkey=${signer.pubKey.take(16)}...")
-        Log.d(TAG, "Listening on relay: $nwcRelay")
+        MLog.d(TAG, "Starting NWC service provider, pubkey=${signer.pubKey.take(16)}...")
+        MLog.d(TAG, "Listening on relay: $nwcRelay")
 
         // Subscribe for kind-23194 events tagged to our service pubkey
         val filter = Filter(
@@ -90,7 +90,7 @@ object NwcServiceProvider {
         )
 
         _isRunning.value = true
-        Log.d(TAG, "NWC service provider started")
+        MLog.d(TAG, "NWC service provider started")
     }
 
     /**
@@ -101,7 +101,7 @@ object NwcServiceProvider {
         subscriptionHandle = null
         serviceSigner = null
         _isRunning.value = false
-        Log.d(TAG, "NWC service provider stopped")
+        MLog.d(TAG, "NWC service provider stopped")
     }
 
     // ── Connection URI ─────────────────────────────────────────────────────
@@ -142,7 +142,7 @@ object NwcServiceProvider {
 
         scope.launch {
             try {
-                Log.d(TAG, "Received NWC request: id=${event.id.take(8)}, from=${event.pubKey.take(8)}")
+                MLog.d(TAG, "Received NWC request: id=${event.id.take(8)}, from=${event.pubKey.take(8)}")
 
                 // Decrypt the request content (NIP-04 encrypted to our service pubkey)
                 val plaintext = signer.nip04Decrypt(event.content, event.pubKey)
@@ -150,7 +150,7 @@ object NwcServiceProvider {
                 val method = requestJson.optString("method", "")
                 val params = requestJson.optJSONObject("params") ?: JSONObject()
 
-                Log.d(TAG, "NWC method: $method")
+                MLog.d(TAG, "NWC method: $method")
 
                 val responseJson = when (method) {
                     "pay_invoice" -> handlePayInvoice(params)
@@ -164,12 +164,12 @@ object NwcServiceProvider {
                 sendResponse(event, responseJson, signer)
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error handling NWC request: ${e.message}", e)
+                MLog.e(TAG, "Error handling NWC request: ${e.message}", e)
                 try {
                     val errorResp = errorResponse("unknown", "INTERNAL", "Internal error: ${e.message?.take(60)}")
                     sendResponse(event, errorResp, signer)
                 } catch (e2: Exception) {
-                    Log.e(TAG, "Failed to send error response: ${e2.message}")
+                    MLog.e(TAG, "Failed to send error response: ${e2.message}")
                 }
             }
         }
@@ -185,10 +185,10 @@ object NwcServiceProvider {
             return errorResponse("pay_invoice", "INTERNAL", "Lightning node is not running")
         }
 
-        Log.d(TAG, "Paying invoice via Phoenix, length=${invoice.length}")
+        MLog.d(TAG, "Paying invoice via Phoenix, length=${invoice.length}")
         return when (val result = PhoenixWalletManager.payInvoice(invoice)) {
             is PaymentResult.Success -> {
-                Log.d(TAG, "Payment successful, preimage=${result.preimage.take(16)}")
+                MLog.d(TAG, "Payment successful, preimage=${result.preimage.take(16)}")
                 JSONObject().apply {
                     put("result_type", "pay_invoice")
                     put("result", JSONObject().apply {
@@ -197,7 +197,7 @@ object NwcServiceProvider {
                 }.toString()
             }
             is PaymentResult.Error -> {
-                Log.w(TAG, "Payment failed: ${result.message}")
+                MLog.w(TAG, "Payment failed: ${result.message}")
                 errorResponse("pay_invoice", "PAYMENT_FAILED", result.message)
             }
         }
@@ -216,11 +216,11 @@ object NwcServiceProvider {
             return errorResponse("make_invoice", "INTERNAL", "Lightning node is not running")
         }
 
-        Log.d(TAG, "Creating invoice: ${amountMsat}msat, desc=$description")
+        MLog.d(TAG, "Creating invoice: ${amountMsat}msat, desc=$description")
         val bolt11 = PhoenixWalletManager.createInvoice(amountMsat, description)
 
         return if (bolt11 != null) {
-            Log.d(TAG, "Invoice created: ${bolt11.take(20)}...")
+            MLog.d(TAG, "Invoice created: ${bolt11.take(20)}...")
             JSONObject().apply {
                 put("result_type", "make_invoice")
                 put("result", JSONObject().apply {
@@ -238,7 +238,7 @@ object NwcServiceProvider {
 
     private fun handleGetBalance(): String {
         val balanceMsat = PhoenixWalletManager.balanceMsat.value
-        Log.d(TAG, "get_balance: ${balanceMsat}msat")
+        MLog.d(TAG, "get_balance: ${balanceMsat}msat")
         return JSONObject().apply {
             put("result_type", "get_balance")
             put("result", JSONObject().apply {
@@ -293,7 +293,7 @@ object NwcServiceProvider {
         // Send to the NWC relay
         val rsm = RelayConnectionStateMachine.getInstance()
         rsm.send(responseEvent, setOf(nwcRelay))
-        Log.d(TAG, "Sent NWC response: id=${responseEvent.id.take(8)}, to=${requestEvent.pubKey.take(8)}")
+        MLog.d(TAG, "Sent NWC response: id=${responseEvent.id.take(8)}, to=${requestEvent.pubKey.take(8)}")
     }
 
     // ── Key management ─────────────────────────────────────────────────────
@@ -309,7 +309,7 @@ object NwcServiceProvider {
         } else {
             val kp = KeyPair() // generates random keypair
             prefs.edit().putString(KEY_SERVICE_PRIVKEY, kp.privKey!!.toHexString()).apply()
-            Log.d(TAG, "Generated new NWC service keypair")
+            MLog.d(TAG, "Generated new NWC service keypair")
             kp
         }
 
@@ -327,7 +327,7 @@ object NwcServiceProvider {
         } else {
             val kp = KeyPair()
             prefs.edit().putString("client_privkey", kp.privKey!!.toHexString()).apply()
-            Log.d(TAG, "Generated new NWC client keypair")
+            MLog.d(TAG, "Generated new NWC client keypair")
             kp
         }
     }
@@ -357,6 +357,6 @@ object NwcServiceProvider {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().clear().apply()
         serviceSigner = null
-        Log.d(TAG, "NWC service provider reset")
+        MLog.d(TAG, "NWC service provider reset")
     }
 }

@@ -2,7 +2,7 @@ package social.mycelium.android.services
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import android.util.LruCache
 import social.mycelium.android.data.UrlPreviewInfo
 import social.mycelium.android.data.UrlPreviewState
@@ -133,9 +133,9 @@ object UrlPreviewCache {
             val json = prefs?.getString(PREFS_KEY, null) ?: return
             val list = diskJson.decodeFromString<List<UrlPreviewInfo>>(json)
             for (info in list) cache.put(info.url, info)
-            Log.d(TAG, "Loaded ${list.size} link previews from disk")
+            MLog.d(TAG, "Loaded ${list.size} link previews from disk")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to load disk cache: ${e.message}")
+            MLog.e(TAG, "Failed to load disk cache: ${e.message}")
         }
     }
 
@@ -155,9 +155,9 @@ object UrlPreviewCache {
             val entries = snapshot.values.toList().takeLast(DISK_CACHE_MAX)
             val json = diskJson.encodeToString(entries)
             prefs?.edit()?.putString(PREFS_KEY, json)?.apply()
-            Log.d(TAG, "Saved ${entries.size} link previews to disk")
+            MLog.d(TAG, "Saved ${entries.size} link previews to disk")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to save disk cache: ${e.message}")
+            MLog.e(TAG, "Failed to save disk cache: ${e.message}")
         }
     }
 }

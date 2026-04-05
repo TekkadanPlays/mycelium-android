@@ -1,7 +1,7 @@
 package social.mycelium.android.viewmodel
 
 import android.app.Application
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -186,7 +186,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
      * allUserRelayUrls = all relays we stay connected to; displayUrls = what to show (sidebar selection).
      */
     fun loadTopicsFromRelays(allUserRelayUrls: List<String>, displayUrls: List<String>) {
-        Log.d(TAG, "🔄 Loading topics: subscription=${allUserRelayUrls.size} relays, display=${displayUrls.size} relay(s)")
+        MLog.d(TAG, "🔄 Loading topics: subscription=${allUserRelayUrls.size} relays, display=${displayUrls.size} relay(s)")
 
         val displayRelays = if (displayUrls.isEmpty()) allUserRelayUrls else displayUrls
         val currentRelays = _uiState.value.connectedRelays.sorted()
@@ -195,7 +195,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
         val stuckLoading = _uiState.value.isLoading && _uiState.value.hashtagStats.isEmpty()
 
         if (currentRelays == newRelays && currentRelays.isNotEmpty() && (hasData || !stuckLoading) && allUserRelayUrls.isNotEmpty()) {
-            Log.d(TAG, "Topics relays unchanged and have data or not loading, skipping")
+            MLog.d(TAG, "Topics relays unchanged and have data or not loading, skipping")
             _uiState.update { it.copy(isLoading = false) }  // Always clear loading on skip
             return
         }
@@ -209,7 +209,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
                 // Sync loading state: connectToRelays clears repo loading; ensure UI doesn't stay on "Connecting to relays..."
                 _uiState.update { it.copy(isLoading = repository.isLoadingTopics(), isReceivingEvents = repository.isReceivingEvents.value) }
             } catch (e: Exception) {
-                Log.e(TAG, "Error loading topics: ${e.message}", e)
+                MLog.e(TAG, "Error loading topics: ${e.message}", e)
                 _uiState.update { it.copy(error = "Failed to load topics: ${e.message}", isLoading = false, isReceivingEvents = false) }
             }
         }
@@ -250,7 +250,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
         repository.applyPendingTopics()
         val currentRelays = _uiState.value.connectedRelays
         if (currentRelays.isEmpty()) {
-            Log.w(TAG, "No relays configured for refresh")
+            MLog.w(TAG, "No relays configured for refresh")
             return
         }
 
@@ -258,7 +258,7 @@ class TopicsViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 repository.refresh(currentRelays)
             } catch (e: Exception) {
-                Log.e(TAG, "Error refreshing topics: ${e.message}", e)
+                MLog.e(TAG, "Error refreshing topics: ${e.message}", e)
                 _uiState.update { it.copy(error = "Failed to refresh topics: ${e.message}") }
             }
         }

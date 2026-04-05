@@ -1,6 +1,6 @@
 package social.mycelium.android.ui.screens
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -192,9 +192,9 @@ fun OnboardingScreen(
 
     // ── Main initialization effect — restore state or show CHOOSE_MODE ──
     LaunchedEffect(hexPubkey) {
-        Log.d("OnboardingScreen", "LaunchedEffect START for pubkey=${hexPubkey.take(8)}")
+        MLog.d("OnboardingScreen", "LaunchedEffect START for pubkey=${hexPubkey.take(8)}")
         if (hexPubkey.isBlank()) {
-            Log.w("OnboardingScreen", "Blank pubkey, exiting LaunchedEffect")
+            MLog.w("OnboardingScreen", "Blank pubkey, exiting LaunchedEffect")
             return@LaunchedEffect
         }
 
@@ -205,7 +205,7 @@ fun OnboardingScreen(
         val cachedPubkey = Nip65RelayListRepository.multiSourcePubkey
         val cachedDone = Nip65RelayListRepository.multiSourceDone.value
         if (cachedPubkey == hexPubkey && cachedDone && cachedResults.isNotEmpty()) {
-            Log.d(
+            MLog.d(
                 "OnboardingScreen",
                 "Restoring cached multi-source results for ${hexPubkey.take(8)} (${cachedResults.size} results)"
             )
@@ -224,7 +224,7 @@ fun OnboardingScreen(
         }
         // Also restore if search is still in progress
         if (cachedPubkey == hexPubkey && !cachedDone && Nip65RelayListRepository.multiSourceTotal.value > 0) {
-            Log.d("OnboardingScreen", "Restoring in-progress multi-source search for ${hexPubkey.take(8)}")
+            MLog.d("OnboardingScreen", "Restoring in-progress multi-source search for ${hexPubkey.take(8)}")
             statusText = "Searching ${Nip65RelayListRepository.multiSourceTotal.value} relays…"
             phase = OnboardingPhase.SEARCHING_NIP65
             return@LaunchedEffect
@@ -235,7 +235,7 @@ fun OnboardingScreen(
         val isReturning = hasReturnedIndexers ||
                 (savedPhase == "SELECT_INDEXERS" && savedIndexers.isNotEmpty())
         if (isReturning) {
-            Log.d(
+            MLog.d(
                 "OnboardingScreen",
                 "Returning to SELECT_INDEXERS (fromDiscovery=$hasReturnedIndexers, selections=${selectedIndexerUrls.size})"
             )
@@ -249,13 +249,13 @@ fun OnboardingScreen(
                     val merged = selectedIndexerUrls + storedIndexerUrls
                     if (merged.size > selectedIndexerUrls.size) {
                         selectedIndexerUrls = merged
-                        Log.d("OnboardingScreen", "Merged relay manager indexers into selection")
+                        MLog.d("OnboardingScreen", "Merged relay manager indexers into selection")
                     }
                 }
             }
             phase = OnboardingPhase.SELECT_INDEXERS
             statusText = "Select your indexer relays"
-            Log.d(
+            MLog.d(
                 "OnboardingScreen",
                 "Refreshed indexer list: ${indexers.size} relays, ${selectedIndexerUrls.size} selected"
             )
@@ -264,7 +264,7 @@ fun OnboardingScreen(
 
         // Fresh start — go to CHOOSE_MODE immediately (no spinner).
         // NIP-66 is already fetching in the background (started in MainActivity).
-        Log.d("OnboardingScreen", "Fresh onboarding — showing CHOOSE_MODE (savedPhase=$savedPhase)")
+        MLog.d("OnboardingScreen", "Fresh onboarding — showing CHOOSE_MODE (savedPhase=$savedPhase)")
         phase = OnboardingPhase.CHOOSE_MODE
         statusText = "Welcome to Mycelium"
         errorMessage = null
@@ -290,7 +290,7 @@ fun OnboardingScreen(
         val toAdd = newIndexerRelays.filter { it.url.trim().removeSuffix("/").lowercase() !in existingUrls }
         if (toAdd.isNotEmpty()) {
             storageManager.saveIndexerRelays(hexPubkey, existingIndexers + toAdd)
-            Log.d("OnboardingScreen", "Saved ${toAdd.size} indexer relays")
+            MLog.d("OnboardingScreen", "Saved ${toAdd.size} indexer relays")
         }
 
         phase = OnboardingPhase.SEARCHING_NIP65
@@ -311,7 +311,7 @@ fun OnboardingScreen(
                 val successCount = statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
                 val failCount =
                     statuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.FAILED || it.status == Nip65RelayListRepository.IndexerQueryStatus.TIMEOUT }
-                Log.d(
+                MLog.d(
                     "OnboardingScreen",
                     "Multi-source: $successCount success, $failCount failed/timeout, ${results.size} with data"
                 )
@@ -335,7 +335,7 @@ fun OnboardingScreen(
                     val retryResults = Nip65RelayListRepository.multiSourceResults.value
                     val retryStatuses = Nip65RelayListRepository.multiSourceStatuses.value
                     val retrySuccessCount = retryStatuses.count { it.status == Nip65RelayListRepository.IndexerQueryStatus.SUCCESS }
-                    Log.d("OnboardingScreen", "Auto-retry: $retrySuccessCount success after retry")
+                    MLog.d("OnboardingScreen", "Auto-retry: $retrySuccessCount success after retry")
                     if (retryResults.isNotEmpty()) {
                         val best = retryResults.maxByOrNull { it.createdAt }!!
                         chosenResult = best
@@ -348,7 +348,7 @@ fun OnboardingScreen(
                 }
                 // Stay on SEARCHING_NIP65 — user reviews results and clicks to proceed
             } catch (e: Exception) {
-                Log.e("OnboardingScreen", "NIP-65 search failed: ${e.message}", e)
+                MLog.e("OnboardingScreen", "NIP-65 search failed: ${e.message}", e)
                 statusText = "Search failed — configure manually"
             }
         }
@@ -380,11 +380,11 @@ fun OnboardingScreen(
                 val discovered = Nip66RelayDiscoveryRepository.discoveredRelays.value
                 val hasIndexers = discovered.values.any { it.isSearch }
                 if (hasIndexers) {
-                    Log.d("OnboardingScreen", "Auto-search: NIP-66 indexers ready after ${waited}ms")
+                    MLog.d("OnboardingScreen", "Auto-search: NIP-66 indexers ready after ${waited}ms")
                     break
                 }
                 if (Nip66RelayDiscoveryRepository.hasFetched.value && !Nip66RelayDiscoveryRepository.isLoading.value) {
-                    Log.d("OnboardingScreen", "Auto-search: NIP-66 fetch done after ${waited}ms")
+                    MLog.d("OnboardingScreen", "Auto-search: NIP-66 fetch done after ${waited}ms")
                     break
                 }
                 delay(200)
@@ -407,7 +407,7 @@ fun OnboardingScreen(
             val autoSelected = (anchorIndexers + nip66Extras).distinct()
 
             if (autoSelected.isEmpty()) {
-                Log.w("OnboardingScreen", "Auto-search: no indexers found, falling back to manual")
+                MLog.w("OnboardingScreen", "Auto-search: no indexers found, falling back to manual")
                 withContext(Dispatchers.Main) {
                     phase = OnboardingPhase.NIP65_NOT_FOUND
                     statusText = "No monitored indexers found — configure manually"
@@ -416,7 +416,7 @@ fun OnboardingScreen(
             }
 
             selectedIndexerUrls = autoSelected.toSet()
-            Log.d(
+            MLog.d(
                 "OnboardingScreen",
                 "Auto-search: selected ${autoSelected.size} indexers (${anchorIndexers.size} anchors + ${nip66Extras.size} NIP-66)"
             )
@@ -499,7 +499,7 @@ fun OnboardingScreen(
             val prunedRead = result.readRelays.size - liveReadRelays.size
             if (prunedWrite > 0 || prunedRead > 0) {
                 val dead = (result.writeRelays + result.readRelays).filter { !isRelayAlive(it) }.distinct()
-                Log.d("OnboardingScreen", "Pruned $prunedWrite write + $prunedRead read dead relays: ${dead.joinToString()}")
+                MLog.d("OnboardingScreen", "Pruned $prunedWrite write + $prunedRead read dead relays: ${dead.joinToString()}")
             }
 
             // REPLACE outbox/inbox storage entirely — do NOT merge. This ensures removed relays
@@ -515,7 +515,7 @@ fun OnboardingScreen(
             //   - Inbox tab  → kind-10002 read relays (saved above)
             //   - Categories → kind-30002 relay sets (fetched by RelayCategorySyncRepository)
             // If the user has no published kind-30002, they get an empty Default Category.
-            Log.d("OnboardingScreen", "Outbox/inbox saved — categories left to kind-30002 sync (not seeded from NIP-65)")
+            MLog.d("OnboardingScreen", "Outbox/inbox saved — categories left to kind-30002 sync (not seeded from NIP-65)")
 
             // Clean up: remove outbox/inbox relay URLs from the Indexer list.
             // These were seeded during auto-search as anchor indexers but if they
@@ -528,7 +528,7 @@ fun OnboardingScreen(
             }
             if (cleanedIndexers.size < existingIndexers.size) {
                 storageManager.saveIndexerRelays(hexPubkey, cleanedIndexers)
-                Log.d("OnboardingScreen", "Cleaned ${existingIndexers.size - cleanedIndexers.size} personal relays from indexer list (${cleanedIndexers.size} remaining)")
+                MLog.d("OnboardingScreen", "Cleaned ${existingIndexers.size - cleanedIndexers.size} personal relays from indexer list (${cleanedIndexers.size} remaining)")
             }
 
             // Before populating the indexer selection screen with NIP-66 suggestions,
@@ -571,11 +571,11 @@ fun OnboardingScreen(
                             .filter { it.size >= 2 && it[0] == "relay" }
                             .map { social.mycelium.android.utils.normalizeRelayUrl(it[1]) }
                             .toSet()
-                        Log.d("OnboardingScreen", "Found published list (kind=${bestEvent.kind}) with ${fetchedIndexerUrls.size} relays")
+                        MLog.d("OnboardingScreen", "Found published list (kind=${bestEvent.kind}) with ${fetchedIndexerUrls.size} relays")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("OnboardingScreen", "Failed to fetch existing lists: ${e.message}")
+                MLog.e("OnboardingScreen", "Failed to fetch existing lists: ${e.message}")
             }
 
             // Kind-30078 (NIP-78): apply synced feed settings from outbox before indexer UI / dashboard.
@@ -615,14 +615,14 @@ fun OnboardingScreen(
                         }
                         val remote = social.mycelium.android.data.SyncedSettings.fromJson(plaintext)
                         SettingsSyncManager.applyRemoteSettings(remote)
-                        Log.d("OnboardingScreen", "Applied kind-30078 (compactMedia=${remote.compactMedia})")
+                        MLog.d("OnboardingScreen", "Applied kind-30078 (compactMedia=${remote.compactMedia})")
                         withContext(Dispatchers.Main) {
                             accountStateViewModel.markSettingsApplied(hexPubkey)
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.e("OnboardingScreen", "Kind-30078 during saveRelayConfig: ${e.message}")
+                MLog.e("OnboardingScreen", "Kind-30078 during saveRelayConfig: ${e.message}")
             }
 
             withContext(Dispatchers.Main) {
@@ -645,7 +645,7 @@ fun OnboardingScreen(
                     withContext(Dispatchers.IO) {
                         storageManager.saveIndexerRelays(hexPubkey, newIndexerRelays)
                     }
-                    Log.d("OnboardingScreen", "Auto-saved ${newIndexerRelays.size} published indexer relays — skipping SELECT_INDEXERS")
+                    MLog.d("OnboardingScreen", "Auto-saved ${newIndexerRelays.size} published indexer relays — skipping SELECT_INDEXERS")
                     statusText = "Downloading your lists\u2026"
                     phase = OnboardingPhase.PREFETCHING_LISTS
                 } else if (selectedIndexerUrls.isEmpty()) {
@@ -2246,9 +2246,9 @@ private fun PrefetchingListsUI(
                     waitedMs += 250L
                     if (stateMachine.relayPool.getConnectedCount() >= 1) break
                 }
-                android.util.Log.d("PrefetchingListsUI", "Step 1 done: ${stateMachine.relayPool.getConnectedCount()} relays connected")
+                MLog.d("PrefetchingListsUI", "Step 1 done: ${stateMachine.relayPool.getConnectedCount()} relays connected")
             } catch (e: Exception) {
-                android.util.Log.e("PrefetchingListsUI", "Connection error: ${e.message}")
+                MLog.e("PrefetchingListsUI", "Connection error: ${e.message}")
             }
         }
 
@@ -2275,9 +2275,9 @@ private fun PrefetchingListsUI(
                             )
                         }
                     }
-                    android.util.Log.d("PrefetchingListsUI", "Step 2 done: contacts & mutes")
+                    MLog.d("PrefetchingListsUI", "Step 2 done: contacts & mutes")
                 } catch (e: Exception) {
-                    android.util.Log.e("PrefetchingListsUI", "Follow/mute fetch error: ${e.message}")
+                    MLog.e("PrefetchingListsUI", "Follow/mute fetch error: ${e.message}")
                 }
             }
 
@@ -2290,9 +2290,9 @@ private fun PrefetchingListsUI(
                         relayUrls = (allOutboxUrls + allInboxUrls + allIndexerUrls).distinct(),
                         context = context.applicationContext,
                     )
-                    android.util.Log.d("PrefetchingListsUI", "Step 3 done: relay collections fetched")
+                    MLog.d("PrefetchingListsUI", "Step 3 done: relay collections fetched")
                 } catch (e: Exception) {
-                    android.util.Log.e("PrefetchingListsUI", "Relay sets fetch error: ${e.message}")
+                    MLog.e("PrefetchingListsUI", "Relay sets fetch error: ${e.message}")
                 }
             }
 
@@ -2306,9 +2306,9 @@ private fun PrefetchingListsUI(
                         context = context.applicationContext,
                         forceReplace = true,
                     )
-                    android.util.Log.d("PrefetchingListsUI", "Step 4 done: indexer list fetched")
+                    MLog.d("PrefetchingListsUI", "Step 4 done: indexer list fetched")
                 } catch (e: Exception) {
-                    android.util.Log.e("PrefetchingListsUI", "Indexer list fetch error: ${e.message}")
+                    MLog.e("PrefetchingListsUI", "Indexer list fetch error: ${e.message}")
                 }
             }
 
@@ -2316,9 +2316,9 @@ private fun PrefetchingListsUI(
             launch(kotlinx.coroutines.Dispatchers.IO) {
                 try {
                     social.mycelium.android.repository.social.BookmarkRepository.fetchBookmarks(hexPubkey, allUserRelayUrls)
-                    android.util.Log.d("PrefetchingListsUI", "Step 5 done: bookmarks fetched")
+                    MLog.d("PrefetchingListsUI", "Step 5 done: bookmarks fetched")
                 } catch (e: Exception) {
-                    android.util.Log.e("PrefetchingListsUI", "Bookmarks fetch error: ${e.message}")
+                    MLog.e("PrefetchingListsUI", "Bookmarks fetch error: ${e.message}")
                 }
             }
         }
@@ -2339,9 +2339,9 @@ private fun PrefetchingListsUI(
                     indexerUrls = allIndexerUrls,
                     limit = 500
                 )
-                android.util.Log.d("PrefetchingListsUI", "Step 6 done: background feed prewarm complete")
+                MLog.d("PrefetchingListsUI", "Step 6 done: background feed prewarm complete")
             } catch (e: Exception) {
-                android.util.Log.e("PrefetchingListsUI", "Feed prewarm error: ${e.message}")
+                MLog.e("PrefetchingListsUI", "Feed prewarm error: ${e.message}")
             }
         }
 

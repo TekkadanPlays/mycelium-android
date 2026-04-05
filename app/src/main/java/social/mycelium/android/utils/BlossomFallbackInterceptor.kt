@@ -1,6 +1,6 @@
 package social.mycelium.android.utils
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import coil.intercept.Interceptor
 import coil.request.ImageResult
 import coil.request.ErrorResult
@@ -55,7 +55,7 @@ class BlossomFallbackInterceptor : Interceptor {
         val fallbacks = BlossomUrlResolver.getFallbackUrls(originalData)
         if (fallbacks.isEmpty()) return originalResult
 
-        Log.d(TAG, "Original blossom URL failed, trying ${fallbacks.size} fallback servers for: $originalData")
+        MLog.d(TAG, "Original blossom URL failed, trying ${fallbacks.size} fallback servers for: $originalData")
 
         for (fallbackUrl in fallbacks) {
             try {
@@ -66,7 +66,7 @@ class BlossomFallbackInterceptor : Interceptor {
                     return fallbackResult
                 }
             } catch (e: Exception) {
-                Log.d(TAG, "Fallback failed: $fallbackUrl — ${e.message}")
+                MLog.d(TAG, "Fallback failed: $fallbackUrl — ${e.message}")
             }
         }
 

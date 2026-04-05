@@ -1,6 +1,6 @@
 package social.mycelium.android.repository
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.data.Author
 import social.mycelium.android.data.LiveActivity
 import social.mycelium.android.data.LiveActivityParticipant
@@ -25,7 +25,7 @@ import social.mycelium.android.repository.cache.ProfileMetadataCache
  */
 class LiveActivityRepository {
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
     private val profileCache = ProfileMetadataCache.getInstance()
     private val relayStateMachine = social.mycelium.android.relay.RelayConnectionStateMachine.getInstance()
 
@@ -152,9 +152,9 @@ class LiveActivityRepository {
             }
             emitUpdate()
 
-            Log.d(TAG, "Live activity ${activity.status}: \"${activity.title}\" by ${activity.hostPubkey.take(8)} (${activitiesById.size} total)")
+            MLog.d(TAG, "Live activity ${activity.status}: \"${activity.title}\" by ${activity.hostPubkey.take(8)} (${activitiesById.size} total)")
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing kind:30311: ${e.message}", e)
+            MLog.e(TAG, "Error parsing kind:30311: ${e.message}", e)
         }
     }
 
@@ -264,7 +264,7 @@ class LiveActivityRepository {
                         ) {
                             activitiesById[key] = activity.copy(status = LiveActivityStatus.ENDED)
                             changed = true
-                            Log.d(TAG, "Auto-expired stale live activity: \"${activity.title}\"")
+                            MLog.d(TAG, "Auto-expired stale live activity: \"${activity.title}\"")
                         }
                     }
                 }

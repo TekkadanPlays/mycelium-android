@@ -1,6 +1,6 @@
 package social.mycelium.android.data
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
@@ -47,7 +47,7 @@ object FlexibleIntListSerializer : KSerializer<List<Int>?> {
                         el.jsonPrimitive.intOrNull
                             ?: el.jsonPrimitive.content.toIntOrNull()
                     } catch (e: Exception) {
-                        Log.w("FlexibleIntList", "Skipping invalid array element: $el")
+                        MLog.w("FlexibleIntList", "Skipping invalid array element: $el")
                         null
                     }
                 }

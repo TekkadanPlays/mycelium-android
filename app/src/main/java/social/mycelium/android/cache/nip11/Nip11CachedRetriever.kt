@@ -1,6 +1,6 @@
 package social.mycelium.android.cache.nip11
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import android.util.LruCache
 import io.ktor.client.HttpClient
 import social.mycelium.android.data.RelayInformation
@@ -49,7 +49,7 @@ class Nip11CachedRetriever(
         )
 
         relayInformationEmptyCache.put(relayUrl, info)
-        Log.d(TAG, "📋 Created empty relay info for $relayUrl")
+        MLog.d(TAG, "📋 Created empty relay info for $relayUrl")
 
         return info
     }
@@ -102,33 +102,33 @@ class Nip11CachedRetriever(
         when (doc) {
             is RetrieveResult.Success -> {
                 // We have successful data - return it
-                Log.d(TAG, "✅ Using cached success for $normalizedUrl")
+                MLog.d(TAG, "✅ Using cached success for $normalizedUrl")
                 onInfo(doc.data)
             }
             is RetrieveResult.Loading -> {
                 if (doc.isValid()) {
                     // Already loading and recent - just wait, don't duplicate fetch
-                    Log.d(TAG, "⏳ Already loading $normalizedUrl, skipping duplicate fetch")
+                    MLog.d(TAG, "⏳ Already loading $normalizedUrl, skipping duplicate fetch")
                 } else {
                     // Loading state is stale - retry
-                    Log.d(TAG, "🔄 Loading state stale for $normalizedUrl, retrying")
+                    MLog.d(TAG, "🔄 Loading state stale for $normalizedUrl, retrying")
                     retrieve(normalizedUrl, onInfo, onError)
                 }
             }
             is RetrieveResult.Error -> {
                 if (doc.isValid()) {
                     // Error is recent - don't retry yet, return error
-                    Log.d(TAG, "⚠️ Using cached error for $normalizedUrl")
+                    MLog.d(TAG, "⚠️ Using cached error for $normalizedUrl")
                     onError(normalizedUrl, doc.errorCode, doc.message)
                 } else {
                     // Error is old - retry
-                    Log.d(TAG, "🔄 Error state stale for $normalizedUrl, retrying")
+                    MLog.d(TAG, "🔄 Error state stale for $normalizedUrl, retrying")
                     retrieve(normalizedUrl, onInfo, onError)
                 }
             }
             is RetrieveResult.Empty, null -> {
                 // No data yet - fetch it
-                Log.d(TAG, "🌐 Fetching fresh data for $normalizedUrl")
+                MLog.d(TAG, "🌐 Fetching fresh data for $normalizedUrl")
                 retrieve(normalizedUrl, onInfo, onError)
             }
         }
@@ -151,7 +151,7 @@ class Nip11CachedRetriever(
                 // Success - cache it and notify
                 relayInformationDocumentCache.put(relayUrl, RetrieveResult.Success(info))
                 relayInformationEmptyCache.remove(relayUrl)
-                Log.d(TAG, "✅ Cached success for $relayUrl: ${info.name}")
+                MLog.d(TAG, "✅ Cached success for $relayUrl: ${info.name}")
                 onInfo(info)
             },
             onError = { url, errorCode, errorMsg ->
@@ -161,7 +161,7 @@ class Nip11CachedRetriever(
                     RetrieveResult.Error(getEmpty(relayUrl), errorCode, errorMsg)
                 )
                 relayInformationEmptyCache.remove(relayUrl)
-                Log.w(TAG, "⚠️ Cached error for $relayUrl: $errorCode - $errorMsg")
+                MLog.d(TAG, "⚠️ Cached error for $relayUrl: $errorCode - $errorMsg")
                 onError(url, errorCode, errorMsg)
             }
         )
@@ -174,10 +174,10 @@ class Nip11CachedRetriever(
         loadRelayInfo(
             relayUrl = relayUrl,
             onInfo = { info ->
-                Log.d(TAG, "📦 Preloaded relay info: ${info.name}")
+                MLog.d(TAG, "📦 Preloaded relay info: ${info.name}")
             },
             onError = { url, code, msg ->
-                Log.w(TAG, "⚠️ Failed to preload $url: $code - $msg")
+                MLog.d(TAG, "⚠️ Failed to preload $url: $code - $msg")
             }
         )
     }
@@ -188,7 +188,7 @@ class Nip11CachedRetriever(
     fun clearCache() {
         relayInformationEmptyCache.evictAll()
         relayInformationDocumentCache.evictAll()
-        Log.d(TAG, "🧹 Cleared all NIP-11 cache")
+        MLog.d(TAG, "🧹 Cleared all NIP-11 cache")
     }
 
     /**
@@ -198,7 +198,7 @@ class Nip11CachedRetriever(
         val normalizedUrl = retriever.normalizeRelayUrl(relayUrl)
         relayInformationEmptyCache.remove(normalizedUrl)
         relayInformationDocumentCache.remove(normalizedUrl)
-        Log.d(TAG, "🧹 Cleared cache for $normalizedUrl")
+        MLog.d(TAG, "🧹 Cleared cache for $normalizedUrl")
     }
 
     /**

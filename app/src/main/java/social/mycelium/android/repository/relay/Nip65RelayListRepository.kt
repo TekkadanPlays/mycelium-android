@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.relay
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.relay.SubscriptionPriority
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayHealthTracker
@@ -33,7 +33,7 @@ object Nip65RelayListRepository {
     private const val KIND_RELAY_LIST = 10002
     private const val FETCH_TIMEOUT_MS = 5_000L
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
 
     /** Room database for NIP-65 persistence. Set via [init]. */
     @Volatile private var db: social.mycelium.android.db.AppDatabase? = null
@@ -70,10 +70,10 @@ object Nip65RelayListRepository {
                 }
                 if (restored > 0) {
                     emitAuthorRelaySnapshot()
-                    Log.d(TAG, "Restored $restored NIP-65 relay lists from Room DB")
+                    MLog.d(TAG, "Restored $restored NIP-65 relay lists from Room DB")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to load NIP-65 from Room: ${e.message}", e)
+                MLog.e(TAG, "Failed to load NIP-65 from Room: ${e.message}", e)
             }
         }
     }
@@ -99,9 +99,9 @@ object Nip65RelayListRepository {
                 // Prune stale entries
                 val pruneMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
                 database.nip65Dao().deleteOlderThan(pruneMs)
-                Log.d(TAG, "Saved ${entities.size} NIP-65 relay lists to Room DB")
+                MLog.d(TAG, "Saved ${entities.size} NIP-65 relay lists to Room DB")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to save NIP-65 to Room: ${e.message}", e)
+                MLog.e(TAG, "Failed to save NIP-65 to Room: ${e.message}", e)
             }
         }
     }
@@ -199,13 +199,13 @@ object Nip65RelayListRepository {
         val userCountry = java.util.Locale.getDefault().country.takeIf { it.length == 2 }
         val ranked = Nip66RelayDiscoveryRepository.getRankedIndexers(userCountry, limit)
         if (ranked.isNotEmpty()) {
-            Log.d("Nip65Repo", "getIndexerRelayUrls: returning ${ranked.size} ranked indexers (trust+geo):")
+            MLog.d("Nip65Repo", "getIndexerRelayUrls: returning ${ranked.size} ranked indexers (trust+geo):")
             ranked.forEach { r ->
-                Log.d("Nip65Repo", "  → ${r.url} country=${r.countryCode} monitors=${r.monitorCount}")
+                MLog.d("Nip65Repo", "  → ${r.url} country=${r.countryCode} monitors=${r.monitorCount}")
             }
             return ranked.map { it.url }
         }
-        Log.d("Nip65Repo", "getIndexerRelayUrls: no discovered relays yet")
+        MLog.d("Nip65Repo", "getIndexerRelayUrls: no discovered relays yet")
         return emptyList()
     }
 
@@ -227,7 +227,7 @@ object Nip65RelayListRepository {
      */
     fun fetchRelayList(pubkeyHex: String, indexerRelayUrls: List<String>) {
         if (indexerRelayUrls.isEmpty()) {
-            Log.w(TAG, "No indexer relays to fetch kind-10002")
+            MLog.w(TAG, "No indexer relays to fetch kind-10002")
             return
         }
         // Reset state when switching to a different pubkey
@@ -241,7 +241,7 @@ object Nip65RelayListRepository {
         }
         // Already completed or already in-flight for this pubkey — skip
         if (pubkeyHex == currentPubkey && (_hasFetched.value || isFetching)) {
-            Log.d(TAG, "Kind-10002 fetch already ${if (_hasFetched.value) "completed" else "in-flight"} for ${pubkeyHex.take(8)}, skipping")
+            MLog.d(TAG, "Kind-10002 fetch already ${if (_hasFetched.value) "completed" else "in-flight"} for ${pubkeyHex.take(8)}, skipping")
             return
         }
         currentPubkey = pubkeyHex
@@ -249,7 +249,7 @@ object Nip65RelayListRepository {
 
         scope.launch {
             try {
-                Log.d(TAG, "Fetching kind-10002 for ${pubkeyHex.take(8)}... from ${indexerRelayUrls.size} indexer relays")
+                MLog.d(TAG, "Fetching kind-10002 for ${pubkeyHex.take(8)}... from ${indexerRelayUrls.size} indexer relays")
 
                 // Use limit=5 to collect multiple versions of this replaceable event.
                 // Different relays may hold different createdAt versions; we pick the newest.
@@ -271,11 +271,11 @@ object Nip65RelayListRepository {
                             val current = bestEvent
                             if (current == null || event.createdAt > current.createdAt) {
                                 if (current != null) {
-                                    Log.d(TAG, "Superseding stale kind-10002: old createdAt=${current.createdAt} from $bestEventSourceRelay → new createdAt=${event.createdAt} from $relayUrl")
+                                    MLog.d(TAG, "Superseding stale kind-10002: old createdAt=${current.createdAt} from $bestEventSourceRelay → new createdAt=${event.createdAt} from $relayUrl")
                                 }
                                 bestEvent = event
                                 bestEventSourceRelay = relayUrl
-                                Log.d(TAG, "Best kind-10002 from $relayUrl: createdAt=${event.createdAt}, rTags=${event.tags.count { it.size >= 2 && it[0] == "r" }}")
+                                MLog.d(TAG, "Best kind-10002 from $relayUrl: createdAt=${event.createdAt}, rTags=${event.tags.count { it.size >= 2 && it[0] == "r" }}")
                             }
                         }
                     }
@@ -302,10 +302,10 @@ object Nip65RelayListRepository {
                     parseRelayListEvent(event)
                     _sourceRelayUrl.value = bestEventSourceRelay
                     _eventCreatedAt.value = event.createdAt
-                    Log.d(TAG, "Kind-10002 for ${pubkeyHex.take(8)}: ${_writeRelays.value.size} write, ${_readRelays.value.size} read (from $bestEventSourceRelay, $eventCount events)")
-                    Log.d(TAG, "  tags: ${event.tags.map { it.toList() }}")
+                    MLog.d(TAG, "Kind-10002 for ${pubkeyHex.take(8)}: ${_writeRelays.value.size} write, ${_readRelays.value.size} read (from $bestEventSourceRelay, $eventCount events)")
+                    MLog.d(TAG, "  tags: ${event.tags.map { it.toList() }}")
                 } else {
-                    Log.d(TAG, "No kind-10002 found for ${pubkeyHex.take(8)}..., using fallback indexer relays")
+                    MLog.d(TAG, "No kind-10002 found for ${pubkeyHex.take(8)}..., using fallback indexer relays")
                     _readRelays.value = emptyList()
                     _writeRelays.value = emptyList()
                     _allRelays.value = emptyList()
@@ -313,7 +313,7 @@ object Nip65RelayListRepository {
                 _hasFetched.value = true
                 isFetching = false
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch kind-10002: ${e.message}", e)
+                MLog.e(TAG, "Failed to fetch kind-10002: ${e.message}", e)
                 _hasFetched.value = true
                 isFetching = false
             }
@@ -352,7 +352,7 @@ object Nip65RelayListRepository {
         timeoutMs: Long = 6_000L
     ) {
         if (indexerUrls.isEmpty()) {
-            Log.w(TAG, "No indexers for multi-source NIP-65 search")
+            MLog.w(TAG, "No indexers for multi-source NIP-65 search")
             _multiSourceDone.value = true
             return
         }
@@ -370,7 +370,7 @@ object Nip65RelayListRepository {
             IndexerQueryState(url, IndexerQueryStatus.PENDING)
         }
 
-        Log.d(TAG, "Multi-source NIP-65 search for ${pubkeyHex.take(8)} across ${indexerUrls.size} indexers (concurrency=$MAX_CONCURRENT, timeout=${timeoutMs}ms)")
+        MLog.d(TAG, "Multi-source NIP-65 search for ${pubkeyHex.take(8)} across ${indexerUrls.size} indexers (concurrency=$MAX_CONCURRENT, timeout=${timeoutMs}ms)")
 
         val filter = Filter(
             kinds = listOf(KIND_RELAY_LIST),
@@ -430,7 +430,7 @@ object Nip65RelayListRepository {
             RelayConnectionStateMachine.getInstance().disconnectIdleRelaysAtUrls(indexerUrls)
 
             _multiSourceDone.value = true
-            Log.d(TAG, "Multi-source search complete: ${_multiSourceResults.value.size}/${indexerUrls.size} indexers returned results (early=${_multiSourceResults.value.size >= MIN_RESULTS_FOR_EARLY_DONE})")
+            MLog.d(TAG, "Multi-source search complete: ${_multiSourceResults.value.size}/${indexerUrls.size} indexers returned results (early=${_multiSourceResults.value.size >= MIN_RESULTS_FOR_EARLY_DONE})")
         }
     }
 
@@ -485,7 +485,7 @@ object Nip65RelayListRepository {
                     _multiSourceResults.value = _multiSourceResults.value + result
                 }
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.SUCCESS, result = result)
-                Log.d(TAG, "  $indexerUrl: ${result.writeRelays.size}w/${result.readRelays.size}r, created=${result.createdAt} (${elapsed}ms)")
+                MLog.d(TAG, "  $indexerUrl: ${result.writeRelays.size}w/${result.readRelays.size}r, created=${result.createdAt} (${elapsed}ms)")
             } else {
                 // Pool listener already records connect success/failure; avoid double-counting here.
                 val health = RelayHealthTracker.getHealth(indexerUrl)
@@ -494,20 +494,20 @@ object Nip65RelayListRepository {
                 if (failedDuringQuery && lastError != null) {
                     val shortError = lastError.take(80)
                     updateIndexerStatus(indexerUrl, IndexerQueryStatus.FAILED, errorMessage = shortError)
-                    Log.d(TAG, "  $indexerUrl: connect failed: $shortError (${elapsed}ms)")
+                    MLog.d(TAG, "  $indexerUrl: connect failed: $shortError (${elapsed}ms)")
                 } else if (elapsed >= timeoutMs - 500) {
                     updateIndexerStatus(indexerUrl, IndexerQueryStatus.TIMEOUT)
-                    Log.d(TAG, "  $indexerUrl: timeout (${elapsed}ms)")
+                    MLog.d(TAG, "  $indexerUrl: timeout (${elapsed}ms)")
                 } else {
                     updateIndexerStatus(indexerUrl, IndexerQueryStatus.NO_DATA)
-                    Log.d(TAG, "  $indexerUrl: no data (${elapsed}ms)")
+                    MLog.d(TAG, "  $indexerUrl: no data (${elapsed}ms)")
                 }
             }
         } catch (e: Exception) {
             val isCancellation = e is kotlinx.coroutines.CancellationException
             if (!isCancellation) {
                 updateIndexerStatus(indexerUrl, IndexerQueryStatus.FAILED, errorMessage = e.message)
-                Log.e(TAG, "  $indexerUrl: failed: ${e.message}")
+                MLog.e(TAG, "  $indexerUrl: failed: ${e.message}")
             }
         }
     }
@@ -555,7 +555,7 @@ object Nip65RelayListRepository {
             it.status in setOf(IndexerQueryStatus.NO_DATA, IndexerQueryStatus.FAILED, IndexerQueryStatus.TIMEOUT)
         }
         if (retryable.isEmpty()) return
-        Log.d(TAG, "Re-pinging ${retryable.size} failed/no-data indexers")
+        MLog.d(TAG, "Re-pinging ${retryable.size} failed/no-data indexers")
         retryable.forEach { rePingIndexer(it.url) }
     }
 
@@ -570,7 +570,7 @@ object Nip65RelayListRepository {
         _sourceRelayUrl.value = result.indexerUrl
         _eventCreatedAt.value = result.createdAt
         _hasFetched.value = true
-        Log.d(TAG, "Applied NIP-65 from ${result.indexerUrl}: ${result.writeRelays.size}w/${result.readRelays.size}r")
+        MLog.d(TAG, "Applied NIP-65 from ${result.indexerUrl}: ${result.writeRelays.size}w/${result.readRelays.size}r")
     }
 
     /**
@@ -587,15 +587,15 @@ object Nip65RelayListRepository {
     ): Map<String, Boolean> {
         val event = correctResult.rawEvent
         if (event == null) {
-            Log.e(TAG, "Cannot publish to outdated relays: no raw event available")
+            MLog.e(TAG, "Cannot publish to outdated relays: no raw event available")
             return outdatedRelayUrls.associateWith { false }
         }
         if (outdatedRelayUrls.isEmpty()) {
-            Log.w(TAG, "No outdated relays to publish to")
+            MLog.w(TAG, "No outdated relays to publish to")
             return emptyMap()
         }
 
-        Log.d(TAG, "Publishing NIP-65 event ${event.id.take(8)} (created_at=${event.createdAt}) to ${outdatedRelayUrls.size} outdated relays")
+        MLog.d(TAG, "Publishing NIP-65 event ${event.id.take(8)} (created_at=${event.createdAt}) to ${outdatedRelayUrls.size} outdated relays")
         val results = mutableMapOf<String, Boolean>()
 
         // Send to each relay individually so we can track per-relay success/failure
@@ -605,20 +605,20 @@ object Nip65RelayListRepository {
                 if (normalized != null) {
                     RelayConnectionStateMachine.getInstance().send(event, setOf(normalized.url))
                     results[url] = true
-                    Log.d(TAG, "  ✓ Sent to $url")
+                    MLog.d(TAG, "  ✓ Sent to $url")
                 } else {
                     results[url] = false
-                    Log.w(TAG, "  ✗ Invalid URL: $url")
+                    MLog.w(TAG, "  ✗ Invalid URL: $url")
                 }
             } catch (e: Exception) {
                 results[url] = false
-                Log.e(TAG, "  ✗ Failed to send to $url: ${e.message}")
+                MLog.e(TAG, "  ✗ Failed to send to $url: ${e.message}")
             }
         }
 
         val ok = results.count { it.value }
         val fail = results.count { !it.value }
-        Log.d(TAG, "Publish complete: $ok sent, $fail failed")
+        MLog.d(TAG, "Publish complete: $ok sent, $fail failed")
         return results
     }
 
@@ -799,7 +799,7 @@ object Nip65RelayListRepository {
         val needed = pubkeys.filter { !hasValidCachedOutbox(it) }
         if (needed.isEmpty()) return
 
-        Log.d(TAG, "Outbox batch flush: ${needed.size} pubkeys on ${relays.size} relays")
+        MLog.d(TAG, "Outbox batch flush: ${needed.size} pubkeys on ${relays.size} relays")
 
         // Fetch in chunks of 50 to stay within relay filter size limits
         needed.chunked(50).forEachIndexed { chunkIdx, chunk ->
@@ -854,17 +854,17 @@ object Nip65RelayListRepository {
                         }
                         authorOutboxCache[pk] = OutboxCacheEntry(writeUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) }, isAuthoritative = true)
                         authorRelayCache[pk] = AuthorRelayList(pk, readUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) }, writeUrls.distinct().filter { !RelayHealthTracker.isBlocked(it) })
-                        Log.d(TAG, "Relays for ${pk.take(8)}: ${writeUrls.size} write, ${readUrls.size} read")
+                        MLog.d(TAG, "Relays for ${pk.take(8)}: ${writeUrls.size} write, ${readUrls.size} read")
                         scheduleRoomSave()
                     } else {
                         authorOutboxCache[pk] = OutboxCacheEntry(emptyList(), isAuthoritative = true)
                         authorRelayCache[pk] = AuthorRelayList(pk, emptyList(), emptyList())
-                        Log.d(TAG, "No kind-10002 for ${pk.take(8)}")
+                        MLog.d(TAG, "No kind-10002 for ${pk.take(8)}")
                     }
                 }
                 emitAuthorRelaySnapshot()
             } catch (e: Exception) {
-                Log.e(TAG, "Outbox batch chunk $chunkIdx failed: ${e.message}")
+                MLog.e(TAG, "Outbox batch chunk $chunkIdx failed: ${e.message}")
                 chunk.forEach { pk -> authorOutboxCache.putIfAbsent(pk, OutboxCacheEntry(emptyList(), isAuthoritative = true)) }
             }
         }
@@ -883,10 +883,10 @@ object Nip65RelayListRepository {
         if (pubkeys.isEmpty() || discoveryRelays.isEmpty()) return
         val uncached = pubkeys.filter { !authorRelayCache.containsKey(it) }
         if (uncached.isEmpty()) {
-            Log.d(TAG, "All ${pubkeys.size} pubkeys already cached")
+            MLog.d(TAG, "All ${pubkeys.size} pubkeys already cached")
             return
         }
-        Log.d(TAG, "Batch-fetching kind-10002 for ${uncached.size} pubkeys (${pubkeys.size - uncached.size} already cached)")
+        MLog.d(TAG, "Batch-fetching kind-10002 for ${uncached.size} pubkeys (${pubkeys.size - uncached.size} already cached)")
         // Process chunks sequentially — each chunk settles before the next starts,
         // so fast relays don't wait for slow ones across chunks.
         scope.launch {
@@ -950,9 +950,9 @@ object Nip65RelayListRepository {
                         }
                     }
                     emitAuthorRelaySnapshot()
-                    Log.d(TAG, "Batch chunk $chunkIdx: found kind-10002 for $found/${chunk.size} pubkeys (settled in ${System.currentTimeMillis() - (deadline - BATCH_CHUNK_MAX_TIMEOUT_MS)}ms)")
+                    MLog.d(TAG, "Batch chunk $chunkIdx: found kind-10002 for $found/${chunk.size} pubkeys (settled in ${System.currentTimeMillis() - (deadline - BATCH_CHUNK_MAX_TIMEOUT_MS)}ms)")
                 } catch (e: Exception) {
-                    Log.e(TAG, "Batch fetch chunk $chunkIdx failed: ${e.message}")
+                    MLog.e(TAG, "Batch fetch chunk $chunkIdx failed: ${e.message}")
                 }
             }
         }
@@ -1006,9 +1006,9 @@ object Nip65RelayListRepository {
 
         when (result) {
             is social.mycelium.android.services.PublishResult.Success ->
-                Log.d(TAG, "NIP-65 published: ${result.eventId.take(8)} (${bothSet.size} both, ${writeOnly.size} write, ${readOnly.size} read)")
+                MLog.d(TAG, "NIP-65 published: ${result.eventId.take(8)} (${bothSet.size} both, ${writeOnly.size} write, ${readOnly.size} read)")
             is social.mycelium.android.services.PublishResult.Error ->
-                Log.e(TAG, "NIP-65 publish failed: ${result.message}")
+                MLog.e(TAG, "NIP-65 publish failed: ${result.message}")
         }
     }
 

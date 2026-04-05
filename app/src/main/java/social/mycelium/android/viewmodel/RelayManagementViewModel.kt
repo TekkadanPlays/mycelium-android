@@ -1,7 +1,7 @@
 package social.mycelium.android.viewmodel
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.debug.DiagnosticLog
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -101,7 +101,7 @@ class RelayManagementViewModel(
         val profile = _uiState.value.relayProfiles.find { it.id == profileId } ?: return
         val category = profile.categories.find { it.id == categoryId } ?: return
         publishCategoryToRelays(category)
-        Log.d("RelayMgmtVM", "Publishing profile category '${category.name}' (${category.relays.size} relays)")
+        MLog.d("RelayMgmtVM", "Publishing profile category '${category.name}' (${category.relays.size} relays)")
     }
 
     // Expose categories separately for easy access from other screens
@@ -220,7 +220,7 @@ class RelayManagementViewModel(
                 current.nip96Servers == nip96
             ) return@launch
 
-            Log.d("RelayMgmtVM", "reloadFromStorage: categories=${categories.size} profiles=${profiles.size} outbox=${outbox.size} inbox=${inbox.size}")
+            MLog.d("RelayMgmtVM", "reloadFromStorage: categories=${categories.size} profiles=${profiles.size} outbox=${outbox.size} inbox=${inbox.size}")
             _uiState.update {
                 it.copy(
                     relayCategories = categories,
@@ -311,7 +311,7 @@ class RelayManagementViewModel(
                 if (newCategories.isNotEmpty()) {
                     categories = categories + newCategories
                     storageManager.saveCategories(pubkey, categories)
-                    Log.d("RelayMgmtVM", "Merged ${newCategories.size} new remote categories into standalone store")
+                    MLog.d("RelayMgmtVM", "Merged ${newCategories.size} new remote categories into standalone store")
                 }
                 social.mycelium.android.repository.relay.RelayCategorySyncRepository.dismissPendingCategoryDiff()
             }
@@ -459,7 +459,7 @@ class RelayManagementViewModel(
         // Background NIP-11 fetches or relay mutations could fire here before
         // loadUserRelays() has repopulated the state from disk.
         if (!storageLoaded) {
-            Log.w("RelayMgmtVM", "saveToStorage() skipped — storage not yet loaded (mid-switch)")
+            MLog.w("RelayMgmtVM", "saveToStorage() skipped — storage not yet loaded (mid-switch)")
             return
         }
         currentPubkey?.let { pubkey ->
@@ -501,7 +501,7 @@ class RelayManagementViewModel(
         val outboxUrls = state.outboxRelays.map { social.mycelium.android.utils.normalizeRelayUrl(it.url) }
         val relayUrls = (subscribedRelayUrls + profileRelayUrls + outboxUrls).distinct()
         if (relayUrls.isEmpty()) return
-        Log.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays (${outboxUrls.size} outbox priority)")
+        MLog.d("RelayMgmtVM", "Refreshing active subscription with ${relayUrls.size} relays (${outboxUrls.size} outbox priority)")
         // Clear NIP-42 auth state for all relays in the new set so re-enabled relays
         // get a clean AUTH handshake (no stale cooldowns or consumed challenges)
         val authHandler = RelayConnectionStateMachine.getInstance().nip42AuthHandler
@@ -773,7 +773,7 @@ class RelayManagementViewModel(
         // Connect to the relay — requestConnect opens a WebSocket and triggers AUTH if needed
         viewModelScope.launch(Dispatchers.IO) {
             stateMachine.relayPool.connect(setOf(normalized))
-            Log.d("RelayMgmtVM", "Drafts relay connected and persistent: $normalized")
+            MLog.d("RelayMgmtVM", "Drafts relay connected and persistent: $normalized")
         }
     }
 
@@ -794,7 +794,7 @@ class RelayManagementViewModel(
             outboxUrls + inboxUrls + subscribedCategoryUrls + draftsUrls
         }
         stateMachine.setPersistentRelayUrls(currentPersistent)
-        Log.d("RelayMgmtVM", "Drafts relay removed from persistent set: $normalized")
+        MLog.d("RelayMgmtVM", "Drafts relay removed from persistent set: $normalized")
     }
 
     fun addBlossomServer(server: social.mycelium.android.data.MediaServer) {
@@ -906,7 +906,7 @@ class RelayManagementViewModel(
         val profile = _uiState.value.relayProfiles.find { it.id == profileId } ?: return
         val category = profile.categories.find { it.id == categoryId } ?: return
         publishCategoryToRelays(category)
-        Log.d("RelayMgmtVM", "Publishing updated profile category '${category.name}' (${category.relays.size} relays)")
+        MLog.d("RelayMgmtVM", "Publishing updated profile category '${category.name}' (${category.relays.size} relays)")
     }
 
     fun addCategoryToProfile(profileId: String, category: RelayCategory) {
@@ -1031,7 +1031,7 @@ class RelayManagementViewModel(
                                 try {
                                     nip11.getRelayInfo(url, forceRefresh = true)
                                 } catch (e: Exception) {
-                                    Log.w("RelayMgmtVM", "Eager NIP-11 fetch failed for $url: ${e.message}")
+                                    MLog.w("RelayMgmtVM", "Eager NIP-11 fetch failed for $url: ${e.message}")
                                 }
                             }
                         }

@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.content
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -49,7 +49,7 @@ object ZapPollResponseRepository {
                     referencedEventId = pollId
                 ))
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to persist zap receipt ${event.id.take(8)}: ${e.message}")
+                MLog.w(TAG, "Failed to persist zap receipt ${event.id.take(8)}: ${e.message}")
             }
         }
     }
@@ -87,7 +87,7 @@ object ZapPollResponseRepository {
                 totalSats += amountSats
                 if (myPubkey != null && voterPubkey == myPubkey) myVotes.add(optionIndex)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse cached zap receipt: ${e.message}")
+                MLog.w(TAG, "Failed to parse cached zap receipt: ${e.message}")
             }
         }
 
@@ -160,7 +160,7 @@ object ZapPollResponseRepository {
                 val roomTally = loadTallyFromRoom(pollId, myPubkey)
                 if (roomTally != null) {
                     _tallies.value = _tallies.value + (pollId to roomTally.copy(isFetching = true))
-                    Log.d(TAG, "ZapPoll $pollId: seeded ${roomTally.totalVoters} voters from Room cache")
+                    MLog.d(TAG, "ZapPoll $pollId: seeded ${roomTally.totalVoters} voters from Room cache")
                 }
 
                 // ── Phase 2: Fetch from relays and persist to Room ──
@@ -204,7 +204,7 @@ object ZapPollResponseRepository {
                             myVotes.add(optionIndex)
                         }
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to parse zap request for poll $pollId: ${e.message}")
+                        MLog.w(TAG, "Failed to parse zap request for poll $pollId: ${e.message}")
                     }
                     // Persist every relay event to Room
                     persistEvent(event, pollId)
@@ -223,9 +223,9 @@ object ZapPollResponseRepository {
                 _tallies.value = _tallies.value + (pollId to tally)
                 fetchedPolls.add(pollId)
                 lastFetchTimeSec[pollId] = fetchStartSec
-                Log.d(TAG, "ZapPoll $pollId: ${votersSeen.size} voters, ${totalSats} sats total")
+                MLog.d(TAG, "ZapPoll $pollId: ${votersSeen.size} voters, ${totalSats} sats total")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to fetch zap poll tally for $pollId: ${e.message}")
+                MLog.e(TAG, "Failed to fetch zap poll tally for $pollId: ${e.message}")
                 _tallies.value = _tallies.value + (pollId to ZapPollTally(pollId, isFetching = false))
             } finally {
                 inFlightPolls.remove(pollId)
@@ -302,13 +302,13 @@ object ZapPollResponseRepository {
                         myVotedOptions = current.myVotedOptions + newMyVotes
                     )
                     _tallies.value = _tallies.value + (pollId to updated)
-                    Log.d(TAG, "ZapPoll $pollId delta refresh: +$newVoterCount voters, +$newSats sats")
+                    MLog.d(TAG, "ZapPoll $pollId delta refresh: +$newVoterCount voters, +$newSats sats")
                 } else {
-                    Log.d(TAG, "ZapPoll $pollId delta refresh: no new votes since $sinceSec")
+                    MLog.d(TAG, "ZapPoll $pollId delta refresh: no new votes since $sinceSec")
                 }
                 lastFetchTimeSec[pollId] = refreshStartSec
             } catch (e: Exception) {
-                Log.w(TAG, "ZapPoll $pollId delta refresh failed: ${e.message}")
+                MLog.w(TAG, "ZapPoll $pollId delta refresh failed: ${e.message}")
             } finally {
                 inFlightPolls.remove(pollId)
             }
@@ -380,13 +380,13 @@ object ZapPollResponseRepository {
                 )
                 _tallies.value = _tallies.value + (pollId to updated)
                 persistEvent(event, pollId)
-                Log.d(TAG, "Live zap vote on poll ${pollId.take(8)}: +${amountSats} sats from ${voterPubkey.take(8)}")
+                MLog.d(TAG, "Live zap vote on poll ${pollId.take(8)}: +${amountSats} sats from ${voterPubkey.take(8)}")
             } catch (e: Exception) {
-                Log.w(TAG, "Live zap parse failed for poll $pollId: ${e.message}")
+                MLog.w(TAG, "Live zap parse failed for poll $pollId: ${e.message}")
             }
         }
         liveSubscriptions[pollId] = handle
-        Log.d(TAG, "Live subscription opened for zap poll ${pollId.take(8)}")
+        MLog.d(TAG, "Live subscription opened for zap poll ${pollId.take(8)}")
         return handle
     }
 

@@ -1,6 +1,6 @@
 package social.mycelium.android.repository.social
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
 import com.example.cybin.relay.SubscriptionPriority
@@ -33,7 +33,7 @@ object MuteListRepository {
 
     private val scope = CoroutineScope(
         Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t ->
-            Log.e(TAG, "Coroutine failed: ${t.message}", t)
+            MLog.e(TAG, "Coroutine failed: ${t.message}", t)
         }
     )
 
@@ -82,7 +82,7 @@ object MuteListRepository {
                 }
             }
         }
-        Log.d(TAG, "Fetching mute list (one-shot) for ${pubkey.take(8)} on ${relayUrls.size} relays")
+        MLog.d(TAG, "Fetching mute list (one-shot) for ${pubkey.take(8)} on ${relayUrls.size} relays")
     }
 
     private fun parseMuteList(event: Event) {
@@ -101,7 +101,7 @@ object MuteListRepository {
         _mutedPubkeys.value = pubkeys
         _mutedHashtags.value = hashtags
         _mutedWords.value = words
-        Log.d(TAG, "Parsed mute list: ${pubkeys.size} pubkeys, ${hashtags.size} hashtags, ${words.size} words")
+        MLog.d(TAG, "Parsed mute list: ${pubkeys.size} pubkeys, ${hashtags.size} hashtags, ${words.size} words")
     }
 
     /**
@@ -112,16 +112,16 @@ object MuteListRepository {
             try {
                 val current = _mutedPubkeys.value
                 if (targetPubkey.lowercase() in current) {
-                    Log.d(TAG, "Already muted ${targetPubkey.take(8)}")
+                    MLog.d(TAG, "Already muted ${targetPubkey.take(8)}")
                     return@launch
                 }
 
                 val updated = current + targetPubkey.lowercase()
                 publishMuteList(updated, _mutedHashtags.value, _mutedWords.value, signer, relayUrls)
                 _mutedPubkeys.value = updated
-                Log.d(TAG, "Muted ${targetPubkey.take(8)}")
+                MLog.d(TAG, "Muted ${targetPubkey.take(8)}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to mute user: ${e.message}", e)
+                MLog.e(TAG, "Failed to mute user: ${e.message}", e)
             }
         }
     }
@@ -135,9 +135,9 @@ object MuteListRepository {
                 val updated = _mutedPubkeys.value - targetPubkey.lowercase()
                 publishMuteList(updated, _mutedHashtags.value, _mutedWords.value, signer, relayUrls)
                 _mutedPubkeys.value = updated
-                Log.d(TAG, "Unmuted ${targetPubkey.take(8)}")
+                MLog.d(TAG, "Unmuted ${targetPubkey.take(8)}")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to unmute user: ${e.message}", e)
+                MLog.e(TAG, "Failed to unmute user: ${e.message}", e)
             }
         }
     }
@@ -147,7 +147,7 @@ object MuteListRepository {
      */
     fun blockUser(targetPubkey: String) {
         _blockedPubkeys.value = _blockedPubkeys.value + targetPubkey.lowercase()
-        Log.d(TAG, "Blocked ${targetPubkey.take(8)} locally")
+        MLog.d(TAG, "Blocked ${targetPubkey.take(8)} locally")
     }
 
     /**
@@ -155,7 +155,7 @@ object MuteListRepository {
      */
     fun unblockUser(targetPubkey: String) {
         _blockedPubkeys.value = _blockedPubkeys.value - targetPubkey.lowercase()
-        Log.d(TAG, "Unblocked ${targetPubkey.take(8)} locally")
+        MLog.d(TAG, "Unblocked ${targetPubkey.take(8)} locally")
     }
 
     /**
@@ -181,7 +181,7 @@ object MuteListRepository {
         val signed = signer.sign(template)
         RelayConnectionStateMachine.getInstance().send(signed, relayUrls)
         latestMuteEvent = signed
-        Log.d(TAG, "Published mute list with ${pubkeys.size} pubkeys")
+        MLog.d(TAG, "Published mute list with ${pubkeys.size} pubkeys")
     }
 
     fun clearAll() {

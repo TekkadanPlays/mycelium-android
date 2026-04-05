@@ -1,7 +1,7 @@
 package social.mycelium.android.repository.sync
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -46,7 +46,7 @@ object StartupRelayPreloader {
         if (relayUrls.isEmpty()) return
         val nip11 = Nip11CacheManager.getInstance(context)
         val normalized = relayUrls.map { normalizeRelayUrl(it) }.distinct()
-        Log.d(TAG, "Preloading NIP-11 for $label: ${normalized.size} relays")
+        MLog.d(TAG, "Preloading NIP-11 for $label: ${normalized.size} relays")
         nip11.preloadRelayInfo(normalized, scope)
     }
 
@@ -76,7 +76,7 @@ object StartupRelayPreloader {
         // Actual WebSocket connections are created on-demand when subscriptions
         // (profile fetches, NIP-50 search) target these relay URLs.
         stateMachine.registerExternalRelays(normalized)
-        Log.d(TAG, "Registered ${normalized.size} indexer relays as persistent + trackable")
+        MLog.d(TAG, "Registered ${normalized.size} indexer relays as persistent + trackable")
     }
 
     // ── Early Profile Fetch ─────────────────────────────────────────────────
@@ -95,9 +95,9 @@ object StartupRelayPreloader {
             try {
                 val cache = social.mycelium.android.repository.cache.ProfileMetadataCache.getInstance()
                 cache.requestProfiles(pubkeys, indexerUrls)
-                Log.d(TAG, "Early profile fetch started: ${pubkeys.size} pubkeys via ${indexerUrls.size} indexers")
+                MLog.d(TAG, "Early profile fetch started: ${pubkeys.size} pubkeys via ${indexerUrls.size} indexers")
             } catch (e: Exception) {
-                Log.w(TAG, "Early profile fetch failed: ${e.message}")
+                MLog.w(TAG, "Early profile fetch failed: ${e.message}")
             }
         }
     }

@@ -1,7 +1,7 @@
 package social.mycelium.android.lightning
 
 import android.content.Context
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import fr.acinq.bitcoin.Chain
 import fr.acinq.bitcoin.PublicKey
 import fr.acinq.bitcoin.utils.Either
@@ -120,7 +120,7 @@ object PhoenixWalletManager {
         } else {
             WalletState.NoWallet
         }
-        Log.d(TAG, "init: state=${_state.value}")
+        MLog.d(TAG, "init: state=${_state.value}")
     }
 
     /**
@@ -146,19 +146,19 @@ object PhoenixWalletManager {
      */
     suspend fun start(context: Context) {
         if (_state.value is WalletState.Running) {
-            Log.d(TAG, "start: already running")
+            MLog.d(TAG, "start: already running")
             return
         }
 
         val seedBytes = SeedManager.deriveSeed(context)
         if (seedBytes == null) {
             _state.value = WalletState.NoWallet
-            Log.w(TAG, "start: no seed found")
+            MLog.w(TAG, "start: no seed found")
             return
         }
 
         _state.value = WalletState.Starting
-        Log.d(TAG, "start: initializing lightning node...")
+        MLog.d(TAG, "start: initializing lightning node...")
 
         try {
             val walletScope = CoroutineScope(
@@ -166,7 +166,7 @@ object PhoenixWalletManager {
                         SupervisorJob() +
                         Dispatchers.Default +
                         CoroutineExceptionHandler { _, e ->
-                            Log.e(TAG, "Uncaught error in wallet scope: ${e.message}", e)
+                            MLog.e(TAG, "Uncaught error in wallet scope: ${e.message}", e)
                         }
             )
             scope = walletScope
@@ -174,7 +174,7 @@ object PhoenixWalletManager {
             // 1. Key manager from seed
             val seed = seedBytes.toByteVector32()
             val keyManager = LocalKeyManager(seed, CHAIN, REMOTE_SWAP_IN_XPUB)
-            Log.d(TAG, "KeyManager created, nodeId=${keyManager.nodeKeys.nodeKey.publicKey}")
+            MLog.d(TAG, "KeyManager created, nodeId=${keyManager.nodeKeys.nodeKey.publicKey}")
 
             // 2. Logger factory (routes to Android Log)
             val loggerFactory = AndroidLoggerFactory
@@ -255,7 +255,7 @@ object PhoenixWalletManager {
             walletScope.launch {
                 lnPeer.connectionState.collect { conn ->
                     _isConnected.value = conn is Connection.ESTABLISHED
-                    Log.d(TAG, "Peer connection: $conn")
+                    MLog.d(TAG, "Peer connection: $conn")
                 }
             }
 
@@ -284,7 +284,7 @@ object PhoenixWalletManager {
                 client.connectionStatus
                     .filter { it is fr.acinq.lightning.blockchain.electrum.ElectrumConnectionStatus.Connected }
                     .first()
-                Log.d(TAG, "Electrum connected, connecting to Lightning peer...")
+                MLog.d(TAG, "Electrum connected, connecting to Lightning peer...")
                 connectPeer(lnPeer)
             }
 
@@ -293,18 +293,18 @@ object PhoenixWalletManager {
                 lnPeer.connectionState
                     .filter { it is Connection.ESTABLISHED }
                     .first()
-                Log.d(TAG, "Peer connected, starting swap-in watcher...")
+                MLog.d(TAG, "Peer connected, starting swap-in watcher...")
                 lnPeer.startWatchSwapInWallet()
             }
 
             _state.value = WalletState.Running(lnPeer)
-            Log.d(TAG, "Lightning node started successfully")
+            MLog.d(TAG, "Lightning node started successfully")
 
             // 14. Start NWC service provider
             NwcServiceProvider.start(context)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start lightning node: ${e.message}", e)
+            MLog.e(TAG, "Failed to start lightning node: ${e.message}", e)
             _state.value = WalletState.Error(e.message ?: "Unknown error")
         }
     }
@@ -313,7 +313,7 @@ object PhoenixWalletManager {
      * Stop the Lightning node and release resources.
      */
     fun stop() {
-        Log.d(TAG, "Stopping lightning node...")
+        MLog.d(TAG, "Stopping lightning node...")
         NwcServiceProvider.stop()
         connectionJob?.cancel()
         peer?.disconnect()
@@ -346,7 +346,7 @@ object PhoenixWalletManager {
 
             val amount = invoice.amount ?: return PaymentResult.Error("Invoice has no amount")
 
-            Log.d(TAG, "Paying invoice: amount=${amount}, paymentHash=${invoice.paymentHash.toHex().take(16)}...")
+            MLog.d(TAG, "Paying invoice: amount=${amount}, paymentHash=${invoice.paymentHash.toHex().take(16)}...")
 
             val paymentId = fr.acinq.lightning.utils.UUID.randomUUID()
             lnPeer.send(
@@ -370,21 +370,21 @@ object PhoenixWalletManager {
             when (result) {
                 is PaymentSent -> {
                     val preimage = (result.payment.status as? fr.acinq.lightning.db.LightningOutgoingPayment.Status.Succeeded)?.preimage
-                    Log.d(TAG, "Payment successful! preimage=${preimage?.toHex()?.take(16)}")
+                    MLog.d(TAG, "Payment successful! preimage=${preimage?.toHex()?.take(16)}")
                     PaymentResult.Success(preimage?.toHex() ?: "")
                 }
                 is PaymentNotSent -> {
-                    Log.w(TAG, "Payment failed: ${result.reason}")
+                    MLog.w(TAG, "Payment failed: ${result.reason}")
                     PaymentResult.Error("Payment failed: ${result.reason}")
                 }
                 null -> {
-                    Log.w(TAG, "Payment timed out")
+                    MLog.w(TAG, "Payment timed out")
                     PaymentResult.Error("Payment timed out after 60s")
                 }
                 else -> PaymentResult.Error("Unexpected payment result")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "payInvoice error: ${e.message}", e)
+            MLog.e(TAG, "payInvoice error: ${e.message}", e)
             PaymentResult.Error("Payment error: ${e.message?.take(80)}")
         }
     }
@@ -403,7 +403,7 @@ object PhoenixWalletManager {
             )
             invoice.write()
         } catch (e: Exception) {
-            Log.e(TAG, "createInvoice error: ${e.message}", e)
+            MLog.e(TAG, "createInvoice error: ${e.message}", e)
             null
         }
     }
@@ -431,24 +431,24 @@ object PhoenixWalletManager {
         while (true) {
             val server = ELECTRUM_SERVERS[serverIndex % ELECTRUM_SERVERS.size]
             try {
-                Log.d(TAG, "Connecting to Electrum: ${server.host}:${server.port}")
+                MLog.d(TAG, "Connecting to Electrum: ${server.host}:${server.port}")
                 val connected = client.connect(
                     serverAddress = server,
                     socketBuilder = TcpSocket.Builder(),
                 )
                 if (connected) {
-                    Log.d(TAG, "Electrum connected to ${server.host}")
+                    MLog.d(TAG, "Electrum connected to ${server.host}")
                     // Wait for disconnection then reconnect
                     client.connectionStatus
                         .filter { it is fr.acinq.lightning.blockchain.electrum.ElectrumConnectionStatus.Closed }
                         .first()
-                    Log.w(TAG, "Electrum disconnected from ${server.host}, will reconnect...")
+                    MLog.w(TAG, "Electrum disconnected from ${server.host}, will reconnect...")
                 } else {
-                    Log.w(TAG, "Electrum connect returned false for ${server.host}, trying next server")
+                    MLog.w(TAG, "Electrum connect returned false for ${server.host}, trying next server")
                     serverIndex++
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Electrum connection to ${server.host} failed: ${e.message}")
+                MLog.e(TAG, "Electrum connection to ${server.host} failed: ${e.message}")
                 serverIndex++
             }
             delay(5000) // retry after 5 seconds
@@ -458,15 +458,15 @@ object PhoenixWalletManager {
     private suspend fun connectPeer(peer: Peer) {
         while (true) {
             try {
-                Log.d(TAG, "Connecting to Lightning peer: ${TRAMPOLINE_NODE_URI.host}:${TRAMPOLINE_NODE_URI.port}")
+                MLog.d(TAG, "Connecting to Lightning peer: ${TRAMPOLINE_NODE_URI.host}:${TRAMPOLINE_NODE_URI.port}")
                 peer.connect(connectTimeout = 15.seconds, handshakeTimeout = 10.seconds)
                 // Wait for disconnection
                 peer.connectionState
                     .filter { it is Connection.CLOSED }
                     .first()
-                Log.w(TAG, "Peer disconnected, will reconnect...")
+                MLog.w(TAG, "Peer disconnected, will reconnect...")
             } catch (e: Exception) {
-                Log.e(TAG, "Peer connection failed: ${e.message}")
+                MLog.e(TAG, "Peer connection failed: ${e.message}")
             }
             delay(5000)
         }

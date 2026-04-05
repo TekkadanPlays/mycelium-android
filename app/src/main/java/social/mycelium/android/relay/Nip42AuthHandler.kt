@@ -1,6 +1,6 @@
 package social.mycelium.android.relay
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.example.cybin.core.Event
 import com.example.cybin.core.eventTemplate
 import com.example.cybin.core.nowUnixSeconds
@@ -70,7 +70,7 @@ class Nip42AuthHandler(
      *  will be authenticated via NIP-42. Call when relay config changes or on login. */
     fun setAllowedRelayUrls(urls: Set<String>) {
         allowedRelayUrls = urls.map { social.mycelium.android.utils.normalizeRelayUrl(it) }.toSet()
-        Log.d(TAG, "Allowed relay URLs updated: ${allowedRelayUrls.size} relays")
+        MLog.d(TAG, "Allowed relay URLs updated: ${allowedRelayUrls.size} relays")
     }
 
     /** Add relay URLs to the allowed set without replacing existing entries.
@@ -82,7 +82,7 @@ class Nip42AuthHandler(
         val newUrls = normalized - allowedRelayUrls
         if (newUrls.isEmpty()) return
         allowedRelayUrls = allowedRelayUrls + newUrls
-        Log.d(TAG, "Added ${newUrls.size} relay(s) to allowed set (total: ${allowedRelayUrls.size})")
+        MLog.d(TAG, "Added ${newUrls.size} relay(s) to allowed set (total: ${allowedRelayUrls.size})")
     }
 
     /** Session-scoped relay URLs temporarily allowed for auth (e.g. foreign relays
@@ -98,7 +98,7 @@ class Nip42AuthHandler(
         val normalized = social.mycelium.android.utils.normalizeRelayUrl(url)
         if (normalized in allowedRelayUrls || normalized in sessionAllowedUrls) return
         sessionAllowedUrls = sessionAllowedUrls + normalized
-        Log.d(TAG, "Session-allowed relay: $normalized (total session: ${sessionAllowedUrls.size})")
+        MLog.d(TAG, "Session-allowed relay: $normalized (total session: ${sessionAllowedUrls.size})")
     }
 
     /** Whether a signer is available to respond to AUTH challenges. */
@@ -158,7 +158,7 @@ class Nip42AuthHandler(
 
     init {
         stateMachine.relayPool.addListener(listener)
-        Log.d(TAG, "NIP-42 auth handler registered")
+        MLog.d(TAG, "NIP-42 auth handler registered")
 
         // Process AUTH signing jobs sequentially — one background sign at a time
         scope.launch {
@@ -172,9 +172,9 @@ class Nip42AuthHandler(
     fun setSigner(newSigner: NostrSigner?) {
         signer = newSigner
         if (newSigner != null) {
-            Log.d(TAG, "Signer set — NIP-42 auth enabled")
+            MLog.d(TAG, "Signer set — NIP-42 auth enabled")
         } else {
-            Log.d(TAG, "Signer cleared — NIP-42 auth disabled")
+            MLog.d(TAG, "Signer cleared — NIP-42 auth disabled")
             _authStatusByRelay.value = emptyMap()
             respondedChallenges.clear()
             pendingAuthEventIds.clear()
@@ -193,7 +193,7 @@ class Nip42AuthHandler(
         // relays the user hasn't explicitly chosen.
         val normalizedUrl = social.mycelium.android.utils.normalizeRelayUrl(url)
         if (normalizedUrl !in allowedRelayUrls && normalizedUrl !in sessionAllowedUrls) {
-            Log.d(TAG, "AUTH[$url] Relay not in allowed or session set — ignoring")
+            MLog.d(TAG, "AUTH[$url] Relay not in allowed or session set — ignoring")
             return
         }
 
@@ -203,12 +203,12 @@ class Nip42AuthHandler(
 
         val currentSigner = signer
         if (currentSigner == null) {
-            Log.w(TAG, "AUTH[$url] No signer — skipping (will retry on next reconnect)")
+            MLog.w(TAG, "AUTH[$url] No signer — skipping (will retry on next reconnect)")
             updateStatus(url, AuthStatus.FAILED)
             return
         }
 
-        Log.d(TAG, "AUTH challenge from $url: ${challenge.take(16)}…")
+        MLog.d(TAG, "AUTH challenge from $url: ${challenge.take(16)}…")
         updateStatus(url, AuthStatus.AUTHENTICATING)
 
         // Queue for sequential background processing
@@ -245,21 +245,21 @@ class Nip42AuthHandler(
                 signed = currentSigner.signBackgroundOnly(template)
                 if (signed != null && signed.sig.isNotBlank()) break
                 if (attempt < MAX_SIGN_ATTEMPTS) {
-                    Log.d(TAG, "AUTH[$url] Background sign attempt $attempt/$MAX_SIGN_ATTEMPTS failed — retrying in ${SIGN_RETRY_DELAY_MS}ms")
+                    MLog.d(TAG, "AUTH[$url] Background sign attempt $attempt/$MAX_SIGN_ATTEMPTS failed — retrying in ${SIGN_RETRY_DELAY_MS}ms")
                     kotlinx.coroutines.delay(SIGN_RETRY_DELAY_MS)
                 }
             }
             if (signed == null || signed.sig.isBlank()) {
-                Log.d(TAG, "AUTH[$url] Background sign unavailable after $MAX_SIGN_ATTEMPTS attempts — unauthenticated until reconnect")
+                MLog.d(TAG, "AUTH[$url] Background sign unavailable after $MAX_SIGN_ATTEMPTS attempts — unauthenticated until reconnect")
                 updateStatus(url, AuthStatus.FAILED)
                 return
             }
-            Log.d(TAG, "AUTH[$url] signed id=${signed.id.take(8)}")
+            MLog.d(TAG, "AUTH[$url] signed id=${signed.id.take(8)}")
             pendingAuthEventIds.add(signed.id)
             stateMachine.relayPool.sendToRelay(url, NostrProtocol.buildAuth(signed))
-            Log.d(TAG, "AUTH[$url] response sent — waiting for OK")
+            MLog.d(TAG, "AUTH[$url] response sent — waiting for OK")
         } catch (e: Exception) {
-            Log.e(TAG, "AUTH[$url] Sign failed: ${e.message}")
+            MLog.e(TAG, "AUTH[$url] Sign failed: ${e.message}")
             updateStatus(url, AuthStatus.FAILED)
         }
     }
@@ -269,19 +269,19 @@ class Nip42AuthHandler(
         pendingAuthEventIds.remove(eventId)
 
         if (success) {
-            Log.d(TAG, "AUTH[$url] ✓ authenticated")
+            MLog.d(TAG, "AUTH[$url] ✓ authenticated")
             updateStatus(url, AuthStatus.AUTHENTICATED)
             stateMachine.relayPool.resubscribeRelay(url)
             // Replay any events that were rejected with auth-required
             val eventsToReplay = pendingReplayEvents.remove(url)
             if (!eventsToReplay.isNullOrEmpty()) {
-                Log.d(TAG, "Replaying ${eventsToReplay.size} event(s) to $url after auth")
+                MLog.d(TAG, "Replaying ${eventsToReplay.size} event(s) to $url after auth")
                 for (event in eventsToReplay) {
                     stateMachine.relayPool.send(event, setOf(url))
                 }
             }
         } else {
-            Log.w(TAG, "AUTH[$url] ✗ rejected: $message")
+            MLog.w(TAG, "AUTH[$url] ✗ rejected: $message")
             updateStatus(url, AuthStatus.FAILED)
             pendingReplayEvents.remove(url)
         }
@@ -308,12 +308,12 @@ class Nip42AuthHandler(
         // Only attempt re-auth for relays in the user's relay manager
         val normalizedUrl = social.mycelium.android.utils.normalizeRelayUrl(relayUrl)
         if (normalizedUrl !in allowedRelayUrls) {
-            Log.d(TAG, "AUTH[$relayUrl] auth-required from non-managed relay — ignoring")
+            MLog.d(TAG, "AUTH[$relayUrl] auth-required from non-managed relay — ignoring")
             return
         }
         val (event, _) = recentEvents[eventId] ?: return
         pendingReplayEvents.getOrPut(relayUrl) { mutableListOf() }.add(event)
-        Log.d(TAG, "Queued event ${eventId.take(8)}… for replay on $relayUrl — forcing reconnect")
+        MLog.d(TAG, "Queued event ${eventId.take(8)}… for replay on $relayUrl — forcing reconnect")
         val norm = social.mycelium.android.utils.normalizeRelayUrl(relayUrl)
         RelayLogBuffer.logDiagnostic(
             norm,
@@ -340,7 +340,7 @@ class Nip42AuthHandler(
         resetRelayState(relayUrl)
         pendingReplayEvents.remove(relayUrl)
         updateStatus(relayUrl, AuthStatus.NONE)
-        Log.d(TAG, "Cleared all auth state for $relayUrl")
+        MLog.d(TAG, "Cleared all auth state for $relayUrl")
     }
 
     private fun updateStatus(relayUrl: String, status: AuthStatus) {
@@ -350,6 +350,6 @@ class Nip42AuthHandler(
     /** Clean up when no longer needed. */
     fun destroy() {
         stateMachine.relayPool.removeListener(listener)
-        Log.d(TAG, "NIP-42 auth handler unregistered")
+        MLog.d(TAG, "NIP-42 auth handler unregistered")
     }
 }

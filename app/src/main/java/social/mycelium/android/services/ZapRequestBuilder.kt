@@ -1,6 +1,6 @@
 package social.mycelium.android.services
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.repository.sync.ZapType
 import com.example.cybin.core.Event
 import com.example.cybin.nip57.LnZapRequestEvent
@@ -43,12 +43,12 @@ object ZapRequestBuilder {
         zapType: ZapType = ZapType.PUBLIC
     ): Event? {
         if (zapType == ZapType.NONZAP) {
-            Log.d(TAG, "Non-zap type: no zap request event needed")
+            MLog.d(TAG, "Non-zap type: no zap request event needed")
             return null
         }
         return try {
             val cybinType = toCybinType(zapType)
-            Log.d(TAG, "Building zap request: type=$cybinType, note=${noteEvent.id.take(8)}")
+            MLog.d(TAG, "Building zap request: type=$cybinType, note=${noteEvent.id.take(8)}")
             LnZapRequestEvent.create(
                 zappedEvent = noteEvent,
                 relays = relays,
@@ -59,7 +59,7 @@ object ZapRequestBuilder {
                 toUserPubHex = null
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Error building zap request: ${e.message}", e)
+            MLog.e(TAG, "Error building zap request: ${e.message}", e)
             null
         }
     }
@@ -82,12 +82,12 @@ object ZapRequestBuilder {
         zapType: ZapType = ZapType.PUBLIC
     ): Event? {
         if (zapType == ZapType.NONZAP) {
-            Log.d(TAG, "Non-zap type: no zap request event needed")
+            MLog.d(TAG, "Non-zap type: no zap request event needed")
             return null
         }
         return try {
             val cybinType = toCybinType(zapType)
-            Log.d(TAG, "Building user zap request: type=$cybinType, user=${userPubkeyHex.take(8)}")
+            MLog.d(TAG, "Building user zap request: type=$cybinType, user=${userPubkeyHex.take(8)}")
             LnZapRequestEvent.create(
                 userHex = userPubkeyHex,
                 relays = relays,
@@ -96,7 +96,7 @@ object ZapRequestBuilder {
                 zapType = cybinType
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Error building user zap request: ${e.message}", e)
+            MLog.e(TAG, "Error building user zap request: ${e.message}", e)
             null
         }
     }

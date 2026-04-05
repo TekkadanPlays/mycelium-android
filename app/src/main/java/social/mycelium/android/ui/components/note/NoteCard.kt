@@ -1,5 +1,7 @@
 package social.mycelium.android.ui.components.note
 
+
+import social.mycelium.android.debug.MLog
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.animateContentSize
@@ -376,10 +378,12 @@ internal fun QuotedNoteBody(
                             ) { page ->
                                 val imgUrl = qImageUrls[page]
                                 val imageContext = LocalContext.current
+                                val qScreenWidthPx = imageContext.resources.displayMetrics.widthPixels
                                 coil.compose.SubcomposeAsyncImage(
                                     model = coil.request.ImageRequest.Builder(imageContext)
                                         .data(imgUrl)
                                         .crossfade(true)
+                                        .size(qScreenWidthPx, qScreenWidthPx)
                                         .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                         .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                                         .build(),
@@ -866,10 +870,12 @@ internal fun QuotedNoteContent(
             if (nowResolved > initiallyResolved) {
                 quotedMentionVersion++
             }
-            profileCache.profileUpdated
-                .filter { it in pubkeySet }
-                .debounce(50)
-                .collect { quotedMentionVersion++ }
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                profileCache.profileUpdated
+                    .filter { it in pubkeySet }
+                    .take(uncached.size.coerceAtLeast(1))
+                    .collect { quotedMentionVersion++ }
+            }
         }
         LaunchedEffect(quotedMentionedPubkeys, quotedDiskCacheReady) {
             if (!quotedDiskCacheReady) return@LaunchedEffect
@@ -1276,7 +1282,7 @@ internal fun NoteMediaCarousel(
                         }
                         // Error overlay
                         if (painterState is AsyncImagePainter.State.Error) {
-                            android.util.Log.e(
+                            MLog.e(
                                 "NoteMediaCarousel",
                                 "Image load failed: url=$url error=${painterState.result.throwable.message}",
                                 painterState.result.throwable
@@ -1384,7 +1390,17 @@ private fun NoteDetailsPanel(
             if (uncached.isNotEmpty()) profileCache.requestProfiles(uncached, profileCache.getConfiguredRelayUrls())
         }
         if (boostPubkeys.isNotEmpty()) {
-            LaunchedEffect(Unit) { profileCache.profileUpdated.collect { pk -> if (pk in boostPubkeys) boostProfileRevision++ } }
+            LaunchedEffect(boostPubkeys) {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    val needed = boostPubkeys.filter { profileCache.getAuthor(it)?.displayName == it.take(8) + "..." || profileCache.getAuthor(it) == null }.size
+                    if (needed > 0) {
+                        profileCache.profileUpdated
+                            .filter { it in boostPubkeys }
+                            .take(needed)
+                            .collect { boostProfileRevision++ }
+                    }
+                }
+            }
         }
         val boostAuthors = remember(note.repostedByAuthors, overrideRepostAuthors, boostProfileRevision) {
             if (overrideRepostAuthors.isNullOrEmpty()) {
@@ -1603,7 +1619,17 @@ private fun NoteDetailsPanel(
                                 rxProfileCache.getConfiguredRelayUrls()
                             )
                         }
-                        LaunchedEffect(Unit) { rxProfileCache.profileUpdated.collect { pk -> if (pk in rxPubkeys) rxProfileRevision++ } }
+                        LaunchedEffect(rxPubkeys) {
+                            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                                val needed = rxPubkeys.count { rxProfileCache.getAuthor(it) == null }
+                                if (needed > 0) {
+                                    rxProfileCache.profileUpdated
+                                        .filter { it in rxPubkeys }
+                                        .take(needed)
+                                        .collect { rxProfileRevision++ }
+                                }
+                            }
+                        }
                         val rxResolvedAuthors = remember(latestReactions, rxProfileRevision) {
                             latestReactions.map { (emoji, pubkey) -> Triple(emoji, pubkey, rxProfileCache.resolveAuthor(pubkey)) }
                         }
@@ -1711,7 +1737,17 @@ private fun NoteDetailsPanel(
                                 zapProfileCache.getConfiguredRelayUrls()
                             )
                         }
-                        LaunchedEffect(Unit) { zapProfileCache.profileUpdated.collect { pk -> if (pk in allZapPubkeys) zapProfileRevision++ } }
+                        LaunchedEffect(allZapPubkeys) {
+                            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                                val needed = allZapPubkeys.count { zapProfileCache.getAuthor(it) == null }
+                                if (needed > 0) {
+                                    zapProfileCache.profileUpdated
+                                        .filter { it in allZapPubkeys }
+                                        .take(needed)
+                                        .collect { zapProfileRevision++ }
+                                }
+                            }
+                        }
                         val sortedZapAuthorsResolved = remember(overrideZapAuthors, overrideZapAmountByAuthor, zapProfileRevision) {
                             overrideZapAuthors?.sortedByDescending { overrideZapAmountByAuthor?.get(it) ?: 0L }
                                 ?.take(3)
@@ -2345,7 +2381,7 @@ private fun ShareToRelayDialog(
                                     social.mycelium.android.relay.RelayConnectionStateMachine.getInstance().send(rawEvent, selectedRelays)
                                     android.widget.Toast.makeText(context, "Shared to ${selectedRelays.size} relays", android.widget.Toast.LENGTH_SHORT).show()
                                 } catch (e: Exception) {
-                                    android.util.Log.e("ShareToRelay", "Failed to decode event", e)
+                                    MLog.e("ShareToRelay", "Failed to decode event", e)
                                     android.widget.Toast.makeText(context, "Failed to send event", android.widget.Toast.LENGTH_SHORT).show()
                                 }
                             } else {
@@ -3357,10 +3393,12 @@ fun NoteCard(
     var localProfileRevision by remember(note.id) { mutableIntStateOf(0) }
     if (sharedRevisions == null) {
         LaunchedEffect(authorPubkey) {
-            profileCache.profileUpdated
-                .filter { it == authorPubkey }
-                .debounce(200)
-                .collect { localProfileRevision++ }
+            kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                profileCache.profileUpdated
+                    .filter { it == authorPubkey }
+                    .take(1)
+                    .collect { localProfileRevision++ }
+            }
         }
     }
     val profileRevision = if (sharedRevisions != null) sharedRevision else localProfileRevision
@@ -3477,10 +3515,12 @@ fun NoteCard(
                 if (nowResolved > initiallyResolved) {
                     mentionProfileVersion++
                 }
-                profileCache.profileUpdated
-                    .filter { it in pubkeySet }
-                    .debounce(50)
-                    .collect { mentionProfileVersion++ }
+                kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    profileCache.profileUpdated
+                        .filter { it in pubkeySet }
+                        .take(uncached.size.coerceAtLeast(1))
+                        .collect { mentionProfileVersion++ }
+                }
             }
             LaunchedEffect(mentionedPubkeys, diskCacheReady) {
                 if (!diskCacheReady) return@LaunchedEffect
@@ -3553,10 +3593,12 @@ fun NoteCard(
             if (quotedSharedRevisions == null && quotedLocalProfileRevision == 0) {
                 LaunchedEffect(quotedAuthorPubkeys) {
                     if (quotedAuthorPubkeys.isNotEmpty()) {
-                        profileCache.profileUpdated
-                            .filter { it in quotedAuthorPubkeys }
-                            .debounce(500)
-                            .collect { quotedLocalProfileRevision = 1 }
+                        kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                            profileCache.profileUpdated
+                                .filter { it in quotedAuthorPubkeys }
+                                .take(1)
+                                .collect { quotedLocalProfileRevision = 1 }
+                        }
                     }
                 }
             }

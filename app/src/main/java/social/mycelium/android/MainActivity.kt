@@ -1,5 +1,7 @@
 package social.mycelium.android
 
+
+import social.mycelium.android.debug.MLog
 import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -73,7 +75,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
             startRelayForegroundService()
         } else {
             pendingStartAfterPermission = false
-            android.util.Log.w("MainActivity", "Notification permission denied; skipping foreground service")
+            MLog.w("MainActivity", "Notification permission denied; skipping foreground service")
         }
     }
 
@@ -88,10 +90,12 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // File-backed diagnostic log: always active (release persists WARN+ERROR only)
+        social.mycelium.android.debug.DiagnosticLog.init(applicationContext)
+
         // Detect main-thread disk/network violations in debug to avoid ANR regressions
         if (BuildConfig.DEBUG) {
             DebugVerboseLog.init(applicationContext)
-            social.mycelium.android.debug.DiagnosticLog.init(applicationContext)
             StrictMode.setThreadPolicy(
                 StrictMode.ThreadPolicy.Builder()
                     .detectAll()
@@ -113,10 +117,11 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
         // registerComponentCallbacks(this) because it causes infinite recursion in
         // onConfigurationChanged on Android 15 foldable devices.
 
-        // Configure Coil: DISK-ONLY caching. Memory cache disabled to prevent
-        // Java heap exhaustion at high note counts. Each NoteCard has up to 18
-        // AsyncImage loads; at 2000+ notes with memory cache, decoded bitmaps
-        // accumulate to 200MB+ and trigger 935ms+ GC pauses.
+        // Configure Coil: Memory + Disk caching. Viewport-gated rendering limits
+        // full NoteCard composition to ~30 cards at a time, so the memory cache
+        // only holds decoded bitmaps for ~90 images max (30 cards × ~3 images).
+        // A 48MB LRU memory cache covers the render window with room for scroll-back,
+        // giving instant image display without re-decoding from disk.
         Coil.setImageLoader(
             ImageLoader.Builder(this)
                 .callFactory {
@@ -133,6 +138,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                         .build()
                 }
                 .components {
+                    add(social.mycelium.android.utils.ImageSizeCapInterceptor(this@MainActivity))
                     add(social.mycelium.android.utils.BlossomFallbackInterceptor())
                     if (android.os.Build.VERSION.SDK_INT >= 28) {
                         add(ImageDecoderDecoder.Factory())
@@ -146,13 +152,19 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 .precision(coil.size.Precision.INEXACT)
                 .allowHardware(true)
                 .allowRgb565(true)
-                // DISABLED memory cache — disk-only. Re-decode from SSD on scroll-back.
-                // This eliminates the #1 heap consumer: decoded bitmaps held by Coil's LRU cache.
-                .memoryCachePolicy(coil.request.CachePolicy.DISABLED)
+                // Bounded memory cache: 48MB LRU. Safe with viewport-gated rendering
+                // (~30 full cards active). Covers render window + recent scroll-back.
+                .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+                .memoryCache {
+                    coil.memory.MemoryCache.Builder(this)
+                        .maxSizePercent(0.15) // ~48MB on a 320MB heap device
+                        .build()
+                }
                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                // Limit concurrent decode threads — prevents decode storms during fast scroll
-                .fetcherDispatcher(kotlinx.coroutines.Dispatchers.IO.limitedParallelism(2))
-                .decoderDispatcher(kotlinx.coroutines.Dispatchers.IO.limitedParallelism(2))
+                // Decode parallelism: 3 threads. Render window caps concurrent decode
+                // pressure to ~30 cards so this won't cause decode storms.
+                .fetcherDispatcher(kotlinx.coroutines.Dispatchers.IO.limitedParallelism(3))
+                .decoderDispatcher(kotlinx.coroutines.Dispatchers.IO.limitedParallelism(3))
                 .diskCache {
                     coil.disk.DiskCache.Builder()
                         .directory(cacheDir.resolve("image_cache"))
@@ -173,7 +185,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 val feedSize = try {
                     social.mycelium.android.repository.feed.NotesRepository.getInstance().notes.value.size
                 } catch (_: Exception) { -1 }
-                android.util.Log.w("HeapMonitor", "Heap: ${usedMB}MB/${maxMB}MB (${pct}%) | feed=$feedSize notes")
+                MLog.w("HeapMonitor", "Heap: ${usedMB}MB/${maxMB}MB (${pct}%) | feed=$feedSize notes")
             }
         }.apply { isDaemon = true; name = "HeapMonitor"; start() }
         // Initialize relay health tracker (loads persisted blocklist before any connections)
@@ -387,7 +399,7 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN -> AppMemoryTrimmer.trimUiCaches(this)
             }
         } catch (e: Throwable) {
-            android.util.Log.w("MainActivity", "onTrimMemory trim failed", e)
+            MLog.w("MainActivity", "onTrimMemory trim failed", e)
         }
     }
 

@@ -5,7 +5,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Environment
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import social.mycelium.android.BuildConfig
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import java.io.File
@@ -59,10 +59,10 @@ object DebugSessionDump {
             val file = File(dir, "mycelium_debug_$stamp.txt")
             val text = buildFull(context)
             file.writeText(text, Charsets.UTF_8)
-            Log.i(TAG, "Saved debug dump (${text.length} chars) to ${file.absolutePath}")
+            MLog.i(TAG, "Saved debug dump (${text.length} chars) to ${file.absolutePath}")
             file.absolutePath
         } catch (e: Exception) {
-            Log.e(TAG, "saveToFile failed: ${e.message}", e)
+            MLog.e(TAG, "saveToFile failed: ${e.message}", e)
             null
         }
     }
@@ -73,7 +73,7 @@ object DebugSessionDump {
         val text = buildFull(context)
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         cm.setPrimaryClip(ClipData.newPlainText(label, text))
-        Log.i(TAG, "Copied debug dump to clipboard (${text.length} chars)")
+        MLog.i(TAG, "Copied debug dump to clipboard (${text.length} chars)")
         return text.length
     }
 

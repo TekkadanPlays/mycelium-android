@@ -1,6 +1,6 @@
 package social.mycelium.android.relay
 
-import android.util.Log
+import social.mycelium.android.debug.MLog
 import com.tinder.StateMachine
 import com.example.cybin.core.Event
 import com.example.cybin.core.Filter
@@ -136,7 +136,7 @@ sealed class RelaySideEffect {
  */
 class RelayConnectionStateMachine {
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
     val relayPool: CybinRelayPool = CybinRelayPool(MyceliumHttpClient.instance, scope)
 
     /** NIP-42 relay authentication handler — intercepts AUTH challenges and signs via Amber.
@@ -196,7 +196,7 @@ class RelayConnectionStateMachine {
             }
 
             override fun onDisconnected(url: String) {
-                Log.d(TAG, "[$url] Disconnected — pool will auto-reconnect if subs active")
+                MLog.d(TAG, "[$url] Disconnected — pool will auto-reconnect if subs active")
                 updateRelayStatus(url, RelayEndpointStatus.Connecting)
                 // Disconnects are meaningful — log them so the user sees *why* connectivity dropped.
                 // (The transport reason comes via onRelayDiagnostic "transport" category.)
@@ -449,7 +449,7 @@ class RelayConnectionStateMachine {
                 relayUrls.forEach { RelayLogBuffer.logConnected(it) }
                 stateMachine.transition(RelayEvent.Connected)
             } catch (e: Exception) {
-                Log.e(TAG, "Connect relays failed: ${e.message}", e)
+                MLog.e(TAG, "Connect relays failed: ${e.message}", e)
                 relayUrls.forEach { RelayLogBuffer.logError(it, e.message ?: "Connection failed") }
                 _connectionError.value = ConnectionError(e.message, true)
                 stateMachine.transition(RelayEvent.ConnectFailed(e.message))
@@ -461,7 +461,7 @@ class RelayConnectionStateMachine {
 
     private fun executeScheduleRetry() {
         if (pendingRelayUrlsForRetry.isEmpty() || retryAttempt >= Companion.MAX_RETRIES) {
-            Log.d(TAG, "No retry: empty pending or max retries ($retryAttempt)")
+            MLog.d(TAG, "No retry: empty pending or max retries ($retryAttempt)")
             return
         }
         retryAttempt++
@@ -470,7 +470,7 @@ class RelayConnectionStateMachine {
             2 -> Companion.RETRY_DELAY_MS_SECOND
             else -> Companion.RETRY_DELAY_MS_SECOND
         }
-        Log.d(TAG, "Scheduling retry $retryAttempt in ${delayMs}ms")
+        MLog.d(TAG, "Scheduling retry $retryAttempt in ${delayMs}ms")
         scope.launch {
             delay(delayMs)
             stateMachine.transition(RelayEvent.RetryRequested)
@@ -513,7 +513,7 @@ class RelayConnectionStateMachine {
                 }
                 if (effectiveRelayUrls.isEmpty()) {
                     // All relays blocked — state updated above for banner, but nothing to subscribe to
-                    Log.w(TAG, "All ${relayUrls.size} relays are blocked, no subscription possible")
+                    MLog.w(TAG, "All ${relayUrls.size} relays are blocked, no subscription possible")
                     android.os.Trace.endSection()
                     return@launch
                 }
@@ -527,7 +527,7 @@ class RelayConnectionStateMachine {
                     currentSubscriptionRelayUrls = effectiveRelayUrls
                     currentKind1Filter = null
                     _currentSubscription.value = CurrentSubscription(effectiveRelayUrls, null)
-                    Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (custom filter)")
+                    MLog.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (custom filter)")
                 } else {
                     val sevenDaysAgo = System.currentTimeMillis() / 1000 - 86400 * 7
                     val filterKind1 = kind1Filter?.let {
@@ -591,7 +591,7 @@ class RelayConnectionStateMachine {
                         }
                     }
                     val mode = if (kind1Filter != null) "following (authors filter)" else "global"
-                    Log.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-6 + kind-30023, $mode)")
+                    MLog.d(TAG, "Subscription updated for ${effectiveRelayUrls.size} relays (kind-1 + kind-6 + kind-30023, $mode)")
                 }
                 val previousRelayUrls = currentSubscriptionRelayUrls
                 currentSubscriptionRelayUrls = effectiveRelayUrls
@@ -608,7 +608,7 @@ class RelayConnectionStateMachine {
                     .filter { it !in persistent }
                     .toSet()
                 if (staleRelays.isNotEmpty()) {
-                    Log.d(TAG, "Disconnecting ${staleRelays.size} stale relay(s): ${staleRelays.joinToString()}")
+                    MLog.d(TAG, "Disconnecting ${staleRelays.size} stale relay(s): ${staleRelays.joinToString()}")
                     for (u in staleRelays) {
                         RelayLogBuffer.logDiagnostic(
                             normalizeRelayUrl(u),
@@ -619,7 +619,7 @@ class RelayConnectionStateMachine {
                     relayPool.disconnectIdleRelays(staleRelays)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Update subscription failed: ${e.message}", e)
+                MLog.e(TAG, "Update subscription failed: ${e.message}", e)
                 // Only mark non-Connected relays as Failed; preserve relays that are already working
                 _perRelayState.value = _perRelayState.value.mapValues { (_, status) ->
                     if (status == RelayEndpointStatus.Connected) status else RelayEndpointStatus.Failed
@@ -627,7 +627,7 @@ class RelayConnectionStateMachine {
                 val anyConnected = _perRelayState.value.values.any { it == RelayEndpointStatus.Connected }
                 if (anyConnected) {
                     // Some relays are working — don't kill the whole subscription
-                    Log.d(TAG, "Subscription error but ${_perRelayState.value.values.count { it == RelayEndpointStatus.Connected }} relays still connected; staying Subscribed")
+                    MLog.d(TAG, "Subscription error but ${_perRelayState.value.values.count { it == RelayEndpointStatus.Connected }} relays still connected; staying Subscribed")
                     _connectionError.value = null
                 } else {
                     _connectionError.value = ConnectionError(e.message, false)
@@ -655,7 +655,7 @@ class RelayConnectionStateMachine {
      *  Call this with the user's inbox + outbox + category relay URLs. */
     fun setPersistentRelayUrls(urls: Set<String>) {
         persistentRelayUrls = urls
-        Log.d(TAG, "Persistent relay URLs set: ${urls.size} relays")
+        MLog.d(TAG, "Persistent relay URLs set: ${urls.size} relays")
     }
 
     /** Set which relay URLs should be prioritized for connection (connect first, clear cooldown).
@@ -686,7 +686,7 @@ class RelayConnectionStateMachine {
         val additions = urls.filter { it !in current }
         if (additions.isEmpty()) return
         _perRelayState.value = current + additions.associateWith { RelayEndpointStatus.Connecting }
-        Log.d(TAG, "Registered ${additions.size} external relays in perRelayState")
+        MLog.d(TAG, "Registered ${additions.size} external relays in perRelayState")
     }
 
     // --- Keepalive health check ---
@@ -727,7 +727,7 @@ class RelayConnectionStateMachine {
                 val disconnected = relayPool.getDisconnectedSubscriptionRelays()
                 val connectedCount = relayPool.getConnectedCount()
                 if (disconnected.isNotEmpty()) {
-                    Log.d(TAG, "Keepalive: $connectedCount connected, ${disconnected.size} disconnected with active subs — reconnecting dead relays")
+                    MLog.d(TAG, "Keepalive: $connectedCount connected, ${disconnected.size} disconnected with active subs — reconnecting dead relays")
                     for (u in disconnected) {
                         RelayLogBuffer.logDiagnostic(
                             normalizeRelayUrl(u),
@@ -744,7 +744,7 @@ class RelayConnectionStateMachine {
                 // --- Check 2: Last-resort full reconnect if no events for a long time ---
                 val elapsed = System.currentTimeMillis() - lastEventReceivedAt
                 if (elapsed > STALE_FALLBACK_THRESHOLD_MS) {
-                    Log.w(TAG, "Keepalive: no events in ${elapsed / 1000}s with $connectedCount connected relays — forcing full reconnect (possible half-open sockets)")
+                    MLog.w(TAG, "Keepalive: no events in ${elapsed / 1000}s with $connectedCount connected relays — forcing full reconnect (possible half-open sockets)")
                     for (u in currentSubscriptionRelayUrls) {
                         RelayLogBuffer.logDiagnostic(
                             normalizeRelayUrl(u),
@@ -755,7 +755,7 @@ class RelayConnectionStateMachine {
                     lastEventReceivedAt = System.currentTimeMillis()
                     requestReconnectOnResume()
                 } else {
-                    Log.d(TAG, "Keepalive: $connectedCount relays connected, last event ${elapsed / 1000}s ago — OK")
+                    MLog.d(TAG, "Keepalive: $connectedCount relays connected, last event ${elapsed / 1000}s ago — OK")
                 }
             }
         }
@@ -810,7 +810,7 @@ class RelayConnectionStateMachine {
         relayUrls: List<String> = currentSubscriptionRelayUrls
     ) {
         if (relayUrls.isEmpty()) {
-            Log.d(TAG, "Topics sub: no relays, skipping")
+            MLog.d(TAG, "Topics sub: no relays, skipping")
             return
         }
         val effectiveUrls = RelayHealthTracker.filterBlocked(relayUrls)
@@ -838,7 +838,7 @@ class RelayConnectionStateMachine {
                 }
             }
         }
-        Log.d(TAG, "Topics+Comments subscription started: ${effectiveUrls.size} relays (kind-11+1111, subId=$newSubId)")
+        MLog.d(TAG, "Topics+Comments subscription started: ${effectiveUrls.size} relays (kind-11+1111, subId=$newSubId)")
     }
 
     /**
@@ -849,7 +849,7 @@ class RelayConnectionStateMachine {
         topicsSubId?.let {
             relayPool.closeSubscription(it)
             topicsSubId = null
-            Log.d(TAG, "Topics subscription stopped")
+            MLog.d(TAG, "Topics subscription stopped")
         }
     }
 
@@ -898,9 +898,9 @@ class RelayConnectionStateMachine {
                 _currentSubscription.value = CurrentSubscription(emptyList(), null)
                 _perRelayState.value = emptyMap()
                 relayPool.disconnect()
-                Log.d(TAG, "Disconnected from all relays")
+                MLog.d(TAG, "Disconnected from all relays")
             } catch (e: Exception) {
-                Log.e(TAG, "Disconnect failed: ${e.message}", e)
+                MLog.e(TAG, "Disconnect failed: ${e.message}", e)
             }
         }
     }
@@ -930,7 +930,7 @@ class RelayConnectionStateMachine {
         if (relayUrls.isEmpty()) return
         val cur = currentSubscriptionRelayUrls
         if (cur.sorted() == relayUrls.sorted() && kind1FiltersEqual(kind1Filter, currentKind1Filter) && isSubscriptionActive()) {
-            Log.d(TAG, "Subscription unchanged (${relayUrls.size} relays) and active, skipping")
+            MLog.d(TAG, "Subscription unchanged (${relayUrls.size} relays) and active, skipping")
             return
         }
         stateMachine.transition(RelayEvent.FeedChangeRequested(relayUrls, null, null, kind1Filter))
@@ -972,7 +972,7 @@ class RelayConnectionStateMachine {
      * relay connections don't bleed into the new user's session.
      */
     fun disconnectAndClearForAccountSwitch() {
-        Log.d(TAG, "Account switch: disconnecting all relays and clearing state")
+        MLog.d(TAG, "Account switch: disconnecting all relays and clearing state")
         stopTopicsSubscription()
         stateMachine.transition(RelayEvent.DisconnectRequested)
         // Clear resume provider so requestReconnectOnResume() won't race with stale relay state.
@@ -1017,7 +1017,7 @@ class RelayConnectionStateMachine {
      * Used by [ConnectionMode.WHEN_ACTIVE] when the app goes to background.
      */
     fun disconnectAll() {
-        Log.d(TAG, "disconnectAll: closing all relay connections (When Active mode)")
+        MLog.d(TAG, "disconnectAll: closing all relay connections (When Active mode)")
         stopKeepalive()
         relayPool.disconnect()
     }
@@ -1047,7 +1047,7 @@ class RelayConnectionStateMachine {
         if (currentState is RelayState.Subscribed && effectiveUrls == activeUrls) {
             val disconnected = relayPool.getDisconnectedSubscriptionRelays()
             if (disconnected.isNotEmpty()) {
-                Log.d(TAG, "App resumed: subscription unchanged, reconnecting ${disconnected.size} dead relays")
+                MLog.d(TAG, "App resumed: subscription unchanged, reconnecting ${disconnected.size} dead relays")
                 for (u in disconnected) {
                     RelayLogBuffer.logDiagnostic(
                         normalizeRelayUrl(u),
@@ -1057,7 +1057,7 @@ class RelayConnectionStateMachine {
                 }
                 relayPool.connect()
             } else {
-                Log.d(TAG, "App resumed: subscription active, ${activeUrls.size} relays healthy — no-op")
+                MLog.d(TAG, "App resumed: subscription active, ${activeUrls.size} relays healthy — no-op")
             }
             return
         }
@@ -1067,7 +1067,7 @@ class RelayConnectionStateMachine {
         // can retry from scratch instead of being stuck at MAX_RETRIES from an
         // earlier offline period.
         retryAttempt = 0
-        Log.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (${effectiveUrls.size} healthy, following=${kind1Filter != null})")
+        MLog.d(TAG, "App resumed: re-applying subscription to ${relayUrls.size} relays (${effectiveUrls.size} healthy, following=${kind1Filter != null})")
         for (u in effectiveUrls) {
             RelayLogBuffer.logDiagnostic(
                 normalizeRelayUrl(u),

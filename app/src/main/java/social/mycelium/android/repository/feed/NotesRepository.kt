@@ -2394,12 +2394,16 @@ class NotesRepository private constructor() {
     private fun loadOlderNotesFromRelay(cursorMs: Long, untilSec: Long, authors: List<String>?, relays: List<String>) {
         olderNotesHandle?.cancel()
 
+        // Pause DeepHistoryFetcher to avoid competing for SQLite write lock
+        DeepHistoryFetcher.pauseForPagination = true
+
         // Filter out exhausted relays — they returned 0 events last time
         val activeRelays = relays.filter { it !in exhaustedPaginationRelays }
         if (activeRelays.isEmpty()) {
             MLog.w(TAG, "loadOlderNotes: all ${relays.size} relays exhausted — pagination done")
             _paginationExhausted.value = true
             _isLoadingOlder.value = false
+            DeepHistoryFetcher.pauseForPagination = false
             return
         }
 
@@ -2529,7 +2533,13 @@ class NotesRepository private constructor() {
                 val roomCursorSec = if (roomPaginatedNotes.isNotEmpty()) {
                     roomPaginatedNotes.minOf { it.timestamp } / 1000
                 } else untilSec
-                val roomNotes = wm.loadPage(roomCursorSec)
+                // Floor: oldest healthy relay cursor minus 14-day buffer.
+                // Prevents ancient events from sparse relays (e.g., pickle at 11/30)
+                // from contaminating the paginated feed.
+                val healthyCursors = perRelayCursorMs.filter { it.key !in exhaustedPaginationRelays }
+                val oldestHealthyMs = healthyCursors.values.minOrNull() ?: (roomCursorSec * 1000)
+                val paginationFloorSec = (oldestHealthyMs / 1000) - (14L * 86_400)
+                val roomNotes = wm.loadPage(roomCursorSec, floorSec = paginationFloorSec.coerceAtLeast(0))
                 if (roomNotes.isNotEmpty()) {
                     val existingMemIds = feedIndex.byId.keys
                     val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
@@ -2608,6 +2618,7 @@ class NotesRepository private constructor() {
 
             if (roomAdded > 0) updateDisplayedNotes()
             _isLoadingOlder.value = false
+            DeepHistoryFetcher.pauseForPagination = false
         }
     }
 

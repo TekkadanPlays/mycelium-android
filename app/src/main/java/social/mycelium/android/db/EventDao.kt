@@ -43,23 +43,24 @@ interface EventDao {
     /** Windowed feed: root posts only for followed authors, ordered newest-first.
      *  Uses the composite (isReply, kind, createdAt) index for efficient filtering.
      *  [olderThanSec]: cursor timestamp — pass Long.MAX_VALUE for initial load.
+     *  [floorSec]: lower bound — events older than this are excluded (pass 0 to disable).
      *  Returns at most [limit] events older than the cursor. */
     @Query("""
         SELECT * FROM cached_events 
         WHERE isReply = 0 AND kind IN (1, 6, 30023) 
-        AND pubkey IN (:pubkeys) AND createdAt < :olderThanSec 
+        AND pubkey IN (:pubkeys) AND createdAt < :olderThanSec AND createdAt > :floorSec
         ORDER BY createdAt DESC LIMIT :limit
     """)
-    suspend fun getFeedWindow(pubkeys: List<String>, olderThanSec: Long, limit: Int = 80): List<CachedEventEntity>
+    suspend fun getFeedWindow(pubkeys: List<String>, olderThanSec: Long, floorSec: Long = 0, limit: Int = 80): List<CachedEventEntity>
 
     /** Windowed feed: root posts only, all authors (global mode). */
     @Query("""
         SELECT * FROM cached_events 
         WHERE isReply = 0 AND kind IN (1, 6, 30023) 
-        AND createdAt < :olderThanSec 
+        AND createdAt < :olderThanSec AND createdAt > :floorSec
         ORDER BY createdAt DESC LIMIT :limit
     """)
-    suspend fun getFeedWindowAll(olderThanSec: Long, limit: Int = 80): List<CachedEventEntity>
+    suspend fun getFeedWindowAll(olderThanSec: Long, floorSec: Long = 0, limit: Int = 80): List<CachedEventEntity>
 
     /** Load events NEWER than a timestamp (for scroll-up / prepend). */
     @Query("""

@@ -101,6 +101,10 @@ object DeepHistoryFetcher {
 
     @Volatile private var fetchJob: Job? = null
 
+    /** Set to true by NotesRepository during relay pagination to pause deep fetch.
+     *  Checked between kind groups to avoid competing for the SQLite write lock. */
+    @Volatile var pauseForPagination: Boolean = false
+
     /**
      * Start the deep history fetch. Idempotent — calling again while running is a no-op.
      *
@@ -331,7 +335,13 @@ object DeepHistoryFetcher {
                         )
                     }
                     try {
-                        eventDao.insertAll(entities)
+                        // Chunk inserts to avoid holding the SQLite write lock for too long.
+                        // Pagination and notification writes compete for the same lock —
+                        // inserting 1000 rows in one shot causes multi-second stalls.
+                        for (chunk in entities.chunked(100)) {
+                            eventDao.insertAll(chunk)
+                            if (entities.size > 100) delay(50)
+                        }
                     } catch (e: Exception) {
                         MLog.e(TAG, "${group.label}: Room insert failed: ${e.message}")
                     }
@@ -433,8 +443,18 @@ object DeepHistoryFetcher {
                 batchCount++
                 _batchesCompleted.value = batchCount
 
-                // Short yield between kind groups within the same window
-                delay(500L)
+                // Yield to pagination if it's active — avoid competing for SQLite write lock
+                if (pauseForPagination) {
+                    MLog.d(TAG, "Pausing for active pagination...")
+                    var waitedMs = 0L
+                    while (pauseForPagination && waitedMs < 30_000L) {
+                        delay(500L)
+                        waitedMs += 500L
+                    }
+                } else {
+                    // Short yield between kind groups within the same window
+                    delay(500L)
+                }
             }
 
             MLog.d(TAG, "Window complete: ${windowTotalEvents} events persisted (total: ${_totalEventsPersisted.value})")

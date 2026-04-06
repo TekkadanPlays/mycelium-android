@@ -68,16 +68,19 @@ class FeedWindowManager(
 
     /**
      * Load a page of notes from Room older than [olderThanSec].
+     * [floorSec]: lower timestamp bound — events older than this are excluded.
+     *  Pass 0 to disable (e.g., initial page load). This prevents ancient events
+     *  from sparse relays (like pickle's 11/30 events) contaminating the feed.
      * Returns the converted notes (empty if Room is exhausted).
      *
      * This does NOT manage any window state -- it's a pure Room query.
      * NotesRepository decides what to do with the results (append to
      * _displayedNotes, merge with in-memory data, etc.).
      */
-    suspend fun loadPage(olderThanSec: Long, limit: Int = pageSize): List<Note> {
+    suspend fun loadPage(olderThanSec: Long, floorSec: Long = 0, limit: Int = pageSize): List<Note> {
         _isLoadingPage.value = true
         try {
-            val entities = queryWindow(olderThanSec, limit)
+            val entities = queryWindow(olderThanSec, floorSec, limit)
             if (entities.isEmpty()) {
                 _hasOlderInRoom.value = false
                 return emptyList()
@@ -90,7 +93,7 @@ class FeedWindowManager(
                     null
                 }
             }
-            MLog.d(TAG, "loadPage(older than ${fmtSec(olderThanSec)}): ${entities.size} entities -> ${notes.size} notes")
+            MLog.d(TAG, "loadPage(older than ${fmtSec(olderThanSec)}, floor=${fmtSec(floorSec)}): ${entities.size} entities -> ${notes.size} notes")
             return notes
         } catch (e: Exception) {
             MLog.e(TAG, "loadPage failed: ${e.message}", e)
@@ -106,7 +109,7 @@ class FeedWindowManager(
      */
     suspend fun loadInitialPage(limit: Int = pageSize): List<Note> {
         _hasOlderInRoom.value = true // reset exhaustion flag
-        return loadPage(Long.MAX_VALUE, limit)
+        return loadPage(Long.MAX_VALUE, limit = limit)
     }
 
     /**
@@ -159,7 +162,7 @@ class FeedWindowManager(
      * weren't in the original in-memory window.
      */
     suspend fun refreshNewestPage(newerThanSec: Long = Long.MIN_VALUE, limit: Int = pageSize): List<Note> {
-        return loadPage(Long.MAX_VALUE, limit)
+        return loadPage(Long.MAX_VALUE, limit = limit)
     }
 
     /**
@@ -205,12 +208,12 @@ class FeedWindowManager(
 
     // ── Internal helpers ───────────────────────────────────────────────────────
 
-    private suspend fun queryWindow(olderThanSec: Long, limit: Int): List<CachedEventEntity> {
+    private suspend fun queryWindow(olderThanSec: Long, floorSec: Long = 0, limit: Int): List<CachedEventEntity> {
         val pubkeys = if (followFilterEnabled && followPubkeys.isNotEmpty()) followPubkeys else null
         return if (pubkeys != null) {
-            eventDao.getFeedWindow(pubkeys, olderThanSec, limit)
+            eventDao.getFeedWindow(pubkeys, olderThanSec, floorSec, limit)
         } else {
-            eventDao.getFeedWindowAll(olderThanSec, limit)
+            eventDao.getFeedWindowAll(olderThanSec, floorSec, limit)
         }
     }
 

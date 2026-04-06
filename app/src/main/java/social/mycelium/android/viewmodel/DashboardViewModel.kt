@@ -4,9 +4,6 @@ import social.mycelium.android.debug.MLog
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.collections.immutable.ImmutableList
-import kotlinx.collections.immutable.persistentListOf
-import kotlinx.collections.immutable.toImmutableList
 import social.mycelium.android.data.Note
 import social.mycelium.android.data.UrlPreviewInfo
 import social.mycelium.android.repository.social.ContactListRepository
@@ -35,7 +32,7 @@ import kotlinx.coroutines.launch
 
 @Immutable
 data class DashboardUiState(
-    val notes: ImmutableList<Note> = persistentListOf(),
+    val notes: List<Note> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
     val currentDestination: String = "home",
@@ -222,7 +219,7 @@ class DashboardViewModel : ViewModel() {
 
     private fun loadInitialData() {
         _uiState.update {
-            it.copy(notes = persistentListOf(), isLoading = false, hasRelays = false)
+            it.copy(notes = emptyList(), isLoading = false, hasRelays = false)
         }
     }
 
@@ -389,7 +386,7 @@ class DashboardViewModel : ViewModel() {
                     } else {
                         note
                     }
-                }.toImmutableList()
+                }
             ) }
 
         }
@@ -404,7 +401,7 @@ class DashboardViewModel : ViewModel() {
                     } else {
                         note
                     }
-                }.toImmutableList()
+                }
             ) }
 
         }
@@ -419,7 +416,7 @@ class DashboardViewModel : ViewModel() {
                     } else {
                         note
                     }
-                }.toImmutableList()
+                }
             ) }
         }
     }
@@ -483,7 +480,7 @@ class DashboardViewModel : ViewModel() {
     fun loadNotesFromFavoriteCategory(allUserRelayUrls: List<String>, displayUrls: List<String>) {
         if (allUserRelayUrls.isEmpty()) {
             MLog.d(TAG, "No relays configured for favorite category")
-            _uiState.update { it.copy(notes = persistentListOf(), hasRelays = false, isLoadingFromRelays = false) }
+            _uiState.update { it.copy(notes = emptyList(), hasRelays = false, isLoadingFromRelays = false) }
             return
         }
 

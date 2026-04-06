@@ -43,9 +43,6 @@ import kotlinx.serialization.json.Json
 import java.util.Collections
 import java.util.HashSet
 import java.util.concurrent.ConcurrentLinkedQueue
-import kotlinx.collections.immutable.ImmutableList
-import kotlinx.collections.immutable.persistentListOf
-import kotlinx.collections.immutable.toImmutableList
 import social.mycelium.android.debug.PipelineDiagnostics
 import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.repository.cache.QuotedNoteCache
@@ -55,6 +52,11 @@ import social.mycelium.android.repository.social.ContactListRepository
 import social.mycelium.android.repository.social.PeopleListRepository
 import social.mycelium.android.repository.social.NoteCountsRepository
 import social.mycelium.android.repository.content.TopicRepliesRepository
+
+// Polyfill to remove dependency on kotlinx.collections.immutable
+private fun <T> persistentListOf(): List<T> = emptyList()
+// Replaced heavy ImmutableList copying with lightweight standard List wrapping
+private fun <T> Iterable<T>.toImmutableList(): List<T> = this.toList()
 
 /** Separate counts of pending new notes for All vs Following. Nonce ensures StateFlow always emits on update. */
 data class NewNotesCounts(val all: Int, val following: Int, val nonce: Long = 0L)
@@ -196,7 +198,7 @@ class NotesRepository private constructor() {
         // Wire outbox feed events into the same ingestion pipeline
         // Mark as isOutbox=true so they bypass the cutoff gate and go directly to feed.
         outboxFeedManager.onNoteReceived = { event, relayUrl ->
-            MLog.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
+            // MLog.d(TAG, "\uD83D\uDCE8 Outbox event: ${event.id.take(8)} from $relayUrl (kind=${event.kind})")
             EventRelayTracker.addRelay(event.id, relayUrl)
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             kind1Dirty.set(true)
@@ -521,6 +523,9 @@ class NotesRepository private constructor() {
 
         // Early exit: nothing to convert or merge
         if (acceptedEvents.isEmpty() && relayUpdates.isEmpty() && kind6Batch.isEmpty()) {
+            if (batch.size > 0) {
+                MLog.d(TAG, "Phase 1 Deduplication: Dropped ${batch.size} identical/duplicate events")
+            }
             PipelineDiagnostics.recordBatch(batch.size, System.currentTimeMillis() - flushStartMs)
             android.os.Trace.endSection()
             return
@@ -684,7 +689,7 @@ class NotesRepository private constructor() {
                     burstShadowNotes = finalMerged
                 } else {
                     burstShadowNotes = null
-                    _notes.value = finalMerged.toImmutableList()
+                    _notes.value = finalMerged.toList()
                     lastEmissionMs = now
                 }
                 advancePaginationCursor(feedNotes)
@@ -706,7 +711,7 @@ class NotesRepository private constructor() {
                 }
             } else if (relayUpdates.isNotEmpty()) {
                 MLog.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges (no new notes)")
-                val afterMerge = _notes.value
+                val afterMerge = burstShadowNotes ?: _notes.value
                 val updatedList = afterMerge.map { note ->
                     relayUpdates[note.id]?.let { urls ->
                         val updated = note.copy(relayUrls = urls)
@@ -714,8 +719,17 @@ class NotesRepository private constructor() {
                         updated
                     } ?: note
                 }
-                _notes.value = updatedList.toImmutableList()
-                lastEmissionMs = System.currentTimeMillis()
+                
+                val now = System.currentTimeMillis()
+                val queueStillLargeForEmission = pendingKind1Events.size > enrichmentDrainThreshold()
+                if (queueStillLargeForEmission && (now - lastEmissionMs) < BURST_EMISSION_THROTTLE_MS) {
+                    burstShadowNotes = updatedList.toList()
+                } else {
+                    burstShadowNotes = null
+                    _notes.value = updatedList.toList()
+                    lastEmissionMs = now
+                }
+                
                 val dao = eventDao
                 if (dao != null) {
                     scope.launch(Dispatchers.IO) {
@@ -821,7 +835,7 @@ class NotesRepository private constructor() {
                 }
             }
 
-            if (BuildConfig.DEBUG && batch.size > 5) {
+            if (batch.size > 5) {
                 MLog.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${roomTailNew.size} to roomTail, ${relayUpdates.size} relay merges")
             }
 
@@ -830,16 +844,14 @@ class NotesRepository private constructor() {
                 for (pending in kind6Batch) {
                     handleKind6Repost(pending.event, pending.relayUrl)
                 }
-                if (BuildConfig.DEBUG) {
-                    MLog.d(TAG, "Processed ${kind6Batch.size} kind-6 reposts in batch")
-                }
+                MLog.d(TAG, "Processed ${kind6Batch.size} kind-6 reposts in batch")
             }
 
         } catch (e: Throwable) {
             MLog.e(TAG, "flushKind1Events failed: ${e.message}", e)
         } finally {
             PipelineDiagnostics.recordBatch(batch.size, System.currentTimeMillis() - flushStartMs)
-            if (BuildConfig.DEBUG) PipelineDiagnostics.logSummary(TAG)
+            if (batch.size > 0) PipelineDiagnostics.logSummary(TAG)
             android.os.Trace.endSection()
         }
         } // Phase 3 mutex released
@@ -892,6 +904,7 @@ class NotesRepository private constructor() {
         NoteCountsRepository.setViewportNoteIds(viewportRelayMap)
         QuotedNoteCache.prefetchForNotes(viewport)
         scheduleUrlPreviewPrefetch(viewport)
+        scheduleContentBlockPrecomputation(viewport)
 
         // ── Phase 2: Background — deferred, LOW priority ──
         if (background.isNotEmpty()) {
@@ -904,6 +917,34 @@ class NotesRepository private constructor() {
                 delay(BACKGROUND_ENRICHMENT_DELAY_MS)
                 QuotedNoteCache.prefetchForNotes(background)
                 scheduleUrlPreviewPrefetch(background)
+                scheduleContentBlockPrecomputation(background)
+            }
+        }
+    }
+
+    /** 
+     * Asynchronously precomputes Jetpack Compose AnnotatedString text layouts for the feed.
+     * Heavily uses regex (naddr, nevent, npub). Running this on Default shields the UI from 
+     * stalling on layout measurement during burst ingestion.
+     */
+    private fun scheduleContentBlockPrecomputation(notes: List<Note>) {
+        val defaultLinkStyle = androidx.compose.ui.text.SpanStyle(color = androidx.compose.ui.graphics.Color(0xFF8E30EB)) // Standard purple link
+        scope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            for (note in notes) {
+                // Check if already in cache
+                val cacheKey = social.mycelium.android.utils.ContentBlockCache.key(note.content, note.mediaUrls.toSet())
+                if (social.mycelium.android.utils.ContentBlockCache.get(cacheKey) == null) {
+                    val blocks = social.mycelium.android.utils.buildNoteContentWithInlinePreviews(
+                        content = note.content,
+                        mediaUrls = note.mediaUrls.toSet(),
+                        urlPreviews = emptyList(), // resolved asynchronously separately
+                        linkStyle = defaultLinkStyle,
+                        profileCache = profileCache,
+                        consumedUrls = emptySet(),
+                        emojiUrls = social.mycelium.android.utils.extractEmojiUrls(note.tags)
+                    )
+                    social.mycelium.android.utils.ContentBlockCache.put(cacheKey, blocks)
+                }
             }
         }
     }
@@ -1130,14 +1171,14 @@ class NotesRepository private constructor() {
     }
 
     // All notes (with relayUrl set when received); filtered by connectedRelays for display
-    private val _notes = MutableStateFlow<ImmutableList<Note>>(persistentListOf())
-    private val _displayedNotes = MutableStateFlow<ImmutableList<Note>>(persistentListOf())
+    private val _notes = MutableStateFlow<List<Note>>(emptyList())
+    private val _displayedNotes = MutableStateFlow<List<Note>>(emptyList())
     /** Displayed notes (filtered by relay + follow filter, debounced). Primary feed source for UI. */
-    val notes: StateFlow<ImmutableList<Note>> = _displayedNotes.asStateFlow()
+    val notes: StateFlow<List<Note>> = _displayedNotes.asStateFlow()
     /** Alias for clarity when distinguishing from allNotes. */
-    val displayedNotes: StateFlow<ImmutableList<Note>> = _displayedNotes.asStateFlow()
+    val displayedNotes: StateFlow<List<Note>> = _displayedNotes.asStateFlow()
     /** Raw unfiltered notes list — emits on every event batch + profile update. Use for fast UI; use displayedNotes for enrichment. */
-    val allNotes: StateFlow<ImmutableList<Note>> = _notes.asStateFlow()
+    val allNotes: StateFlow<List<Note>> = _notes.asStateFlow()
 
     /** Notes loaded from Room via windowed paging. These live OUTSIDE _notes to avoid
      *  the in-memory cap. updateDisplayedNotes() appends these after the filtered
@@ -1161,7 +1202,7 @@ class NotesRepository private constructor() {
      * Room prewarm, full-list profile updates). The hot path (flushKind1Events)
      * updates the index incrementally instead of calling this.
      */
-    private fun setNotes(notes: ImmutableList<Note>) {
+    private fun setNotes(notes: List<Note>) {
         _notes.value = notes
         feedIndex.rebuild(notes)
     }
@@ -1214,7 +1255,7 @@ class NotesRepository private constructor() {
     private var isGlobalMode: Boolean = false
 
     /** In-memory snapshot of following notes saved before entering Global mode; restored instantly on return. */
-    private var followingNotesSnapshot: ImmutableList<Note> = persistentListOf()
+    private var followingNotesSnapshot: List<Note> = emptyList()
 
     /** Last applied kind-1 filter (authors) when Following was active; used on resume when follow list is temporarily empty so All notes do not bleed into Following. */
     @Volatile
@@ -1576,8 +1617,8 @@ class NotesRepository private constructor() {
                 }
                 if (cacheDropped > 0) MLog.w(TAG, "Feed cache: dropped $cacheDropped ancient events (>14d)")
                 if (notes.isNotEmpty() && _notes.value.isEmpty()) {
-                    setNotes(notes.toImmutableList())
-                    _displayedNotes.value = notes.toImmutableList()
+                    setNotes(notes.toList())
+                    _displayedNotes.value = notes.toList()
                     initialLoadComplete = true
                     val now = System.currentTimeMillis()
                     feedCutoffTimestampMs = now
@@ -2407,9 +2448,12 @@ class NotesRepository private constructor() {
             // Sync follow filter state
             wm.followFilterEnabled = followFilterEnabled
             wm.followPubkeys = authors ?: emptyList()
+            val expectedWindowFloorSec = untilSec - (PAGINATION_WINDOW_DAYS * 86_400L)
             scope.launch {
                 try {
-                    val roomNotes = wm.loadPage(untilSec)
+                    // Enforce the 7-day floor so we don't accidentally skip over empty weeks
+                    // and serve disjointed garbage from months ago when Room has gaps.
+                    val roomNotes = wm.loadPage(untilSec, floorSec = expectedWindowFloorSec)
                     if (roomNotes.isNotEmpty()) {
                         // Dedup against in-memory and existing Room-paginated notes
                         val existingMemIds = feedIndex.byId.keys

@@ -4,7 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandVertically
@@ -47,6 +50,7 @@ import androidx.compose.material.icons.outlined.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.SaveAlt
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
@@ -144,6 +148,28 @@ fun DiagnosticLogViewerScreen(
     var refreshTrigger by remember { mutableStateOf(0) }
     var menuExpanded by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
+    var pendingExportContent by remember { mutableStateOf<String?>(null) }
+
+    val saveFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri: Uri? ->
+        if (uri == null) { pendingExportContent = null; return@rememberLauncherForActivityResult }
+        val content = pendingExportContent ?: return@rememberLauncherForActivityResult
+        pendingExportContent = null
+        scope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(content.toByteArray()) }
+                    true
+                } catch (_: Exception) { false }
+            }
+            Toast.makeText(
+                context,
+                if (ok) "Saved ${content.length} chars" else "Save failed",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
 
     val activeGroup = remember(selectedGroup) {
         GroupTab.entries.firstOrNull { it.name == selectedGroup } ?: GroupTab.ALL
@@ -383,6 +409,22 @@ fun DiagnosticLogViewerScreen(
                                 },
                                 leadingIcon = {
                                     Icon(Icons.Outlined.Share, null, modifier = Modifier.size(20.dp))
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Save to file") },
+                                onClick = {
+                                    menuExpanded = false
+                                    scope.launch {
+                                        val export = withContext(Dispatchers.IO) { DiagnosticLog.buildExport() }
+                                        pendingExportContent = export
+                                        val ts = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US)
+                                            .format(java.util.Date())
+                                        saveFileLauncher.launch("mycelium_logs_$ts.txt")
+                                    }
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Outlined.SaveAlt, null, modifier = Modifier.size(20.dp))
                                 }
                             )
                             DropdownMenuItem(

@@ -122,6 +122,10 @@ object StartupOrchestrator {
     private var phase1Started = false
     @Volatile
     private var phase0Started = false
+    @Volatile
+    private var phase3Started = false
+    @Volatile
+    private var phase4Started = false
 
     /** Deferred that completes when Phase 1 is done. Callers can await it. */
     @Volatile
@@ -145,6 +149,8 @@ object StartupOrchestrator {
         _enrichmentStarted.value = false
         phase0Started = false
         phase1Started = false
+        phase3Started = false
+        phase4Started = false
         phase1Deferred = null
         logD( "Reset — all phases cleared (deep fetch stopped)")
     }
@@ -379,6 +385,32 @@ object StartupOrchestrator {
                 if (!followJob.isCompleted) logW("Phase 1: follow list timed out")
                 if (!muteJob.isCompleted) logW("Phase 1: mute list timed out")
 
+                // ── Pre-warm NIP-65 outbox relay cache for followed users ──
+                // Kick off the batch kind-10002 fetch NOW so that by the time
+                // Phase 3a starts outbox discovery, all relay data is already
+                // cached. This eliminates the 15s discovery delay that was
+                // causing the feed to start without outbox content.
+                val followedPubkeys = ContactListRepository.getCachedFollowList(userPubkey) ?: emptySet()
+                if (followedPubkeys.isNotEmpty()) {
+                    val indexerUrls = if (context != null) {
+                        social.mycelium.android.repository.relay.RelayStorageManager(context)
+                            .loadIndexerRelays(userPubkey).map { it.url }
+                    } else emptyList()
+                    if (indexerUrls.isNotEmpty()) {
+                        scope.launch {
+                            try {
+                                Nip65RelayListRepository.batchFetchRelayLists(
+                                    followedPubkeys.toList(), indexerUrls
+                                )
+                                logD("Phase 1: NIP-65 batch fetch complete for ${followedPubkeys.size} follows")
+                            } catch (e: Exception) {
+                                logE("Phase 1: NIP-65 batch fetch failed: ${e.message}")
+                            }
+                        }
+                        logD("Phase 1: NIP-65 batch fetch launched for ${followedPubkeys.size} follows (fire-and-forget)")
+                    }
+                }
+
                 // Fire-and-forget: people lists + hashtag interests (LOW priority, don't block feed)
                 PeopleListRepository.fetchPeopleLists(userPubkey, allUserRelayUrls, signer)
                 PeopleListRepository.fetchHashtagList(userPubkey, allUserRelayUrls)
@@ -434,6 +466,8 @@ object StartupOrchestrator {
         followedPubkeys: Set<String>,
         feedRelayUrls: List<String>,
     ) {
+        if (phase3Started) return
+        phase3Started = true
         _enrichmentStarted.value = true
         _currentPhase.value = StartupPhase.ENRICHMENT
         logD( "Phase 3: starting enrichment (sub-phased over ~8s)")
@@ -509,6 +543,8 @@ object StartupOrchestrator {
         indexerUrls: List<String>,
         context: Context? = null,
     ) {
+        if (phase4Started) return
+        phase4Started = true
         _currentPhase.value = StartupPhase.BACKGROUND
         logD( "Phase 4: starting background subscriptions")
 

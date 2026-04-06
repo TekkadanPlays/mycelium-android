@@ -301,11 +301,11 @@ private fun DashboardFeedContent(
                 val totalItems = info.totalItemsCount
                 val lastVisible = info.visibleItemsInfo.lastOrNull()?.index ?: 0
                 if (totalItems < 2) return@derivedStateOf false
-                // Trigger when the user is within the last 20% of the list OR within
-                // 5 items of the bottom — whichever comes first. This handles both
-                // large feeds (20% = 100 notes buffer in a 500-item list) and small
-                // feeds (5-item threshold ensures pagination fires even with 15 items).
-                val threshold = maxOf(5, totalItems / 5)
+                // Trigger when the user is within the last 25% of the list OR within
+                // 15 items of the bottom — whichever comes first. The earlier trigger
+                // ensures outbox relays (per-relay pagination) don't run dry before
+                // the user reaches the bottom. For a 200-item feed this fires at 150.
+                val threshold = maxOf(15, totalItems / 4)
                 lastVisible >= totalItems - threshold
             }
         }
@@ -1040,7 +1040,9 @@ fun DashboardScreen(
     }
 
     // When feed is visible, sync profile cache into notes so names/avatars render (e.g. after debug Fetch all or returning from profile)
+    // Also pause/resume auto-pagination to prevent heap pressure while offscreen.
     LaunchedEffect(isDashboardVisible) {
+        social.mycelium.android.repository.feed.NotesRepository.getInstance().setFeedVisible(isDashboardVisible)
         if (isDashboardVisible) {
             kotlinx.coroutines.delay(400)
             viewModel.syncFeedAuthorsFromCache()

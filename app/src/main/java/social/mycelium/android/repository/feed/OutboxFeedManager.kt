@@ -18,7 +18,12 @@ import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.relay.RelayDeliveryTracker
 import social.mycelium.android.relay.RelayHealthTracker
 import social.mycelium.android.relay.TemporarySubscriptionHandle
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import social.mycelium.android.repository.relay.Nip65RelayListRepository
 import social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository
 
@@ -51,7 +56,7 @@ import social.mycelium.android.repository.relay.Nip66RelayDiscoveryRepository
  * ## Connection budget
  * We cap outbox relays at [MAX_OUTBOX_RELAYS] to avoid opening hundreds of WebSockets.
  * Relays are ranked by how many followed authors publish there (most popular first).
- * The user's own inbox relays are excluded (already subscribed via main feed).
+ * No relays are excluded based on the user's own relay list — full outbox coverage.
  */
 class OutboxFeedManager private constructor() {
 
@@ -79,9 +84,14 @@ class OutboxFeedManager private constructor() {
     var currentRelayAssignment: Map<String, Set<String>> = emptyMap()
         private set
 
-    /** Callback to inject events into NotesRepository's ingestion pipeline. */
+    /** Callback to inject events into NotesRepository's ingestion pipeline (live subscription). */
     @Volatile
     var onNoteReceived: ((Event, String) -> Unit)? = null
+
+    /** Callback for pagination events — same pipeline but marked isPagination=true so
+     *  they bypass the age gate and can extend the feed into deep history. */
+    @Volatile
+    var onPaginationNoteReceived: ((Event, String) -> Unit)? = null
 
     // ── Observable state for UI / diagnostics ──
 
@@ -118,20 +128,61 @@ class OutboxFeedManager private constructor() {
     /** Per-relay note counter for outbox relays. */
     private val outboxRelayNoteCounts = ConcurrentHashMap<String, Int>()
 
+    /** Per-relay oldest event timestamp (epoch seconds) seen during the current subscription.
+     *  Used by auto-pagination to decide which relays likely have more history. */
+    private val perRelayOldestEventSec = ConcurrentHashMap<String, Long>()
+
+    /** Background job that auto-paginates outbox relays after the initial subscription settles. */
+    private var autoPaginationJob: Job? = null
+
+    /** When false, auto-pagination pauses to reduce heap pressure while the user
+     *  is away from the feed (e.g. in thread view, DMs, settings). Set by
+     *  [NotesRepository] when the dashboard composable enters/leaves composition. */
+    @Volatile
+    var feedVisible: Boolean = true
+
+    // ── Per-relay pagination state ──────────────────────────────────────────
+
+    /** Per-relay cursor: the `until` timestamp (seconds) for the next pagination page.
+     *  Initialized to the initial subscription's `since` (7 days ago) when the relay
+     *  first connects. Steps back by [PAGINATION_WINDOW_SECS] on each page. */
+    private val relayCursors = ConcurrentHashMap<String, Long>()
+
+    /** Per-relay exhaustion: consecutive empty windows for each relay.
+     *  When >= [RELAY_EXHAUSTION_THRESHOLD], the relay is excluded from future pagination. */
+    private val relayEmptyStreaks = ConcurrentHashMap<String, Int>()
+
+    /** Guard against concurrent pagination calls. */
+    private val paginationMutex = Mutex()
+
+    /** Active pagination handles — cancelled if a new pagination starts or stop() is called. */
+    private val paginationHandles = ConcurrentHashMap<String, TemporarySubscriptionHandle>()
+
+    /** True when pagination is in progress. */
+    private val _isPaginating = MutableStateFlow(false)
+    val isPaginating: StateFlow<Boolean> = _isPaginating.asStateFlow()
+
+    /** True when ALL outbox relays have exhausted their history. */
+    private val _paginationExhausted = MutableStateFlow(false)
+    val paginationExhausted: StateFlow<Boolean> = _paginationExhausted.asStateFlow()
+
     /**
      * Start outbox discovery and subscription for the given follow list.
+     * Connects to followed users' OUTBOX (write) relays to find their published
+     * content (kind-1, kind-6, kind-30023). Does NOT exclude any relays — even
+     * if a relay overlaps with the user's own relay list, it still needs outbox
+     * per-author subscriptions because the user's main subscription may not
+     * cover all followed authors on that relay.
      *
      * @param followedPubkeys  Set of hex pubkeys the user follows
      * @param indexerRelayUrls Indexer relay URLs to use for NIP-65 discovery
-     * @param inboxRelayUrls   The user's own inbox/subscription relays (excluded from outbox set)
      */
     /** Last follow set we started with — skip if unchanged to prevent redundant restarts. */
     @Volatile private var lastStartedFollowSet: Set<String>? = null
 
     fun start(
         followedPubkeys: Set<String>,
-        indexerRelayUrls: List<String>,
-        inboxRelayUrls: List<String>
+        indexerRelayUrls: List<String>
     ) {
         if (followedPubkeys.isEmpty()) {
             MLog.d(TAG, "No followed pubkeys — skipping outbox discovery")
@@ -165,8 +216,7 @@ class OutboxFeedManager private constructor() {
                 discoverOutboxRelays(followedPubkeys.toList(), indexerRelayUrls)
 
                 // Phase 2: Build relay→authors map and subscribe
-                val inboxSet = inboxRelayUrls.map { normalizeUrl(it) }.toSet()
-                subscribeToOutboxRelays(followedPubkeys, inboxSet)
+                subscribeToOutboxRelays(followedPubkeys)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 MLog.e(TAG, "Outbox feed failed: ${e.message}", e)
@@ -194,6 +244,16 @@ class OutboxFeedManager private constructor() {
         _discoveredAuthorCount.value = 0
         _activeOutboxRelays.value = emptyList()
         outboxRelayNoteCounts.clear()
+        // Reset per-relay pagination state
+        autoPaginationJob?.cancel()
+        autoPaginationJob = null
+        paginationHandles.values.forEach { it.cancel() }
+        paginationHandles.clear()
+        relayCursors.clear()
+        relayEmptyStreaks.clear()
+        perRelayOldestEventSec.clear()
+        _isPaginating.value = false
+        _paginationExhausted.value = false
         MLog.d(TAG, "Outbox feed stopped")
     }
 
@@ -246,12 +306,13 @@ class OutboxFeedManager private constructor() {
 
     /**
      * Phase 2: Build relay→authors map from cached outbox data, then subscribe.
-     * Excludes the user's own inbox relays (already covered by main feed subscription).
+     * Subscribes to ALL discovered write relays — no inbox exclusion. The user's
+     * own relays may overlap with outbox relays (e.g. relay.damus.io), but they
+     * still need per-author outbox subscriptions for full coverage.
      * Caps at [MAX_OUTBOX_RELAYS] sorted by author count (most popular relays first).
      */
     private fun subscribeToOutboxRelays(
-        followedPubkeys: Set<String>,
-        inboxRelayUrls: Set<String>
+        followedPubkeys: Set<String>
     ) {
         _phase.value = Phase.SUBSCRIBING
 
@@ -261,14 +322,12 @@ class OutboxFeedManager private constructor() {
             val outboxRelays = Nip65RelayListRepository.getCachedOutboxRelays(pubkey) ?: continue
             for (relayUrl in outboxRelays) {
                 val normalized = normalizeUrl(relayUrl)
-                // Skip relays we're already subscribed to via main feed
-                if (normalized in inboxRelayUrls) continue
                 relayToAuthors.getOrPut(normalized) { mutableSetOf() }.add(pubkey)
             }
         }
 
         if (relayToAuthors.isEmpty()) {
-            MLog.d(TAG, "No additional outbox relays to subscribe to (all covered by inbox)")
+            MLog.d(TAG, "No outbox relays discovered — cannot subscribe")
             _phase.value = Phase.ACTIVE
             return
         }
@@ -395,16 +454,16 @@ class OutboxFeedManager private constructor() {
         val uncoveredAuthors = followedPubkeys.filter { pk ->
             pk !in coveredByOutbox && Nip65RelayListRepository.getCachedOutboxRelays(pk).isNullOrEmpty()
         }
-        val coveredByInboxOnly = followedPubkeys.filter { pk ->
+        val uncoveredButHaveRelays = followedPubkeys.filter { pk ->
             pk !in coveredByOutbox && !Nip65RelayListRepository.getCachedOutboxRelays(pk).isNullOrEmpty()
         }
         if (uncoveredAuthors.isNotEmpty()) {
             MLog.w(TAG, "⚠️ ${uncoveredAuthors.size} followed authors have NO outbox relay (no NIP-65): ${uncoveredAuthors.take(10).joinToString { it.take(8) + "…" }}")
         }
-        if (coveredByInboxOnly.isNotEmpty()) {
-            MLog.w(TAG, "⚠️ ${coveredByInboxOnly.size} followed authors' outbox relays not in selected set (rely on inbox only): ${coveredByInboxOnly.take(10).joinToString { it.take(8) + "…" }}")
+        if (uncoveredButHaveRelays.isNotEmpty()) {
+            MLog.w(TAG, "⚠️ ${uncoveredButHaveRelays.size} followed authors' outbox relays not in selected set (relay cap): ${uncoveredButHaveRelays.take(10).joinToString { it.take(8) + "…" }}")
         }
-        MLog.d(TAG, "Coverage: ${coveredByOutbox.size}/${followedPubkeys.size} via outbox, ${followedPubkeys.size - uncoveredAuthors.size - coveredByInboxOnly.size} via inbox overlap")
+        MLog.d(TAG, "Coverage: ${coveredByOutbox.size}/${followedPubkeys.size} via outbox, ${uncoveredAuthors.size} no NIP-65, ${uncoveredButHaveRelays.size} capped out")
 
         // Phase 5: Self-healing — add indexer fallback for chronically missed authors
         val missedAuthors = RelayDeliveryTracker.getMissedAuthors()
@@ -514,6 +573,8 @@ class OutboxFeedManager private constructor() {
             return
         }
 
+        perRelayOldestEventSec.clear()
+
         outboxHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
             relayFilters = authGuardedFilters.mapValues { it.value },
             priority = SubscriptionPriority.NORMAL,
@@ -522,6 +583,8 @@ class OutboxFeedManager private constructor() {
                 _outboxNotesReceived.value = _outboxNotesReceived.value + 1
                 // Track which authors delivered events (for relay attribution)
                 deliveredAuthors.add(event.pubKey)
+                // Track per-relay oldest event for auto-pagination decisions
+                perRelayOldestEventSec.merge(relayUrl, event.createdAt) { old, new -> minOf(old, new) }
                 // Track per-relay note counts for transparency
                 val newCount = outboxRelayNoteCounts.merge(relayUrl, 1) { old, inc -> old + inc } ?: 1
                 _activeOutboxRelays.value = _activeOutboxRelays.value.map { state ->
@@ -534,6 +597,16 @@ class OutboxFeedManager private constructor() {
         }
 
         _phase.value = Phase.ACTIVE
+
+        // Initialize per-relay pagination cursors: each relay starts at the
+        // initial subscription's `since` boundary. Pagination steps backward from here.
+        val initialSince = System.currentTimeMillis() / 1000 - SINCE_WINDOW_SECS
+        for (relayUrl in authGuardedFilters.keys) {
+            relayCursors[relayUrl] = initialSince
+            relayEmptyStreaks[relayUrl] = 0
+        }
+        _paginationExhausted.value = false
+
         MLog.d(TAG, "Outbox subscriptions active: ${authGuardedFilters.size} relays" +
             if (removedByAuthGuard > 0) " ($removedByAuthGuard auth-required relays blocked)" else "")
 
@@ -551,6 +624,188 @@ class OutboxFeedManager private constructor() {
 
         // Schedule delivery measurement after events have had time to arrive
         scheduleDeliveryMeasurement()
+
+        // ── Auto-pagination: continuously fetch older content in the background ──
+        // After the initial subscription settles, relays that returned events likely
+        // have more history. Automatically paginate them one window at a time so the
+        // user never hits a cliff. Each relay independently steps back by 1 week.
+        autoPaginationJob?.cancel()
+        autoPaginationJob = scope.launch {
+            // Wait for initial events to settle before starting auto-pagination
+            delay(AUTO_PAGINATION_INITIAL_DELAY_MS)
+            MLog.d(TAG, "Auto-pagination starting: ${perRelayOldestEventSec.size} relays delivered events")
+
+            while (!_paginationExhausted.value) {
+                try {
+                    // Pause when user navigates away from feed (thread view, DMs, etc.)
+                    // to prevent unbounded roomTail growth and heap pressure.
+                    if (!feedVisible) {
+                        delay(2_000L)
+                        continue
+                    }
+                    val events = paginateOlderNotes()
+                    if (events.isEmpty() && !_paginationExhausted.value) {
+                        delay(AUTO_PAGINATION_INTERVAL_MS * 2)
+                    } else if (events.isNotEmpty()) {
+                        delay(AUTO_PAGINATION_INTERVAL_MS)
+                    }
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    MLog.e(TAG, "Auto-pagination cycle failed: ${e.message}")
+                    delay(AUTO_PAGINATION_INTERVAL_MS * 3)
+                }
+            }
+            MLog.d(TAG, "Auto-pagination finished: all relays exhausted")
+        }
+    }
+
+    // ── Per-relay pagination ──────────────────────────────────────────────────
+
+    /**
+     * Paginate older notes from outbox relays. Each relay independently steps back
+     * one [PAGINATION_WINDOW_SECS] window from its own cursor. Relays that have
+     * exhausted their history ([RELAY_EXHAUSTION_THRESHOLD] consecutive empty windows)
+     * are skipped.
+     *
+     * @return List of (Event, relayUrl) pairs for NotesRepository to ingest.
+     *         Empty if all relays are exhausted or pagination is already in progress.
+     */
+    suspend fun paginateOlderNotes(): List<Pair<Event, String>> {
+        if (_phase.value != Phase.ACTIVE) return emptyList()
+        if (_paginationExhausted.value) return emptyList()
+
+        return paginationMutex.withLock {
+            _isPaginating.value = true
+            try {
+                paginateOlderNotesInternal()
+            } finally {
+                _isPaginating.value = false
+            }
+        }
+    }
+
+    private suspend fun paginateOlderNotesInternal(): List<Pair<Event, String>> {
+        val assignment = currentRelayAssignment
+        if (assignment.isEmpty()) return emptyList()
+
+        // Filter to relays that haven't exhausted their history
+        val activeRelays = assignment.keys.filter { url ->
+            val streak = relayEmptyStreaks[url] ?: 0
+            streak < RELAY_EXHAUSTION_THRESHOLD
+        }
+
+        if (activeRelays.isEmpty()) {
+            _paginationExhausted.value = true
+            MLog.d(TAG, "Pagination: all ${assignment.size} outbox relays exhausted")
+            return emptyList()
+        }
+
+        // Build per-relay filters: each relay gets its own time window based on its cursor
+        val perRelayFilters = mutableMapOf<String, List<Filter>>()
+        val perRelayWindows = mutableMapOf<String, Pair<Long, Long>>() // relayUrl → (since, until)
+
+        for (relayUrl in activeRelays) {
+            val cursor = relayCursors[relayUrl] ?: continue
+            val windowUntil = cursor
+            val windowSince = cursor - PAGINATION_WINDOW_SECS
+
+            val authors = assignment[relayUrl]?.toList() ?: continue
+            if (authors.isEmpty()) continue
+
+            perRelayFilters[relayUrl] = listOf(
+                Filter(
+                    kinds = listOf(1),
+                    authors = authors,
+                    since = windowSince,
+                    until = windowUntil,
+                    limit = PAGINATION_PER_RELAY_LIMIT
+                )
+            )
+            perRelayWindows[relayUrl] = windowSince to windowUntil
+        }
+
+        if (perRelayFilters.isEmpty()) return emptyList()
+
+        MLog.d(TAG, "Pagination: fetching from ${perRelayFilters.size} relays " +
+            "(${assignment.size - activeRelays.size} exhausted)")
+
+        // Fire per-relay subscriptions and collect events
+        val collectedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
+        val perRelayEventCount = ConcurrentHashMap<String, AtomicInteger>()
+        val lastEventAt = AtomicLong(0)
+
+        // Cancel any prior pagination handles
+        paginationHandles.values.forEach { it.cancel() }
+        paginationHandles.clear()
+
+        val handle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
+            relayFilters = perRelayFilters,
+            priority = SubscriptionPriority.HIGH,
+        ) { event, relayUrl ->
+            if (event.kind == 1) {
+                lastEventAt.set(System.currentTimeMillis())
+                perRelayEventCount.getOrPut(relayUrl) { AtomicInteger(0) }.incrementAndGet()
+                collectedEvents.add(event to relayUrl)
+            }
+        }
+
+        // Settle-based wait: break early when stream goes quiet
+        val deadline = System.currentTimeMillis() + PAGINATION_TIMEOUT_MS
+        while (System.currentTimeMillis() < deadline) {
+            delay(300)
+            val lastAt = lastEventAt.get()
+            if (lastAt > 0) {
+                val quietMs = System.currentTimeMillis() - lastAt
+                if (quietMs >= PAGINATION_SETTLE_MS) break
+            }
+        }
+        handle.cancel()
+
+        // Update per-relay cursors and exhaustion streaks
+        var totalReceived = 0
+        val relayStats = mutableListOf<String>()
+        for (relayUrl in perRelayFilters.keys) {
+            val count = perRelayEventCount[relayUrl]?.get() ?: 0
+            totalReceived += count
+            val (windowSince, _) = perRelayWindows[relayUrl] ?: continue
+
+            // Step cursor back to this window's `since` for the next page
+            relayCursors[relayUrl] = windowSince
+
+            if (count == 0) {
+                val newStreak = (relayEmptyStreaks[relayUrl] ?: 0) + 1
+                relayEmptyStreaks[relayUrl] = newStreak
+                if (newStreak >= RELAY_EXHAUSTION_THRESHOLD) {
+                    relayStats.add("${relayUrl.removePrefix("wss://").removeSuffix("/").takeLast(20)}=0(exhausted)")
+                }
+            } else {
+                relayEmptyStreaks[relayUrl] = 0
+                relayStats.add("${relayUrl.removePrefix("wss://").removeSuffix("/").takeLast(20)}=$count")
+            }
+        }
+
+        // Check if ALL relays are now exhausted
+        val allExhausted = assignment.keys.all { url ->
+            (relayEmptyStreaks[url] ?: 0) >= RELAY_EXHAUSTION_THRESHOLD
+        }
+        if (allExhausted) {
+            _paginationExhausted.value = true
+        }
+
+        // Inject into NotesRepository via pagination callback (isPagination=true)
+        // so these older events bypass the age gate and extend feed history.
+        val paginationCallback = onPaginationNoteReceived ?: onNoteReceived
+        if (paginationCallback != null) {
+            for ((event, relayUrl) in collectedEvents) {
+                paginationCallback(event, relayUrl)
+            }
+        }
+
+        MLog.d(TAG, "Pagination: +$totalReceived events from ${perRelayFilters.size} relays" +
+            if (allExhausted) " (ALL EXHAUSTED)" else "" +
+            " | ${relayStats.take(5).joinToString()}")
+
+        return collectedEvents.toList()
     }
 
     /**
@@ -630,6 +885,35 @@ class OutboxFeedManager private constructor() {
         /** Extra relay slots beyond MAX_OUTBOX_RELAYS for per-author diversity coverage.
          *  Raised from 4→8 to ensure niche-relay authors aren't left uncovered. */
         private const val DIVERSITY_BUDGET = 8
+
+        // ── Per-relay pagination constants ──
+
+        /** Width of each pagination window (seconds). Each relay steps back by this amount. */
+        private const val PAGINATION_WINDOW_SECS = 7 * 24 * 3600L
+
+        /** Per-relay note limit for pagination requests. */
+        private const val PAGINATION_PER_RELAY_LIMIT = 50
+
+        /** Max wait for pagination subscription before cancelling. */
+        private const val PAGINATION_TIMEOUT_MS = 12_000L
+
+        /** Quiet period after last event before considering the pagination page complete. */
+        private const val PAGINATION_SETTLE_MS = 3_000L
+
+        /** Consecutive empty weekly windows before a relay is considered exhausted.
+         *  4 weeks = ~1 month of empty history before giving up on that relay. */
+        private const val RELAY_EXHAUSTION_THRESHOLD = 4
+
+        // ── Auto-pagination constants ──
+
+        /** Delay after initial outbox subscription before starting auto-pagination.
+         *  Gives the initial 1w window time to deliver events so we can judge
+         *  which relays have more history. */
+        private const val AUTO_PAGINATION_INITIAL_DELAY_MS = 15_000L
+
+        /** Interval between auto-pagination cycles. Each cycle fetches one 1w window
+         *  per active relay. Staggered to avoid hammering relays and SQLite. */
+        private const val AUTO_PAGINATION_INTERVAL_MS = 10_000L
 
         @Volatile
         private var instance: OutboxFeedManager? = null

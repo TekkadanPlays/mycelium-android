@@ -13,6 +13,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -78,7 +79,10 @@ class ProfileMetadataCache {
         private const val DISK_CACHE_MAX = 1500
 
         /** Debounce delay before writing profile cache to disk after an update. */
-        private const val DISK_SAVE_DEBOUNCE_MS = 2000L
+        private const val DISK_SAVE_DEBOUNCE_MS = 10_000L
+
+        /** Minimum interval between actual disk writes (prevents burst save storm). */
+        private const val DISK_SAVE_MIN_INTERVAL_MS = 30_000L
 
         /** Profiles older than this are considered stale and will be re-fetched when encountered. */
         private const val PROFILE_TTL_MS = 7L * 24 * 60 * 60 * 1000 // 7 days
@@ -154,6 +158,14 @@ class ProfileMetadataCache {
     private val diskSaveMutex = kotlinx.coroutines.sync.Mutex()
     @Volatile
     private var diskDirtyAfterSave = false
+
+    /** Wall-clock time of last completed disk save. Used to enforce minimum interval. */
+    @Volatile
+    private var lastDiskSaveMs = 0L
+
+    /** Pubkeys whose profile or NIP-65 data changed since the last disk save.
+     *  Allows incremental upsert instead of full-snapshot serialization. */
+    private val dirtyPubkeys = Collections.synchronizedSet(mutableSetOf<String>())
 
     /** Pubkeys (lowercase) that should not be evicted by LRU when under HARD_CAP (e.g. follow list). */
     private val pinnedPubkeys = Collections.synchronizedSet(mutableSetOf<String>())
@@ -253,7 +265,9 @@ class ProfileMetadataCache {
 
     /** Store outbox relay URLs for a user (NIP-65 write relays). */
     fun setOutboxRelays(pubkey: String, relayUrls: List<String>) {
-        outboxRelayCache[normalizeKey(pubkey)] = relayUrls
+        val key = normalizeKey(pubkey)
+        outboxRelayCache[key] = relayUrls
+        dirtyPubkeys.add(key)
         scheduleDiskSave()
     }
 
@@ -297,7 +311,10 @@ class ProfileMetadataCache {
         }
         if (dataChanged) _profileVersion.value++
         // Only write to disk when the profile data actually changed
-        if (dataChanged) scheduleDiskSave()
+        if (dataChanged) {
+            dirtyPubkeys.add(key)
+            scheduleDiskSave()
+        }
         // Auto-trigger NIP-05 verification when profile has nip05 field
         author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
             social.mycelium.android.repository.social.Nip05Verifier.verify(key, nip05)
@@ -314,6 +331,7 @@ class ProfileMetadataCache {
         scope.launch {
             _profileUpdated.emit(key)
         }
+        dirtyPubkeys.add(key)
         scheduleDiskSave()
         // Auto-trigger NIP-05 verification when profile has nip05 field
         author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
@@ -641,23 +659,28 @@ class ProfileMetadataCache {
     /** Schedule a debounced save after a profile update. */
     private fun scheduleDiskSave() {
         if (appContext == null) return
-        // If a save is already in progress, mark dirty so it does one more pass after finishing
-        if (diskSaveMutex.isLocked) {
+        // If a save is already in progress or scheduled, just mark dirty —
+        // the running job will do one more pass after finishing.
+        if (diskSaveMutex.isLocked || diskSaveJob?.isActive == true) {
             diskDirtyAfterSave = true
             return
         }
         diskSaveJob?.cancel()
         diskSaveJob = scope.launch {
-            delay(DISK_SAVE_DEBOUNCE_MS)
-            if (diskSaveMutex.tryLock()) {
-                try {
-                    do {
-                        diskDirtyAfterSave = false
-                        saveProfileCacheToDisk()
-                    } while (diskDirtyAfterSave)
-                } finally {
-                    diskSaveMutex.unlock()
-                }
+            // Enforce minimum interval between saves to prevent burst storm
+            val sinceLast = System.currentTimeMillis() - lastDiskSaveMs
+            val effectiveDelay = maxOf(DISK_SAVE_DEBOUNCE_MS, DISK_SAVE_MIN_INTERVAL_MS - sinceLast)
+            delay(effectiveDelay)
+            diskSaveMutex.withLock {
+                do {
+                    diskDirtyAfterSave = false
+                    saveProfileCacheToDisk()
+                    lastDiskSaveMs = System.currentTimeMillis()
+                    if (diskDirtyAfterSave) {
+                        // Re-enforce min interval before next iteration
+                        delay(DISK_SAVE_MIN_INTERVAL_MS)
+                    }
+                } while (diskDirtyAfterSave)
             }
         }
     }
@@ -704,17 +727,10 @@ class ProfileMetadataCache {
                         }
                     }
                     MLog.d(TAG, "Restored ${profileEntities.size} profiles from Room DB (${restoredKeys.size} new)")
-                    // Trigger NIP-05 verification for restored profiles so badges
-                    // appear on cold start without waiting for relay-fetched kind-0.
-                    var nip05Count = 0
-                    for (key in restoredKeys) {
-                        val author = cache[key] ?: continue
-                        author.nip05?.takeIf { it.isNotBlank() }?.let { nip05 ->
-                            social.mycelium.android.repository.social.Nip05Verifier.verify(key, nip05)
-                            nip05Count++
-                        }
-                    }
-                    if (nip05Count > 0) MLog.d(TAG, "Queued $nip05Count NIP-05 verifications for disk-restored profiles")
+                    // NIP-05 verification deferred — badges are cosmetic and firing
+                    // hundreds of HTTP requests at cold start competes with relay
+                    // connections, causing memory pressure. Profiles get verified
+                    // lazily when relay-fetched kind-0 arrives via putProfileIfNewer().
                     _diskCacheRestored.value = true
                     return@withContext
                 }
@@ -802,54 +818,62 @@ class ProfileMetadataCache {
         }
     }
 
+    /** Counter for periodic full prune (every Nth incremental save). */
+    @Volatile private var incrementalSaveCount = 0
+
     private suspend fun saveProfileCacheToDisk() {
         val database = db ?: return
         withContext(Dispatchers.IO) {
             try {
-                val snapshot: Map<String, Author>
-                val fetchedAtSnapshot: Map<String, Long>
-                val outboxSnapshot: Map<String, List<String>>
-                synchronized(cache) {
-                    val pinned = cache.entries.filter { it.key in pinnedPubkeys }
-                    val rest = cache.entries.filter { it.key !in pinnedPubkeys }
-                    val combined = (pinned + rest).takeLast(DISK_CACHE_MAX)
-                    val keys = combined.map { it.key }.toSet()
-                    snapshot = combined.associate { it.key to it.value }
-                    fetchedAtSnapshot = combined.mapNotNull { entry ->
-                        profileFetchedAt[entry.key]?.let { entry.key to it }
-                    }.toMap()
-                    outboxSnapshot = outboxRelayCache.filter { it.key in keys }
+                // Drain dirty set atomically — new mutations will accumulate in a fresh set
+                val dirty: Set<String>
+                synchronized(dirtyPubkeys) {
+                    dirty = dirtyPubkeys.toSet()
+                    dirtyPubkeys.clear()
                 }
+                if (dirty.isEmpty()) return@withContext
 
-                val profileEntities = snapshot.map { (key, author) ->
-                    social.mycelium.android.db.CachedProfileEntity(
-                        pubkey = key,
-                        displayName = author.displayName,
-                        username = author.username,
-                        avatarUrl = author.avatarUrl,
-                        about = author.about,
-                        nip05 = author.nip05,
-                        website = author.website,
-                        lud16 = author.lud16,
-                        banner = author.banner,
-                        pronouns = author.pronouns,
-                        updatedAt = fetchedAtSnapshot[key] ?: System.currentTimeMillis()
+                // Incremental: only serialize and upsert profiles that actually changed
+                val profileEntities = ArrayList<social.mycelium.android.db.CachedProfileEntity>(dirty.size)
+                val nip65Entities = ArrayList<social.mycelium.android.db.CachedNip65Entity>()
+                for (key in dirty) {
+                    val author = cache[key] ?: continue
+                    profileEntities.add(
+                        social.mycelium.android.db.CachedProfileEntity(
+                            pubkey = key,
+                            displayName = author.displayName,
+                            username = author.username,
+                            avatarUrl = author.avatarUrl,
+                            about = author.about,
+                            nip05 = author.nip05,
+                            website = author.website,
+                            lud16 = author.lud16,
+                            banner = author.banner,
+                            pronouns = author.pronouns,
+                            updatedAt = profileFetchedAt[key] ?: System.currentTimeMillis()
+                        )
                     )
-                }
-                val nip65Entities = outboxSnapshot.map { (key, relays) ->
-                    social.mycelium.android.db.CachedNip65Entity(
-                        pubkey = key,
-                        writeRelays = relays.joinToString(","),
-                        readRelays = ""
-                    )
+                    outboxRelayCache[key]?.let { relays ->
+                        nip65Entities.add(
+                            social.mycelium.android.db.CachedNip65Entity(
+                                pubkey = key,
+                                writeRelays = relays.joinToString(","),
+                                readRelays = ""
+                            )
+                        )
+                    }
                 }
                 if (profileEntities.isNotEmpty()) database.profileDao().upsertAll(profileEntities)
                 if (nip65Entities.isNotEmpty()) database.nip65Dao().upsertAll(nip65Entities)
-                // Prune stale entries older than 30 days
-                val pruneMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
-                database.profileDao().deleteOlderThan(pruneMs)
-                database.nip65Dao().deleteOlderThan(pruneMs)
-                MLog.d(TAG, "Saved ${profileEntities.size} profiles, ${nip65Entities.size} NIP-65 sets to Room DB")
+
+                // Periodic prune: every 10th save, clean stale entries older than 30 days
+                incrementalSaveCount++
+                if (incrementalSaveCount % 10 == 0) {
+                    val pruneMs = System.currentTimeMillis() - 30L * 24 * 60 * 60 * 1000
+                    database.profileDao().deleteOlderThan(pruneMs)
+                    database.nip65Dao().deleteOlderThan(pruneMs)
+                }
+                MLog.d(TAG, "Saved ${profileEntities.size} profiles, ${nip65Entities.size} NIP-65 sets to Room DB (incremental)")
             } catch (e: Exception) {
                 MLog.e(TAG, "Save profile cache to Room DB failed: ${e.message}", e)
             }

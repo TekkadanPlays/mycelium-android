@@ -34,6 +34,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -199,6 +201,13 @@ class NotesRepository private constructor() {
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             kind1Dirty.set(true)
         }
+        // Outbox pagination events use isPagination=true so they bypass the age gate
+        // and can extend the feed into deep history (weeks/months back).
+        outboxFeedManager.onPaginationNoteReceived = { event, relayUrl ->
+            EventRelayTracker.addRelay(event.id, relayUrl)
+            pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = true, isOutbox = true))
+            kind1Dirty.set(true)
+        }
         // Wire global feed enrichment events (hashtag/list indexer subscriptions) into the pipeline.
         globalFeedManager.onNoteReceived = { event, relayUrl ->
             MLog.d(TAG, "\uD83C\uDF0D Global enrichment event: ${event.id.take(8)} from $relayUrl")
@@ -225,8 +234,7 @@ class NotesRepository private constructor() {
         }
         outboxFeedManager.start(
             followedPubkeys = followedPubkeys,
-            indexerRelayUrls = indexerRelayUrls,
-            inboxRelayUrls = subscriptionRelays
+            indexerRelayUrls = indexerRelayUrls
         )
     }
 
@@ -333,95 +341,59 @@ class NotesRepository private constructor() {
 
         val flushStartMs = System.currentTimeMillis()
         android.os.Trace.beginSection("NotesRepo.flushKind1Events(${batch.size})")
+
+        // ════════════════════════════════════════════════════════════════════
+        // THREE-PHASE PIPELINE: Triage (mutex) → Convert (parallel) → Merge (mutex)
+        //
+        // Phase 1 holds the mutex only for cheap O(1) dedup/filter checks using
+        // event IDs and pubkeys — no regex, no JSON parsing, no allocations.
+        // Phase 2 runs convertEventToNote() in parallel across CPU cores,
+        // outside the mutex, so other coroutines aren't blocked.
+        // Phase 3 re-acquires the mutex to merge Notes into _notes/feedIndex.
+        // ════════════════════════════════════════════════════════════════════
+
+        // Outputs from Phase 1 (populated under mutex, consumed after release)
+        val acceptedEvents = mutableListOf<PendingKind1Event>()
+        val acceptedIds = HashSet<String>()
+        val relayUpdates = mutableMapOf<String, List<String>>()
+        val kind6Batch = mutableListOf<PendingKind1Event>()
+        val outboxNoteIds = HashSet<String>()
+        var existingArticleKeysCopy = emptyMap<String, Long>()
+
+        // ── PHASE 1: Triage (under mutex — cheap O(1) checks only) ──────────
         processEventMutex.withLock {
-        try {
-            // Convert all events to Notes (no lock needed — convertEventToNote is stateless except profile cache)
-            val newNotes = mutableListOf<Note>()
-            val newNoteIds = HashSet<String>() // O(1) dedup within batch
-            val relayUpdates = mutableMapOf<String, List<String>>() // noteId -> merged relayUrls
-            val currentNotes = _notes.value
-            // O(1) lookups from persistent FeedIndex — replaces per-flush O(n) rebuilds
             val currentIds = feedIndex.byId
             val pendingIds = synchronized(pendingNotesLock) { pendingIndex.ids.toSet() }
-            // Set of original note IDs that are already represented as reposts (for fast dedup)
             val repostedOriginalIds = buildSet(feedIndex.repostedOriginalIds.size + synchronized(pendingNotesLock) { pendingIndex.repostOriginals.size }) {
                 addAll(feedIndex.repostedOriginalIds)
                 synchronized(pendingNotesLock) { addAll(pendingIndex.repostOriginals) }
             }
-            // Kind 30023 (NIP-23 articles) are parameterized replaceable: same author + d-tag = same article.
-            // Track existing articles by author:dTag so updated versions replace older ones.
             val existingArticleKeys = feedIndex.articleKeys.toMutableMap()
 
-            // Age gate: events from the main subscription older than the feed floor are
-            // silently dropped. Only loadOlderNotes (isPagination=true) may introduce older
-            // notes. This prevents relays that ignore `since` from contaminating the feed
-            // with ancient notes that corrupt the pagination cursor.
-            val ageFloorMs = feedAgeFloorMs
-            // Hard absolute floor: always reject events older than 14 days regardless of
-            // mainSubscriptionFloorMs init state. This is the safety net for the race where
-            // events arrive before the subscription sets the floor (e.g. late prewarm echo).
-            val absoluteFloorMs = System.currentTimeMillis() - 14L * 86_400_000L
-            var ageGateDropped = 0
-            // Track which note IDs came from outbox events so they bypass the cutoff gate
-            val outboxNoteIds = HashSet<String>()
-
-            // Diagnostic: count duplicate event IDs in this batch (same event from different relays)
-            val batchEventIds = batch.filter { it.event.kind in listOf(1, 11, 1111, 1068, 6969, 30023) }
-            val uniqueEventIds = batchEventIds.map { it.event.id }.toSet()
-            val duplicateCount = batchEventIds.size - uniqueEventIds.size
-            if (batchEventIds.isNotEmpty()) {
-                val relayDistribution = batchEventIds.groupBy { it.relayUrl }.mapValues { it.value.size }
-                MLog.d(TAG, "\uD83D\uDD35 BATCH: ${batchEventIds.size} events, ${uniqueEventIds.size} unique, $duplicateCount dupes, relays=${relayDistribution.entries.joinToString { "${it.key.takeLast(25)}=${it.value}" }}")
+            // Diagnostic: count duplicate event IDs in this batch
+            if (BuildConfig.DEBUG) {
+                val batchEventIds = batch.filter { it.event.kind in listOf(1, 11, 1111, 1068, 6969, 30023) }
+                val uniqueEventIds = batchEventIds.map { it.event.id }.toSet()
+                val duplicateCount = batchEventIds.size - uniqueEventIds.size
+                if (batchEventIds.isNotEmpty()) {
+                    val relayDistribution = batchEventIds.groupBy { it.relayUrl }.mapValues { it.value.size }
+                    MLog.d(TAG, "\uD83D\uDD35 BATCH: ${batchEventIds.size} events, ${uniqueEventIds.size} unique, $duplicateCount dupes, relays=${relayDistribution.entries.joinToString { "${it.key.takeLast(25)}=${it.value}" }}")
+                }
             }
 
-            // Separate kind-6/16 reposts for batch processing after kind-1
-            val kind6Batch = mutableListOf<PendingKind1Event>()
             for (pending in batch) {
                 val event = pending.event
                 val relayUrl = pending.relayUrl
                 val isPagination = pending.isPagination
                 val isOutbox = pending.isOutbox
-                // Route kind-6/16 reposts to batch handler (processed below, same mutex)
-                // Apply age gate to reposts too — use the repost timestamp (event.createdAt),
-                // not the embedded original note's timestamp, since that's when the boost happened.
+
+                // Route kind-6/16 reposts to batch handler
                 if (event.kind == 6 || event.kind == 16) {
-                    val repostMs = event.createdAt * 1000L
-                    // Hard floor: reject non-pagination reposts older than 14 days
-                    if (!isPagination && repostMs < absoluteFloorMs) { ageGateDropped++; continue }
-                    if (!isPagination && mainSubscriptionFloorMs > 0L && repostMs < mainSubscriptionFloorMs) {
-                        ageGateDropped++
-                        continue
-                    }
-                    if (isPagination && ageFloorMs > 0L && repostMs < ageFloorMs) {
-                        ageGateDropped++
-                        continue
-                    }
                     kind6Batch.add(pending)
                     continue
                 }
                 if (event.kind != 1 && event.kind != 30023 && event.kind != 1068 && event.kind != 6969) continue
-                // Accumulate relay URL in tracker — builds up across duplicate deliveries
                 if (relayUrl.isNotBlank()) EventRelayTracker.addRelay(event.id, relayUrl)
-
-                // Age gate: separate floors for live vs pagination events.
-                // Live subscription uses the fixed mainSubscriptionFloorMs so pagination
-                // can't widen the window for the main feed. Pagination events use the
-                // progressively-lowered feedAgeFloorMs.
-                // Outbox events use the same mainSubscriptionFloorMs as live events —
-                // they represent recent notes from followed users' write relays, not
-                // historical content. Ancient events from outbox relays that ignore
-                // `since` are dropped here.
-                val eventMs = event.createdAt * 1000L
-                // Hard floor: reject non-pagination events older than 14 days
-                if (!isPagination && eventMs < absoluteFloorMs) { ageGateDropped++; continue }
-                if (!isPagination && mainSubscriptionFloorMs > 0L && eventMs < mainSubscriptionFloorMs) {
-                    ageGateDropped++
-                    continue
-                }
-                if (isPagination && ageFloorMs > 0L && eventMs < ageFloorMs) {
-                    ageGateDropped++
-                    continue
-                }
 
                 if (isOutbox) {
                     outboxNoteIds.add(event.id)
@@ -429,11 +401,9 @@ class NotesRepository private constructor() {
                 }
 
                 // ── Pre-conversion dedup: all checks use event.id (no regex) ──
-                // Normalize relay URL once (cheap string op — no regex, no Bech32)
-                // This replaces the full convertEventToNote call for duplicate events.
                 val newUrl = relayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
 
-                // 1. Repost composite exists in feed — relay merge only
+                // 1. Repost composite exists in feed
                 val repostId = "repost:${event.id}"
                 val existingRepost = currentIds[repostId]
                 if (existingRepost != null) {
@@ -441,12 +411,11 @@ class NotesRepository private constructor() {
                         val existingUrls = existingRepost.relayUrls.ifEmpty { listOfNotNull(existingRepost.relayUrl) }
                         if (newUrl !in existingUrls) {
                             relayUpdates[repostId] = (existingUrls + newUrl)
-                            MLog.d(TAG, "\uD83D\uDD35 Relay merge into repost: ${repostId.take(16)} += $newUrl")
                         }
                     }
                     continue
                 }
-                // 2. Repost composite exists in pending — relay merge only
+                // 2. Repost composite exists in pending
                 if (pendingIds.contains(repostId)) {
                     if (newUrl != null && newUrl.isNotBlank()) {
                         synchronized(pendingNotesLock) {
@@ -464,7 +433,7 @@ class NotesRepository private constructor() {
                     }
                     continue
                 }
-                // 3. Original note already represented as repost — relay merge only
+                // 3. Original note already represented as repost
                 if (event.id in repostedOriginalIds) {
                     if (newUrl != null && newUrl.isNotBlank()) {
                         val repostNoteId = feedIndex.repostOriginalToComposite[event.id]
@@ -478,7 +447,7 @@ class NotesRepository private constructor() {
                     }
                     continue
                 }
-                // 4. Locally-published event echo — relay merge only
+                // 4. Locally-published event echo
                 if (locallyPublishedIds.contains(event.id)) {
                     val existingLocal = currentIds[event.id]
                     if (existingLocal != null) {
@@ -489,17 +458,16 @@ class NotesRepository private constructor() {
                     }
                     continue
                 }
-                // 5. Already in feed — relay merge only
+                // 5. Already in feed
                 val existing = currentIds[event.id]
                 if (existing != null) {
                     val existingUrls = existing.relayUrls.ifEmpty { listOfNotNull(existing.relayUrl) }
                     if (newUrl != null && newUrl.isNotBlank() && newUrl !in existingUrls) {
                         relayUpdates[event.id] = existingUrls + newUrl
-                        MLog.d(TAG, "\uD83D\uDD35 Relay merge: ${event.id.take(8)} += $newUrl")
                     }
                     continue
                 }
-                // 6. Already in pending — relay merge only
+                // 6. Already in pending
                 if (pendingIds.contains(event.id)) {
                     if (newUrl != null && newUrl.isNotBlank()) {
                         synchronized(pendingNotesLock) {
@@ -517,22 +485,10 @@ class NotesRepository private constructor() {
                     }
                     continue
                 }
-                // 7. Already in this batch — relay merge only
-                if (event.id in newNoteIds) {
-                    if (newUrl != null && newUrl.isNotBlank()) {
-                        val batchIdx = newNotes.indexOfFirst { it.id == event.id }
-                        if (batchIdx >= 0) {
-                            val batchNote = newNotes[batchIdx]
-                            val existingUrls = batchNote.relayUrls.ifEmpty { listOfNotNull(batchNote.relayUrl) }
-                            if (newUrl !in existingUrls) {
-                                newNotes[batchIdx] = batchNote.copy(relayUrls = existingUrls + newUrl)
-                            }
-                        }
-                    }
-                    continue
-                }
+                // 7. Already in this batch
+                if (event.id in acceptedIds) continue
 
-                // ── Follow filter: uses event.pubKey directly (no conversion) ──
+                // Follow filter
                 if (!isGlobalMode && followFilterEnabled) {
                     val ff = followFilter
                     if (ff != null && ff.isNotEmpty()) {
@@ -540,14 +496,11 @@ class NotesRepository private constructor() {
                         val isOwnEvent = authorKey == currentUserPubkey
                         if (!isOwnEvent && authorKey !in ff) continue
                     } else {
-                        // Follow filter is enabled but list is null/empty (still loading).
-                        // During Loading state, let notes through so feed isn't blank.
-                        // Once Live, drop to prevent global bleed into Following feed.
                         if (_feedSessionState.value == FeedSessionState.Live) continue
                     }
                 }
 
-                // ── Article dedup: uses event tags directly (no regex) ──
+                // Article dedup
                 if (event.kind == 30023) {
                     val dTag = event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1)
                     if (dTag != null) {
@@ -555,40 +508,86 @@ class NotesRepository private constructor() {
                         val existingTs = existingArticleKeys[articleKey]
                         val eventTs = event.createdAt * 1000L
                         if (existingTs != null && existingTs >= eventTs) continue
-                        if (existingTs != null) {
-                            newNotes.removeAll { it.kind == 30023 && it.dTag == dTag && it.author.id.lowercase() == event.pubKey.lowercase() }
-                        }
                         existingArticleKeys[articleKey] = eventTs
                     }
                 }
 
-                // ── ALL dedup/filter checks passed — NOW do the expensive conversion ──
-                newNoteIds.add(event.id)
-                if (BuildConfig.DEBUG) logIncomingEventSummary(event, relayUrl)
-                val note = convertEventToNote(event, relayUrl)
+                // ── ACCEPTED: will be converted in Phase 2 ──
+                acceptedIds.add(event.id)
+                acceptedEvents.add(pending)
+            }
+            existingArticleKeysCopy = existingArticleKeys.toMap()
+        } // Phase 1 mutex released — other coroutines can proceed
 
-                // Track kind:1 notes with I tags as topic replies (NIP-22)
+        // Early exit: nothing to convert or merge
+        if (acceptedEvents.isEmpty() && relayUpdates.isEmpty() && kind6Batch.isEmpty()) {
+            PipelineDiagnostics.recordBatch(batch.size, System.currentTimeMillis() - flushStartMs)
+            android.os.Trace.endSection()
+            return
+        }
+
+        // ── PHASE 2: Parallel conversion (NO mutex — CPU-bound, thread-safe) ─
+        // convertEventToNote() is stateless: reads from thread-safe singletons
+        // (ProfileMetadataCache, MediaAspectRatioCache, Nip65RelayListRepository).
+        // Parallelizing across Dispatchers.Default spreads regex/URL detection/tag
+        // parsing across all CPU cores instead of running serially on one.
+        val convertedNotes: List<Note>
+        if (acceptedEvents.isNotEmpty()) {
+            if (BuildConfig.DEBUG) {
+                for (pending in acceptedEvents) logIncomingEventSummary(pending.event, pending.relayUrl)
+            }
+            convertedNotes = if (acceptedEvents.size <= 8) {
+                // Small batch: sequential to avoid coroutine overhead
+                acceptedEvents.map { convertEventToNote(it.event, it.relayUrl) }
+            } else {
+                // Large batch: fan out across CPU cores
+                coroutineScope {
+                    val deferred = acceptedEvents.map { pending ->
+                        async(Dispatchers.Default) {
+                            convertEventToNote(pending.event, pending.relayUrl)
+                        }
+                    }
+                    deferred.map { it.await() }
+                }
+            }
+        } else {
+            convertedNotes = emptyList()
+        }
+
+        // ── PHASE 3: Merge (under mutex — feed state mutation) ──────────────
+        processEventMutex.withLock {
+        try {
+            val newNotes = mutableListOf<Note>()
+            val currentNotes = _notes.value
+
+            // Process converted notes: filter replies, re-check for races
+            for (note in convertedNotes) {
+                // Race re-check: another flush may have added this event while we were converting
+                if (feedIndex.byId.containsKey(note.id)) continue
+
                 topicRepliesRepo.processKind1Note(note)
 
                 if (note.isReply) {
-                    Nip10ReplyDetector.getRootId(event)?.let { rootId ->
-                        ThreadReplyCache.addReply(rootId, note)
+                    val event = acceptedEvents.firstOrNull { it.event.id == note.id }?.event
+                    if (event != null) {
+                        Nip10ReplyDetector.getRootId(event)?.let { rootId ->
+                            ThreadReplyCache.addReply(rootId, note)
+                        }
                     }
-                    // Replies are only needed on-demand in thread view.
-                    // Skipping here prevents them from consuming feed cap space —
-                    // previously 77% of _notes were replies that got filtered in display.
                     continue
                 }
 
                 newNotes.add(note)
             }
 
-            // Remove stale article versions from existing feed (newer version arrived in this batch)
+            // Remove stale article versions from existing feed
             val articleReplacements = newNotes.filter { it.kind == 30023 && it.dTag != null }
             if (articleReplacements.isNotEmpty()) {
                 val staleIds = mutableSetOf<String>()
                 for (replacement in articleReplacements) {
                     val key = "${replacement.author.id.lowercase()}:${replacement.dTag}"
+                    // Also remove older articles from THIS batch that were superseded
+                    newNotes.removeAll { it.kind == 30023 && it.dTag != null && "${it.author.id.lowercase()}:${it.dTag}" == key && it.id != replacement.id }
                     currentNotes.filter { it.kind == 30023 && it.dTag != null && "${it.author.id.lowercase()}:${it.dTag}" == key && it.id != replacement.id }
                         .forEach { staleIds.add(it.id) }
                 }
@@ -600,23 +599,42 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Relay URL merges are deferred until after new notes are merged into
-            // _notes (below). Applying them here would be overwritten by the second
-            // _notes.value write in the feed-merge block, silently dropping the merged URLs.
-
             if (newNotes.isEmpty() && relayUpdates.isEmpty()) {
-                return
+                // Still need to process kind-6 reposts below — don't return yet
+                if (kind6Batch.isEmpty()) {
+                    if (BuildConfig.DEBUG && batch.size > 5) {
+                        MLog.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): 0 to feed, 0 to pending, ${relayUpdates.size} relay merges")
+                    }
+                    return
+                }
             }
 
-            // Partition new notes into feed vs pending
+            // Partition new notes into feed vs pending vs Room tail (deep history).
+            // The data layer accepts ALL valid deduped events. Timestamp-based routing
+            // determines where they live in memory:
+            //   - Recent (within display window) → _notes (in-memory, rendered)
+            //   - Old (outside display window)   → roomPaginatedNotes (rendered when scrolled to)
+            //   - Newer than cutoff              → pending (user taps "new notes" to merge)
             val feedNotes = mutableListOf<Note>()
             val pendingNew = mutableListOf<Note>()
+            val roomTailNew = mutableListOf<Note>()
             val cutoff = feedCutoffTimestampMs
+            val newestMs = (_notes.value.firstOrNull()?.let { it.repostTimestamp ?: it.timestamp }
+                ?: System.currentTimeMillis())
+            val displayWindowFloorMs = newestMs - DISPLAY_WINDOW_MS
 
             for (note in newNotes) {
-                val isOlderThanCutoff = cutoff <= 0L || note.timestamp <= cutoff
+                val noteTs = note.repostTimestamp ?: note.timestamp
                 val isOwnEvent = note.author.id.lowercase() == currentUserPubkey
 
+                // Notes older than the display window → Room tail (deep history).
+                // Own events always go to feed for immediate feedback.
+                if (noteTs < displayWindowFloorMs && !isOwnEvent) {
+                    roomTailNew.add(note)
+                    continue
+                }
+
+                val isOlderThanCutoff = cutoff <= 0L || note.timestamp <= cutoff
                 if (!initialLoadComplete || isOlderThanCutoff || isOwnEvent) {
                     feedNotes.add(note)
                 } else {
@@ -624,13 +642,8 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Merge feed notes efficiently based on temporal position:
-            // - Pagination notes (older) → sort batch only, append to end
-            // - Live notes (newer) → sort batch only, prepend to start
-            // - Mixed → fall back to full merge-sort (rare)
-            // This avoids re-sorting the entire 4000+ element list on every flush.
+            // Merge feed notes efficiently based on temporal position
             if (feedNotes.isNotEmpty()) {
-                // Read from shadow list if available (burst accumulation), otherwise from StateFlow
                 val current = burstShadowNotes ?: _notes.value
                 val sortedBatch = feedNotes.sortedByDescending { it.repostTimestamp ?: it.timestamp }
                 val merged = if (current.isEmpty()) {
@@ -639,24 +652,19 @@ class NotesRepository private constructor() {
                     val oldestCurrent = current.last().let { it.repostTimestamp ?: it.timestamp }
                     val newestBatch = sortedBatch.first().let { it.repostTimestamp ?: it.timestamp }
                     if (newestBatch <= oldestCurrent) {
-                        // All batch notes are older — append (pagination path, most common)
                         trimNotesToCap(current + sortedBatch)
                     } else {
                         val oldestBatch = sortedBatch.last().let { it.repostTimestamp ?: it.timestamp }
                         val newestCurrent = current.first().let { it.repostTimestamp ?: it.timestamp }
                         if (oldestBatch > newestCurrent) {
-                            // All batch notes are newer — prepend (live notes path)
                             trimNotesToCap(sortedBatch + current)
                         } else {
-                            // Mixed — full merge required (rare: batch spans existing range)
                             trimNotesToCap((current + sortedBatch).sortedByDescending { it.repostTimestamp ?: it.timestamp })
                         }
                     }
                 }
-                // Incrementally update feedIndex with new feed notes (O(batch), not O(n))
                 for (note in feedNotes) { feedIndex.addNote(note) }
 
-                // Apply relay URL merges to the merged list BEFORE emitting (coalesced single write)
                 val finalMerged = if (relayUpdates.isNotEmpty()) {
                     MLog.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges inline")
                     merged.map { note ->
@@ -670,16 +678,11 @@ class NotesRepository private constructor() {
                     merged
                 }
 
-                // Burst emission throttle: during burst ingestion, accumulate in shadow
-                // list and only emit to StateFlow every 200ms. This reduces emissions
-                // from ~250/sec to ~5/sec, preventing Compose snapshot churn.
                 val now = System.currentTimeMillis()
                 val queueStillLargeForEmission = pendingKind1Events.size > enrichmentDrainThreshold()
                 if (queueStillLargeForEmission && (now - lastEmissionMs) < BURST_EMISSION_THROTTLE_MS) {
-                    // Accumulate in shadow — skip StateFlow write
                     burstShadowNotes = finalMerged
                 } else {
-                    // Emit: either throttle window opened, or steady-state
                     burstShadowNotes = null
                     _notes.value = finalMerged.toImmutableList()
                     lastEmissionMs = now
@@ -689,12 +692,11 @@ class NotesRepository private constructor() {
                     MLog.d(TAG, "Initial load: ${finalMerged.size} notes so far")
                 }
 
-                // Persist relay URL merges to Room (background, best-effort)
                 if (relayUpdates.isNotEmpty()) {
                     val dao = eventDao
                     if (dao != null) {
                         scope.launch(Dispatchers.IO) {
-                            flushEventStore() // ensure rows exist before UPDATE
+                            flushEventStore()
                             for ((noteId, urls) in relayUpdates) {
                                 try { dao.updateRelayUrls(noteId, urls.joinToString(",")) }
                                 catch (e: Exception) { /* best-effort */ }
@@ -703,7 +705,6 @@ class NotesRepository private constructor() {
                     }
                 }
             } else if (relayUpdates.isNotEmpty()) {
-                // No new feed notes, but relay URL merges to apply
                 MLog.d(TAG, "\uD83D\uDD35 Applying ${relayUpdates.size} relay URL merges (no new notes)")
                 val afterMerge = _notes.value
                 val updatedList = afterMerge.map { note ->
@@ -715,7 +716,6 @@ class NotesRepository private constructor() {
                 }
                 _notes.value = updatedList.toImmutableList()
                 lastEmissionMs = System.currentTimeMillis()
-                // Persist merged relay URLs to Room
                 val dao = eventDao
                 if (dao != null) {
                     scope.launch(Dispatchers.IO) {
@@ -728,19 +728,13 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // ── Enrichment: counts, quotes, URL previews, profiles, NIP-11 ──
-            // During burst ingestion (queue still large), defer enrichment to avoid
-            // 1200 rounds of subscription fan-out. Accumulate notes and fire once
-            // when the queue drains below the adaptive drain threshold.
+            // Enrichment
             val queueStillLarge = pendingKind1Events.size > enrichmentDrainThreshold()
 
             if (feedNotes.isNotEmpty()) {
                 if (queueStillLarge) {
-                    // Defer: accumulate for later enrichment
                     deferredEnrichmentNotes.addAll(feedNotes)
                 } else {
-                    // Steady-state: fire enrichment immediately
-                    // Include any previously deferred notes
                     val enrichBatch = mutableListOf<Note>()
                     while (true) { val n = deferredEnrichmentNotes.poll() ?: break; enrichBatch.add(n) }
                     enrichBatch.addAll(feedNotes)
@@ -748,7 +742,6 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Add pending notes
             if (pendingNew.isNotEmpty()) {
                 synchronized(pendingNotesLock) {
                     _pendingNewNotes.addAll(pendingNew)
@@ -765,14 +758,45 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Display update: only during steady-state. During burst ingestion the
-            // display layer can't keep up anyway, and updateDisplayedNotes does 5 O(n)
-            // passes + fires counts subscriptions — wasted work while draining 60k events.
-            if (!queueStillLarge) {
+            // ── Room tail: pagination notes older than the display window ──
+            // These bypass _notes/trimNotesToCap (which would kill them) and go
+            // directly into roomPaginatedNotes where updateDisplayedNotes() appends
+            // them after the windowed in-memory portion.
+            if (roomTailNew.isNotEmpty()) {
+                // Hard cap: stop accepting roomTail notes when already at capacity.
+                // This prevents unbounded growth when scroll eviction can't fire
+                // (e.g. user is in thread view and not scrolling the feed).
+                val roomBudget = MAX_ROOM_PAGINATED - roomPaginatedNotes.size
+                if (roomBudget <= 0) {
+                    MLog.d(TAG, "roomTail at cap ($MAX_ROOM_PAGINATED), skipping ${roomTailNew.size} pagination notes")
+                } else {
+                    val sorted = roomTailNew.sortedByDescending { it.repostTimestamp ?: it.timestamp }
+                    var added = 0
+                    for (note in sorted) {
+                        if (added >= roomBudget) break
+                        if (roomPaginatedIds.contains(note.id)) continue
+                        if (feedIndex.byId.containsKey(note.id)) continue
+                        roomPaginatedNotes.add(note)
+                        roomPaginatedIds.add(note.id)
+                        feedIndex.addNote(note)
+                        added++
+                    }
+                    if (added > 0) {
+                        roomTailVersion++
+                        MLog.d(TAG, "Outbox pagination: +$added notes to roomTail (total=${roomPaginatedNotes.size})")
+                    }
+                }
+            }
+
+            // Only trigger display update when in-memory feed actually changed.
+            // roomTail-only changes are picked up lazily when the user scrolls
+            // near the boundary (see updateVisibleScrollPosition), preventing
+            // the 10s auto-pagination cycle from triggering full list rebuilds.
+            val feedChanged = feedNotes.isNotEmpty() || pendingNew.isNotEmpty() || relayUpdates.isNotEmpty()
+            if (!queueStillLarge && feedChanged) {
                 scheduleDisplayUpdate()
             }
 
-            // Profiles and NIP-11: also deferred during burst
             if (!queueStillLarge) {
                 val profileRelayUrls = getProfileRelayUrls()
                 if (pendingProfilePubkeys.isNotEmpty() && profileRelayUrls.isNotEmpty()) {
@@ -789,7 +813,6 @@ class NotesRepository private constructor() {
                     }
                 }
             } else {
-                // Accumulate NIP-11 URLs even during burst (cheap, no network)
                 val nip11Cache = social.mycelium.android.cache.Nip11CacheManager.getInstanceOrNull()
                 if (nip11Cache != null) {
                     val allRelayUrls = (feedNotes + pendingNew).flatMap { it.relayUrls }.distinct()
@@ -799,15 +822,10 @@ class NotesRepository private constructor() {
             }
 
             if (BuildConfig.DEBUG && batch.size > 5) {
-                MLog.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${relayUpdates.size} relay merges${if (ageGateDropped > 0) ", $ageGateDropped age-gated" else ""}")
-            }
-            if (ageGateDropped > 0) {
-                MLog.w(TAG, "Age gate dropped $ageGateDropped events (floor=${fmtMs(ageFloorMs)}, mainFloor=${fmtMs(mainSubscriptionFloorMs)}, absFloor=${fmtMs(absoluteFloorMs)})")
+                MLog.d(TAG, "Flushed ${batch.size} events (${kind6Batch.size} reposts): ${feedNotes.size} to feed, ${pendingNew.size} to pending, ${roomTailNew.size} to roomTail, ${relayUpdates.size} relay merges")
             }
 
-            // ── Batch kind-6/16 reposts ──────────────────────────────────────────
-            // Processed inside the SAME mutex lock as kind-1: eliminates 150+
-            // individual coroutine launches + mutex acquisitions per burst.
+            // Batch kind-6/16 reposts
             if (kind6Batch.isNotEmpty()) {
                 for (pending in kind6Batch) {
                     handleKind6Repost(pending.event, pending.relayUrl)
@@ -817,7 +835,6 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Poller handles remaining events automatically — no continuation flush needed
         } catch (e: Throwable) {
             MLog.e(TAG, "flushKind1Events failed: ${e.message}", e)
         } finally {
@@ -825,7 +842,7 @@ class NotesRepository private constructor() {
             if (BuildConfig.DEBUG) PipelineDiagnostics.logSummary(TAG)
             android.os.Trace.endSection()
         }
-        } // processEventMutex.withLock
+        } // Phase 3 mutex released
     }
 
     /**
@@ -1326,6 +1343,10 @@ class NotesRepository private constructor() {
         private const val MAX_NOTES_IN_MEMORY = 600
         /** Hard ceiling for pagination extra cap. Prevents unbounded growth. */
         private const val MAX_PAGINATION_EXTRA_CAP = 100
+        /** Maximum notes in the displayed list (filtered + roomTail). Prevents
+         *  LazyColumn diff and ImmutableList copy from choking on 800+ items.
+         *  400 = ~340 filtered (7d window) + 60 roomTail look-ahead. */
+        private const val MAX_DISPLAYED_NOTES = 400
         /** Limit for following feed; relays return only notes from followed authors so we can ask for more. */
         private const val FOLLOWING_FEED_LIMIT = 300
         /** Limit for global feed. */
@@ -1828,33 +1849,58 @@ class NotesRepository private constructor() {
      *  Used to scope interest registration to a sliding window around the viewport. */
     @Volatile private var currentScrollPosition: Int = 0
 
+    /** Incremented when roomPaginatedNotes changes; the last version seen by
+     *  updateDisplayedNotes is tracked in [lastRoomTailVersionEmitted]. When the
+     *  user scrolls near the boundary, a display refresh fires only if the version
+     *  diverged — avoiding full-list rebuilds from the 10s auto-pagination loop. */
+    @Volatile private var roomTailVersion: Long = 0L
+    @Volatile private var lastRoomTailVersionEmitted: Long = 0L
+
     /** Called by DashboardScreen when the user scrolls. Updates the viewport-scoped
      *  interest window without triggering a full display update.
      *  Also drives memory eviction: when the user scrolls back toward the top,
-     *  Room-paginated history that is far below the viewport is trimmed. */
+     *  Room-paginated history that is far below the viewport is trimmed.
+     *  When scrolling near the bottom, lazily emits accumulated roomTail changes. */
     fun updateVisibleScrollPosition(firstVisibleIndex: Int) {
         currentScrollPosition = firstVisibleIndex
-        // Evict Room-paginated tail when user scrolls back toward the top.
-        // The in-memory _notes covers the live window; Room tail is deep history
-        // loaded by loadOlderNotes. When the user scrolls up, that history is no
-        // longer visible and can be released (it's still in Room for re-pagination).
+        val displayedSize = _displayedNotes.value.size
         val inMemSize = _notes.value.size
-        if (roomPaginatedNotes.isNotEmpty() && firstVisibleIndex < inMemSize / 2) {
-            // User is in the top half of in-memory notes — trim Room tail
-            val tailSize = roomPaginatedNotes.size
-            if (tailSize > 50) {
-                synchronized(roomPaginatedNotes) {
-                    val trimCount = tailSize / 2
-                    repeat(trimCount) {
-                        if (roomPaginatedNotes.isNotEmpty()) {
-                            val removed = roomPaginatedNotes.removeAt(roomPaginatedNotes.size - 1)
-                            roomPaginatedIds.remove(removed.id)
-                        }
-                    }
-                }
-                MLog.d(TAG, "Scroll eviction: trimmed roomTail $tailSize → ${roomPaginatedNotes.size} (scroll=$firstVisibleIndex, inMem=$inMemSize)")
+
+        // ── Scroll-proximity roomTail refresh ──
+        // When the user scrolls into the bottom 30% of the displayed list and
+        // roomTail has unseen changes, trigger a display update to append them.
+        // This makes roomTail content appear seamlessly as the user approaches it.
+        if (displayedSize > 0 && firstVisibleIndex > displayedSize * 7 / 10) {
+            if (roomTailVersion != lastRoomTailVersionEmitted && roomPaginatedNotes.isNotEmpty()) {
+                scheduleDisplayUpdate()
             }
         }
+
+        // ── Evict Room-paginated tail when user scrolls back toward the top ──
+        // Use the DISPLAYED list size (not just inMem) to determine when the user
+        // is far from the roomTail boundary. Evict aggressively: keep only 30 items
+        // as a small buffer for quick re-scroll.
+        val tailSize = roomPaginatedNotes.size
+        if (tailSize > 30 && firstVisibleIndex < displayedSize / 2) {
+            val keepCount = 30
+            synchronized(roomPaginatedNotes) {
+                while (roomPaginatedNotes.size > keepCount) {
+                    val removed = roomPaginatedNotes.removeAt(roomPaginatedNotes.size - 1)
+                    roomPaginatedIds.remove(removed.id)
+                }
+            }
+            if (tailSize != roomPaginatedNotes.size) {
+                roomTailVersion++
+                MLog.d(TAG, "Scroll eviction: trimmed roomTail $tailSize → ${roomPaginatedNotes.size} (scroll=$firstVisibleIndex, displayed=$displayedSize)")
+            }
+        }
+    }
+
+    /** Notify the feed pipeline whether the dashboard is currently visible.
+     *  When false, auto-pagination pauses to avoid unbounded roomTail growth
+     *  and heap pressure while the user is in thread view, DMs, etc. */
+    fun setFeedVisible(visible: Boolean) {
+        outboxFeedManager.feedVisible = visible
     }
 
     /** Size of the sliding interest window around the scroll position.
@@ -2004,13 +2050,18 @@ class NotesRepository private constructor() {
             // Skip emission if the note ID list is identical — prevents unnecessary
             // LazyColumn re-layout that causes scroll jumps and nav bar reappearing.
             val currentIds = _displayedNotes.value
-            // Append Room-paginated notes (deep history from Room, outside _notes cap)
-            val roomTail = if (roomPaginatedNotes.isNotEmpty()) {
-                synchronized(roomPaginatedNotes) { roomPaginatedNotes.toList() }
+            // Append Room-paginated notes (deep history), capped so total never exceeds MAX_DISPLAYED_NOTES.
+            // This prevents the LazyColumn diff + ImmutableList copy from choking on 800+ items.
+            val roomTailBudget = (MAX_DISPLAYED_NOTES - filtered.size).coerceAtLeast(0)
+            val roomTail = if (roomPaginatedNotes.isNotEmpty() && roomTailBudget > 0) {
+                synchronized(roomPaginatedNotes) { roomPaginatedNotes.take(roomTailBudget) }
             } else emptyList()
-            val newList = if (roomTail.isNotEmpty()) filtered.toList() + roomTail else filtered.toList()
-            val idsMatch = newList.size == currentIds.size &&
-                newList.indices.all { i -> newList[i].id == currentIds[i].id }
+            if (roomTail.isNotEmpty()) lastRoomTailVersionEmitted = roomTailVersion
+            val newList = if (roomTail.isNotEmpty()) filtered + roomTail else filtered.toList()
+            // Fast identity check: size + hash of IDs avoids O(N) string comparison per emission.
+            val newHash = newList.fold(0) { acc, note -> acc * 31 + note.id.hashCode() }
+            val currentHash = currentIds.fold(0) { acc, note -> acc * 31 + note.id.hashCode() }
+            val idsMatch = newList.size == currentIds.size && newHash == currentHash
             if (idsMatch) {
                 // IDs match but note data may have updated (relay URLs, author info) —
                 // only emit if any note object actually differs (referential check).
@@ -2385,6 +2436,7 @@ class NotesRepository private constructor() {
                                 paginationCursorMs = oldestMs
                             }
                             if (oldestMs < feedAgeFloorMs) feedAgeFloorMs = oldestMs
+                            roomTailVersion++
                             MLog.w(TAG, "loadOlderNotes: Room served ${newNotes.size} notes, roomTail=${roomPaginatedNotes.size}, cursor=${fmtMs(paginationCursorMs)}")
                             // Trigger display update to append Room tail
                             updateDisplayedNotes()
@@ -2407,38 +2459,26 @@ class NotesRepository private constructor() {
         loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
     }
 
-    /** Weekly window pagination: all relays get the same since/until (7-day window).
-     *  Cursor steps back 7 days per page. Dense relays return many events, sparse relays
-     *  return few — that's fine. No per-relay cursor tracking needed. */
+    /** Category/inbox relay pagination: weekly window approach.
+     *  Outbox relays are handled separately by OutboxFeedManager's auto-pagination loop
+     *  so they are excluded here. This method only fires for scroll-triggered pagination
+     *  of category relays. */
     private fun loadOlderNotesFromRelay(cursorMs: Long, untilSec: Long, authors: List<String>?, relays: List<String>) {
         olderNotesHandle?.cancel()
 
         // Pause DeepHistoryFetcher to avoid competing for SQLite write lock
         DeepHistoryFetcher.pauseForPagination = true
 
-        // Weekly window: all relays get the same since/until
+        // Outbox relays auto-paginate via OutboxFeedManager — only category relays need scroll-triggered fetch
+        val outboxRelayUrls = outboxFeedManager.currentRelayAssignment.keys
+        val categoryRelays = relays.filter { it !in outboxRelayUrls }
+
+        // Weekly window for category relays (shared cursor)
         val windowUntilSec = untilSec
         val windowSinceSec = untilSec - (PAGINATION_WINDOW_DAYS * 86_400L)
 
-        // Build per-relay filters: same time window for all relays.
-        // Outbox relays get their NIP-65 resolved author subset.
-        val outboxAssignment = outboxFeedManager.currentRelayAssignment
-        val perRelayFilters = relays.associate { relayUrl ->
-            val relayAuthors = outboxAssignment[relayUrl]?.toList()
-            val effectiveAuthors = if (relayAuthors != null && authors != null) {
-                relayAuthors.filter { it in authors.toSet() }.ifEmpty { authors }
-            } else authors
-            val filter = if (effectiveAuthors != null) {
-                Filter(kinds = listOf(1), authors = effectiveAuthors, limit = PAGINATION_PER_RELAY_LIMIT,
-                    since = windowSinceSec, until = windowUntilSec)
-            } else {
-                Filter(kinds = listOf(1), limit = PAGINATION_PER_RELAY_LIMIT,
-                    since = windowSinceSec, until = windowUntilSec)
-            }
-            relayUrl to listOf(filter)
-        }
-
-        MLog.w(TAG, "loadOlderNotes (weekly): ${relays.size} relays, window=${fmtMs(windowSinceSec * 1000)}→${fmtMs(windowUntilSec * 1000)}")
+        MLog.w(TAG, "loadOlderNotes: ${categoryRelays.size} category relays (window=${fmtMs(windowSinceSec * 1000)}→${fmtMs(windowUntilSec * 1000)})" +
+            ", outbox relays auto-paginating separately")
 
         // Lower the age floor to the window start
         val windowFloorMs = windowSinceSec * 1000L
@@ -2446,45 +2486,61 @@ class NotesRepository private constructor() {
             feedAgeFloorMs = windowFloorMs
         }
 
-        val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
-        val eventCount = java.util.concurrent.atomic.AtomicInteger(0)
-        val perRelayEventCount = java.util.concurrent.ConcurrentHashMap<String, Int>()
-        val collectedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
-
-        olderNotesHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
-            relayFilters = perRelayFilters,
-            priority = SubscriptionPriority.HIGH,
-        ) { event, relayUrl ->
-            if (event.kind == 1) {
-                lastEventAt.set(System.currentTimeMillis())
-                eventCount.incrementAndGet()
-                perRelayEventCount.merge(relayUrl, 1) { old, inc -> old + inc }
-                EventRelayTracker.addRelay(event.id, relayUrl)
-                collectedEvents.add(event to relayUrl)
-            }
-        }
-
-        // Settle-based wait: break early when stream goes quiet
         scope.launch {
-            val deadline = System.currentTimeMillis() + OLDER_NOTES_TIMEOUT_MS
-            while (System.currentTimeMillis() < deadline) {
-                delay(300)
-                val lastAt = lastEventAt.get()
-                if (lastAt > 0) {
-                    val quietMs = System.currentTimeMillis() - lastAt
-                    if (quietMs >= OLDER_NOTES_SETTLE_MS) break
-                }
-            }
-            olderNotesHandle?.cancel()
-            olderNotesHandle = null
+            val allCollectedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
+            val categoryEventCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val perRelayEventCount = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
-            val received = eventCount.get()
+            // ── Branch 1: Category relays (global window) ────────────────────
+            val categoryJob = if (categoryRelays.isNotEmpty()) {
+                scope.launch {
+                    val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
+                    val perRelayFilters = categoryRelays.associate { relayUrl ->
+                        val filter = if (authors != null) {
+                            Filter(kinds = listOf(1), authors = authors, limit = PAGINATION_PER_RELAY_LIMIT,
+                                since = windowSinceSec, until = windowUntilSec)
+                        } else {
+                            Filter(kinds = listOf(1), limit = PAGINATION_PER_RELAY_LIMIT,
+                                since = windowSinceSec, until = windowUntilSec)
+                        }
+                        relayUrl to listOf(filter)
+                    }
+
+                    val handle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
+                        relayFilters = perRelayFilters,
+                        priority = SubscriptionPriority.HIGH,
+                    ) { event, relayUrl ->
+                        if (event.kind == 1) {
+                            lastEventAt.set(System.currentTimeMillis())
+                            categoryEventCount.incrementAndGet()
+                            perRelayEventCount.merge(relayUrl, 1) { old, inc -> old + inc }
+                            EventRelayTracker.addRelay(event.id, relayUrl)
+                            allCollectedEvents.add(event to relayUrl)
+                        }
+                    }
+
+                    // Settle-based wait
+                    val deadline = System.currentTimeMillis() + OLDER_NOTES_TIMEOUT_MS
+                    while (System.currentTimeMillis() < deadline) {
+                        delay(300)
+                        val lastAt = lastEventAt.get()
+                        if (lastAt > 0 && System.currentTimeMillis() - lastAt >= OLDER_NOTES_SETTLE_MS) break
+                    }
+                    handle.cancel()
+                }
+            } else null
+
+            // Wait for category relay fetch to complete
+            categoryJob?.join()
+
+            olderNotesHandle = null
+            val received = categoryEventCount.get()
 
             // ── Persist to Room ──
             val dao = eventDao
-            if (dao != null && collectedEvents.isNotEmpty()) {
+            if (dao != null && allCollectedEvents.isNotEmpty()) {
                 withContext(Dispatchers.IO) {
-                    val entities = collectedEvents.mapNotNull { (event, relayUrl) ->
+                    val entities = allCollectedEvents.mapNotNull { (event, relayUrl) ->
                         val normalizedUrl = relayUrl.ifBlank { null }
                         val trackedUrls = EventRelayTracker.getRelays(event.id)
                         val allUrls = if (trackedUrls.isNotEmpty()) {
@@ -2517,11 +2573,9 @@ class NotesRepository private constructor() {
             if (wm != null && received > 0) {
                 wm.followFilterEnabled = followFilterEnabled
                 wm.followPubkeys = authors ?: emptyList()
-                // Room cursor: oldest existing paginated note, or untilSec for first page
                 val roomCursorSec = if (roomPaginatedNotes.isNotEmpty()) {
                     roomPaginatedNotes.minOf { it.timestamp } / 1000
                 } else windowUntilSec
-                // Floor = window start — only show events within this weekly window
                 val roomNotes = wm.loadPage(roomCursorSec, floorSec = windowSinceSec)
                 if (roomNotes.isNotEmpty()) {
                     val existingMemIds = feedIndex.byId.keys
@@ -2539,37 +2593,33 @@ class NotesRepository private constructor() {
                                 }
                             }
                         }
+                        roomTailVersion++
                         roomAdded = newNotes.size
                     }
                 }
             }
 
-            // Step cursor back by one week for the next page
+            // Step category cursor back by one week for the next page
             paginationCursorMs = windowSinceSec * 1000L
 
-            // Exhaustion: 3 consecutive weekly windows with 0 displayable notes
-            if (received == 0) {
+            // Exhaustion tracking for category relays (outbox auto-paginates independently)
+            val categoryExhausted = categoryEventCount.get() == 0
+            if (categoryExhausted) {
                 paginationEmptyStreak++
-                if (paginationEmptyStreak >= PAGINATION_EXHAUSTION_WEEKS) {
-                    _paginationExhausted.value = true
-                    MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty weeks (~${paginationEmptyStreak * PAGINATION_WINDOW_DAYS / 30} months)")
-                }
-            } else if (roomAdded == 0) {
-                paginationEmptyStreak++
-                if (paginationEmptyStreak >= PAGINATION_EXHAUSTION_WEEKS) {
-                    _paginationExhausted.value = true
-                    MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak weeks yielded 0 displayable notes ($received recv)")
-                }
-            } else {
+            } else if (roomAdded > 0) {
                 paginationEmptyStreak = 0
             }
+            if (paginationEmptyStreak >= PAGINATION_EXHAUSTION_WEEKS) {
+                _paginationExhausted.value = true
+                MLog.w(TAG, "Category pagination exhausted: $paginationEmptyStreak empty weeks")
+            }
 
-            val relayStats = relays.take(5).joinToString { r ->
+            val catStats = categoryRelays.take(3).joinToString { r ->
                 val cnt = perRelayEventCount[r] ?: 0
                 "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt"
             }
-            MLog.w(TAG, "Older notes (weekly ${fmtMs(windowSinceSec*1000)}→${fmtMs(windowUntilSec*1000)}): " +
-                "+$roomAdded displayed ($received recv), roomTail=${roomPaginatedNotes.size} | $relayStats")
+            MLog.w(TAG, "Older notes: +$roomAdded displayed (category=${categoryEventCount.get()}), " +
+                "roomTail=${roomPaginatedNotes.size} | $catStats")
 
             if (roomAdded > 0) updateDisplayedNotes()
             _isLoadingOlder.value = false
@@ -2755,6 +2805,48 @@ class NotesRepository private constructor() {
                 MLog.d(TAG, "Skipping kind-6 echo of locally-published repost ${event.id.take(8)}")
                 return
             }
+
+            // ── Pre-parse dedup: skip expensive JSON/regex work for known reposts ──
+            // Extract original note ID from e-tag (cheap array scan, no JSON/regex).
+            // If composite "repost:{id}" already exists in feed or pending, just merge relay URL.
+            val eTagOrigId = event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+            if (eTagOrigId != null) {
+                val compositeId = "repost:$eTagOrigId"
+                val newUrl = relayUrl.ifEmpty { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) }
+                val existingFeed = feedIndex.byId[compositeId]
+                if (existingFeed != null) {
+                    if (newUrl != null && newUrl.isNotBlank()) {
+                        val existingUrls = existingFeed.relayUrls.ifEmpty { listOfNotNull(existingFeed.relayUrl) }
+                        if (newUrl !in existingUrls) {
+                            val updated = existingFeed.copy(relayUrls = existingUrls + newUrl)
+                            feedIndex.updateNote(updated)
+                            _notes.value = _notes.value.map { if (it.id == compositeId) updated else it }.toImmutableList()
+                        }
+                    }
+                    EventRelayTracker.addRelay(eTagOrigId, relayUrl)
+                    return
+                }
+                val existingPending = synchronized(pendingNotesLock) { pendingIndex.byId[compositeId] }
+                if (existingPending != null) {
+                    if (newUrl != null && newUrl.isNotBlank()) {
+                        synchronized(pendingNotesLock) {
+                            val pn = pendingIndex.byId[compositeId]
+                            if (pn != null) {
+                                val existingUrls = pn.relayUrls.ifEmpty { listOfNotNull(pn.relayUrl) }
+                                if (newUrl !in existingUrls) {
+                                    val updated = pn.copy(relayUrls = existingUrls + newUrl)
+                                    val idx = _pendingNewNotes.indexOfFirst { it.id == compositeId }
+                                    if (idx >= 0) _pendingNewNotes[idx] = updated
+                                    pendingIndex.updateNote(updated)
+                                }
+                            }
+                        }
+                    }
+                    EventRelayTracker.addRelay(eTagOrigId, relayUrl)
+                    return
+                }
+            }
+
             val reposterAuthor = profileCache.resolveAuthor(reposterPubkey)
             val profileRelayUrls = getProfileRelayUrls()
             if (profileCache.getAuthor(reposterPubkey) == null && profileRelayUrls.isNotEmpty()) {
@@ -3499,7 +3591,8 @@ class NotesRepository private constructor() {
         // Skip during burst ingestion: extractPubkeysWithHintsFromContent is regex-heavy
         // and most mentioned pubkeys overlap across notes. The author's own pubkey (above)
         // is always queued; content mentions are lower priority and can wait for steady state.
-        if (pendingProfilePubkeys.size < 200 && profileRelayUrls.isNotEmpty()) {
+        // Tightened threshold from 200→100 to reduce regex pressure during outbox pagination bursts.
+        if (pendingProfilePubkeys.size < 100 && profileRelayUrls.isNotEmpty()) {
             extractPubkeysWithHintsFromContent(event.content).forEach { (hex, relayHints) ->
                 val lowerHex = hex.lowercase()
                 if (profileCache.getAuthor(lowerHex) == null && lowerHex !in pendingProfilePubkeys) {
@@ -3510,9 +3603,75 @@ class NotesRepository private constructor() {
                 }
             }
         }
-        val hashtags = event.tags.toList()
-            .filter { tag -> tag.size >= 2 && tag[0] == "t" }
-            .mapNotNull { tag -> tag.getOrNull(1) }
+
+        // ── Single-pass tag extraction ──────────────────────────────────────
+        // Replaces 5+ separate filter/map/mapNotNull chains over event.tags with
+        // one loop. Eliminates ~10 intermediate list allocations per event.
+        val needsFullTags = event.kind == 30023 || event.kind == 1068 || event.kind == 6969
+        val isArticle = event.kind == 30023
+        val hashtags = ArrayList<String>(4)
+        val mentionedPubkeys = ArrayList<String>(4)
+        val mentionedPubkeySet = HashSet<String>(4) // dedup without .distinct()
+        val filteredTags = if (needsFullTags) null else ArrayList<List<String>>(4)
+        var articleTitle: String? = null
+        var articleSummary: String? = null
+        var articleImage: String? = null
+        var dTag: String? = null
+        val hasOutboxForAuthor = Nip65RelayListRepository.getCachedOutboxRelays(event.pubKey) != null
+
+        for (tag in event.tags) {
+            if (tag.size < 2) continue
+            val tagType = tag[0]
+            val tagValue = tag[1]
+
+            when (tagType) {
+                "t" -> hashtags.add(tagValue)
+                "p" -> {
+                    if (tagValue.length == 64 && mentionedPubkeySet.add(tagValue)) {
+                        mentionedPubkeys.add(tagValue)
+                    }
+                    // Relay hint extraction (position 2)
+                    if (tag.size >= 3 && tagValue.length == 64) {
+                        val hint = tag[2].trim()
+                        if (hint.startsWith("wss://") || hint.startsWith("ws://")) {
+                            Nip65RelayListRepository.addRelayHintsForAuthor(tagValue, listOf(hint))
+                        }
+                    }
+                }
+                "e" -> {
+                    // Relay hint extraction (position 2)
+                    if (tag.size >= 3) {
+                        val hint = tag[2].trim()
+                        if (hint.isNotBlank() && (hint.startsWith("wss://") || hint.startsWith("ws://"))) {
+                            // e-tag relay hints don't map to a pubkey, just noted for the relay pool
+                        }
+                    }
+                    // Keep e-tags in filtered tags for UI (reply rendering, thread detection)
+                    filteredTags?.add(tag.toList())
+                }
+                "emoji", "zapraiser", "content-warning", "I" -> {
+                    filteredTags?.add(tag.toList())
+                }
+                // Article-specific tags (kind 30023) — extracted inline, no separate firstOrNull scans
+                "title" -> if (isArticle && articleTitle == null) articleTitle = tagValue
+                "summary" -> if (isArticle && articleSummary == null) articleSummary = tagValue
+                "image" -> if (isArticle && articleImage == null) articleImage = tagValue
+                "d" -> if (isArticle && dTag == null) dTag = tagValue
+            }
+        }
+
+        // Full tags for articles/polls; filtered for kind-1
+        val tags: List<List<String>> = if (needsFullTags) {
+            event.tags.map { it.toList() }
+        } else {
+            filteredTags ?: emptyList()
+        }
+
+        // Seed relay hints for the author from this event's source relay
+        if (storedRelayUrl != null && !hasOutboxForAuthor) {
+            Nip65RelayListRepository.addRelayHintsForAuthor(event.pubKey, listOf(storedRelayUrl))
+        }
+
         val mediaUrls = UrlDetector.findUrls(event.content).filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
         // NIP-92: parse imeta tags for dimensions, blurhash, mimeType
         val mediaMeta = social.mycelium.android.data.IMetaData.parseAll(event.tags)
@@ -3523,48 +3682,17 @@ class NotesRepository private constructor() {
             }
         }
         val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(event.content)
-        val quotedEventIds = quotedRefs.map { it.eventId }
-        // Register relay hints from nevent1 TLV so QuotedNoteCache can use them for fetching
-        quotedRefs.forEach { ref ->
-            if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
-        }
-        // Extract relay hints from e-tags and p-tags (position 2 = relay URL hint).
-        // Feed into NIP-65 cache as supplementary data for authors without kind-10002.
-        // This enriches relay orbs for users whose outbox relays weren't discovered yet.
-        if (storedRelayUrl != null && Nip65RelayListRepository.getCachedOutboxRelays(event.pubKey) == null) {
-            Nip65RelayListRepository.addRelayHintsForAuthor(event.pubKey, listOf(storedRelayUrl))
-        }
-        for (tag in event.tags) {
-            if (tag.size >= 3 && tag[2].isNotBlank()) {
-                val tagType = tag[0]
-                val relayHint = tag[2].trim()
-                if ((tagType == "e" || tagType == "p") && (relayHint.startsWith("wss://") || relayHint.startsWith("ws://"))) {
-                    // For p-tags, the hint tells us where the mentioned author reads (inbox)
-                    if (tagType == "p" && tag[1].length == 64) {
-                        Nip65RelayListRepository.addRelayHintsForAuthor(tag[1], listOf(relayHint))
-                    }
-                }
+        val quotedEventIds = if (quotedRefs.isEmpty()) emptyList() else ArrayList<String>(quotedRefs.size).also { list ->
+            for (ref in quotedRefs) {
+                list.add(ref.eventId)
+                if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
             }
         }
+
         val isReply = Nip10ReplyDetector.isReply(event)
         val rootNoteId = if (isReply) Nip10ReplyDetector.getRootId(event) else null
         val replyToId = if (isReply) Nip10ReplyDetector.getReplyToId(event) else null
-        // Relay orbs: only show relays that actually delivered/confirmed this event.
-        // Additional relays are merged naturally when the same event arrives from
-        // other relays (flushKind1Events dedup) or via publish OK (mergePublishRelayUrl).
-        // NIP-65 outbox relays are NOT added here — they are speculative and would show
-        // relays where the note may not actually exist.
         val relayUrls = if (storedRelayUrl != null) listOf(storedRelayUrl) else emptyList()
-        
-        // Convert event tags to List<List<String>> for NIP-22 I tags and better e tag tracking
-        val tags = event.tags.map { it.toList() }
-        
-        // NIP-23 long-form content fields (kind 30023)
-        val isArticle = event.kind == 30023
-        val articleTitle = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "title" }?.getOrNull(1) else null
-        val articleSummary = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "summary" }?.getOrNull(1) else null
-        val articleImage = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "image" }?.getOrNull(1) else null
-        val dTag = if (isArticle) event.tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.getOrNull(1) else null
 
         // NIP-88 poll data (kind 1068)
         val pollData = if (event.kind == 1068) social.mycelium.android.data.PollData.parseFromTags(tags) else null
@@ -3593,10 +3721,7 @@ class NotesRepository private constructor() {
             kind = event.kind,
             topicTitle = articleTitle,
             tags = tags,
-            mentionedPubkeys = event.tags
-                .filter { tag -> tag.size >= 2 && tag[0] == "p" }
-                .mapNotNull { tag -> tag.getOrNull(1)?.takeIf { it.length == 64 } }
-                .distinct(),
+            mentionedPubkeys = mentionedPubkeys,
             summary = articleSummary,
             imageUrl = articleImage,
             dTag = dTag,

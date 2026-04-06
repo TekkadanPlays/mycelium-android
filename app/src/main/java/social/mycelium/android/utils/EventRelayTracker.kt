@@ -16,10 +16,10 @@ object EventRelayTracker {
     private val relaysByEvent = ConcurrentHashMap<String, MutableSet<String>>()
 
     /** Maximum tracked events to prevent unbounded growth.
-     *  Must exceed MAX_NOTES_IN_MEMORY (5000) + topics + thread replies + deep history
-     *  to avoid evicting relay data for notes still visible in the feed. */
-    private const val MAX_TRACKED = 20_000
-    private const val EVICT_BATCH = 4_000
+     *  Must exceed MAX_NOTES_IN_MEMORY (600) + MAX_ROOM_PAGINATED (500) + thread/topic buffer.
+     *  3,000 provides ~2.7x headroom over visible notes while using ~85% less memory than before. */
+    private const val MAX_TRACKED = 3_000
+    private const val EVICT_BATCH = 500
 
     /** Dirty flag: set when a relay URL is added that's NEW for an event (not just a duplicate).
       * Consumed by updateDisplayedNotes to skip the O(n) enrichment pass when no new data exists. */

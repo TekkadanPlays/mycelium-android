@@ -82,7 +82,7 @@ class NotificationsRepository(
         private const val PREFS_KEY_PUBKEY = "my_pubkey_hex"
         private const val PREFS_KEY_MARK_ALL_SEEN_EPOCH_MS = "mark_all_seen_epoch_ms"
         private const val SWEEP_FALLBACK_DELAY_MS = 15_000L
-        private const val TARGET_FETCH_BATCH_DELAY_MS = 200L
+        private const val TARGET_FETCH_BATCH_DELAY_MS = 500L
         private const val TARGET_FETCH_TIMEOUT_MS = 2500L
         private const val TARGET_FETCH_RETRY_TIMEOUT_MS = 4000L
         private const val MAX_TARGET_FETCH_RETRIES = 2
@@ -238,6 +238,11 @@ class NotificationsRepository(
     }.stateIn(scope, SharingStarted.Eagerly, 0)
 
     private val notificationsById = ConcurrentHashMap<String, NotificationData>()
+
+    /** Notification IDs modified since the last Room save. Only these are upserted on the next
+     *  [saveNotificationsToRoom] call, avoiding the O(N) full-list upsert that was writing
+     *  5,000+ entities every few seconds and saturating the SQLite write path. */
+    private val dirtyNotificationIds = java.util.Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     /** Active notification subscription handles (inbox deep + sweep + extras). */
     private val notificationHandles = CopyOnWriteArrayList<TemporarySubscriptionHandle>()
@@ -966,9 +971,11 @@ class NotificationsRepository(
         targetFetchPollerJob = null
         profileBatchPollerJob?.cancel()
         profileBatchPollerJob = null
-        // Flush any pending notification save
+        // Flush any pending notification save — mark ALL as dirty so enrichment
+        // updates (profile resolution, target notes) get captured in the final save.
         val ctx = appContext
         if (ctx != null && notificationsById.isNotEmpty()) {
+            dirtyNotificationIds.addAll(notificationsById.keys)
             scope.launch(Dispatchers.IO) { saveNotificationsToRoom(ctx) }
         }
         // Reset session state
@@ -1272,7 +1279,7 @@ class NotificationsRepository(
             scope.launch { fetchAndSetTargetNote(eTag, consolidatedId) { d -> { note -> d.copy(targetNote = note) } } }
         }
         updateTodaySummary(NotificationType.LIKE, ts, 0L)
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(consolidatedId)
     }
 
     private fun handleReply(event: Event, author: Author, ts: Long) {
@@ -1328,7 +1335,7 @@ class NotificationsRepository(
         }
         // Update today's summary
         updateTodaySummary(notifType, ts, 0L)
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     /** Handle a kind-1 event that quotes one of our notes (q-tag). */
@@ -1357,6 +1364,7 @@ class NotificationsRepository(
         )
         // Fetch the quoted note for display
         scope.launch { fetchAndSetTargetNote(quotedNoteId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
+        dirtyAndScheduleSave(event.id)
     }
 
     /**
@@ -1533,7 +1541,7 @@ class NotificationsRepository(
         )
         scope.launch { fetchAndSetTargetNote(rootId, event.id) { d -> { n -> d.copy(targetNote = n) } } }
         updateTodaySummary(notifType, ts, 0L)
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     private fun handleHighlight(event: Event, author: Author, ts: Long) {
@@ -1557,7 +1565,7 @@ class NotificationsRepository(
             eventEpochSec = ts / 1000,
             noteId = event.id
         )
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     private fun handleReport(event: Event, author: Author, ts: Long) {
@@ -1603,7 +1611,7 @@ class NotificationsRepository(
             eventEpochSec = ts / 1000,
             noteId = event.id
         )
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     private fun handleBadgeAward(event: Event, author: Author, ts: Long) {
@@ -1631,7 +1639,7 @@ class NotificationsRepository(
         if (aTagValue != null && subscriptionRelayUrls.isNotEmpty()) {
             scope.launch { resolveBadgeDefinition(event.id, aTagValue) }
         }
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     /** Fetch kind 30009 badge definition from a-tag and enrich the notification with badge name/image. */
@@ -1707,7 +1715,7 @@ class NotificationsRepository(
             noteId = event.id
         )
         updateTodaySummary(NotificationType.MENTION, ts, 0L)
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     private fun handlePollVote(event: Event, author: Author, ts: Long) {
@@ -1746,7 +1754,7 @@ class NotificationsRepository(
         if (subscriptionRelayUrls.isNotEmpty()) {
             scope.launch { enrichPollVoteNotification(event.id, pollId, responseCodes) }
         }
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(event.id)
     }
 
     /** Fetch the kind-1068 poll event and enrich the POLL_VOTE notification with question and option labels. */
@@ -1912,7 +1920,7 @@ class NotificationsRepository(
             scope.launch { fetchAndSetTargetNote(repostedNoteId, consolidatedId) { d -> { n -> d.copy(targetNote = n) } } }
         }
         updateTodaySummary(NotificationType.REPOST, ts, 0L)
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(consolidatedId)
     }
 
     private fun parseRepostedNoteFromContent(content: String): Note? {
@@ -2016,7 +2024,7 @@ class NotificationsRepository(
             scope.launch { fetchAndSetTargetNote(eTag, consolidatedId) { d -> { note -> d.copy(targetNote = note) } } }
         }
         updateTodaySummary(NotificationType.ZAP, ts, amountSats)
-        scheduleNotificationSave()
+        dirtyAndScheduleSave(consolidatedId)
         // If the zapper's profile isn't cached yet, queue it for batched resolution.
         // The profileWatcher coroutine will update all affected notifications when it resolves.
         if (needsProfileFetch && realZapperPubkey != null && cacheRelayUrls.isNotEmpty()) {
@@ -2325,11 +2333,21 @@ class NotificationsRepository(
     // without re-fetching from relays.
 
     private var notifSaveJob: Job? = null
-    private val NOTIF_SAVE_DEBOUNCE_MS = 3_000L
+    private val NOTIF_SAVE_DEBOUNCE_MS = 15_000L
     /** Longer debounce during startup replay — hundreds of events arrive in bursts,
-     *  no point writing to Room every 3s when the next event will arrive momentarily. */
-    private val NOTIF_SAVE_REPLAY_DEBOUNCE_MS = 10_000L
+     *  no point writing to Room every 15s when the next event will arrive momentarily. */
+    private val NOTIF_SAVE_REPLAY_DEBOUNCE_MS = 60_000L
+    /** Minimum interval between notification Room saves (wall-clock). */
+    @Volatile private var lastNotifSaveMs = 0L
+    private val NOTIF_SAVE_MIN_INTERVAL_MS = 30_000L
     private val saveLock = Any()
+
+    /** Mark a notification as dirty (modified since last Room save) and schedule a debounced save.
+     *  Preferred over calling [scheduleNotificationSave] directly since it tracks incremental changes. */
+    private fun dirtyAndScheduleSave(notificationId: String) {
+        dirtyNotificationIds.add(notificationId)
+        scheduleNotificationSave()
+    }
 
     /** Debounced save of notifications to Room. Called after any notification state change.
      *  Thread-safe: synchronizes the cancel→launch sequence to prevent concurrent callers
@@ -2350,11 +2368,19 @@ class NotificationsRepository(
         try {
             val pubkey = myPubkeyHex ?: return
             val dao = social.mycelium.android.db.AppDatabase.getInstance(context).notificationDao()
-            val notifications = notificationsById.values.toList()
-            val entities = notifications.map { it.toEntity(pubkey) }
+            // Snapshot and clear dirty IDs atomically
+            val dirtyIds = dirtyNotificationIds.toSet()
+            dirtyNotificationIds.clear()
+            if (dirtyIds.isEmpty()) {
+                MLog.d(TAG, "saveNotificationsToRoom: no dirty notifications, skipping")
+                return
+            }
+            val dirtyNotifications = dirtyIds.mapNotNull { notificationsById[it] }
+            if (dirtyNotifications.isEmpty()) return
+            val entities = dirtyNotifications.map { it.toEntity(pubkey) }
             dao.upsertAll(entities)
-            // Removed trimToNewest to allow unlimited depth of historical events
-            MLog.d(TAG, "Saved ${entities.size} notifications to Room")
+            lastNotifSaveMs = System.currentTimeMillis()
+            MLog.d(TAG, "Saved ${entities.size} notifications to Room (${notificationsById.size} total)")
         } catch (e: Exception) {
             MLog.e(TAG, "saveNotificationsToRoom failed: ${e.message}", e)
         }
@@ -2505,7 +2531,7 @@ class NotificationsRepository(
     }
 
     /** Maximum pending target fetches before forcing an immediate flush (prevents starvation). */
-    private val MAX_TARGET_FETCH_BATCH = 50
+    private val MAX_TARGET_FETCH_BATCH = 100
 
     private fun fetchAndSetTargetNote(
         noteId: String,
@@ -2515,6 +2541,10 @@ class NotificationsRepository(
         // Fast path: check feed cache immediately — avoids the debounce delay entirely
         // for target notes that are already in the local feed (common for replies/likes to your recent posts).
         val cached = NotesRepository.getInstance().getNoteFromCache(noteId)
+        // During startup replay, only use the cache fast-path. Don't queue relay
+        // fetches — they create a storm of 80+ batch flushes competing for relay
+        // slots. The reEnrichOrphanedNotifications() sweep after EOSE handles misses.
+        if (cached == null && !_replaySettled.value) return
         if (cached != null) {
             val current = notificationsById[notificationId]
             if (current != null) {

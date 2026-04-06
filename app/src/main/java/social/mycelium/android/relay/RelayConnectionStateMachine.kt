@@ -136,7 +136,8 @@ sealed class RelaySideEffect {
  */
 class RelayConnectionStateMachine {
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
+    private val relayDispatcher = Dispatchers.IO.limitedParallelism(16)
+    private val scope = CoroutineScope(relayDispatcher + SupervisorJob() + CoroutineExceptionHandler { _, t -> MLog.e(TAG, "Coroutine failed: ${t.message}", t) })
     val relayPool: CybinRelayPool = CybinRelayPool(MyceliumHttpClient.instance, scope)
 
     /** NIP-42 relay authentication handler — intercepts AUTH challenges and signs via Amber.
@@ -757,6 +758,22 @@ class RelayConnectionStateMachine {
                 } else {
                     MLog.d(TAG, "Keepalive: $connectedCount relays connected, last event ${elapsed / 1000}s ago — OK")
                 }
+
+                // --- Check 3: Disconnect idle relays with no active subscriptions ---
+                // Relays opened for one-off fetches (NIP-65, profiles, outbox discovery)
+                // stay connected after their subscriptions close. The periodic sweep in
+                // CybinRelayPool CLOSEs stale subs, but the TCP socket stays open.
+                // This check tears down sockets that have been idle (0 active REQs)
+                // unless they're in the persistent set (inbox/outbox/notification relays).
+                val persistent = persistentRelayUrls
+                val subscriptionSet = currentSubscriptionRelayUrls.toSet()
+                relayPool.disconnectIdleRelays(
+                    relayPool.getRelaySlotSnapshots()
+                        .filter { it.activeCount == 0 && it.queuedCount == 0 }
+                        .map { it.url }
+                        .filter { it !in persistent && it !in subscriptionSet }
+                        .toSet()
+                )
             }
         }
     }

@@ -4101,33 +4101,31 @@ fun MyceliumNavigation(
                     )
                 }
 
-                if (BuildConfig.DEBUG) {
-                    composable("settings/debug") {
-                        DebugSettingsScreen(
-                            onBackClick = { navController.popBackStack() },
-                            onEffectsLab = {
-                                navController.navigate("effects_lab") { launchSingleTop = true }
-                            },
-                            onMetricsDashboard = {
-                                navController.navigate("metrics_dashboard") { launchSingleTop = true }
-                            },
-                            onLogViewer = {
-                                navController.navigate("diagnostic_log_viewer") { launchSingleTop = true }
-                            }
-                        )
-                    }
+                composable("settings/debug") {
+                    DebugSettingsScreen(
+                        onBackClick = { navController.popBackStack() },
+                        onEffectsLab = {
+                            navController.navigate("effects_lab") { launchSingleTop = true }
+                        },
+                        onMetricsDashboard = {
+                            navController.navigate("metrics_dashboard") { launchSingleTop = true }
+                        },
+                        onLogViewer = {
+                            navController.navigate("diagnostic_log_viewer") { launchSingleTop = true }
+                        }
+                    )
+                }
 
-                    composable("metrics_dashboard") {
-                        social.mycelium.android.ui.screens.MetricsDashboardScreen(
-                            onBackClick = { navController.popBackStack() }
-                        )
-                    }
+                composable("metrics_dashboard") {
+                    social.mycelium.android.ui.screens.MetricsDashboardScreen(
+                        onBackClick = { navController.popBackStack() }
+                    )
+                }
 
-                    composable("diagnostic_log_viewer") {
-                        social.mycelium.android.ui.screens.DiagnosticLogViewerScreen(
-                            onBackClick = { navController.popBackStack() }
-                        )
-                    }
+                composable("diagnostic_log_viewer") {
+                    social.mycelium.android.ui.screens.DiagnosticLogViewerScreen(
+                        onBackClick = { navController.popBackStack() }
+                    )
                 }
 
                 composable("effects_lab") {

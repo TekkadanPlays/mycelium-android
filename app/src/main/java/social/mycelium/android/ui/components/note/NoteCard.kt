@@ -1233,7 +1233,6 @@ internal fun NoteMediaCarousel(
                             .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                             .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                             .size(feedDecodePx, feedDecodePx)
-                            .allowHardware(false)
                             .build()
                     )
                     val painterState = imagePainter.state

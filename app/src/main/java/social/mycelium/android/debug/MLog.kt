@@ -121,46 +121,46 @@ object MLog {
 
     // ── VERBOSE ─────────────────────────────────────────────────────────
 
-    fun v(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun v(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         if (BuildConfig.DEBUG) Log.v(tag, msg)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.VERBOSE, tag, msg)
+        DiagnosticLog.log(channel, DiagnosticLog.Level.VERBOSE, tag, msg, trace)
     }
 
     // ── DEBUG ───────────────────────────────────────────────────────────
 
-    fun d(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun d(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         if (BuildConfig.DEBUG) Log.d(tag, msg)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.DEBUG, tag, msg)
+        DiagnosticLog.log(channel, DiagnosticLog.Level.DEBUG, tag, msg, trace)
     }
 
     // ── INFO ────────────────────────────────────────────────────────────
 
-    fun i(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun i(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         if (BuildConfig.DEBUG) Log.i(tag, msg)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.INFO, tag, msg)
+        DiagnosticLog.log(channel, DiagnosticLog.Level.INFO, tag, msg, trace)
     }
 
     // ── WARN ────────────────────────────────────────────────────────────
 
-    fun w(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun w(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         Log.w(tag, msg)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.WARN, tag, msg)
+        DiagnosticLog.log(channel, DiagnosticLog.Level.WARN, tag, msg, trace)
     }
 
-    fun w(tag: String, msg: String, tr: Throwable, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun w(tag: String, msg: String, tr: Throwable, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         Log.w(tag, msg, tr)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.WARN, tag, "$msg | ${tr.message}")
+        DiagnosticLog.log(channel, DiagnosticLog.Level.WARN, tag, "$msg | ${tr.message}", trace)
     }
 
     // ── ERROR ───────────────────────────────────────────────────────────
 
-    fun e(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun e(tag: String, msg: String, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         Log.e(tag, msg)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.ERROR, tag, msg)
+        DiagnosticLog.log(channel, DiagnosticLog.Level.ERROR, tag, msg, trace)
     }
 
-    fun e(tag: String, msg: String, tr: Throwable, channel: DiagnosticLog.Channel = resolveChannel(tag)) {
+    fun e(tag: String, msg: String, tr: Throwable, channel: DiagnosticLog.Channel = resolveChannel(tag), trace: String? = null) {
         Log.e(tag, msg, tr)
-        DiagnosticLog.log(channel, DiagnosticLog.Level.ERROR, tag, "$msg | ${tr::class.simpleName}: ${tr.message}")
+        DiagnosticLog.log(channel, DiagnosticLog.Level.ERROR, tag, "$msg | ${tr::class.simpleName}: ${tr.message}", trace)
     }
 }

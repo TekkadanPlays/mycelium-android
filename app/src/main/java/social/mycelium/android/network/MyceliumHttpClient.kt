@@ -51,7 +51,7 @@ object MyceliumHttpClient {
         HttpClient(CIO) {
             engine {
                 requestTimeout = 30_000
-                maxConnectionsCount = 1000
+                maxConnectionsCount = 100
             }
 
             install(HttpTimeout) {

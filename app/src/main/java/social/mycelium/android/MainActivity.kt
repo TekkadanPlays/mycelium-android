@@ -150,7 +150,6 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
                 }
                 .crossfade(100)
                 .precision(coil.size.Precision.INEXACT)
-                .allowHardware(false)
                 .allowRgb565(false)
                 // Bounded memory cache: fixed 32MB LRU. Viewport-gated rendering
                 // keeps ~30 full cards active. 32MB covers the render window + scroll-back

@@ -22,7 +22,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import social.mycelium.android.BuildConfig
 import social.mycelium.android.repository.feed.DebugEventStatsSnapshot
 import social.mycelium.android.repository.feed.NotesRepository
 import social.mycelium.android.ui.components.zap.SupportZapBottomSheet
@@ -116,13 +115,11 @@ fun SettingsScreen(
             SettingsItem(icon = Icons.Outlined.BugReport, title = "Report a Bug", onClick = onBugReportClick)
             SettingsItem(icon = Icons.Outlined.Info, title = "About", onClick = { onNavigateTo("about") })
 
-            if (BuildConfig.DEBUG) {
-                HorizontalDivider(
-                    thickness = 1.dp,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
-                )
-                SettingsItem(icon = Icons.Outlined.Code, title = "Debug", onClick = { onNavigateTo("debug") })
-            }
+            HorizontalDivider(
+                thickness = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f)
+            )
+            SettingsItem(icon = Icons.Outlined.Code, title = "Debug", onClick = { onNavigateTo("debug") })
 
             Spacer(modifier = Modifier.height(16.dp))
         }

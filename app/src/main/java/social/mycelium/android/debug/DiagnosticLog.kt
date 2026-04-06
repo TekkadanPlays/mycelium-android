@@ -12,10 +12,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Always-on, file-backed diagnostic log for debug builds.
+ * Always-on, file-backed diagnostic log for all builds.
  *
- * Unlike [DebugVerboseLog] (opt-in, in-memory, lossy), this logger:
- *   - Is **always active** in debug builds — no manual toggle
+ * Unlike [DebugVerboseLog] (opt-in, in-memory, lossy, debug-only), this logger:
+ *   - Is **always active** — no manual toggle needed
  *   - Writes to a **persistent file** that survives logcat buffer rotation
  *   - Uses **structured channels** for targeted retrieval via `adb shell cat`
  *   - Keeps a **rolling window** (last N lines per file) to stay small
@@ -62,16 +62,23 @@ object DiagnosticLog {
     private const val ALL_FILE = "all.log"
     private const val FLUSH_INTERVAL_MS = 500L
 
-    enum class Channel(val filename: String) {
-        STARTUP("startup.log"),
-        RELAY("relay.log"),
-        SYNC("sync.log"),
-        STATE("state.log"),
-        FEED("feed.log"),
-        AUTH("auth.log"),
-        NOTIFICATION("notification.log"),
-        WALLET("wallet.log"),
-        GENERAL("general.log"),
+    enum class ChannelGroup(val label: String) {
+        NETWORK("Network"),
+        DATA("Data"),
+        SYSTEM("System"),
+        PAYMENTS("Payments"),
+    }
+
+    enum class Channel(val filename: String, val group: ChannelGroup) {
+        STARTUP("startup.log", ChannelGroup.SYSTEM),
+        RELAY("relay.log", ChannelGroup.NETWORK),
+        SYNC("sync.log", ChannelGroup.NETWORK),
+        STATE("state.log", ChannelGroup.DATA),
+        FEED("feed.log", ChannelGroup.DATA),
+        AUTH("auth.log", ChannelGroup.NETWORK),
+        NOTIFICATION("notification.log", ChannelGroup.DATA),
+        WALLET("wallet.log", ChannelGroup.PAYMENTS),
+        GENERAL("general.log", ChannelGroup.SYSTEM),
     }
 
     enum class Level { VERBOSE, DEBUG, INFO, WARN, ERROR }
@@ -88,10 +95,8 @@ object DiagnosticLog {
 
     /**
      * Initialize the diagnostic log system. Call once from Application.onCreate().
-     * No-op in release builds.
      */
     fun init(context: Context) {
-        if (!BuildConfig.DEBUG) return
         if (!initialized.compareAndSet(false, true)) return
 
         val dir = File(context.filesDir, DIR).apply { mkdirs() }
@@ -138,20 +143,20 @@ object DiagnosticLog {
      * @param source The source tag (e.g. class name or subsystem)
      * @param message The log message
      */
-    fun log(channel: Channel, source: String, message: String) {
-        if (!BuildConfig.DEBUG || !initialized.get()) return
+    fun log(channel: Channel, source: String, message: String, trace: String? = null) {
+        if (!initialized.get()) return
         val ts = timeFmt.format(Date())
-        val line = "$ts | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $message"
+        val msg = if (trace != null) "[$trace] $message" else message
+        val line = "$ts | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $msg"
         pending.add(channel to line)
     }
 
-    fun log(channel: Channel, level: Level, source: String, message: String) {
-        // In release builds, only persist WARN and ERROR
-        if (!BuildConfig.DEBUG && level.ordinal < Level.WARN.ordinal) return
+    fun log(channel: Channel, level: Level, source: String, message: String, trace: String? = null) {
         if (!initialized.get()) return
         val ts = timeFmt.format(Date())
         val lvl = level.name.first()
-        val line = "$ts | $lvl | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $message"
+        val msg = if (trace != null) "[$trace] $message" else message
+        val line = "$ts | $lvl | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $msg"
         pending.add(channel to line)
     }
 
@@ -239,6 +244,21 @@ object DiagnosticLog {
         } catch (e: Exception) {
             listOf("Error reading all.log: ${e.message}")
         }
+    }
+
+    /** Read + merge all channels in a [ChannelGroup], sorted by timestamp. */
+    fun readGroup(group: ChannelGroup): List<String> {
+        val dir = logDir ?: return emptyList()
+        flushPending()
+        return Channel.entries
+            .filter { it.group == group }
+            .flatMap { ch ->
+                val file = File(dir, ch.filename)
+                try {
+                    if (file.exists()) file.readLines() else emptyList()
+                } catch (_: Exception) { emptyList() }
+            }
+            .sortedBy { it.take(12) } // sort by HH:mm:ss.SSS prefix
     }
 
     /** Build a single export string containing all channel logs for sharing/copying. */

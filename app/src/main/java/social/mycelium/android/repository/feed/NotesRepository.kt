@@ -324,7 +324,9 @@ class NotesRepository private constructor() {
         // Event objects are queued as-is; toJson() runs on background IO thread during flush.
         if (eventDao != null && !isGlobalMode) {
             for (item in batch) {
-                pendingEventObjects.add(Triple(item.event, item.relayUrl, Unit))
+                if (pendingEventObjects.size < EVENT_STORE_QUEUE_CAP) {
+                    pendingEventObjects.add(Triple(item.event, item.relayUrl, Unit))
+                }
             }
             scheduleEventStoreFlush()
         }
@@ -367,8 +369,8 @@ class NotesRepository private constructor() {
             val batchEventIds = batch.filter { it.event.kind in listOf(1, 11, 1111, 1068, 6969, 30023) }
             val uniqueEventIds = batchEventIds.map { it.event.id }.toSet()
             val duplicateCount = batchEventIds.size - uniqueEventIds.size
-            val relayDistribution = batchEventIds.groupBy { it.relayUrl }.mapValues { it.value.size }
             if (batchEventIds.isNotEmpty()) {
+                val relayDistribution = batchEventIds.groupBy { it.relayUrl }.mapValues { it.value.size }
                 MLog.d(TAG, "\uD83D\uDD35 BATCH: ${batchEventIds.size} events, ${uniqueEventIds.size} unique, $duplicateCount dupes, relays=${relayDistribution.entries.joinToString { "${it.key.takeLast(25)}=${it.value}" }}")
             }
 
@@ -1041,11 +1043,11 @@ class NotesRepository private constructor() {
         val dao = eventDao ?: return
         withContext(Dispatchers.IO) {
             val entities = mutableListOf<CachedEventEntity>()
-            while (true) {
+            var drained = 0
+            while (drained < EVENT_STORE_BATCH_CAP) {
                 val triple = pendingEventObjects.poll() ?: break
                 val (event, relayUrl, _) = triple
                 val normalizedUrl = relayUrl.ifBlank { null }
-                // Merge all known relay URLs from tracker into persisted relayUrls
                 val trackedUrls = EventRelayTracker.getRelays(event.id)
                 val allUrls = if (trackedUrls.isNotEmpty()) {
                     (trackedUrls + listOfNotNull(normalizedUrl)).distinct().joinToString(",")
@@ -1057,24 +1059,32 @@ class NotesRepository private constructor() {
                     kind = event.kind,
                     pubkey = event.pubKey.lowercase(),
                     createdAt = event.createdAt,
-                    eventJson = event.toJson(), // O(1) for relay events via rawJson
+                    eventJson = event.toJson(),
                     relayUrl = normalizedUrl,
                     relayUrls = allUrls,
                     isReply = social.mycelium.android.utils.Nip10ReplyDetector.isReply(event)
                 ))
+                drained++
             }
             if (entities.isEmpty()) return@withContext
             try {
                 dao.insertAll(entities)
                 PipelineDiagnostics.recordDbCommit(entities.size)
-                // Notify FeedWindowManager that Room has new data — enables
-                // Room-first freshness for pagination and cold-start restore.
                 feedWindowManager?.onRoomDataChanged()
-                if (entities.size > 20) {
-                    MLog.d(TAG, "Event store: persisted ${entities.size} events (total=${dao.count()})")
+                val remaining = pendingEventObjects.size
+                if (entities.size > 20 || remaining > 0) {
+                    MLog.d(TAG, "Event store: persisted ${entities.size} events, $remaining queued")
                 }
             } catch (e: Exception) {
                 MLog.e(TAG, "Event store flush failed: ${e.message}", e)
+            }
+            // More events waiting — yield briefly (let GC breathe) then drain next batch.
+            // Don't use scheduleEventStoreFlush() here — its 2s debounce would delay
+            // draining when we already know there's work. 50ms gap between batches
+            // spreads allocation pressure across GC windows.
+            if (pendingEventObjects.isNotEmpty()) {
+                delay(50)
+                flushEventStore()
             }
         }
     }
@@ -1082,6 +1092,7 @@ class NotesRepository private constructor() {
     /** Persist a kind-6 repost event to the store. Called from handleKind6Repost. */
     private fun persistRepostEvent(event: Event, relayUrl: String) {
         if (eventDao == null || isGlobalMode) return
+        if (pendingEventObjects.size >= EVENT_STORE_QUEUE_CAP) return
         pendingEventObjects.add(Triple(event, relayUrl, Unit))
         scheduleEventStoreFlush()
     }
@@ -1298,6 +1309,12 @@ class NotesRepository private constructor() {
     private val pendingEventObjects = java.util.concurrent.ConcurrentLinkedQueue<Triple<Event, String, Unit>>()
     private var eventStoreFlushJob: Job? = null
     private val EVENT_STORE_FLUSH_DEBOUNCE_MS = 2_000L
+    /** Max events to persist per flush cycle. Spreads allocation across GC windows
+     *  instead of creating a 453-event spike that triggers 300ms stop-the-world GC. */
+    private val EVENT_STORE_BATCH_CAP = 100
+    /** Max events queued for Room persistence. Beyond this, oldest entries are dropped
+     *  (they're already in the feed pipeline; Room persistence is best-effort cache). */
+    private val EVENT_STORE_QUEUE_CAP = 2_000
 
     /** Event IDs that the user has deleted — persisted so they stay hidden after restart. */
     private val deletedEventIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
@@ -1316,6 +1333,10 @@ class NotesRepository private constructor() {
         /** Limit for global feed. */
         private const val GLOBAL_FEED_LIMIT = 300
         private const val FEED_SINCE_DAYS = 7
+        /** Display window: only render notes within this duration from the newest note.
+         *  Older notes are evicted from memory and served from Room on demand.
+         *  Matches FEED_SINCE_DAYS so the visible feed and relay subscription window align. */
+        private const val DISPLAY_WINDOW_MS = FEED_SINCE_DAYS.toLong() * 86_400_000L
         /** Debounce display updates so hundreds of events/sec don't thrash the UI. */
         private const val DISPLAY_UPDATE_DEBOUNCE_MS = 150L
         private const val DELETED_IDS_PREFS = "notes_deleted_ids"
@@ -1324,10 +1345,14 @@ class NotesRepository private constructor() {
         private const val FEED_CACHE_MAX = 200
         /** Max time to wait for older notes before declaring done. */
         private const val OLDER_NOTES_TIMEOUT_MS = 12_000L
-        /** After last event arrives, wait this long for more before declaring done. */
-        private const val OLDER_NOTES_SETTLE_MS = 1_500L
-        /** Max cursor jump per page (14 days). Prevents a single outlier from skipping weeks. */
-        private const val MAX_CURSOR_JUMP_MS = 14L * 86_400_000L
+        /** After last event arrives, wait this long for more before declaring done.
+         *  Raised from 1.5s→3s: outbox relays (damus) can be slower than local relays,
+         *  and the subscription was closing before they finished delivering. */
+        private const val OLDER_NOTES_SETTLE_MS = 3_000L
+        /** Max cursor jump per page (30 days). Prevents a single outlier from skipping months.
+         *  Raised from 14d→30d: Following feeds on outbox relays (damus) can have sparse
+         *  activity with 2-3 week gaps between posts by followed authors. */
+        private const val MAX_CURSOR_JUMP_MS = 30L * 86_400_000L
         /** Number of events to request per pagination page (limit param). */
         private const val PAGINATION_PAGE_SIZE = 100
         /** Per-relay limit for pagination requests (total events ≈ relayCount × this). */
@@ -1798,9 +1823,32 @@ class NotesRepository private constructor() {
     @Volatile private var currentScrollPosition: Int = 0
 
     /** Called by DashboardScreen when the user scrolls. Updates the viewport-scoped
-     *  interest window without triggering a full display update. */
+     *  interest window without triggering a full display update.
+     *  Also drives memory eviction: when the user scrolls back toward the top,
+     *  Room-paginated history that is far below the viewport is trimmed. */
     fun updateVisibleScrollPosition(firstVisibleIndex: Int) {
         currentScrollPosition = firstVisibleIndex
+        // Evict Room-paginated tail when user scrolls back toward the top.
+        // The in-memory _notes covers the live window; Room tail is deep history
+        // loaded by loadOlderNotes. When the user scrolls up, that history is no
+        // longer visible and can be released (it's still in Room for re-pagination).
+        val inMemSize = _notes.value.size
+        if (roomPaginatedNotes.isNotEmpty() && firstVisibleIndex < inMemSize / 2) {
+            // User is in the top half of in-memory notes — trim Room tail
+            val tailSize = roomPaginatedNotes.size
+            if (tailSize > 50) {
+                synchronized(roomPaginatedNotes) {
+                    val trimCount = tailSize / 2
+                    repeat(trimCount) {
+                        if (roomPaginatedNotes.isNotEmpty()) {
+                            val removed = roomPaginatedNotes.removeAt(roomPaginatedNotes.size - 1)
+                            roomPaginatedIds.remove(removed.id)
+                        }
+                    }
+                }
+                MLog.d(TAG, "Scroll eviction: trimmed roomTail $tailSize → ${roomPaginatedNotes.size} (scroll=$firstVisibleIndex, inMem=$inMemSize)")
+            }
+        }
     }
 
     /** Size of the sliding interest window around the scroll position.
@@ -1888,11 +1936,17 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Single-pass filter: relay match + follow filter + reply filter combined.
-            // Replaces 3 sequential .filter() calls (3× O(N)) with one pass (1× O(N)).
+            // Single-pass filter: relay match + follow filter + reply filter + display window.
+            // Replaces multiple sequential .filter() calls with one pass (1× O(N)).
             var afterRelay = 0
             var afterFollow = 0
             var afterReply = 0
+            var afterWindow = 0
+            // Display window: only render notes within DISPLAY_WINDOW_MS of the newest note.
+            // Older notes are served from Room via pagination. The window floor is computed
+            // from the newest note timestamp so the window slides forward as new notes arrive.
+            val newestMs = allNotes.maxOfOrNull { it.repostTimestamp ?: it.timestamp } ?: System.currentTimeMillis()
+            val displayWindowFloorMs = newestMs - DISPLAY_WINDOW_MS
             val filtered = ArrayList<Note>(minOf(allNotes.size, 500))
             for (note in allNotes) {
                 // 1. Relay match — notes must come from a user-configured relay.
@@ -1918,10 +1972,20 @@ class NotesRepository private constructor() {
                 afterReply++
                 // 4. Boost dedup: skip original if a repost version exists
                 if (note.originalNoteId == null && note.id in repostedOriginals) continue
+                // 5. Temporal display window: exclude notes older than the sliding window.
+                //    These notes exist in Room and can be loaded via loadOlderNotes pagination.
+                //    User's own recently-published notes always pass (immediate feedback).
+                val noteTs = note.repostTimestamp ?: note.timestamp
+                if (noteTs < displayWindowFloorMs) {
+                    val isLocal = locallyPublishedIds.contains(note.id) ||
+                        (note.originalNoteId != null && locallyPublishedIds.contains(note.originalNoteId))
+                    if (!isLocal) continue
+                }
+                afterWindow++
                 filtered.add(note)
             }
             if (filtered.size != _displayedNotes.value.size || filtered.isEmpty() || roomPaginatedNotes.isNotEmpty()) {
-                MLog.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →final=${filtered.size} +roomTail=${roomPaginatedNotes.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
+                MLog.w(TAG, "displayFilter: total=${allNotes.size} →relay=$afterRelay →follow=$afterFollow →noReply=$afterReply →window=$afterWindow →final=${filtered.size} +roomTail=${roomPaginatedNotes.size} (connRelays=${connectedRelays.size}, followList=${currentFollowFilter?.size ?: 0})")
             }
             // Skip emission if the note ID list is identical — prevents unnecessary
             // LazyColumn re-layout that causes scroll jumps and nav bar reappearing.
@@ -2257,7 +2321,10 @@ class NotesRepository private constructor() {
         val authors = if (followFilterEnabled) followFilter?.toList() else null
         if (followFilterEnabled && authors.isNullOrEmpty()) return
 
-        val relays = subscriptionRelays.ifEmpty { return }
+        val outboxUrls = outboxFeedManager.activeOutboxRelays.value
+            .map { it.url }
+            .filter { it.isNotBlank() }
+        val relays = (subscriptionRelays + outboxUrls).distinct().ifEmpty { return }
 
         _isLoadingOlder.value = true
 
@@ -2325,10 +2392,7 @@ class NotesRepository private constructor() {
      *  Each relay tracks its own oldest-event timestamp so dense relays (damus) paginate
      *  independently from sparse relays (pickle). Exhausted relays are skipped. */
     private fun loadOlderNotesFromRelay(cursorMs: Long, untilSec: Long, authors: List<String>?, relays: List<String>) {
-        val currentNotes = _notes.value
         olderNotesHandle?.cancel()
-        paginationExtraCap += PAGINATION_PAGE_SIZE
-        val beforeCount = currentNotes.size
 
         // Filter out exhausted relays — they returned 0 events last time
         val activeRelays = relays.filter { it !in exhaustedPaginationRelays }
@@ -2377,6 +2441,9 @@ class NotesRepository private constructor() {
         // Track per-relay event counts and oldest timestamps for cursor updates
         val perRelayEventCount = java.util.concurrent.ConcurrentHashMap<String, Int>()
         val perRelayOldestMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+        // Collect raw events for Room persistence — pagination events bypass _notes entirely
+        // and go Room → roomPaginatedNotes so they aren't killed by trimNotesToCap's window.
+        val collectedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
 
         olderNotesHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
             relayFilters = perRelayFilters,
@@ -2390,8 +2457,8 @@ class NotesRepository private constructor() {
                 // Track per-relay stats
                 perRelayEventCount.merge(relayUrl, 1) { old, inc -> old + inc }
                 perRelayOldestMs.merge(relayUrl, eventMs) { old, new -> minOf(old, new) }
-                pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = true))
-                kind1Dirty.set(true)
+                EventRelayTracker.addRelay(event.id, relayUrl)
+                collectedEvents.add(event to relayUrl)
             }
         }
 
@@ -2409,20 +2476,70 @@ class NotesRepository private constructor() {
             olderNotesHandle?.cancel()
             olderNotesHandle = null
 
-            // Flush any remaining buffered events from this page
-            kind1Dirty.set(false)
-            flushKind1Events()
-
-            val newSize = _notes.value.size
-            val added = newSize - beforeCount
             val received = eventCount.get()
+
+            // ── Persist to Room (same as flushEventStore but inline for pagination) ──
+            val dao = eventDao
+            if (dao != null && collectedEvents.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    val entities = collectedEvents.mapNotNull { (event, relayUrl) ->
+                        val normalizedUrl = relayUrl.ifBlank { null }
+                        val trackedUrls = EventRelayTracker.getRelays(event.id)
+                        val allUrls = if (trackedUrls.isNotEmpty()) {
+                            (trackedUrls + listOfNotNull(normalizedUrl)).distinct().joinToString(",")
+                        } else normalizedUrl
+                        CachedEventEntity(
+                            eventId = event.id,
+                            kind = event.kind,
+                            pubkey = event.pubKey.lowercase(),
+                            createdAt = event.createdAt,
+                            eventJson = event.toJson(),
+                            relayUrl = normalizedUrl,
+                            relayUrls = allUrls,
+                            isReply = Nip10ReplyDetector.isReply(event)
+                        )
+                    }
+                    try {
+                        dao.insertAll(entities)
+                        feedWindowManager?.onRoomDataChanged()
+                        MLog.d(TAG, "Pagination: persisted ${entities.size} events to Room")
+                    } catch (e: Exception) {
+                        MLog.e(TAG, "Pagination Room persist failed: ${e.message}", e)
+                    }
+                }
+            }
+
+            // ── Load from Room into roomPaginatedNotes (unified path) ──
+            val wm = feedWindowManager
+            var roomAdded = 0
+            if (wm != null && received > 0) {
+                wm.followFilterEnabled = followFilterEnabled
+                wm.followPubkeys = authors ?: emptyList()
+                val roomNotes = wm.loadPage(untilSec)
+                if (roomNotes.isNotEmpty()) {
+                    val existingMemIds = feedIndex.byId.keys
+                    val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
+                    if (newNotes.isNotEmpty()) {
+                        for (note in newNotes) {
+                            roomPaginatedNotes.add(note)
+                            roomPaginatedIds.add(note.id)
+                        }
+                        if (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
+                            synchronized(roomPaginatedNotes) {
+                                while (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
+                                    val removed = roomPaginatedNotes.removeAt(roomPaginatedNotes.size - 1)
+                                    roomPaginatedIds.remove(removed.id)
+                                }
+                            }
+                        }
+                        roomAdded = newNotes.size
+                    }
+                }
+            }
 
             // Update per-relay cursors from actual received data
             for ((relayUrl, oldest) in perRelayOldestMs) {
                 val current = perRelayCursorMs[relayUrl]
-                // Clamp cursor jump: if a relay jumps > MAX_CURSOR_JUMP_MS in one page,
-                // it's returning sparse ancient data (e.g. pickle jumping 03/14 → 11/30).
-                // Mark it exhausted instead of accepting the ancient cursor.
                 if (current != null && current - oldest > MAX_CURSOR_JUMP_MS) {
                     exhaustedPaginationRelays.add(relayUrl)
                     MLog.w(TAG, "Relay cursor-clamped: ${relayUrl.removePrefix("wss://").removeSuffix("/")} " +
@@ -2431,12 +2548,9 @@ class NotesRepository private constructor() {
                     perRelayCursorMs[relayUrl] = oldest
                 }
             }
-            // Mark relays that returned too few events as exhausted.
-            // A relay returning < 5 events from a 50-limit request is effectively empty.
-            // This catches "zombie" relays like pickle that return 1 ancient event per page.
-            val MIN_USEFUL_EVENTS = 5
+            val MIN_USEFUL_EVENTS = 2
             for (relayUrl in activeRelays) {
-                if (relayUrl in exhaustedPaginationRelays) continue  // already handled by cursor-clamp
+                if (relayUrl in exhaustedPaginationRelays) continue
                 val count = perRelayEventCount[relayUrl] ?: 0
                 if (count < MIN_USEFUL_EVENTS) {
                     exhaustedPaginationRelays.add(relayUrl)
@@ -2450,39 +2564,33 @@ class NotesRepository private constructor() {
                 if (paginationCursorMs == 0L || oldest < paginationCursorMs) {
                     paginationCursorMs = oldest
                 }
+                if (oldest < feedAgeFloorMs) feedAgeFloorMs = oldest
             }
 
-            // Exhaustion: all active relays returned 0 events
+            // Exhaustion detection
             if (received == 0) {
                 paginationEmptyStreak++
                 if (paginationEmptyStreak >= 2) {
                     _paginationExhausted.value = true
                     MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty responses")
                 }
-            } else if (added == 0) {
-                // Received events but trimNotesToCap discarded them all — feed is at cap.
-                // Further pagination just wastes relay bandwidth.
+            } else if (roomAdded == 0) {
                 paginationEmptyStreak++
                 if (paginationEmptyStreak >= 2) {
                     _paginationExhausted.value = true
-                    MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak pages trimmed to 0 (cap reached, $received recv discarded)")
-                } else {
-                    val relayStats = activeRelays.joinToString { r ->
-                        val cnt = perRelayEventCount[r] ?: 0
-                        val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
-                        "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
-                    }
-                    MLog.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
+                    MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak pages yielded 0 displayable notes ($received recv)")
                 }
             } else {
                 paginationEmptyStreak = 0
-                val relayStats = activeRelays.joinToString { r ->
-                    val cnt = perRelayEventCount[r] ?: 0
-                    val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
-                    "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
-                }
-                MLog.w(TAG, "Older notes: +$added new ($received recv), feed=$newSize | $relayStats")
             }
+            val relayStats = activeRelays.take(5).joinToString { r ->
+                val cnt = perRelayEventCount[r] ?: 0
+                val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
+                "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
+            }
+            MLog.w(TAG, "Older notes (relay→Room→tail): +$roomAdded displayed ($received recv), roomTail=${roomPaginatedNotes.size} | $relayStats")
+
+            if (roomAdded > 0) updateDisplayedNotes()
             _isLoadingOlder.value = false
         }
     }
@@ -2618,12 +2726,29 @@ class NotesRepository private constructor() {
     }
 
     /** Keep only the newest notes to cap memory; list must be sorted by timestamp descending.
-     *  Cap grows dynamically as the user paginates older notes so they don't get trimmed immediately. */
+     *  Cap grows dynamically as the user paginates older notes so they don't get trimmed immediately.
+     *  Also enforces the temporal display window: notes older than DISPLAY_WINDOW_MS from the
+     *  newest note are trimmed even if under the count cap. This dual bound (count + time)
+     *  ensures memory stays controlled regardless of event density. */
     private fun trimNotesToCap(notes: List<Note>): List<Note> {
+        if (notes.isEmpty()) return notes
         val effectiveCap = MAX_NOTES_IN_MEMORY + minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)
-        if (notes.size <= effectiveCap) return notes
-        MLog.w(TAG, "Trimming feed: ${notes.size} → $effectiveCap (base=$MAX_NOTES_IN_MEMORY + paginationCap=${minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)})")
-        return notes.take(effectiveCap)
+        // Phase 1: count-based trim
+        val countTrimmed = if (notes.size > effectiveCap) {
+            MLog.w(TAG, "Trimming feed (count): ${notes.size} → $effectiveCap (base=$MAX_NOTES_IN_MEMORY + paginationCap=${minOf(paginationExtraCap, MAX_PAGINATION_EXTRA_CAP)})")
+            notes.take(effectiveCap)
+        } else notes
+        // Phase 2: timestamp-based trim — remove notes older than the display window
+        val newestMs = countTrimmed.first().let { it.repostTimestamp ?: it.timestamp }
+        val windowFloorMs = newestMs - DISPLAY_WINDOW_MS
+        val windowTrimmed = countTrimmed.filter { note ->
+            val ts = note.repostTimestamp ?: note.timestamp
+            ts >= windowFloorMs
+        }
+        if (windowTrimmed.size < countTrimmed.size) {
+            MLog.w(TAG, "Trimming feed (window): ${countTrimmed.size} → ${windowTrimmed.size} (floor=${fmtMs(windowFloorMs)})")
+        }
+        return windowTrimmed
     }
 
     /**

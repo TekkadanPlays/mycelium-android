@@ -108,6 +108,7 @@ external/
 BATTLE_PLAN.md
 MYCELIUM FULL ARCHITECTURE AUDIT.ini
 *.gif
+old.kt
 
 # Old release APKs
 releases/
@@ -126,6 +127,7 @@ dev_notes/
 benchmark/
 
 # External cloned repos (not part of this project)
+clones/
 Player/
 Scarlet/
 nextplayer/

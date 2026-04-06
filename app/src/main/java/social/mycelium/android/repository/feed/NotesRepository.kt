@@ -1906,12 +1906,20 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Pre-build a combined set of raw + normalized URLs for O(1) lookup (avoids per-note normalization)
+            // Pre-build a combined set of raw + normalized URLs for O(1) lookup (avoids per-note normalization).
+            // Includes active outbox relay URLs so notes discovered via NIP-65 outbox pass the filter —
+            // without this, notes from followed users' write relays are silently dropped.
             val hasRelayFilter = connectedRelays.isNotEmpty()
             val connectedSet = if (hasRelayFilter) buildSet {
                 connectedRelays.forEach { url ->
                     add(url)
                     RelayUrlNormalizer.normalizeOrNull(url)?.url?.let { add(it) }
+                }
+                // Outbox relays: where followed users WRITE content — must be in the
+                // display set or their notes get filtered out despite being valid feed content
+                outboxFeedManager.activeOutboxRelays.value.forEach { state ->
+                    add(state.url)
+                    RelayUrlNormalizer.normalizeOrNull(state.url)?.url?.let { add(it) }
                 }
             } else emptySet()
             val allNotes = _notes.value

@@ -1176,6 +1176,10 @@ class NotesRepository private constructor() {
 
     private var connectedRelays = listOf<String>()
     private var subscriptionRelays = listOf<String>()
+    /** Outbox + category relays — where followed users WRITE content.
+     *  Used exclusively for pagination (content discovery). Inbox relays are
+     *  for notifications/reactions and should NOT be queried for feed content. */
+    private var paginationRelays = listOf<String>()
 
     /** When non-null and followFilterEnabled, only notes whose author.id is in this set are shown. Volatile so relay callback thread sees latest. */
     @Volatile
@@ -1347,6 +1351,8 @@ class NotesRepository private constructor() {
         private const val PAGINATION_PER_RELAY_LIMIT = 50
         /** Weekly window size (days). Each pagination page fetches this many days from all relays. */
         private const val PAGINATION_WINDOW_DAYS = 7L
+        /** Consecutive empty weekly windows before declaring pagination exhausted (~3 months). */
+        private const val PAGINATION_EXHAUSTION_WEEKS = 13
 
         @Volatile
         private var instance: NotesRepository? = null
@@ -1628,6 +1634,18 @@ class NotesRepository private constructor() {
             updateDisplayedNotes()
             displayUpdateJob = null
         }
+    }
+
+    /**
+     * Set the relay set used for pagination (outbox + category relays).
+     * These are where followed users WRITE content — the correct relays for
+     * content discovery. Inbox relays are for notifications/reactions only.
+     */
+    fun setPaginationRelays(outboxAndCategoryUrls: List<String>) {
+        val normalized = outboxAndCategoryUrls.map { it.trim().removeSuffix("/") }.distinct()
+        if (normalized.sorted() == paginationRelays.sorted()) return
+        paginationRelays = normalized
+        MLog.d(TAG, "Pagination relays set: ${normalized.size} relays (outbox + categories)")
     }
 
     /**
@@ -2092,6 +2110,7 @@ class NotesRepository private constructor() {
         relayStateMachine.requestDisconnect()
         connectedRelays = emptyList()
         subscriptionRelays = emptyList()
+        paginationRelays = emptyList()
         followFilter = null
         followFilterEnabled = false
         isGlobalMode = false
@@ -2307,10 +2326,16 @@ class NotesRepository private constructor() {
         val authors = if (followFilterEnabled) followFilter?.toList() else null
         if (followFilterEnabled && authors.isNullOrEmpty()) return
 
-        val outboxUrls = outboxFeedManager.activeOutboxRelays.value
-            .map { it.url }
-            .filter { it.isNotBlank() }
-        val relays = (subscriptionRelays + outboxUrls).distinct().ifEmpty { return }
+        // Use outbox + category relays for content discovery (not inbox relays).
+        // Fall back to subscriptionRelays + outbox if paginationRelays not yet set.
+        val relays = if (paginationRelays.isNotEmpty()) {
+            paginationRelays
+        } else {
+            val outboxUrls = outboxFeedManager.activeOutboxRelays.value
+                .map { it.url }.filter { it.isNotBlank() }
+            (subscriptionRelays + outboxUrls).distinct()
+        }
+        if (relays.isEmpty()) return
 
         _isLoadingOlder.value = true
 
@@ -2517,13 +2542,13 @@ class NotesRepository private constructor() {
             // Exhaustion: 3 consecutive weekly windows with 0 displayable notes
             if (received == 0) {
                 paginationEmptyStreak++
-                if (paginationEmptyStreak >= 3) {
+                if (paginationEmptyStreak >= PAGINATION_EXHAUSTION_WEEKS) {
                     _paginationExhausted.value = true
-                    MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty weeks")
+                    MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty weeks (~${paginationEmptyStreak * PAGINATION_WINDOW_DAYS / 30} months)")
                 }
             } else if (roomAdded == 0) {
                 paginationEmptyStreak++
-                if (paginationEmptyStreak >= 3) {
+                if (paginationEmptyStreak >= PAGINATION_EXHAUSTION_WEEKS) {
                     _paginationExhausted.value = true
                     MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak weeks yielded 0 displayable notes ($received recv)")
                 }

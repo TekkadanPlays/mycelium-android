@@ -1531,10 +1531,17 @@ fun MyceliumNavigation(
         val allUserRelayUrls = (categoryUrls + outboxUrls + inboxUrls)
             .map { it.trim().removeSuffix("/") }
             .distinct()
+        // Pagination relay set: outbox + category relays (where follows WRITE content).
+        // Inbox relays are for notifications/reactions — not content discovery.
+        val paginationRelayUrls = (outboxUrls + categoryUrls)
+            .map { it.trim().removeSuffix("/") }
+            .distinct()
+        social.mycelium.android.repository.feed.NotesRepository.getInstance()
+            .setPaginationRelays(paginationRelayUrls)
 
         MLog.d(
             "MyceliumNav",
-            "Startup: categories=${categoryUrls.size}, outbox=${outboxUrls.size}, inbox=${inboxUrls.size}, total=${allUserRelayUrls.size}"
+            "Startup: categories=${categoryUrls.size}, outbox=${outboxUrls.size}, inbox=${inboxUrls.size}, total=${allUserRelayUrls.size}, pagination=${paginationRelayUrls.size}"
         )
 
         if (allUserRelayUrls.isEmpty()) {

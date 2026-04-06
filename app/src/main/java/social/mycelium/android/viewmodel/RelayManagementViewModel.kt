@@ -529,6 +529,9 @@ class RelayManagementViewModel(
         // Update NotesRepository relay set so NoteCountsRepository (kind-30011 votes,
         // kind-1111 replies) picks up the new relay for existing subscriptions
         social.mycelium.android.repository.feed.NotesRepository.getInstance().setSubscriptionRelays(relayUrls)
+        // Update pagination relays: outbox + category relays (where follows WRITE content)
+        social.mycelium.android.repository.feed.NotesRepository.getInstance()
+            .setPaginationRelays((outboxUrls + subscribedRelayUrls + profileRelayUrls).distinct())
         // Update NotificationsRepository so target-note fetches, badge resolution, and
         // poll enrichment use the updated relay set (not just the sign-in set).
         social.mycelium.android.repository.NotificationsRepository.updateSubscriptionRelayUrls(relayUrls)

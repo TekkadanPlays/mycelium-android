@@ -671,22 +671,24 @@ private fun CustomEmojiCell(
     onEmojiSelected: (String) -> Unit,
     onCustomEmojiSelected: ((shortcode: String, url: String) -> Unit)?
 ) {
+    // Normalize: pack map keys are ":shortcode:" but callbacks expect bare shortcodes
+    val bareShortcode = shortcode.removeSurrounding(":")
     Box(
         modifier = Modifier
             .height(38.dp)
             .fillMaxWidth()
             .clickable {
                 if (onCustomEmojiSelected != null) {
-                    onCustomEmojiSelected(shortcode, url)
+                    onCustomEmojiSelected(bareShortcode, url)
                 } else {
-                    onEmojiSelected(shortcode)
+                    onEmojiSelected(":$bareShortcode:")
                 }
             },
         contentAlignment = Alignment.Center
     ) {
         AsyncImage(
             model = url,
-            contentDescription = shortcode.removeSurrounding(":"),
+            contentDescription = bareShortcode,
             modifier = Modifier.size(28.dp),
             contentScale = ContentScale.Fit
         )

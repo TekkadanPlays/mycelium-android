@@ -216,15 +216,16 @@ fun EmojiPickerDialog(
                     ) {
                         if (customSearchResults.isNotEmpty()) {
                             items(customSearchResults) { (shortcode, url) ->
+                                val bareShortcode = shortcode.removeSurrounding(":")
                                 Box(
                                     modifier = Modifier
                                         .aspectRatio(1f)
                                         .clip(RoundedCornerShape(6.dp))
                                         .clickable {
                                             if (onCustomEmojiSelected != null) {
-                                                onCustomEmojiSelected(shortcode, url)
+                                                onCustomEmojiSelected(bareShortcode, url)
                                             } else {
-                                                onEmojiSelected(shortcode)
+                                                onEmojiSelected(":$bareShortcode:")
                                             }
                                         },
                                     contentAlignment = Alignment.Center
@@ -276,22 +277,23 @@ fun EmojiPickerDialog(
                                                 )
                                             }
                                             items(pack.emojis.entries.toList()) { (shortcode, url) ->
+                                                val bareShortcode = shortcode.removeSurrounding(":")
                                                 Box(
                                                     modifier = Modifier
                                                         .aspectRatio(1f)
                                                         .clip(RoundedCornerShape(6.dp))
                                                         .clickable {
                                                             if (onCustomEmojiSelected != null) {
-                                                                onCustomEmojiSelected(shortcode, url)
+                                                                onCustomEmojiSelected(bareShortcode, url)
                                                             } else {
-                                                                onEmojiSelected(shortcode)
+                                                                onEmojiSelected(":$bareShortcode:")
                                                             }
                                                         },
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     AsyncImage(
                                                         model = url,
-                                                        contentDescription = shortcode.removeSurrounding(":"),
+                                                        contentDescription = bareShortcode,
                                                         modifier = Modifier.size(32.dp),
                                                         contentScale = ContentScale.Fit
                                                     )

@@ -945,43 +945,13 @@ fun OnboardingScreen(
                                             )
                                         }
                                     }
-
-                                    // NIP-66 loading indicator (subtle, below options)
-                                    val nip66Loading by Nip66RelayDiscoveryRepository.isLoading.collectAsState()
-                                    val nip66HasData by Nip66RelayDiscoveryRepository.hasFetched.collectAsState()
-                                    if (nip66Loading && !nip66HasData) {
-                                        Spacer(Modifier.height(4.dp))
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.Center,
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(10.dp),
-                                                strokeWidth = 1.dp,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
-                                            )
-                                            Spacer(Modifier.width(6.dp))
-                                            Text(
-                                                text = "Preloading relay index\u2026",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                                                fontSize = 10.sp
-                                            )
-                                        }
-                                    }
                                 }
                             }
 
                             OnboardingPhase.LOADING_INDEXERS -> {
                                 // Brief loading state while auto-search resolves NIP-66
+                                // Phase icon spinner provides the visual loading cue.
                                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(32.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                                    )
-                                    Spacer(Modifier.height(12.dp))
                                     Text(
                                         text = "Checking monitored relays\u2026",
                                         style = MaterialTheme.typography.bodySmall,
@@ -1147,11 +1117,7 @@ fun OnboardingScreen(
                             }
 
                             OnboardingPhase.SAVING -> {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(32.dp),
-                                    strokeWidth = 2.dp,
-                                    color = Color(0xFF4CAF50)
-                                )
+                                // Phase icon spinner provides the visual loading cue.
                             }
 
                             OnboardingPhase.READY -> {
@@ -2348,16 +2314,11 @@ private fun PrefetchingListsUI(
         onComplete()
     }
 
+    // Phase icon spinner provides the visual loading cue.
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = Modifier.fillMaxWidth().padding(16.dp)
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(32.dp),
-            strokeWidth = 2.dp,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Spacer(Modifier.height(16.dp))
         Text(
             text = currentTask,
             style = MaterialTheme.typography.bodySmall,

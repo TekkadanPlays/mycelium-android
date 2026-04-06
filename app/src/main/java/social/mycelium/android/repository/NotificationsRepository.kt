@@ -1160,7 +1160,14 @@ class NotificationsRepository(
         )
         val isReplayPhase = sessionStartEpochSec == Long.MAX_VALUE
         val watermark = markAllSeenEpochMs
-        val shouldAutoMark = isReplayPhase || (watermark > 0 && ts <= watermark)
+        // Auto-mark as seen if:
+        // 1. We're still in the initial replay phase (before enableAndroidNotifications)
+        // 2. The event timestamp is at or before the "Read All" watermark
+        // 3. The event was created BEFORE the current session started — this is the key
+        //    fix for Phase 2/3 events and cross-pollinated feed events that arrive
+        //    after enableAndroidNotifications() but are still historical data.
+        val isHistoricalEvent = sessionStartEpochSec != Long.MAX_VALUE && event.createdAt < sessionStartEpochSec
+        val shouldAutoMark = isReplayPhase || (watermark > 0 && ts <= watermark) || isHistoricalEvent
         if (shouldAutoMark && !isConsolidatedKind) {
             addSeenId(event.id)
         }
@@ -1215,7 +1222,8 @@ class NotificationsRepository(
         val consolidatedId = "like:$eTag:$emoji"
         val shouldAutoMark = (event.id in _seenIdsBacking) ||
                 (sessionStartEpochSec == Long.MAX_VALUE) ||
-                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
+                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs) ||
+                (sessionStartEpochSec != Long.MAX_VALUE && event.createdAt < sessionStartEpochSec)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
             if (existing != null) {
@@ -1855,7 +1863,8 @@ class NotificationsRepository(
         val consolidatedId = "repost:$repostedNoteId"
         val shouldAutoMark = (event.id in _seenIdsBacking) ||
                 (sessionStartEpochSec == Long.MAX_VALUE) ||
-                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
+                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs) ||
+                (sessionStartEpochSec != Long.MAX_VALUE && event.createdAt < sessionStartEpochSec)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
             if (existing != null) {
@@ -1954,7 +1963,8 @@ class NotificationsRepository(
         val consolidatedId = "zap:$eTag"
         val shouldAutoMark = (event.id in _seenIdsBacking) ||
                 (sessionStartEpochSec == Long.MAX_VALUE) ||
-                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs)
+                (markAllSeenEpochMs > 0 && ts <= markAllSeenEpochMs) ||
+                (sessionStartEpochSec != Long.MAX_VALUE && event.createdAt < sessionStartEpochSec)
         synchronized(consolidationLock) {
             val existing = notificationsById[consolidatedId]
             if (existing != null) {
@@ -2219,12 +2229,20 @@ class NotificationsRepository(
             .sortedByDescending { it.sortTimestamp }
             .toList()
         _notifications.value = sorted
-        // Auto-mark historical notifications that arrived after user pressed "Read All".
-        // sortTimestamp is event.createdAt * 1000 — any event created before the watermark
-        // is a historical replay and should be considered already seen.
-        val cutoff = markAllSeenEpochMs
-        if (cutoff > 0) {
-            val autoSeen = sorted.filter { it.sortTimestamp <= cutoff && it.id !in _seenIdsBacking }.map { it.id }
+        // Auto-mark historical notifications:
+        // 1. Events at or before the "Read All" watermark (user pressed "Read All")
+        // 2. Events created before the current session started (safety net for
+        //    Phase 2/3, cross-pollinated, and Room-restored notifications that
+        //    weren't caught by the per-event auto-mark in dispatchEvent).
+        val watermarkCutoff = markAllSeenEpochMs
+        val sessionCutoffMs = if (sessionStartEpochSec != Long.MAX_VALUE) sessionStartEpochSec * 1000L else 0L
+        if (watermarkCutoff > 0 || sessionCutoffMs > 0) {
+            val autoSeen = sorted.filter { notif ->
+                notif.id !in _seenIdsBacking && (
+                    (watermarkCutoff > 0 && notif.sortTimestamp <= watermarkCutoff) ||
+                    (sessionCutoffMs > 0 && notif.sortTimestamp < sessionCutoffMs)
+                )
+            }.map { it.id }
             if (autoSeen.isNotEmpty()) {
                 addSeenIds(autoSeen)
             }

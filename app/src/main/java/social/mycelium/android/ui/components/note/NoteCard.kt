@@ -894,6 +894,7 @@ internal fun QuotedNoteContent(
             quotedMediaUrls
         )
     }
+    val quotedEmojiUrls = remember(meta.tags) { extractEmojiUrls(meta.tags) }
     val quotedContentBlocks by produceState(
         initialValue = social.mycelium.android.utils.ContentBlockCache.get(quotedCacheKey) ?: emptyList(),
         quotedCacheKey, quotedMentionVersion
@@ -904,7 +905,8 @@ internal fun QuotedNoteContent(
                 quotedMediaUrls,
                 emptyList(),
                 linkStyle,
-                profileCache
+                profileCache,
+                emojiUrls = quotedEmojiUrls
             )
         }
         social.mycelium.android.utils.ContentBlockCache.put(quotedCacheKey, result)

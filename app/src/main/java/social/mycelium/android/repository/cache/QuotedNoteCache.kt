@@ -45,9 +45,16 @@ object QuotedNoteCache {
         val snippet = buildSmartSnippet(event.content, SNIPPET_MAX_LEN)
         val rootId = social.mycelium.android.utils.Nip10ReplyDetector.getRootId(event)
         val replyToId = social.mycelium.android.utils.Nip10ReplyDetector.getReplyToId(event)
+        // Include poll tags for poll kinds, and emoji tags for ALL kinds.
+        // Emoji tags are needed for NIP-30 custom emoji/GIF rendering in
+        // quoted note body text via extractEmojiUrls(meta.tags).
+        // Only UI-relevant tags are preserved to keep serialization small.
         val tags = if (event.kind == 1068 || event.kind == 6969) {
             event.tags.map { it.toList() }
-        } else emptyList()
+        } else {
+            // Extract only emoji tags: ["emoji", "shortcode", "url"]
+            event.tags.filter { it.size >= 3 && it[0] == "emoji" }.map { it.toList() }
+        }
 
         // Seed MediaAspectRatioCache from NIP-92 imeta tags so quoted note images
         // have correct aspect ratios on first render (before Coil loads them).

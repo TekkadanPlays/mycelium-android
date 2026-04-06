@@ -1253,12 +1253,6 @@ class NotesRepository private constructor() {
      *  by each loadOlderNotes call so progressively older pages can pass through. Only
      *  applies to events marked isPagination=true. */
     @Volatile private var feedAgeFloorMs: Long = 0L
-    /** Per-relay pagination cursors: tracks the oldest event timestamp (ms) seen from each relay.
-     *  Used by loadOlderNotesFromRelay to send relay-specific `until` values so dense relays
-     *  (damus) advance independently from sparse relays (pickle). Cleared on fresh subscription. */
-    private val perRelayCursorMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
-    /** Relays that returned 0 events on their last pagination request — skipped until reset. */
-    private val exhaustedPaginationRelays = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private val _pendingNewNotes = mutableListOf<Note>()
     private val pendingNotesLock = Any()
     private val _newNotesCounts = MutableStateFlow(NewNotesCounts(0, 0))
@@ -1349,16 +1343,10 @@ class NotesRepository private constructor() {
          *  Raised from 1.5s→3s: outbox relays (damus) can be slower than local relays,
          *  and the subscription was closing before they finished delivering. */
         private const val OLDER_NOTES_SETTLE_MS = 3_000L
-        /** Max cursor jump per page (30 days). Prevents a single outlier from skipping months.
-         *  Raised from 14d→30d: Following feeds on outbox relays (damus) can have sparse
-         *  activity with 2-3 week gaps between posts by followed authors. */
-        private const val MAX_CURSOR_JUMP_MS = 30L * 86_400_000L
-        /** Number of events to request per pagination page (limit param). */
-        private const val PAGINATION_PAGE_SIZE = 100
-        /** Per-relay limit for pagination requests (total events ≈ relayCount × this). */
+        /** Per-relay limit for pagination requests within each weekly window. */
         private const val PAGINATION_PER_RELAY_LIMIT = 50
-        /** How far back (days) the age floor is lowered per pagination page. */
-        private const val PAGINATION_PAGE_DAYS = 7L
+        /** Weekly window size (days). Each pagination page fetches this many days from all relays. */
+        private const val PAGINATION_WINDOW_DAYS = 7L
 
         @Volatile
         private var instance: NotesRepository? = null
@@ -2224,8 +2212,6 @@ class NotesRepository private constructor() {
         paginationCursorMs = 0L
         paginationExtraCap = 0
         paginationEmptyStreak = 0
-        perRelayCursorMs.clear()
-        exhaustedPaginationRelays.clear()
         _paginationExhausted.value = false
         _timeGapIndex.value = null
 
@@ -2388,73 +2374,48 @@ class NotesRepository private constructor() {
         loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
     }
 
-    /** Relay-based pagination with per-relay cursors.
-     *  Each relay tracks its own oldest-event timestamp so dense relays (damus) paginate
-     *  independently from sparse relays (pickle). Exhausted relays are skipped. */
+    /** Weekly window pagination: all relays get the same since/until (7-day window).
+     *  Cursor steps back 7 days per page. Dense relays return many events, sparse relays
+     *  return few — that's fine. No per-relay cursor tracking needed. */
     private fun loadOlderNotesFromRelay(cursorMs: Long, untilSec: Long, authors: List<String>?, relays: List<String>) {
         olderNotesHandle?.cancel()
 
         // Pause DeepHistoryFetcher to avoid competing for SQLite write lock
         DeepHistoryFetcher.pauseForPagination = true
 
-        // Filter out exhausted relays — they returned 0 events last time
-        val activeRelays = relays.filter { it !in exhaustedPaginationRelays }
-        if (activeRelays.isEmpty()) {
-            MLog.w(TAG, "loadOlderNotes: all ${relays.size} relays exhausted — pagination done")
-            _paginationExhausted.value = true
-            _isLoadingOlder.value = false
-            DeepHistoryFetcher.pauseForPagination = false
-            return
-        }
+        // Weekly window: all relays get the same since/until
+        val windowUntilSec = untilSec
+        val windowSinceSec = untilSec - (PAGINATION_WINDOW_DAYS * 86_400L)
 
-        // Build per-relay filters: each relay gets its own `until` based on where it left off.
-        // Outbox relays get their NIP-65 resolved author subset instead of the full follow list
-        // (e.g. damus only has posts from authors who declared it as a write relay).
+        // Build per-relay filters: same time window for all relays.
+        // Outbox relays get their NIP-65 resolved author subset.
         val outboxAssignment = outboxFeedManager.currentRelayAssignment
-        val perRelayFilters = activeRelays.associate { relayUrl ->
-            val relayCursor = perRelayCursorMs[relayUrl]
-            val effectiveUntilSec = if (relayCursor != null && relayCursor > 0) {
-                relayCursor / 1000  // Use this relay's own cursor
-            } else {
-                untilSec  // First page: use global cursor
-            }
-            // Use outbox-specific authors if this relay has a NIP-65 assignment
+        val perRelayFilters = relays.associate { relayUrl ->
             val relayAuthors = outboxAssignment[relayUrl]?.toList()
             val effectiveAuthors = if (relayAuthors != null && authors != null) {
                 relayAuthors.filter { it in authors.toSet() }.ifEmpty { authors }
             } else authors
             val filter = if (effectiveAuthors != null) {
-                Filter(kinds = listOf(1), authors = effectiveAuthors, limit = PAGINATION_PER_RELAY_LIMIT, until = effectiveUntilSec)
+                Filter(kinds = listOf(1), authors = effectiveAuthors, limit = PAGINATION_PER_RELAY_LIMIT,
+                    since = windowSinceSec, until = windowUntilSec)
             } else {
-                Filter(kinds = listOf(1), limit = PAGINATION_PER_RELAY_LIMIT, until = effectiveUntilSec)
+                Filter(kinds = listOf(1), limit = PAGINATION_PER_RELAY_LIMIT,
+                    since = windowSinceSec, until = windowUntilSec)
             }
             relayUrl to listOf(filter)
         }
 
-        MLog.w(TAG, "loadOlderNotes: ${activeRelays.size}/${relays.size} active relays " +
-            "(${exhaustedPaginationRelays.size} exhausted), cursors: ${activeRelays.take(5).joinToString { 
-                val c = perRelayCursorMs[it]
-                "${it.removePrefix("wss://").removeSuffix("/").takeLast(20)}=${if (c != null) fmtMs(c) else "init"}"
-            }}")
+        MLog.w(TAG, "loadOlderNotes (weekly): ${relays.size} relays, window=${fmtMs(windowSinceSec * 1000)}→${fmtMs(windowUntilSec * 1000)}")
 
-        // Lower the age floor based on HEALTHY relay cursors only (relays returning
-        // meaningful data). Zombie relays stuck at ancient timestamps (e.g. pickle at 11/30)
-        // must not pull the floor back months.
-        val healthyCursors = perRelayCursorMs.filter { it.key !in exhaustedPaginationRelays }
-        val oldestHealthyCursorMs = healthyCursors.values.minOrNull() ?: cursorMs
-        val pageFloorMs = oldestHealthyCursorMs - PAGINATION_PAGE_DAYS * 86_400_000L
-        if (pageFloorMs < feedAgeFloorMs) {
-            feedAgeFloorMs = pageFloorMs
+        // Lower the age floor to the window start
+        val windowFloorMs = windowSinceSec * 1000L
+        if (windowFloorMs < feedAgeFloorMs) {
+            feedAgeFloorMs = windowFloorMs
         }
 
         val lastEventAt = java.util.concurrent.atomic.AtomicLong(0)
         val eventCount = java.util.concurrent.atomic.AtomicInteger(0)
-        val oldestReceivedMs = java.util.concurrent.atomic.AtomicLong(Long.MAX_VALUE)
-        // Track per-relay event counts and oldest timestamps for cursor updates
         val perRelayEventCount = java.util.concurrent.ConcurrentHashMap<String, Int>()
-        val perRelayOldestMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
-        // Collect raw events for Room persistence — pagination events bypass _notes entirely
-        // and go Room → roomPaginatedNotes so they aren't killed by trimNotesToCap's window.
         val collectedEvents = java.util.concurrent.ConcurrentLinkedQueue<Pair<Event, String>>()
 
         olderNotesHandle = relayStateMachine.requestTemporarySubscriptionPerRelayWithRelay(
@@ -2464,11 +2425,7 @@ class NotesRepository private constructor() {
             if (event.kind == 1) {
                 lastEventAt.set(System.currentTimeMillis())
                 eventCount.incrementAndGet()
-                val eventMs = event.createdAt * 1000L
-                oldestReceivedMs.updateAndGet { prev -> minOf(prev, eventMs) }
-                // Track per-relay stats
                 perRelayEventCount.merge(relayUrl, 1) { old, inc -> old + inc }
-                perRelayOldestMs.merge(relayUrl, eventMs) { old, new -> minOf(old, new) }
                 EventRelayTracker.addRelay(event.id, relayUrl)
                 collectedEvents.add(event to relayUrl)
             }
@@ -2490,7 +2447,7 @@ class NotesRepository private constructor() {
 
             val received = eventCount.get()
 
-            // ── Persist to Room (same as flushEventStore but inline for pagination) ──
+            // ── Persist to Room ──
             val dao = eventDao
             if (dao != null && collectedEvents.isNotEmpty()) {
                 withContext(Dispatchers.IO) {
@@ -2521,25 +2478,18 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // ── Load from Room into roomPaginatedNotes (unified path) ──
+            // ── Load from Room into roomPaginatedNotes ──
             val wm = feedWindowManager
             var roomAdded = 0
             if (wm != null && received > 0) {
                 wm.followFilterEnabled = followFilterEnabled
                 wm.followPubkeys = authors ?: emptyList()
-                // Use oldest existing Room-paginated note as cursor so subsequent
-                // pages don't re-fetch the same entities. Falls back to untilSec
-                // on the first relay page (roomPaginatedNotes still empty).
+                // Room cursor: oldest existing paginated note, or untilSec for first page
                 val roomCursorSec = if (roomPaginatedNotes.isNotEmpty()) {
                     roomPaginatedNotes.minOf { it.timestamp } / 1000
-                } else untilSec
-                // Floor: oldest healthy relay cursor minus 14-day buffer.
-                // Prevents ancient events from sparse relays (e.g., pickle at 11/30)
-                // from contaminating the paginated feed.
-                val healthyCursors = perRelayCursorMs.filter { it.key !in exhaustedPaginationRelays }
-                val oldestHealthyMs = healthyCursors.values.minOrNull() ?: (roomCursorSec * 1000)
-                val paginationFloorSec = (oldestHealthyMs / 1000) - (14L * 86_400)
-                val roomNotes = wm.loadPage(roomCursorSec, floorSec = paginationFloorSec.coerceAtLeast(0))
+                } else windowUntilSec
+                // Floor = window start — only show events within this weekly window
+                val roomNotes = wm.loadPage(roomCursorSec, floorSec = windowSinceSec)
                 if (roomNotes.isNotEmpty()) {
                     val existingMemIds = feedIndex.byId.keys
                     val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
@@ -2561,60 +2511,32 @@ class NotesRepository private constructor() {
                 }
             }
 
-            // Update per-relay cursors from actual received data
-            for ((relayUrl, oldest) in perRelayOldestMs) {
-                val current = perRelayCursorMs[relayUrl]
-                if (current != null && current - oldest > MAX_CURSOR_JUMP_MS) {
-                    exhaustedPaginationRelays.add(relayUrl)
-                    MLog.w(TAG, "Relay cursor-clamped: ${relayUrl.removePrefix("wss://").removeSuffix("/")} " +
-                        "jumped ${fmtMs(current)} → ${fmtMs(oldest)} (>${MAX_CURSOR_JUMP_MS / 86_400_000L}d gap)")
-                } else if (current == null || oldest < current) {
-                    perRelayCursorMs[relayUrl] = oldest
-                }
-            }
-            val MIN_USEFUL_EVENTS = 2
-            for (relayUrl in activeRelays) {
-                if (relayUrl in exhaustedPaginationRelays) continue
-                val count = perRelayEventCount[relayUrl] ?: 0
-                if (count < MIN_USEFUL_EVENTS) {
-                    exhaustedPaginationRelays.add(relayUrl)
-                    MLog.w(TAG, "Relay exhausted: ${relayUrl.removePrefix("wss://").removeSuffix("/")} ($count < $MIN_USEFUL_EVENTS events this page)")
-                }
-            }
+            // Step cursor back by one week for the next page
+            paginationCursorMs = windowSinceSec * 1000L
 
-            // Update global cursor from the oldest event we actually received
-            val oldest = oldestReceivedMs.get()
-            if (oldest < Long.MAX_VALUE && oldest > 0) {
-                if (paginationCursorMs == 0L || oldest < paginationCursorMs) {
-                    paginationCursorMs = oldest
-                }
-                if (oldest < feedAgeFloorMs) feedAgeFloorMs = oldest
-            }
-
-            // Exhaustion detection — require 3 consecutive empty pages before giving up.
-            // Relays can return events that are all replies or unfollowed authors, so
-            // a single empty-display page is normal. 3 is a safer threshold.
+            // Exhaustion: 3 consecutive weekly windows with 0 displayable notes
             if (received == 0) {
                 paginationEmptyStreak++
                 if (paginationEmptyStreak >= 3) {
                     _paginationExhausted.value = true
-                    MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty responses")
+                    MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty weeks")
                 }
             } else if (roomAdded == 0) {
                 paginationEmptyStreak++
                 if (paginationEmptyStreak >= 3) {
                     _paginationExhausted.value = true
-                    MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak pages yielded 0 displayable notes ($received recv)")
+                    MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak weeks yielded 0 displayable notes ($received recv)")
                 }
             } else {
                 paginationEmptyStreak = 0
             }
-            val relayStats = activeRelays.take(5).joinToString { r ->
+
+            val relayStats = relays.take(5).joinToString { r ->
                 val cnt = perRelayEventCount[r] ?: 0
-                val cur = perRelayCursorMs[r]?.let { fmtMs(it) } ?: "?"
-                "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt→$cur"
+                "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt"
             }
-            MLog.w(TAG, "Older notes (relay→Room→tail): +$roomAdded displayed ($received recv), roomTail=${roomPaginatedNotes.size} | $relayStats")
+            MLog.w(TAG, "Older notes (weekly ${fmtMs(windowSinceSec*1000)}→${fmtMs(windowUntilSec*1000)}): " +
+                "+$roomAdded displayed ($received recv), roomTail=${roomPaginatedNotes.size} | $relayStats")
 
             if (roomAdded > 0) updateDisplayedNotes()
             _isLoadingOlder.value = false
@@ -3666,8 +3588,6 @@ class NotesRepository private constructor() {
         paginationCursorMs = 0L
         paginationExtraCap = 0
         paginationEmptyStreak = 0
-        perRelayCursorMs.clear()
-        exhaustedPaginationRelays.clear()
         _paginationExhausted.value = false
         // Clear Room-paginated tail
         synchronized(roomPaginatedNotes) { roomPaginatedNotes.clear() }

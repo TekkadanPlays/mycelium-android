@@ -2403,7 +2403,10 @@ class NotesRepository private constructor() {
             return
         }
 
-        // Build per-relay filters: each relay gets its own `until` based on where it left off
+        // Build per-relay filters: each relay gets its own `until` based on where it left off.
+        // Outbox relays get their NIP-65 resolved author subset instead of the full follow list
+        // (e.g. damus only has posts from authors who declared it as a write relay).
+        val outboxAssignment = outboxFeedManager.currentRelayAssignment
         val perRelayFilters = activeRelays.associate { relayUrl ->
             val relayCursor = perRelayCursorMs[relayUrl]
             val effectiveUntilSec = if (relayCursor != null && relayCursor > 0) {
@@ -2411,8 +2414,13 @@ class NotesRepository private constructor() {
             } else {
                 untilSec  // First page: use global cursor
             }
-            val filter = if (authors != null) {
-                Filter(kinds = listOf(1), authors = authors, limit = PAGINATION_PER_RELAY_LIMIT, until = effectiveUntilSec)
+            // Use outbox-specific authors if this relay has a NIP-65 assignment
+            val relayAuthors = outboxAssignment[relayUrl]?.toList()
+            val effectiveAuthors = if (relayAuthors != null && authors != null) {
+                relayAuthors.filter { it in authors.toSet() }.ifEmpty { authors }
+            } else authors
+            val filter = if (effectiveAuthors != null) {
+                Filter(kinds = listOf(1), authors = effectiveAuthors, limit = PAGINATION_PER_RELAY_LIMIT, until = effectiveUntilSec)
             } else {
                 Filter(kinds = listOf(1), limit = PAGINATION_PER_RELAY_LIMIT, until = effectiveUntilSec)
             }
@@ -2515,7 +2523,13 @@ class NotesRepository private constructor() {
             if (wm != null && received > 0) {
                 wm.followFilterEnabled = followFilterEnabled
                 wm.followPubkeys = authors ?: emptyList()
-                val roomNotes = wm.loadPage(untilSec)
+                // Use oldest existing Room-paginated note as cursor so subsequent
+                // pages don't re-fetch the same entities. Falls back to untilSec
+                // on the first relay page (roomPaginatedNotes still empty).
+                val roomCursorSec = if (roomPaginatedNotes.isNotEmpty()) {
+                    roomPaginatedNotes.minOf { it.timestamp } / 1000
+                } else untilSec
+                val roomNotes = wm.loadPage(roomCursorSec)
                 if (roomNotes.isNotEmpty()) {
                     val existingMemIds = feedIndex.byId.keys
                     val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
@@ -2567,16 +2581,18 @@ class NotesRepository private constructor() {
                 if (oldest < feedAgeFloorMs) feedAgeFloorMs = oldest
             }
 
-            // Exhaustion detection
+            // Exhaustion detection — require 3 consecutive empty pages before giving up.
+            // Relays can return events that are all replies or unfollowed authors, so
+            // a single empty-display page is normal. 3 is a safer threshold.
             if (received == 0) {
                 paginationEmptyStreak++
-                if (paginationEmptyStreak >= 2) {
+                if (paginationEmptyStreak >= 3) {
                     _paginationExhausted.value = true
                     MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak consecutive empty responses")
                 }
             } else if (roomAdded == 0) {
                 paginationEmptyStreak++
-                if (paginationEmptyStreak >= 2) {
+                if (paginationEmptyStreak >= 3) {
                     _paginationExhausted.value = true
                     MLog.w(TAG, "Pagination stopped: $paginationEmptyStreak pages yielded 0 displayable notes ($received recv)")
                 }

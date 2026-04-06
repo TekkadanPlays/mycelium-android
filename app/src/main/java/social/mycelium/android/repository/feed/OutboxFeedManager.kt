@@ -73,9 +73,11 @@ class OutboxFeedManager private constructor() {
     /** Tracks which authors delivered events this session (for relay attribution). */
     private val deliveredAuthors = ConcurrentHashMap.newKeySet<String>()
 
-    /** The relay→authors assignment from the current session (for delivery attribution). */
+    /** The relay→authors assignment from the current session (for delivery attribution
+     *  and pagination per-relay author filtering). */
     @Volatile
-    private var currentRelayAssignment: Map<String, Set<String>> = emptyMap()
+    var currentRelayAssignment: Map<String, Set<String>> = emptyMap()
+        private set
 
     /** Callback to inject events into NotesRepository's ingestion pipeline. */
     @Volatile

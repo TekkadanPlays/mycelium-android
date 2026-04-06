@@ -152,3 +152,6 @@ better-antigravity/
 
 # Patch files
 *.patch
+
+# Device diagnostic log exports
+device_logs/

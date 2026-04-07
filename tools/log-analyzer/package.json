@@ -1,0 +1,31 @@
+{
+  "name": "spore",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Spore — a lean, performant microframework: Bun + Hono + InfernoJS + Blazecn + Preact Signals",
+  "scripts": {
+    "dev": "bun --watch run src/server.ts",
+    "dev:css": "bunx @tailwindcss/cli -i src/styles.css -o public/styles.css --watch",
+    "build": "bun run build:css && bun run build:client",
+    "build:client": "bun build src/client/entry.ts --outdir public/dist --target browser --minify",
+    "build:css": "bunx @tailwindcss/cli -i src/styles.css -o public/styles.css --minify",
+    "start": "bun run src/server.ts"
+  },
+  "dependencies": {
+    "@preact/signals-core": "^1.8.0",
+    "blazecn": "github:TekkadanPlays/blazecn",
+    "chart.js": "^4.5.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "hono": "^4.7.0",
+    "inferno": "^8.2.3",
+    "inferno-create-element": "^8.2.3",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0",
+    "tailwindcss": "^4.1.0",
+    "@tailwindcss/cli": "^4.1.0"
+  }
+}

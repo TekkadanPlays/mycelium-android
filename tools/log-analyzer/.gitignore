@@ -1,0 +1,7 @@
+node_modules/
+dist/
+public/dist/
+public/styles.css
+bun.lock
+*.log
+.DS_Store

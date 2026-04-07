@@ -155,7 +155,14 @@ object RelayLogBuffer {
     fun logReceived(relayUrl: String, message: String) = log(relayUrl, LogType.RECEIVED, message)
     fun logError(relayUrl: String, error: String) = log(relayUrl, LogType.ERROR, error)
     fun logNotice(relayUrl: String, message: String) = log(relayUrl, LogType.NOTICE, message)
-    fun logEose(relayUrl: String, subId: String) = log(relayUrl, LogType.EOSE, "EOSE: $subId", LogCategory.SUBSCRIPTION)
+    fun logEose(relayUrl: String, subId: String) {
+        log(relayUrl, LogType.EOSE, "EOSE: $subId", LogCategory.SUBSCRIPTION)
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.SUB_EOSE,
+            "RELAY", "RelayLogBuffer",
+            data = mapOf("sub_id" to subId, "url" to relayUrl)
+        )
+    }
 
     /** Structured diagnostic line: `[category] detail` for the relay control panel. */
     fun logDiagnostic(relayUrl: String, category: String, detail: String) {

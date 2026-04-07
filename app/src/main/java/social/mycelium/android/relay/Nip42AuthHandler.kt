@@ -210,6 +210,10 @@ class Nip42AuthHandler(
 
         MLog.d(TAG, "AUTH challenge from $url: ${challenge.take(16)}…")
         updateStatus(url, AuthStatus.AUTHENTICATING)
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.AUTH_CHALLENGE,
+            "AUTH", TAG, data = mapOf("url" to url, "challenge_prefix" to challenge.take(16))
+        )
 
         // Queue for sequential background processing
         authQueue.trySend(AuthJob(url, challenge, currentSigner))
@@ -235,6 +239,7 @@ class Nip42AuthHandler(
      */
     private suspend fun processAuthJob(job: AuthJob) {
         val (url, challenge, currentSigner) = job
+        val authStart = System.currentTimeMillis()
         try {
             val template = eventTemplate(22242, "", nowUnixSeconds()) {
                 add(arrayOf("relay", url))
@@ -242,6 +247,10 @@ class Nip42AuthHandler(
             }
             var signed: Event? = null
             for (attempt in 1..MAX_SIGN_ATTEMPTS) {
+                social.mycelium.android.debug.EventLog.emit(
+                    social.mycelium.android.debug.LogEvents.AUTH_SIGNING,
+                    "AUTH", TAG, data = mapOf("url" to url, "attempt" to attempt)
+                )
                 signed = currentSigner.signBackgroundOnly(template)
                 if (signed != null && signed.sig.isNotBlank()) break
                 if (attempt < MAX_SIGN_ATTEMPTS) {
@@ -252,6 +261,10 @@ class Nip42AuthHandler(
             if (signed == null || signed.sig.isBlank()) {
                 MLog.d(TAG, "AUTH[$url] Background sign unavailable after $MAX_SIGN_ATTEMPTS attempts — unauthenticated until reconnect")
                 updateStatus(url, AuthStatus.FAILED)
+                social.mycelium.android.debug.EventLog.emit(
+                    social.mycelium.android.debug.LogEvents.AUTH_SIGN_FAILED,
+                    "AUTH", TAG, data = mapOf("url" to url, "attempts" to MAX_SIGN_ATTEMPTS)
+                )
                 return
             }
             MLog.d(TAG, "AUTH[$url] signed id=${signed.id.take(8)}")
@@ -274,8 +287,20 @@ class Nip42AuthHandler(
             stateMachine.relayPool.resubscribeRelay(url)
             // Replay any events that were rejected with auth-required
             val eventsToReplay = pendingReplayEvents.remove(url)
+            val replayCount = eventsToReplay?.size ?: 0
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.AUTH_SUCCESS,
+                "AUTH", TAG, data = mapOf(
+                    "url" to url,
+                    "replay_count" to replayCount,
+                )
+            )
             if (!eventsToReplay.isNullOrEmpty()) {
                 MLog.d(TAG, "Replaying ${eventsToReplay.size} event(s) to $url after auth")
+                social.mycelium.android.debug.EventLog.emit(
+                    social.mycelium.android.debug.LogEvents.AUTH_REPLAY,
+                    "AUTH", TAG, data = mapOf("url" to url, "event_count" to replayCount)
+                )
                 for (event in eventsToReplay) {
                     stateMachine.relayPool.send(event, setOf(url))
                 }
@@ -284,6 +309,10 @@ class Nip42AuthHandler(
             MLog.w(TAG, "AUTH[$url] ✗ rejected: $message")
             updateStatus(url, AuthStatus.FAILED)
             pendingReplayEvents.remove(url)
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.AUTH_REJECTED,
+                "AUTH", TAG, data = mapOf("url" to url, "message" to message)
+            )
         }
     }
 

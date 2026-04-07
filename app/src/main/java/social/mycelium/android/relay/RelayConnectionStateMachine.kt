@@ -746,6 +746,14 @@ class RelayConnectionStateMachine {
                 val elapsed = System.currentTimeMillis() - lastEventReceivedAt
                 if (elapsed > STALE_FALLBACK_THRESHOLD_MS) {
                     MLog.w(TAG, "Keepalive: no events in ${elapsed / 1000}s with $connectedCount connected relays — forcing full reconnect (possible half-open sockets)")
+                    social.mycelium.android.debug.EventLog.emit(
+                        social.mycelium.android.debug.LogEvents.RELAY_STALE_RECONNECT,
+                        "RELAY", TAG, data = mapOf(
+                            "elapsed_s" to (elapsed / 1000).toInt(),
+                            "connected_count" to connectedCount,
+                            "reason" to "keepalive_stale",
+                        )
+                    )
                     for (u in currentSubscriptionRelayUrls) {
                         RelayLogBuffer.logDiagnostic(
                             normalizeRelayUrl(u),

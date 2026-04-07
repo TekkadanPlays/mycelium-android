@@ -160,6 +160,25 @@ object DiagnosticLog {
         pending.add(channel to line)
     }
 
+    /** Start a measurable span and return its ID. Include the ID in subsequent logs, then call endSpan. */
+    fun startSpan(channel: Channel, source: String, operation: String): String {
+        if (!initialized.get()) return ""
+        val spanId = java.util.UUID.randomUUID().toString().take(8)
+        val ts = timeFmt.format(Date())
+        val line = "$ts | I | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | SPAN_START {$spanId} $operation"
+        pending.add(channel to line)
+        return spanId
+    }
+
+    /** End a measurable span previously started. */
+    fun endSpan(channel: Channel, source: String, operation: String, spanId: String, data: String? = null) {
+        if (!initialized.get() || spanId.isEmpty()) return
+        val ts = timeFmt.format(Date())
+        val msg = if (data != null) "SPAN_END {$spanId} $operation : $data" else "SPAN_END {$spanId} $operation"
+        val line = "$ts | I | ${channel.name.padEnd(12)} | ${source.padEnd(20).take(20)} | $msg"
+        pending.add(channel to line)
+    }
+
     /** Convenience: log to STARTUP channel. */
     fun startup(source: String, message: String) = log(Channel.STARTUP, source, message)
 

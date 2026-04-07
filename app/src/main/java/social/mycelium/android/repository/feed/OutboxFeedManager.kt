@@ -685,8 +685,10 @@ class OutboxFeedManager private constructor() {
     }
 
     private suspend fun paginateOlderNotesInternal(): List<Pair<Event, String>> {
-        val assignment = currentRelayAssignment
-        if (assignment.isEmpty()) return emptyList()
+        val spanId = social.mycelium.android.debug.DiagnosticLog.startSpan(social.mycelium.android.debug.DiagnosticLog.Channel.FEED, "OutboxFeedManager", "Pagination Fetch")
+        try {
+            val assignment = currentRelayAssignment
+            if (assignment.isEmpty()) return emptyList()
 
         // Filter to relays that haven't exhausted their history
         val activeRelays = assignment.keys.filter { url ->
@@ -806,6 +808,9 @@ class OutboxFeedManager private constructor() {
             " | ${relayStats.take(5).joinToString()}")
 
         return collectedEvents.toList()
+        } finally {
+            social.mycelium.android.debug.DiagnosticLog.endSpan(social.mycelium.android.debug.DiagnosticLog.Channel.FEED, "OutboxFeedManager", "Pagination Fetch", spanId)
+        }
     }
 
     /**

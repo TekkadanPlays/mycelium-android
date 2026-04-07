@@ -1089,9 +1089,11 @@ class NotesRepository private constructor() {
     }
 
     // ── Event store write path (deferred toJson on IO thread) ────────────────
+    private val eventStoreFlushMutex = kotlinx.coroutines.sync.Mutex()
+
     private fun scheduleEventStoreFlush() {
-        eventStoreFlushJob?.cancel()
-        eventStoreFlushJob = scope.launch {
+        if (eventStoreFlushJob?.isActive == true) return
+        eventStoreFlushJob = scope.launch(Dispatchers.IO) {
             delay(EVENT_STORE_FLUSH_DEBOUNCE_MS)
             flushEventStore()
         }
@@ -1099,51 +1101,60 @@ class NotesRepository private constructor() {
 
     private suspend fun flushEventStore() {
         val dao = eventDao ?: return
-        withContext(Dispatchers.IO) {
-            val entities = mutableListOf<CachedEventEntity>()
-            var drained = 0
-            while (drained < EVENT_STORE_BATCH_CAP) {
-                val triple = pendingEventObjects.poll() ?: break
-                val (event, relayUrl, _) = triple
-                val normalizedUrl = relayUrl.ifBlank { null }
-                val trackedUrls = EventRelayTracker.getRelays(event.id)
-                val allUrls = if (trackedUrls.isNotEmpty()) {
-                    (trackedUrls + listOfNotNull(normalizedUrl)).distinct().joinToString(",")
-                } else {
-                    normalizedUrl
+        if (!eventStoreFlushMutex.tryLock()) return // Existing flusher will process the queue
+        
+        val spanId = social.mycelium.android.debug.DiagnosticLog.startSpan(social.mycelium.android.debug.DiagnosticLog.Channel.FEED, "NotesRepository", "DB Queue Drain")
+        try {
+            withContext(Dispatchers.IO) {
+                while (pendingEventObjects.isNotEmpty()) {
+                    val entities = mutableListOf<CachedEventEntity>()
+                    var drained = 0
+                    while (drained < EVENT_STORE_BATCH_CAP) {
+                        val triple = pendingEventObjects.poll() ?: break
+                        val (event, relayUrl, _) = triple
+                        val normalizedUrl = relayUrl.ifBlank { null }
+                        val trackedUrls = EventRelayTracker.getRelays(event.id)
+                        val allUrls = if (trackedUrls.isNotEmpty()) {
+                            (trackedUrls + listOfNotNull(normalizedUrl)).distinct().joinToString(",")
+                        } else {
+                            normalizedUrl
+                        }
+                        entities.add(CachedEventEntity(
+                            eventId = event.id,
+                            kind = event.kind,
+                            pubkey = event.pubKey.lowercase(),
+                            createdAt = event.createdAt,
+                            eventJson = event.toJson(),
+                            relayUrl = normalizedUrl,
+                            relayUrls = allUrls,
+                            isReply = social.mycelium.android.utils.Nip10ReplyDetector.isReply(event)
+                        ))
+                        drained++
+                    }
+                    if (entities.isEmpty()) break
+                    try {
+                        dao.insertAll(entities)
+                        PipelineDiagnostics.recordDbCommit(entities.size)
+                        val remaining = pendingEventObjects.size
+                        if (entities.size > 20 || remaining > 0) {
+                            MLog.d(TAG, "Event store: persisted ${entities.size} events, $remaining queued")
+                        }
+                    } catch (e: Exception) {
+                        if (e !is kotlinx.coroutines.CancellationException) {
+                            MLog.e(TAG, "Event store flush failed: ${e.message}", e)
+                        } else throw e
+                    }
+                    // More events waiting — yield briefly (let GC breathe) then drain next batch.
+                    if (pendingEventObjects.isNotEmpty()) {
+                        delay(25)
+                    }
                 }
-                entities.add(CachedEventEntity(
-                    eventId = event.id,
-                    kind = event.kind,
-                    pubkey = event.pubKey.lowercase(),
-                    createdAt = event.createdAt,
-                    eventJson = event.toJson(),
-                    relayUrl = normalizedUrl,
-                    relayUrls = allUrls,
-                    isReply = social.mycelium.android.utils.Nip10ReplyDetector.isReply(event)
-                ))
-                drained++
-            }
-            if (entities.isEmpty()) return@withContext
-            try {
-                dao.insertAll(entities)
-                PipelineDiagnostics.recordDbCommit(entities.size)
+                // Notify window manager once after all batches drain
                 feedWindowManager?.onRoomDataChanged()
-                val remaining = pendingEventObjects.size
-                if (entities.size > 20 || remaining > 0) {
-                    MLog.d(TAG, "Event store: persisted ${entities.size} events, $remaining queued")
-                }
-            } catch (e: Exception) {
-                MLog.e(TAG, "Event store flush failed: ${e.message}", e)
             }
-            // More events waiting — yield briefly (let GC breathe) then drain next batch.
-            // Don't use scheduleEventStoreFlush() here — its 2s debounce would delay
-            // draining when we already know there's work. 50ms gap between batches
-            // spreads allocation pressure across GC windows.
-            if (pendingEventObjects.isNotEmpty()) {
-                delay(50)
-                flushEventStore()
-            }
+        } finally {
+            social.mycelium.android.debug.DiagnosticLog.endSpan(social.mycelium.android.debug.DiagnosticLog.Channel.FEED, "NotesRepository", "DB Queue Drain", spanId)
+            eventStoreFlushMutex.unlock()
         }
     }
 

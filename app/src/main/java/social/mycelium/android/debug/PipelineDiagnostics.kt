@@ -72,6 +72,11 @@ object PipelineDiagnostics {
         batchFlushesTotal.incrementAndGet()
         batchEventsTotal.addAndGet(batchSize.toLong())
         batchLatencyMsTotal.addAndGet(elapsedMs)
+        EventLog.emit(
+            LogEvents.FEED_FLUSH,
+            "FEED", "Pipeline",
+            data = mapOf("events" to batchSize, "elapsed_ms" to elapsedMs)
+        )
     }
 
     /**
@@ -82,6 +87,11 @@ object PipelineDiagnostics {
     fun recordDbCommit(rowCount: Int) {
         dbCommitsTotal.incrementAndGet()
         dbRowsTotal.addAndGet(rowCount.toLong())
+        EventLog.emit(
+            LogEvents.FEED_BATCH_COMMIT,
+            "FEED", "Pipeline",
+            data = mapOf("rows" to rowCount)
+        )
     }
 
     // ── Snapshot & logging ────────────────────────────────────────────────────

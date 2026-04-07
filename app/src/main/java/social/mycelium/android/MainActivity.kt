@@ -92,6 +92,8 @@ class MainActivity : ComponentActivity(), ComponentCallbacks2 {
 
         // File-backed diagnostic log: always active (release persists WARN+ERROR only)
         social.mycelium.android.debug.DiagnosticLog.init(applicationContext)
+        // Structured JSONL event stream for machine-readable analysis
+        social.mycelium.android.debug.EventLog.init(applicationContext)
 
         // Detect main-thread disk/network violations in debug to avoid ANR regressions
         if (BuildConfig.DEBUG) {

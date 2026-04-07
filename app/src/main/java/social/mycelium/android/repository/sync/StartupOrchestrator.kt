@@ -153,6 +153,14 @@ object StartupOrchestrator {
         phase4Started = false
         phase1Deferred = null
         logD( "Reset — all phases cleared (deep fetch stopped)")
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.STARTUP_RESET,
+            "STARTUP", TAG, data = mapOf("reset_reason" to "account_switch")
+        )
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.SESSION_ACCOUNT_SWITCH,
+            "SYSTEM", TAG
+        )
     }
 
     /**
@@ -239,6 +247,8 @@ object StartupOrchestrator {
 
         // Fire-and-forget: settings apply reactively via SharedPreferences → Compose recomposition
         scope.launch {
+            val phase0Sid = social.mycelium.android.debug.EventLog.startStartupPhase(0, "SETTINGS", relayUrls.size)
+            val phase0Start = System.currentTimeMillis()
             try {
                 val filter = Filter(
                     kinds = listOf(30078),
@@ -284,6 +294,9 @@ object StartupOrchestrator {
             } finally {
                 _settingsReady.value = true
                 logD( "Phase 0: complete")
+                social.mycelium.android.debug.EventLog.endStartupPhase(
+                    0, "SETTINGS", phase0Sid, System.currentTimeMillis() - phase0Start
+                )
             }
         }
     }
@@ -315,6 +328,8 @@ object StartupOrchestrator {
         logD( "Phase 1: fetching follow list + mute list")
 
         scope.launch {
+            val phase1Sid = social.mycelium.android.debug.EventLog.startStartupPhase(1, "USER_STATE", followRelayUrls.size)
+            val phase1Start = System.currentTimeMillis()
             try {
                 // Follow list and mute list in parallel — both use one-shot subs
                 val followJob = scope.launch {
@@ -422,6 +437,9 @@ object StartupOrchestrator {
                 _currentPhase.value = StartupPhase.FEED
                 deferred.complete(Unit)
                 logD( "Phase 1: complete → advancing to Phase 2 (feed)")
+                social.mycelium.android.debug.EventLog.endStartupPhase(
+                    1, "USER_STATE", phase1Sid, System.currentTimeMillis() - phase1Start
+                )
             }
         }
         return deferred
@@ -438,6 +456,10 @@ object StartupOrchestrator {
         _feedStarted.value = true
         _currentPhase.value = StartupPhase.ENRICHMENT
         logD( "Phase 2: feed subscription started → advancing to Phase 3")
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.STARTUP_PHASE_START,
+            "STARTUP", TAG, data = mapOf("phase" to 2, "name" to "FEED")
+        )
 
         // Auto-advance to enrichment after a brief delay for EOSE
         scope.launch {
@@ -471,6 +493,10 @@ object StartupOrchestrator {
         _enrichmentStarted.value = true
         _currentPhase.value = StartupPhase.ENRICHMENT
         logD( "Phase 3: starting enrichment (sub-phased over ~8s)")
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.STARTUP_PHASE_START,
+            "STARTUP", TAG, data = mapOf("phase" to 3, "name" to "ENRICHMENT")
+        )
 
         // ── Phase 3a (immediate): outbox feed + self profile ──
         // Outbox discovers notes from followed users on their write relays —
@@ -547,6 +573,10 @@ object StartupOrchestrator {
         phase4Started = true
         _currentPhase.value = StartupPhase.BACKGROUND
         logD( "Phase 4: starting background subscriptions")
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.STARTUP_PHASE_START,
+            "STARTUP", TAG, data = mapOf("phase" to 4, "name" to "BACKGROUND")
+        )
 
         // DMs (deferred: store credentials but don't connect until user visits DM page)
         DirectMessageRepository.startSubscription(userPubkey, signer, inboxUrls, outboxUrls, deferred = true)
@@ -570,6 +600,10 @@ object StartupOrchestrator {
             delay(2_000L)
             _currentPhase.value = StartupPhase.COMPLETE
             logD( "Startup complete — all phases done")
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.STARTUP_PHASE_END,
+                "STARTUP", TAG, data = mapOf("phase" to 4, "name" to "COMPLETE")
+            )
         }
     }
 

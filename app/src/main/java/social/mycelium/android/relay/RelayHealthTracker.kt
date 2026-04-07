@@ -391,23 +391,32 @@ object RelayHealthTracker {
 
     // --- Recording events ---
 
+    /** Per-relay span IDs for connect attempt tracking. */
+    private val connectSpans = java.util.concurrent.ConcurrentHashMap<String, String>()
+
     /** Call when a connection attempt starts (for connect-time tracking). */
     fun recordConnectionAttempt(relayUrl: String) {
         val url = normalize(relayUrl)
+        var attempt = 0
         synchronized(lock) {
             val data = getOrCreate(url)
             data.connectionAttempts++
+            attempt = data.connectionAttempts
             val now = System.currentTimeMillis()
             data.connectStartedAt = now
             if (data.firstSeenAt == 0L) data.firstSeenAt = now
         }
         emitState()
         RelayLogBuffer.logConnecting(url)
+        val sid = social.mycelium.android.debug.EventLog.startRelayConnect(url, attempt)
+        connectSpans[url] = sid
     }
 
     /** Call when a connection succeeds. */
     fun recordConnectionSuccess(relayUrl: String) {
         val url = normalize(relayUrl)
+        var latencyMs = 0L
+        var wasUnflagged = false
         synchronized(lock) {
             val data = getOrCreate(url)
             data.consecutiveFailures = 0
@@ -415,8 +424,8 @@ object RelayHealthTracker {
             data.lastError = null
             // WS handshake time (NOT RTT — includes DNS, TCP, TLS, WS upgrade)
             if (data.connectStartedAt > 0) {
-                val elapsed = System.currentTimeMillis() - data.connectStartedAt
-                data.connectTimeSamples.add(elapsed)
+                latencyMs = System.currentTimeMillis() - data.connectStartedAt
+                data.connectTimeSamples.add(latencyMs)
                 if (data.connectTimeSamples.size > MAX_CONNECT_TIME_SAMPLES) {
                     data.connectTimeSamples.removeAt(0)
                 }
@@ -425,11 +434,20 @@ object RelayHealthTracker {
             // Unflag if it was flagged and now succeeds
             if (data.isFlagged) {
                 data.isFlagged = false
+                wasUnflagged = true
                 MLog.i(TAG, "Relay $url unflagged after successful connection")
             }
         }
         emitState()
         RelayLogBuffer.logConnected(url)
+        val sid = connectSpans.remove(url)
+        social.mycelium.android.debug.EventLog.endRelayConnect(url, sid ?: "", latencyMs)
+        if (wasUnflagged) {
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.RELAY_UNFLAGGED,
+                "RELAY", TAG, data = mapOf("url" to url)
+            )
+        }
     }
 
     /** Call when a connection fails. */
@@ -464,8 +482,25 @@ object RelayHealthTracker {
                 MLog.d(TAG, "Relay $url failure while OFFLINE — not counting toward consecutive failures")
             }
         }
+        connectSpans.remove(url)  // discard span — connection never succeeded
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.RELAY_FAILED,
+            "RELAY", TAG, data = mapOf(
+                "url" to url,
+                "error" to (error ?: "unknown"),
+                "consecutive_failures" to synchronized(lock) { healthData[url]?.consecutiveFailures ?: 0 },
+                "online" to deviceOnline,
+            )
+        )
         if (nowFlagged) {
             MLog.w(TAG, "Relay $url FLAGGED after $FLAG_CONSECUTIVE_FAILURES consecutive failures: $error")
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.RELAY_FLAGGED,
+                "RELAY", TAG, data = mapOf(
+                    "url" to url,
+                    "consecutive_failures" to FLAG_CONSECUTIVE_FAILURES,
+                )
+            )
         }
         if (nowAutoBlocked) {
             _blockedRelays.value = _blockedRelays.value + url
@@ -473,6 +508,14 @@ object RelayHealthTracker {
             persistBlockedRelays()
             persistAutoBlockExpiry()
             MLog.w(TAG, "Relay $url AUTO-BLOCKED for ${AUTO_BLOCK_DURATION_MS / 3600000}h after $AUTO_BLOCK_CONSECUTIVE_FAILURES consecutive failures")
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.RELAY_BLOCKED,
+                "RELAY", TAG, data = mapOf(
+                    "url" to url,
+                    "consecutive_failures" to AUTO_BLOCK_CONSECUTIVE_FAILURES,
+                    "duration_hours" to (AUTO_BLOCK_DURATION_MS / 3600000).toInt(),
+                )
+            )
             // Cancel any pending reconnect and ensure socket stays closed
             try {
                 RelayConnectionStateMachine.getInstance().relayPool.disconnectRelay(url)
@@ -557,6 +600,10 @@ object RelayHealthTracker {
         persistAutoBlockExpiry()
         emitState()
         MLog.i(TAG, "Relay UNBLOCKED: $url — triggering reconnect")
+        social.mycelium.android.debug.EventLog.emit(
+            social.mycelium.android.debug.LogEvents.RELAY_UNBLOCKED,
+            "RELAY", TAG, data = mapOf("url" to url, "reason" to "manual")
+        )
         // Clear pool-level blacklist + reconnect state for this relay, then
         // re-apply subscriptions so the relay immediately rejoins the feed.
         try {
@@ -597,7 +644,13 @@ object RelayHealthTracker {
             persistBlockedRelays()
             persistAutoBlockExpiry()
             emitState()
-            expired.forEach { MLog.i(TAG, "Relay auto-block EXPIRED, unblocked: $it") }
+            expired.forEach { url ->
+                MLog.i(TAG, "Relay auto-block EXPIRED, unblocked: $url")
+                social.mycelium.android.debug.EventLog.emit(
+                    social.mycelium.android.debug.LogEvents.RELAY_UNBLOCKED,
+                    "RELAY", TAG, data = mapOf("url" to url, "reason" to "expiry")
+                )
+            }
         }
     }
 
@@ -653,6 +706,10 @@ object RelayHealthTracker {
             persistAutoBlockExpiry()
             emitState()
             MLog.i(TAG, "Offline amnesty: unflagged $unflaggedCount relays, released $releasedAutoBlocks auto-blocks")
+            social.mycelium.android.debug.EventLog.emit(
+                social.mycelium.android.debug.LogEvents.NETWORK_REGAINED,
+                "RELAY", TAG, data = mapOf("flagged_count" to unflaggedCount, "auto_blocks_released" to releasedAutoBlocks)
+            )
         } else {
             emitState()
             MLog.d(TAG, "Offline amnesty: no relays needed recovery")

@@ -100,7 +100,18 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import social.mycelium.android.debug.DiagnosticLog
+import social.mycelium.android.debug.EventLog
+
+// ── Top-level view mode ─────────────────────────────────────────────────────
+
+private enum class ViewMode(val label: String) {
+    LOGS("Logs"),
+    TIMELINE("Timeline"),
+    STARTUP("Startup"),
+    HEALTH("Relay Health"),
+}
 
 // ── Tier 1: Channel group tabs ──────────────────────────────────────────────
 
@@ -136,6 +147,8 @@ fun DiagnosticLogViewerScreen(
     val scope = rememberCoroutineScope()
 
     // ── State ────────────────────────────────────────────────────────────
+    var viewMode by rememberSaveable { mutableStateOf(ViewMode.LOGS.name) }
+    val activeViewMode = remember(viewMode) { ViewMode.entries.firstOrNull { it.name == viewMode } ?: ViewMode.LOGS }
     var selectedGroup by rememberSaveable { mutableStateOf(GroupTab.ALL.name) }
     var selectedSource by rememberSaveable { mutableStateOf<String?>(null) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -432,6 +445,7 @@ fun DiagnosticLogViewerScreen(
                                 onClick = {
                                     menuExpanded = false
                                     DiagnosticLog.clearAll()
+                                    social.mycelium.android.debug.EventLog.clear()
                                     rawLines = emptyList()
                                     allParsed = emptyList()
                                     Toast.makeText(context, "Logs cleared", Toast.LENGTH_SHORT).show()
@@ -470,6 +484,38 @@ fun DiagnosticLogViewerScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            // ── View mode tab row ─────────────────────────────────────────
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ViewMode.entries.forEach { mode ->
+                    val selected = mode.name == viewMode
+                    FilterChip(
+                        selected = selected,
+                        onClick = { viewMode = mode.name },
+                        label = { Text(mode.label, fontSize = 12.sp) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                        modifier = Modifier.height(32.dp)
+                    )
+                }
+            }
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+            // ── Route to view mode ────────────────────────────────────────
+            when (activeViewMode) {
+                ViewMode.TIMELINE -> { EventTimelineView(); return@Column }
+                ViewMode.STARTUP  -> { StartupWaterfallView(); return@Column }
+                ViewMode.HEALTH   -> { RelayHealthView(); return@Column }
+                ViewMode.LOGS     -> { /* fall through to existing log viewer below */ }
+            }
+
             // ── Group chips + entry count ─────────────────────────────────
             Row(
                 modifier = Modifier
@@ -925,6 +971,446 @@ private fun highlightSearch(text: String, query: String): AnnotatedString {
                 append(text.substring(idx, idx + query.length))
             }
             start = idx + query.length
+        }
+    }
+}
+
+// ── Event JSON parsing ──────────────────────────────────────────────────────
+
+private data class LogEvent(
+    val ts: Long,
+    val ev: String,
+    val ch: String,
+    val tag: String,
+    val sid: String?,
+    val data: Map<String, String>,  // all extra fields as strings for display
+)
+
+private fun parseEventJsonl(lines: List<String>): List<LogEvent> {
+    val result = mutableListOf<LogEvent>()
+    for (line in lines) {
+        val trimmed = line.trim()
+        if (!trimmed.startsWith("{")) continue
+        try {
+            val obj = JSONObject(trimmed)
+            val ts  = obj.optLong("ts", 0L)
+            val ev  = obj.optString("ev", "")
+            val ch  = obj.optString("ch", "")
+            val tag = obj.optString("tag", "")
+            val sid = obj.optString("sid", "").takeIf { it.isNotEmpty() }
+            if (ev.isEmpty() || ts == 0L) continue
+            val skip = setOf("ts", "ev", "ch", "tag", "sid")
+            val extra = mutableMapOf<String, String>()
+            obj.keys().forEach { k -> if (k !in skip) extra[k] = obj.get(k).toString() }
+            result.add(LogEvent(ts, ev, ch, tag, sid, extra))
+        } catch (_: Exception) {}
+    }
+    return result
+}
+
+private fun fmtTs(tsMs: Long): String {
+    val d = java.util.Date(tsMs)
+    return java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(d)
+}
+
+private fun fmtMs(ms: Long?): String {
+    if (ms == null || ms < 0) return "—"
+    return if (ms < 1000) "${ms}ms" else "${"%.1f".format(ms / 1000.0)}s"
+}
+
+private val CHANNEL_COLORS = mapOf(
+    "STARTUP"  to Color(0xFF26C6DA),
+    "RELAY"    to Color(0xFF42A5F5),
+    "AUTH"     to Color(0xFFBA68C8),
+    "FEED"     to Color(0xFF66BB6A),
+    "WALLET"   to Color(0xFFFFA726),
+    "SYNC"     to Color(0xFF90A4AE),
+    "SYSTEM"   to Color(0xFF90A4AE),
+)
+
+private fun chColor(ch: String) = CHANNEL_COLORS[ch] ?: Color(0xFF90A4AE)
+
+// ── Timeline view ────────────────────────────────────────────────────────────
+
+@Composable
+private fun EventTimelineView() {
+    val scope = rememberCoroutineScope()
+    var events by remember { mutableStateOf<List<LogEvent>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var searchQuery by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        isLoading = true
+        events = withContext(Dispatchers.IO) { parseEventJsonl(EventLog.readAll()) }
+        isLoading = false
+    }
+
+    val filtered by remember(events, searchQuery) {
+        derivedStateOf {
+            if (searchQuery.isBlank()) events
+            else events.filter { e ->
+                e.ev.contains(searchQuery, true) ||
+                e.ch.contains(searchQuery, true) ||
+                e.tag.contains(searchQuery, true) ||
+                e.data.values.any { it.contains(searchQuery, true) }
+            }
+        }
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        // Search bar
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(Icons.Outlined.Search, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+            BasicTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                singleLine = true,
+                textStyle = TextStyle(color = MaterialTheme.colorScheme.onSurface, fontSize = 13.sp, fontFamily = FontFamily.Monospace),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                decorationBox = { inner ->
+                    Box(Modifier.fillMaxWidth()) {
+                        if (searchQuery.isEmpty()) Text("Filter events…", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), fontSize = 13.sp)
+                        inner()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+
+        if (isLoading) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("Loading…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            return@Column
+        }
+        if (filtered.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(if (events.isEmpty()) "No events yet — use the app to generate events" else "No matching events",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            return@Column
+        }
+
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
+            itemsIndexed(filtered) { i, ev ->
+                val bg = if (i % 2 == 0) MaterialTheme.colorScheme.surfaceContainerLowest
+                         else MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.4f)
+                val accent = chColor(ev.ch)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(bg)
+                        .drawBehind { drawRect(accent, Offset(0f, 0f), Size(3.dp.toPx(), size.height)) }
+                        .padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    // Timestamp
+                    Text(
+                        fmtTs(ev.ts),
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.width(72.dp),
+                    )
+                    // Channel badge
+                    Text(
+                        ev.ch.take(7),
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = accent,
+                        modifier = Modifier.width(56.dp),
+                    )
+                    // Event + data
+                    Column(Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(ev.ev, fontSize = 11.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface)
+                            if (ev.sid != null) {
+                                Text("[${ev.sid}]", fontSize = 9.sp, fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f))
+                            }
+                        }
+                        if (ev.data.isNotEmpty()) {
+                            Text(
+                                ev.data.entries.take(4).joinToString("  ") { (k, v) ->
+                                    val vDisplay = if (v.length > 40) v.take(37) + "…" else v
+                                    "$k=$vDisplay"
+                                },
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                overflow = TextOverflow.Ellipsis,
+                                maxLines = 2,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ── Startup waterfall view ────────────────────────────────────────────────────
+
+private val PHASE_NAMES_MAP = mapOf(0 to "SETTINGS", 1 to "USER_STATE", 2 to "FEED", 3 to "ENRICHMENT", 4 to "BACKGROUND")
+private val PHASE_COLORS = listOf(
+    Color(0xFF26C6DA), Color(0xFF42A5F5), Color(0xFF66BB6A), Color(0xFFFFA726), Color(0xFFBA68C8),
+)
+
+@Composable
+private fun StartupWaterfallView() {
+    var events by remember { mutableStateOf<List<LogEvent>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        isLoading = true
+        events = withContext(Dispatchers.IO) { parseEventJsonl(EventLog.readAll()) }
+        isLoading = false
+    }
+
+    if (isLoading) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Loading…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+
+    // Find most recent session's phase events (after last startup.reset or session.start)
+    val sessionEvents = buildList {
+        var collecting = false
+        for (e in events) {
+            if (e.ev == "session.start" || e.ev == "startup.reset") { clear(); collecting = true }
+            if (collecting && (e.ev.startsWith("startup.phase"))) add(e)
+        }
+    }
+
+    data class PhaseRow(val phase: Int, val name: String, val startMs: Long, val endMs: Long?, val relayCount: Int)
+
+    val starts = mutableMapOf<Int, LogEvent>()
+    val rows = mutableListOf<PhaseRow>()
+    for (e in sessionEvents) {
+        when (e.ev) {
+            "startup.phase_start" -> {
+                val ph = e.data["phase"]?.toIntOrNull() ?: continue
+                starts[ph] = e
+            }
+            "startup.phase_end" -> {
+                val ph = e.data["phase"]?.toIntOrNull() ?: continue
+                val start = starts[ph] ?: continue
+                rows.add(PhaseRow(ph, PHASE_NAMES_MAP[ph] ?: "Phase $ph",
+                    start.ts, e.ts, start.data["relay_count"]?.toIntOrNull() ?: 0))
+            }
+        }
+    }
+    // Add in-progress phases
+    for ((ph, startEv) in starts) {
+        if (rows.none { it.phase == ph }) {
+            rows.add(PhaseRow(ph, PHASE_NAMES_MAP[ph] ?: "Phase $ph", startEv.ts, null,
+                startEv.data["relay_count"]?.toIntOrNull() ?: 0))
+        }
+    }
+    rows.sortBy { it.phase }
+
+    if (rows.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No startup events yet. Open the app fresh to generate startup telemetry.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(24.dp))
+        }
+        return
+    }
+
+    val sessionStartMs = rows.minOf { it.startMs }
+    val sessionEndMs = rows.maxOf { it.endMs ?: (it.startMs + 5000L) }
+    val totalMs = (sessionEndMs - sessionStartMs).coerceAtLeast(1L)
+
+    LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        item {
+            Text("STARTUP WATERFALL", fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+        }
+        items(rows) { row ->
+            val color = PHASE_COLORS.getOrElse(row.phase) { Color(0xFF90A4AE) }
+            val elapsed = row.endMs?.let { it - row.startMs }
+            val isComplete = row.endMs != null
+
+            Column(Modifier.fillMaxWidth()) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Phase ${row.phase}  ${row.name}",
+                        fontSize = 11.sp, fontFamily = FontFamily.Monospace, color = color,
+                        fontWeight = FontWeight.Bold)
+                    Text(
+                        if (isComplete) fmtMs(elapsed) else "in progress…",
+                        fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                        color = if (isComplete) color else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                // Bar showing proportion of total session time used by this phase
+                val fillFraction = (row.endMs?.let { (it - row.startMs).toFloat() / totalMs } ?: 0.3f).coerceIn(0.02f, 1f)
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(14.dp)
+                        .background(color.copy(alpha = 0.08f), shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                ) {
+                    Box(
+                        Modifier
+                            .fillMaxWidth(fillFraction)
+                            .fillMaxHeight()
+                            .background(color.copy(alpha = if (isComplete) 0.65f else 0.3f),
+                                shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
+                    )
+                }
+                if (row.relayCount > 0) {
+                    Text("${row.relayCount} relays", fontSize = 9.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                        fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+
+        item {
+            val totalElapsed = rows.lastOrNull { it.endMs != null }?.let { it.endMs!! - sessionStartMs }
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Total cold start: ${fmtMs(totalElapsed)}",
+                fontSize = 13.sp, fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                "Session start: ${fmtTs(sessionStartMs)}",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+            )
+        }
+    }
+}
+
+// ── Relay health view ─────────────────────────────────────────────────────────
+
+@Composable
+private fun RelayHealthView() {
+    var events by remember { mutableStateOf<List<LogEvent>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        isLoading = true
+        events = withContext(Dispatchers.IO) { parseEventJsonl(EventLog.readAll()) }
+        isLoading = false
+    }
+
+    if (isLoading) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Loading…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        return
+    }
+
+    data class RelayStats(
+        val url: String,
+        var connects: Int = 0,
+        var failures: Int = 0,
+        val latencies: MutableList<Long> = mutableListOf(),
+        var blocked: Boolean = false,
+        var flagged: Boolean = false,
+        var blockedHours: Int = 6,
+        var eoseCount: Int = 0,
+    ) {
+        val avgLatency: Long? get() = if (latencies.isEmpty()) null else latencies.sum() / latencies.size
+        val failRate: Float get() = if (connects == 0) 0f else failures.toFloat() / connects
+    }
+
+    val stats = mutableMapOf<String, RelayStats>()
+    fun get(url: String) = stats.getOrPut(url) { RelayStats(url) }
+
+    for (e in events) {
+        val url = e.data["url"] ?: continue
+        when (e.ev) {
+            "relay.connecting"  -> get(url).connects++
+            "relay.connected"   -> e.data["latency_ms"]?.toLongOrNull()?.let { get(url).latencies.add(it) }
+            "relay.failed"      -> get(url).failures++
+            "relay.flagged"     -> get(url).flagged = true
+            "relay.unflagged"   -> get(url).flagged = false
+            "relay.blocked"     -> { get(url).blocked = true; get(url).blockedHours = e.data["duration_hours"]?.toIntOrNull() ?: 6 }
+            "relay.unblocked"   -> get(url).blocked = false
+            "sub.eose"          -> get(url).eoseCount++
+        }
+    }
+
+    if (stats.isEmpty()) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("No relay events yet. Connect to relays to generate health data.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(24.dp))
+        }
+        return
+    }
+
+    val sorted = stats.values.sortedWith(
+        compareByDescending<RelayStats> { it.blocked }.thenByDescending { it.flagged }.thenByDescending { it.connects }
+    )
+
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 80.dp)) {
+        item {
+            Text(
+                "  ${sorted.size} relays observed  ·  ${sorted.count { it.blocked }} blocked  ·  ${sorted.count { it.flagged }} flagged",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+        }
+        items(sorted) { s ->
+            val displayUrl = s.url.removePrefix("wss://").removePrefix("ws://")
+            val statusColor = when {
+                s.blocked -> Color(0xFFEF5350)
+                s.flagged -> Color(0xFFFFA726)
+                s.failRate > 0.3f -> Color(0xFFFFA726)
+                else -> Color(0xFF66BB6A)
+            }
+            val statusLabel = when {
+                s.blocked -> "BLOCKED (${s.blockedHours}h)"
+                s.flagged -> "FLAGGED"
+                s.failRate > 0.3f -> "degraded"
+                else -> "OK"
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .drawBehind { drawRect(statusColor, Offset(0f, 0f), Size(3.dp.toPx(), size.height)) }
+                    .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp)
+            ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text(displayUrl, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium,
+                        overflow = TextOverflow.Ellipsis, maxLines = 1,
+                        modifier = Modifier.weight(1f))
+                    Text(statusLabel, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = statusColor,
+                        fontWeight = FontWeight.Bold)
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    val dimColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    Text("connects: ${s.connects}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = dimColor)
+                    Text("fails: ${s.failures}", fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                        color = if (s.failures > 0) Color(0xFFFFA726) else dimColor)
+                    Text("avg latency: ${fmtMs(s.avgLatency)}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = dimColor)
+                    Text("eose: ${s.eoseCount}", fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = dimColor)
+                }
+            }
+            HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
         }
     }
 }

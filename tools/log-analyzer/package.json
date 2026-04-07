@@ -1,8 +1,8 @@
 {
-  "name": "spore",
+  "name": "mycelium-log-analyzer",
   "version": "0.1.0",
   "type": "module",
-  "description": "Spore — a lean, performant microframework: Bun + Hono + InfernoJS + Blazecn + Preact Signals",
+  "description": "Diagnostic telemetry viewer and log analyzer for Mycelium Android",
   "scripts": {
     "dev": "bun --watch run src/server.ts",
     "dev:css": "bunx @tailwindcss/cli -i src/styles.css -o public/styles.css --watch",

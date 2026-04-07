@@ -7,7 +7,7 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Spore design tokens — blazecn naming convention
+ * Mycelium Log Analyzer design tokens — blazecn naming convention
  * All colors use oklch for perceptual uniformity.
  * Semantic pairs: --X + --X-foreground
  *

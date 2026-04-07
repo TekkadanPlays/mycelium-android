@@ -10,7 +10,7 @@ app.use('/public/*', serveStatic({ root: './' }));
 // API route — demonstrates Hono's lightweight JSON API
 app.get('/api/status', (c) => {
   return c.json({
-    framework: 'Spore',
+    app: 'Mycelium Log Analyzer',
     stack: ['Bun', 'Hono', 'InfernoJS', 'Blazecn', 'Preact Signals'],
     uptime: process.uptime(),
     timestamp: Date.now(),
@@ -51,4 +51,4 @@ export default {
   fetch: app.fetch,
 };
 
-console.log('🍄 Spore is alive on http://localhost:3000');
+console.log('🍄 Log Analyzer is live on http://localhost:3000');

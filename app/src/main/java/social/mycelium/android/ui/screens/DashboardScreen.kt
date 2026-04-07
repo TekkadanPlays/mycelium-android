@@ -630,6 +630,55 @@ private fun DashboardFeedContent(
                     modifier = Modifier.fillMaxWidth()
                 )
             }
+            
+            if (engagementFilteredNotes.isEmpty()) {
+                item(key = "empty_feed_indicator") {
+                    val feedCacheChecked by viewModel.feedCacheChecked.collectAsState()
+                    val feedSession by viewModel.feedSessionState.collectAsState()
+                    val isLoading = !feedCacheChecked || 
+                            feedSession == social.mycelium.android.repository.feed.FeedSessionState.Idle || 
+                            feedSession == social.mycelium.android.repository.feed.FeedSessionState.Loading
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillParentMaxHeight(0.8f),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isLoading) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(48.dp),
+                                    strokeWidth = 3.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    "Hydrating feed...",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        } else {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    "Your feed is empty",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    "Waiting for the network to find fresh content.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 32.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
 
             // ═══ Load older notes indicator ═══
             // Always show a bottom item when feed has content and pagination isn't exhausted.

@@ -30,7 +30,8 @@ object AppMemoryTrimmer {
     fun trimUiCaches(context: Context?) {
         try { ThreadReplyCache.trimToSize(ThreadReplyCache.TRIM_SIZE_UI_HIDDEN) } catch (e: Throwable) { MLog.w(TAG, "ThreadReplyCache trim failed", e) }
         try { QuotedNoteCache.trimToSize(QuotedNoteCache.TRIM_SIZE_UI_HIDDEN) } catch (e: Throwable) { MLog.w(TAG, "QuotedNoteCache trim failed", e) }
-        try { UrlPreviewCache.clear() } catch (e: Throwable) { MLog.w(TAG, "UrlPreviewCache clear failed", e) }
+        // Removed UrlPreviewCache.clear() here: it's a bounded 100-item LRU cache (tiny memory footprint)
+        // and wiping it forces a massive redraw flash across the entire feed when the UI returns to foreground. 
     }
 
     /**

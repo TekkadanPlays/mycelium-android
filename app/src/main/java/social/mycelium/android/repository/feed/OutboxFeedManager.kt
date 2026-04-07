@@ -88,10 +88,7 @@ class OutboxFeedManager private constructor() {
     @Volatile
     var onNoteReceived: ((Event, String) -> Unit)? = null
 
-    /** Callback for pagination events — same pipeline but marked isPagination=true so
-     *  they bypass the age gate and can extend the feed into deep history. */
-    @Volatile
-    var onPaginationNoteReceived: ((Event, String) -> Unit)? = null
+    // onPaginationNoteReceived removed — handled synchronously by paginateOlderNotes
 
     // ── Observable state for UI / diagnostics ──
 
@@ -131,9 +128,6 @@ class OutboxFeedManager private constructor() {
     /** Per-relay oldest event timestamp (epoch seconds) seen during the current subscription.
      *  Used by auto-pagination to decide which relays likely have more history. */
     private val perRelayOldestEventSec = ConcurrentHashMap<String, Long>()
-
-    /** Background job that auto-paginates outbox relays after the initial subscription settles. */
-    private var autoPaginationJob: Job? = null
 
     /** When false, auto-pagination pauses to reduce heap pressure while the user
      *  is away from the feed (e.g. in thread view, DMs, settings). Set by
@@ -245,8 +239,6 @@ class OutboxFeedManager private constructor() {
         _activeOutboxRelays.value = emptyList()
         outboxRelayNoteCounts.clear()
         // Reset per-relay pagination state
-        autoPaginationJob?.cancel()
-        autoPaginationJob = null
         paginationHandles.values.forEach { it.cancel() }
         paginationHandles.clear()
         relayCursors.clear()
@@ -625,38 +617,11 @@ class OutboxFeedManager private constructor() {
         // Schedule delivery measurement after events have had time to arrive
         scheduleDeliveryMeasurement()
 
-        // ── Auto-pagination: continuously fetch older content in the background ──
-        // After the initial subscription settles, relays that returned events likely
-        // have more history. Automatically paginate them one window at a time so the
-        // user never hits a cliff. Each relay independently steps back by 1 week.
-        autoPaginationJob?.cancel()
-        autoPaginationJob = scope.launch {
-            // Wait for initial events to settle before starting auto-pagination
-            delay(AUTO_PAGINATION_INITIAL_DELAY_MS)
-            MLog.d(TAG, "Auto-pagination starting: ${perRelayOldestEventSec.size} relays delivered events")
-
-            while (!_paginationExhausted.value) {
-                try {
-                    // Pause when user navigates away from feed (thread view, DMs, etc.)
-                    // to prevent unbounded roomTail growth and heap pressure.
-                    if (!feedVisible) {
-                        delay(2_000L)
-                        continue
-                    }
-                    val events = paginateOlderNotes()
-                    if (events.isEmpty() && !_paginationExhausted.value) {
-                        delay(AUTO_PAGINATION_INTERVAL_MS * 2)
-                    } else if (events.isNotEmpty()) {
-                        delay(AUTO_PAGINATION_INTERVAL_MS)
-                    }
-                } catch (e: Exception) {
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    MLog.e(TAG, "Auto-pagination cycle failed: ${e.message}")
-                    delay(AUTO_PAGINATION_INTERVAL_MS * 3)
-                }
-            }
-            MLog.d(TAG, "Auto-pagination finished: all relays exhausted")
-        }
+        // ── Auto-pagination removed to prevent feed storm ──
+        // Background looping pagination was causing thousands of old notes to be
+        // aggressively downloaded, filling Room DB and causing a massive UI/memory churn.
+        // Pagination is now strictly driven by NotesRepository's loadOlderNotes()
+        // when the user scrolls near the bottom of the feed.
     }
 
     // ── Per-relay pagination ──────────────────────────────────────────────────
@@ -794,14 +759,10 @@ class OutboxFeedManager private constructor() {
             _paginationExhausted.value = true
         }
 
-        // Inject into NotesRepository via pagination callback (isPagination=true)
-        // so these older events bypass the age gate and extend feed history.
-        val paginationCallback = onPaginationNoteReceived ?: onNoteReceived
-        if (paginationCallback != null) {
-            for ((event, relayUrl) in collectedEvents) {
-                paginationCallback(event, relayUrl)
-            }
-        }
+        // Removed internal callback triggering here so the caller handles ingestion synchronously.
+        // It's much safer to have NotesRepository collect the return list and persist them
+        // precisely alongside the rest of the pagination results in a single Room transaction
+        // before appending to the local scroll feed cursor.
 
         MLog.d(TAG, "Pagination: +$totalReceived events from ${perRelayFilters.size} relays" +
             if (allExhausted) " (ALL EXHAUSTED)" else "" +
@@ -909,18 +870,7 @@ class OutboxFeedManager private constructor() {
          *  4 weeks = ~1 month of empty history before giving up on that relay. */
         private const val RELAY_EXHAUSTION_THRESHOLD = 4
 
-        // ── Auto-pagination constants ──
-
-        /** Delay after initial outbox subscription before starting auto-pagination.
-         *  Gives the initial 1w window time to deliver events so we can judge
-         *  which relays have more history. */
-        private const val AUTO_PAGINATION_INITIAL_DELAY_MS = 15_000L
-
-        /** Interval between auto-pagination cycles. Each cycle fetches one 1w window
-         *  per active relay. Staggered to avoid hammering relays and SQLite. */
-        private const val AUTO_PAGINATION_INTERVAL_MS = 10_000L
-
-        @Volatile
+        // removed pagination intervals
         private var instance: OutboxFeedManager? = null
         fun getInstance(): OutboxFeedManager =
             instance ?: synchronized(this) { instance ?: OutboxFeedManager().also { instance = it } }

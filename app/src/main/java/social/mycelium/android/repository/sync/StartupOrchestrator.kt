@@ -18,6 +18,8 @@ import kotlinx.coroutines.launch
 import social.mycelium.android.relay.RelayConnectionStateMachine
 import social.mycelium.android.debug.DebugVerboseLog
 import social.mycelium.android.debug.DiagnosticLog
+import social.mycelium.android.debug.startStartupPhase
+import social.mycelium.android.debug.endStartupPhase
 import social.mycelium.android.repository.cache.ProfileMetadataCache
 import social.mycelium.android.repository.messaging.DirectMessageRepository
 import social.mycelium.android.repository.relay.Nip65RelayListRepository

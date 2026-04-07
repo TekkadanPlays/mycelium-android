@@ -5,6 +5,8 @@ import android.content.SharedPreferences
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import social.mycelium.android.debug.MLog
+import social.mycelium.android.debug.startRelayConnect
+import social.mycelium.android.debug.endRelayConnect
 import com.example.cybin.core.Event
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers

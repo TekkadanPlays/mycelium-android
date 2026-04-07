@@ -203,14 +203,7 @@ class NotesRepository private constructor() {
             pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = false, isOutbox = true))
             kind1Dirty.set(true)
         }
-        // Outbox pagination events use isPagination=true so they bypass the age gate
-        // and can extend the feed into deep history (weeks/months back).
-        outboxFeedManager.onPaginationNoteReceived = { event, relayUrl ->
-            EventRelayTracker.addRelay(event.id, relayUrl)
-            pendingKind1Events.add(PendingKind1Event(event, relayUrl, isPagination = true, isOutbox = true))
-            kind1Dirty.set(true)
-        }
-        // Wire global feed enrichment events (hashtag/list indexer subscriptions) into the pipeline.
+        // Global feed enrichment bypassing cutoff.
         globalFeedManager.onNoteReceived = { event, relayUrl ->
             MLog.d(TAG, "\uD83C\uDF0D Global enrichment event: ${event.id.take(8)} from $relayUrl")
             EventRelayTracker.addRelay(event.id, relayUrl)
@@ -2462,50 +2455,63 @@ class NotesRepository private constructor() {
             val expectedWindowFloorSec = untilSec - (PAGINATION_WINDOW_DAYS * 86_400L)
             scope.launch {
                 try {
-                    // Enforce the 7-day floor so we don't accidentally skip over empty weeks
-                    // and serve disjointed garbage from months ago when Room has gaps.
-                    val roomNotes = wm.loadPage(untilSec, floorSec = expectedWindowFloorSec)
-                    if (roomNotes.isNotEmpty()) {
-                        // Dedup against in-memory and existing Room-paginated notes
-                        val existingMemIds = feedIndex.byId.keys
-                        val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
-                        if (newNotes.isNotEmpty()) {
-                            // Add to Room tail buffer
-                            for (note in newNotes) {
-                                roomPaginatedNotes.add(note)
-                                roomPaginatedIds.add(note.id)
+                    var currentUntilSec = untilSec
+                    while (true) {
+                        val expectedWindowFloorSec = currentUntilSec - (PAGINATION_WINDOW_DAYS * 86_400L)
+                        val roomNotes = wm.loadPage(currentUntilSec, floorSec = expectedWindowFloorSec)
+                        if (roomNotes.isNotEmpty()) {
+                            // Always advance cursor using fetched notes to prevent stalling
+                            val oldestRoomMs = roomNotes.minOf { it.timestamp }
+                            if (paginationCursorMs == 0L || oldestRoomMs < paginationCursorMs) {
+                                paginationCursorMs = oldestRoomMs
                             }
-                            // Cap: trim oldest entries to prevent unbounded growth
-                            if (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
-                                synchronized(roomPaginatedNotes) {
-                                    while (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
-                                        val removed = roomPaginatedNotes.removeAt(roomPaginatedNotes.size - 1)
-                                        roomPaginatedIds.remove(removed.id)
-                                    }
+                            
+                            // Dedup against in-memory and existing Room-paginated notes
+                            val existingMemIds = feedIndex.byId.keys
+                            val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
+                            
+                            if (newNotes.isNotEmpty()) {
+                                // Add to Room tail buffer
+                                for (note in newNotes) {
+                                    roomPaginatedNotes.add(note)
+                                    roomPaginatedIds.add(note.id)
                                 }
-                                MLog.d(TAG, "loadOlderNotes: trimmed roomTail to $MAX_ROOM_PAGINATED")
+                                // Cap: trim oldest entries to prevent unbounded growth
+                                if (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
+                                    synchronized(roomPaginatedNotes) {
+                                        while (roomPaginatedNotes.size > MAX_ROOM_PAGINATED) {
+                                            val removed = roomPaginatedNotes.removeAt(0)
+                                            roomPaginatedIds.remove(removed.id)
+                                        }
+                                    }
+                                    MLog.d(TAG, "loadOlderNotes: trimmed roomTail to $MAX_ROOM_PAGINATED")
+                                }
+                                if (oldestRoomMs < feedAgeFloorMs) feedAgeFloorMs = oldestRoomMs
+                                roomTailVersion++
+                                MLog.w(TAG, "loadOlderNotes: Room served ${newNotes.size} notes, roomTail=${roomPaginatedNotes.size}, cursor=${fmtMs(paginationCursorMs)}")
+                                // Trigger display update to append Room tail
+                                updateDisplayedNotes()
+                                _isLoadingOlder.value = false
+                                return@launch
+                            } else {
+                                MLog.d(TAG, "loadOlderNotes: Room ${roomNotes.size} events all dupes, advancing cursor to ${fmtMs(paginationCursorMs)}")
+                                currentUntilSec = oldestRoomMs / 1000
+                                // Guard against identical timestamps freezing the cursor
+                                if (roomNotes.size == 1) {
+                                    currentUntilSec -= 1
+                                }
+                                kotlinx.coroutines.yield()
                             }
-                            // Update cursor from oldest loaded note
-                            val oldestMs = newNotes.minOf { it.timestamp }
-                            if (paginationCursorMs == 0L || oldestMs < paginationCursorMs) {
-                                paginationCursorMs = oldestMs
-                            }
-                            if (oldestMs < feedAgeFloorMs) feedAgeFloorMs = oldestMs
-                            roomTailVersion++
-                            MLog.w(TAG, "loadOlderNotes: Room served ${newNotes.size} notes, roomTail=${roomPaginatedNotes.size}, cursor=${fmtMs(paginationCursorMs)}")
-                            // Trigger display update to append Room tail
-                            updateDisplayedNotes()
                         } else {
-                            MLog.d(TAG, "loadOlderNotes: Room ${roomNotes.size} events all dupes")
+                            break // Room exhausted for this window
                         }
-                        _isLoadingOlder.value = false
-                        return@launch
                     }
                 } catch (e: Exception) {
                     MLog.e(TAG, "Room-backed pagination failed: ${e.message}", e)
                 }
-                // Room empty for this window — fall back to relay fetch
-                loadOlderNotesFromRelay(cursorMs, untilSec, authors, relays)
+                // Room exhausted for this window — fall back to relay fetch using updated cursor
+                val updatedCursorMs = if (paginationCursorMs > 0) paginationCursorMs else cursorMs
+                loadOlderNotesFromRelay(updatedCursorMs, (updatedCursorMs / 1000), authors, relays)
             }
             return
         }
@@ -2585,8 +2591,21 @@ class NotesRepository private constructor() {
                 }
             } else null
 
-            // Wait for category relay fetch to complete
+            // ── Branch 2: Outbox relays (independent cursors) ────────────────
+            var outboxEvents: List<Pair<Event, String>> = emptyList()
+            val outboxJob = if (outboxRelayUrls.isNotEmpty()) {
+                scope.launch {
+                    outboxEvents = outboxFeedManager.paginateOlderNotes()
+                }
+            } else null
+
+            // Wait for relay fetches to complete
             categoryJob?.join()
+            outboxJob?.join()
+            
+            if (outboxEvents.isNotEmpty()) {
+                allCollectedEvents.addAll(outboxEvents)
+            }
 
             olderNotesHandle = null
             val received = categoryEventCount.get()

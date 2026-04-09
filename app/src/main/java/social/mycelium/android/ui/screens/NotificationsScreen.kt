@@ -432,14 +432,7 @@ fun NotificationsScreen(
                 }
             }
             
-            // ── Pagination Trigger ──
-            LaunchedEffect(pageListState) {
-                snapshotFlow { pageListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
-                    .filter { it != null && flatItems.isNotEmpty() && it >= flatItems.size - 5 }
-                    .collect {
-                        NotificationsRepository.loadOlderNotifications()
-                    }
-            }
+
 
             LazyColumn(
                 state = pageListState,

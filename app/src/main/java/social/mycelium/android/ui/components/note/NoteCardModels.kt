@@ -59,6 +59,31 @@ class NoteCardOverrides(
     val zapAmountByAuthor: Map<String, Long>? = null,
     val customEmojiUrls: Map<String, String>? = null,
 ) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is NoteCardOverrides) return false
+        return replyCount == other.replyCount &&
+                zapCount == other.zapCount &&
+                zapTotalSats == other.zapTotalSats &&
+                reactions == other.reactions &&
+                reactionAuthors == other.reactionAuthors &&
+                zapAuthors == other.zapAuthors &&
+                zapAmountByAuthor == other.zapAmountByAuthor &&
+                customEmojiUrls == other.customEmojiUrls
+    }
+
+    override fun hashCode(): Int {
+        var result = replyCount ?: 0
+        result = 31 * result + (zapCount ?: 0)
+        result = 31 * result + (zapTotalSats?.hashCode() ?: 0)
+        result = 31 * result + (reactions?.hashCode() ?: 0)
+        result = 31 * result + (reactionAuthors?.hashCode() ?: 0)
+        result = 31 * result + (zapAuthors?.hashCode() ?: 0)
+        result = 31 * result + (zapAmountByAuthor?.hashCode() ?: 0)
+        result = 31 * result + (customEmojiUrls?.hashCode() ?: 0)
+        return result
+    }
+
     companion object {
         val EMPTY = NoteCardOverrides()
 
@@ -94,7 +119,36 @@ class NoteCardConfig(
     val compactMedia: Boolean = false,
     val showSensitiveContent: Boolean = false,
     val moderationFlagCount: Int = 0,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is NoteCardConfig) return false
+        return showActionRow == other.showActionRow &&
+                actionRowSchema == other.actionRowSchema &&
+                rootAuthorId == other.rootAuthorId &&
+                expandLinkPreviewInThread == other.expandLinkPreviewInThread &&
+                showHashtagsSection == other.showHashtagsSection &&
+                initialMediaPage == other.initialMediaPage &&
+                isVisible == other.isVisible &&
+                compactMedia == other.compactMedia &&
+                showSensitiveContent == other.showSensitiveContent &&
+                moderationFlagCount == other.moderationFlagCount
+    }
+
+    override fun hashCode(): Int {
+        var result = showActionRow.hashCode()
+        result = 31 * result + actionRowSchema.hashCode()
+        result = 31 * result + (rootAuthorId?.hashCode() ?: 0)
+        result = 31 * result + expandLinkPreviewInThread.hashCode()
+        result = 31 * result + showHashtagsSection.hashCode()
+        result = 31 * result + initialMediaPage
+        result = 31 * result + isVisible.hashCode()
+        result = 31 * result + compactMedia.hashCode()
+        result = 31 * result + showSensitiveContent.hashCode()
+        result = 31 * result + moderationFlagCount
+        return result
+    }
+}
 
 /**
  * Per-note interaction state (zap progress, own reactions, etc.).
@@ -110,4 +164,29 @@ class NoteCardInteractionState(
     val voteScore: Int = 0,
     val isAuthorFollowed: Boolean = false,
     val shouldCloseZapMenus: Boolean = false,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is NoteCardInteractionState) return false
+        return isZapInProgress == other.isZapInProgress &&
+                isZapped == other.isZapped &&
+                isBoosted == other.isBoosted &&
+                myZappedAmount == other.myZappedAmount &&
+                ownVoteValue == other.ownVoteValue &&
+                voteScore == other.voteScore &&
+                isAuthorFollowed == other.isAuthorFollowed &&
+                shouldCloseZapMenus == other.shouldCloseZapMenus
+    }
+
+    override fun hashCode(): Int {
+        var result = isZapInProgress.hashCode()
+        result = 31 * result + isZapped.hashCode()
+        result = 31 * result + isBoosted.hashCode()
+        result = 31 * result + (myZappedAmount?.hashCode() ?: 0)
+        result = 31 * result + ownVoteValue
+        result = 31 * result + voteScore
+        result = 31 * result + isAuthorFollowed.hashCode()
+        result = 31 * result + shouldCloseZapMenus.hashCode()
+        return result
+    }
+}

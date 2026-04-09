@@ -360,16 +360,34 @@ internal fun QuotedNoteBody(
                     if (qImageUrls.isNotEmpty()) {
                         val qPagerState = rememberPagerState(pageCount = { qImageUrls.size })
                         val currentImgUrl = qImageUrls.getOrNull(qPagerState.currentPage)
-                        // Lock ratio at first composition — never resize mid-view
-                        val imgRatio by remember(qImageUrls) {
-                            val initial =
-                                currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
-                            mutableFloatStateOf((initial ?: 1.0f).coerceIn(0.4f, 2.5f))
+                        // Use imeta or cache for instant correct sizing; default to 4:3
+                        val qImgListKey = remember(qImageUrls) { qImageUrls.joinToString(",") }
+                        val qKnownImgRatio = remember(qImgListKey) {
+                            currentImgUrl?.let { social.mycelium.android.utils.MediaAspectRatioCache.get(it) }
                         }
+                        var qImgContainerRatio by remember(qImgListKey) {
+                            mutableFloatStateOf((qKnownImgRatio ?: (4f / 3f)).coerceIn(0.4f, 2.5f))
+                        }
+                        var qImgCorrected by remember(qImgListKey) { mutableStateOf(qKnownImgRatio != null) }
+                        // Update ratio when swiping to a page with known dimensions
+                        LaunchedEffect(qPagerState.currentPage, qImgListKey) {
+                            val pageUrl = qImageUrls.getOrNull(qPagerState.currentPage) ?: return@LaunchedEffect
+                            val r = social.mycelium.android.utils.MediaAspectRatioCache.get(pageUrl)
+                            if (r != null) {
+                                qImgContainerRatio = r.coerceIn(0.4f, 2.5f)
+                                qImgCorrected = true
+                            }
+                        }
+                        // Smooth ratio transition to prevent layout snap
+                        val qAnimatedImgRatio by animateFloatAsState(
+                            targetValue = qImgContainerRatio,
+                            animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing),
+                            label = "quoted_img_ratio"
+                        )
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .aspectRatio(imgRatio)
+                                .aspectRatio(qAnimatedImgRatio)
                                 .clip(RoundedCornerShape(6.dp))
                         ) {
                             HorizontalPager(
@@ -379,16 +397,17 @@ internal fun QuotedNoteBody(
                                 val imgUrl = qImageUrls[page]
                                 val imageContext = LocalContext.current
                                 val qScreenWidthPx = imageContext.resources.displayMetrics.widthPixels
+                                val isCurrentQPage = qPagerState.currentPage == page
                                 coil.compose.SubcomposeAsyncImage(
                                     model = coil.request.ImageRequest.Builder(imageContext)
                                         .data(imgUrl)
-                                        .crossfade(true)
+                                        .crossfade(!qImgCorrected)
                                         .size(qScreenWidthPx, qScreenWidthPx)
                                         .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                         .diskCachePolicy(coil.request.CachePolicy.ENABLED)
                                         .build(),
                                     contentDescription = null,
-                                    contentScale = if (social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl) == null) ContentScale.Crop else ContentScale.Fit,
+                                    contentScale = if (qImgCorrected) ContentScale.Fit else ContentScale.Crop,
                                     modifier = Modifier
                                         .fillMaxSize()
                                         .clickable { navigateToQuotedNote() }
@@ -427,7 +446,7 @@ internal fun QuotedNoteBody(
                                             androidx.compose.foundation.Image(
                                                 painter = painter,
                                                 contentDescription = null,
-                                                contentScale = if (social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl) == null) ContentScale.Crop else ContentScale.Fit,
+                                                contentScale = if (qImgCorrected) ContentScale.Fit else ContentScale.Crop,
                                                 modifier = Modifier.fillMaxSize()
                                             )
                                             SideEffect {
@@ -443,6 +462,12 @@ internal fun QuotedNoteBody(
                                                             w,
                                                             h
                                                         )
+                                                        // One-time correction for quoted images without imeta
+                                                        if (!qImgCorrected && isCurrentQPage) {
+                                                            val realRatio = (w.toFloat() / h.toFloat()).coerceIn(0.4f, 2.5f)
+                                                            qImgContainerRatio = realRatio
+                                                            qImgCorrected = true
+                                                        }
                                                     }
                                                 }
                                             }
@@ -747,7 +772,7 @@ internal fun QuotedNoteBody(
             Spacer(modifier = Modifier.height(4.dp))
             unrenderedMedia.forEach { imgUrl ->
                 val knownRatio = social.mycelium.android.utils.MediaAspectRatioCache.get(imgUrl)
-                val ratio = (knownRatio ?: (16f / 9f)).coerceIn(1.2f, 2.5f) // Wider ratio for collapsed preview
+                val ratio = (knownRatio ?: (4f / 3f)).coerceIn(1.2f, 2.5f) // Wider ratio for collapsed preview
                 coil.compose.AsyncImage(
                     model = imgUrl,
                     contentDescription = null,
@@ -1136,9 +1161,10 @@ internal fun NoteMediaCarousel(
         onMediaPageChanged(pagerState.currentPage)
     }
     // Container ratio: prefer imeta/cache for instant correct sizing.
-    // When no ratio is known, default to 16:9 placeholder. Once the image loads and
-    // reports its intrinsic dimensions, update to the real ratio (one-time resize).
-    // On subsequent visits the cache provides the real ratio instantly (no shift).
+    // When no ratio is known, default to 4:3 (common photo aspect). Once the image
+    // loads and reports its intrinsic dimensions, allow a ONE-TIME update to the real
+    // ratio. On subsequent visits the MediaAspectRatioCache provides the real ratio
+    // instantly (no shift at all).
     //
     // KEY FIX: Use a content-based key (joined URLs) rather than list identity.
     // This prevents ratio resets when a Note re-emits with the same media URLs
@@ -1150,18 +1176,32 @@ internal fun NoteMediaCarousel(
             mediaMeta[currentUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(currentUrl)
         } else null
     }
+    // Default to 4:3 (1.33f) instead of 1:1 — closer to typical photo aspect ratios
+    // and avoids the jarring square crop for landscape/portrait images without imeta.
     var containerRatio by remember(mediaListKey) {
-        mutableFloatStateOf(knownRatio ?: 1.0f)
+        mutableFloatStateOf(knownRatio ?: (4f / 3f))
     }
+    // Track whether this item has already applied a one-time ratio correction.
+    // Prevents repeated layout shifts if the item recomposes multiple times.
+    var hasAppliedCorrection by remember(mediaListKey) { mutableStateOf(knownRatio != null) }
     // Update container ratio when user swipes to a page with a known ratio
     LaunchedEffect(pagerState.currentPage, mediaListKey) {
         val pageUrl = mediaList.getOrNull(pagerState.currentPage) ?: return@LaunchedEffect
         val pageRatio = mediaMeta[pageUrl]?.aspectRatio() ?: MediaAspectRatioCache.get(pageUrl)
         if (pageRatio != null) {
             containerRatio = pageRatio
+            hasAppliedCorrection = true
         }
     }
     val ratioWasKnown = knownRatio != null
+    // Smooth ratio transitions: animating avoids jarring layout snaps when the
+    // real ratio arrives. tween(300) is fast enough to feel responsive but slow
+    // enough to prevent scroll teleport perception.
+    val animatedRatio by animateFloatAsState(
+        targetValue = containerRatio.coerceIn(0.3f, 3.0f),
+        animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing),
+        label = "media_ratio"
+    )
     // Pass vertical scroll through to parent LazyColumn so the HorizontalPager
     // doesn't steal vertical gestures. Only single-image carousels disable paging entirely.
     val verticalPassthrough = remember {
@@ -1180,7 +1220,7 @@ internal fun NoteMediaCarousel(
         modifier = Modifier
             .fillMaxWidth()
             .then(if (compactMedia) Modifier.padding(horizontal = 16.dp) else Modifier)
-            .aspectRatio((containerRatio ?: 1.0f).coerceIn(0.3f, 3.0f))
+            .aspectRatio(animatedRatio)
             .clip(if (compactMedia) RoundedCornerShape(8.dp) else RectangleShape)
             .clipToBounds()
             .nestedScroll(verticalPassthrough)
@@ -1215,7 +1255,7 @@ internal fun NoteMediaCarousel(
                         onFullscreenClick = {
                             onVideoClick(allMediaUrls, groupStartIndex + page)
                         },
-                        onAspectRatioKnown = if (videoKnown == null) { ratio -> containerRatio = ratio } else null
+                        onAspectRatioKnown = if (videoKnown == null) { ratio -> containerRatio = ratio; hasAppliedCorrection = true } else null
                     )
                 } else {
                     val imageContext = LocalContext.current
@@ -1236,7 +1276,9 @@ internal fun NoteMediaCarousel(
                             .build()
                     )
                     val painterState = imagePainter.state
-                    // Cache aspect ratio on success + update container if ratio was unknown
+                    // Cache aspect ratio on success + apply one-time container correction
+                    // when no imeta dimensions were available. The ratio is cached for future
+                    // visits so this correction only happens once per URL ever.
                     if (painterState is AsyncImagePainter.State.Success) {
                         SideEffect {
                             val drawable = painterState.result.drawable
@@ -1244,20 +1286,25 @@ internal fun NoteMediaCarousel(
                             val h = drawable.intrinsicHeight
                             if (w > 0 && h > 0) {
                                 MediaAspectRatioCache.add(url, w, h)
-                                // We intentionally DO NOT update containerRatio here.
-                                // Dynamically resizing the container when Coil finishes loading
-                                // causes LazyColumn to shift scroll positions (recomposition teleport).
-                                // Images without imeta dimensions will remain at the default ratio (1.0f)
-                                // and be cropped (ContentScale.Crop), preventing feed layout jumps.
+                                // One-time correction: update container ratio to real dimensions.
+                                // animateFloatAsState smooths the transition to prevent scroll jank.
+                                // hasAppliedCorrection ensures we only do this once per item lifecycle.
+                                if (!hasAppliedCorrection && isCurrentPage) {
+                                    val realRatio = w.toFloat() / h.toFloat()
+                                    containerRatio = realRatio
+                                    hasAppliedCorrection = true
+                                }
                             }
                         }
                     }
                     Box(modifier = Modifier.fillMaxSize()) {
-                        // Main image — always composed, invisible while loading
+                        // Main image — always composed, invisible while loading.
+                        // Use ContentScale.Fit when ratio is known (imeta, cache, or corrected)
+                        // and ContentScale.Crop only during the brief placeholder phase.
                         androidx.compose.foundation.Image(
                             painter = imagePainter,
                             contentDescription = meta?.alt,
-                            contentScale = if (!ratioWasKnown) ContentScale.Crop else ContentScale.Fit,
+                            contentScale = if (hasAppliedCorrection) ContentScale.Fit else ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
                         )
                         // Loading overlay

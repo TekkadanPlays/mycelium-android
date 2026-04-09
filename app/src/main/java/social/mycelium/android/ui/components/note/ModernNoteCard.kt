@@ -903,9 +903,9 @@ private fun NoteCardContent(
                                                                                         )
                                                                                     }
                                                                                 } else {
-                                                                                    // Images: stable ratio from cache
+                                                                                    // Images: stable ratio from cache, default 4:3
                                                                                     val qImgRatio = (qKnownRatio
-                                                                                        ?: (16f / 9f)).coerceIn(
+                                                                                        ?: (4f / 3f)).coerceIn(
                                                                                         0.4f,
                                                                                         2.5f
                                                                                     )
@@ -1020,7 +1020,7 @@ private fun NoteCardContent(
                     pageCount = { mediaList.size },
                     initialPage = 0
                 )
-                // Container ratio: locked at first composition from imeta/cache, or defaults to 16:9.
+                // Container ratio: locked at first composition from imeta/cache, or defaults to 4:3.
                 // NEVER resizes mid-view — scroll-back resets remember keys → picks up cache.
                 val currentMediaUrl = mediaList.getOrNull(pagerState.currentPage)
                 var mediaContainerRatio by remember(mediaList) {
@@ -1028,7 +1028,7 @@ private fun NoteCardContent(
                         note.mediaMeta[currentMediaUrl]?.aspectRatio()
                             ?: social.mycelium.android.utils.MediaAspectRatioCache.get(currentMediaUrl)
                     } else null
-                    mutableFloatStateOf(initial ?: (16f / 9f))
+                    mutableFloatStateOf(initial ?: (4f / 3f))
                 }
                 val modernCompactMedia by social.mycelium.android.ui.theme.ThemePreferences.compactMedia.collectAsState()
                 val mediaContainerModifier = Modifier.fillMaxWidth()

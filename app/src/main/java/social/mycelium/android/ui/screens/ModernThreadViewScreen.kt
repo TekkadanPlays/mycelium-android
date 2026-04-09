@@ -1698,7 +1698,7 @@ private fun ModernCommentCard(
                     if (commentImageUrls.size == 1 && commentVideoUrls.isEmpty()) {
                         val commentMediaRatio = remember(commentImageUrls[0]) {
                             social.mycelium.android.utils.MediaAspectRatioCache.get(commentImageUrls[0])
-                                ?: (16f / 9f)
+                                ?: (4f / 3f)
                         }
                         AsyncImage(
                             model = commentImageUrls[0],

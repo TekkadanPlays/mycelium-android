@@ -465,10 +465,12 @@ private fun DashboardFeedContent(
                 val isFollowing = homeFeedState.isFollowing
                 val newCount = if (isFollowing) uiState.newNotesCountFollowing else uiState.newNotesCountAll
                 val isAtTop by remember { derivedStateOf { listState.firstVisibleItemIndex <= 0 } }
+                // Use fade-only animation instead of expandVertically to avoid
+                // expensive layout pass cascades during scroll (article recommendation).
                 androidx.compose.animation.AnimatedVisibility(
                     visible = newCount > 0 && isAtTop,
-                    enter = androidx.compose.animation.expandVertically() + androidx.compose.animation.fadeIn(),
-                    exit = androidx.compose.animation.shrinkVertically() + androidx.compose.animation.fadeOut()
+                    enter = androidx.compose.animation.fadeIn(animationSpec = tween(200)),
+                    exit = androidx.compose.animation.fadeOut(animationSpec = tween(150))
                 ) {
                     Surface(
                         modifier = Modifier
@@ -547,6 +549,43 @@ private fun DashboardFeedContent(
                 }
                 
                 val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
+                // Per-item remember: structural equality via equals/hashCode lets Compose
+                // skip recomposition when the derived values haven't actually changed.
+                val noteOverrides = remember(note.id, counts, replyCountByNoteId[note.id]) {
+                    NoteCardOverrides(
+                        replyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
+                        zapCount = counts?.zapCount,
+                        zapTotalSats = counts?.zapTotalSats,
+                        reactions = counts?.reactions,
+                        reactionAuthors = counts?.reactionAuthors,
+                        zapAuthors = counts?.zapAuthors,
+                        zapAmountByAuthor = counts?.zapAmountByAuthor,
+                        customEmojiUrls = counts?.customEmojiUrls,
+                    )
+                }
+                val noteInteraction = remember(
+                    note.id,
+                    note.id in zapInProgressNoteIds,
+                    note.id in zappedNoteIds,
+                    note.id in boostedNoteIds,
+                    note.originalNoteId,
+                    zappedAmountByNoteId[note.id],
+                    note.author.id.lowercase() in followSetLower,
+                    shouldCloseZapMenus,
+                ) {
+                    NoteCardInteractionState(
+                        isZapInProgress = note.id in zapInProgressNoteIds,
+                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
+                            note.id
+                        ),
+                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
+                            note.originalNoteId ?: note.id
+                        ),
+                        myZappedAmount = zappedAmountByNoteId[note.id],
+                        isAuthorFollowed = note.author.id.lowercase() in followSetLower,
+                        shouldCloseZapMenus = shouldCloseZapMenus,
+                    )
+                }
                 NoteCard(
                     note = note,
                     callbacks = NoteCardCallbacks(
@@ -581,16 +620,7 @@ private fun DashboardFeedContent(
                         onPollVote = stableOnPollVote,
                         onDeleteReaction = stableOnDeleteReaction,
                     ),
-                    overrides = NoteCardOverrides(
-                        replyCount = replyCountByNoteId[note.id] ?: counts?.replyCount,
-                        zapCount = counts?.zapCount,
-                        zapTotalSats = counts?.zapTotalSats,
-                        reactions = counts?.reactions,
-                        reactionAuthors = counts?.reactionAuthors,
-                        zapAuthors = counts?.zapAuthors,
-                        zapAmountByAuthor = counts?.zapAmountByAuthor,
-                        customEmojiUrls = counts?.customEmojiUrls,
-                    ),
+                    overrides = noteOverrides,
                     config = NoteCardConfig(
                         showHashtagsSection = false,
                         initialMediaPage = mediaPageForNote(note.id),
@@ -598,18 +628,7 @@ private fun DashboardFeedContent(
                         compactMedia = compactMedia,
                         showSensitiveContent = showSensitiveContent,
                     ),
-                    interaction = NoteCardInteractionState(
-                        isZapInProgress = note.id in zapInProgressNoteIds,
-                        isZapped = note.id in zappedNoteIds || social.mycelium.android.repository.social.NoteCountsRepository.isOwnZap(
-                            note.id
-                        ),
-                        isBoosted = note.id in boostedNoteIds || (note.originalNoteId != null && note.originalNoteId in boostedNoteIds) || social.mycelium.android.repository.social.NoteCountsRepository.isOwnBoost(
-                            note.originalNoteId ?: note.id
-                        ),
-                        myZappedAmount = zappedAmountByNoteId[note.id],
-                        isAuthorFollowed = note.author.id.lowercase() in followSetLower,
-                        shouldCloseZapMenus = shouldCloseZapMenus,
-                    ),
+                    interaction = noteInteraction,
                     accountNpub = accountNpub,
                     myPubkeyHex = currentUserHex,
                     countsByNoteId = countsByNoteId,

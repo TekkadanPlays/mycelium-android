@@ -431,6 +431,15 @@ fun NotificationsScreen(
                     }
                 }
             }
+            
+            // ── Pagination Trigger ──
+            LaunchedEffect(pageListState) {
+                snapshotFlow { pageListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
+                    .filter { it != null && flatItems.isNotEmpty() && it >= flatItems.size - 5 }
+                    .collect {
+                        NotificationsRepository.loadOlderNotifications()
+                    }
+            }
 
             LazyColumn(
                 state = pageListState,
@@ -1285,7 +1294,7 @@ private fun NotificationReplyContent(
                                 }
                             } else {
                                 val ratio = remember(url) {
-                                    social.mycelium.android.utils.MediaAspectRatioCache.get(url) ?: (16f / 9f)
+                                    social.mycelium.android.utils.MediaAspectRatioCache.get(url) ?: (4f / 3f)
                                 }
                                 AsyncImage(
                                     model = url,

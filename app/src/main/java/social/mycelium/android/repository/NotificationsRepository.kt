@@ -2391,7 +2391,7 @@ class NotificationsRepository(
         val ctx = appContext ?: return
         try {
             val dao = social.mycelium.android.db.AppDatabase.getInstance(ctx).notificationDao()
-            val entities = dao.getForOwner(pubkey)
+            val entities = dao.getAllForOwner(pubkey)
             if (entities.isEmpty()) {
                 MLog.d(TAG, "No cached notifications in Room for ${pubkey.take(8)}")
                 return

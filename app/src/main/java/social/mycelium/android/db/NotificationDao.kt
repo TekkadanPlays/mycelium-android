@@ -14,9 +14,13 @@ interface NotificationDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(notification: CachedNotificationEntity)
 
-    /** Load all notifications for a given account, newest first. */
+    /** Load notifications for a given account, newest first, with a limit. */
     @Query("SELECT * FROM cached_notifications WHERE ownerPubkey = :pubkey ORDER BY sortTimestamp DESC LIMIT :limit")
     suspend fun getForOwner(pubkey: String, limit: Int = 5000): List<CachedNotificationEntity>
+
+    /** Load ALL notifications for a given account, newest first. No cap — supports years of history. */
+    @Query("SELECT * FROM cached_notifications WHERE ownerPubkey = :pubkey ORDER BY sortTimestamp DESC")
+    suspend fun getAllForOwner(pubkey: String): List<CachedNotificationEntity>
 
     /** Delete all notifications for an account (account switch / logout). */
     @Query("DELETE FROM cached_notifications WHERE ownerPubkey = :pubkey")

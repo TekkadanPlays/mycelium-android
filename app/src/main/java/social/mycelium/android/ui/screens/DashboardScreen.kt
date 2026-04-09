@@ -437,11 +437,25 @@ private fun DashboardFeedContent(
         androidx.compose.runtime.CompositionLocalProvider(
             social.mycelium.android.ui.components.note.LocalFeedListState provides listState
         ) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(top = 4.dp, bottom = 80.dp)
-        ) {
+        if (engagementFilteredNotes.isEmpty() && !isFeedLive) {
+            // Prevent listState scroll position from clamping to zero during restoration 
+            // by deferring LazyColumn composition until initial data is loaded from Room.
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(36.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    strokeWidth = 3.dp
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(top = 4.dp, bottom = 80.dp)
+            ) {
             // New notes counter (tap to load).
             // Always present in the LazyColumn so adding/removing it doesn't shift items.
             // Only shown when user is at the top of the feed — expandVertically shifts
@@ -691,6 +705,7 @@ private fun DashboardFeedContent(
                 }
             }
         }
+        } // end else for deferred LazyColumn
         } // end CompositionLocalProvider
         } // end SharedProfileRevisionProvider
 

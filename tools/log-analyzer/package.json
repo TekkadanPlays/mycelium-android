@@ -4,10 +4,14 @@
   "type": "module",
   "description": "Diagnostic telemetry viewer and log analyzer for Mycelium Android",
   "scripts": {
-    "dev": "bun --watch run src/server.ts",
+    "dev": "bun run build:client && bun run build:worker && bun run build:css && concurrently -n server,client,worker,css -c blue,green,magenta,yellow \"bun run dev:server\" \"bun run dev:client\" \"bun run dev:worker\" \"bun run dev:css\"",
+    "dev:server": "bun --watch run src/server.ts",
+    "dev:client": "bun build src/client/entry.ts --outdir public/dist --target browser --watch",
+    "dev:worker": "bun build src/worker/parserWorker.ts --outdir public/dist --target browser --watch",
     "dev:css": "bunx @tailwindcss/cli -i src/styles.css -o public/styles.css --watch",
-    "build": "bun run build:css && bun run build:client",
+    "build": "bun run build:css && bun run build:client && bun run build:worker",
     "build:client": "bun build src/client/entry.ts --outdir public/dist --target browser --minify",
+    "build:worker": "bun build src/worker/parserWorker.ts --outdir public/dist --target browser --minify",
     "build:css": "bunx @tailwindcss/cli -i src/styles.css -o public/styles.css --minify",
     "start": "bun run src/server.ts"
   },
@@ -23,9 +27,10 @@
     "tailwind-merge": "^3.4.0"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
     "@types/bun": "latest",
-    "typescript": "^5.7.0",
+    "concurrently": "^9.2.1",
     "tailwindcss": "^4.1.0",
-    "@tailwindcss/cli": "^4.1.0"
+    "typescript": "^5.7.0"
   }
 }

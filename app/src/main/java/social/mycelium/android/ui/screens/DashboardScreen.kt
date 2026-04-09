@@ -163,25 +163,6 @@ private fun DashboardFeedContent(
                 listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
             }
         }
-        // ── Viewport render window: full NoteCard only for notes near the viewport ──
-        // Notes outside this window get a lightweight PlaceholderNoteCard with zero
-        // side effects (no LaunchedEffect, no collectAsState, no profile fetches).
-        // Buffer: 10 above + 15 below viewport = ~30 full cards at any time.
-        val RENDER_BUFFER_ABOVE = 5
-        val RENDER_BUFFER_BELOW = 8
-        val renderWindow by remember {
-            derivedStateOf {
-                val info = listState.layoutInfo
-                // visibleItemsInfo indices are LazyColumn item indices (includes header items).
-                // Note items start at index 1 (after "new_notes_counter").
-                val firstVisible = (info.visibleItemsInfo.firstOrNull()?.index ?: 0)
-                val lastVisible = (info.visibleItemsInfo.lastOrNull()?.index ?: 0)
-                // Convert to note-list indices (subtract 1 for the header item)
-                val noteFirst = maxOf(0, firstVisible - 1 - RENDER_BUFFER_ABOVE)
-                val noteLast = lastVisible - 1 + RENDER_BUFFER_BELOW
-                noteFirst..noteLast
-            }
-        }
         // Disk-only image prefetch: fetch images to disk cache without decoding bitmaps.
         // Memory-cache prefetching (imageLoader.enqueue) was removed because it decoded
         // bitmaps for notes the user may never scroll to, creating massive allocation
@@ -507,24 +488,11 @@ private fun DashboardFeedContent(
             itemsIndexed(
                 items = engagementFilteredNotes,
                 key = { _, note -> note.id },
-                contentType = { index, note ->
-                    if (index !in renderWindow) "placeholder_card"
-                    else if (note.kind == 30023) "article_card"
+                contentType = { _, note ->
+                    if (note.kind == 30023) "article_card"
                     else "note_card"
                 }
-            ) { index, note ->
-                // ── Viewport-gated rendering ──
-                // Notes outside the render window get a zero-side-effect placeholder.
-                // This eliminates ~14 LaunchedEffects + ~7 collectAsState per off-screen card.
-                if (index !in renderWindow) {
-                    social.mycelium.android.ui.components.note.PlaceholderNoteCard(
-                        note = note,
-                        onClick = { stableOnNoteClick(note) },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    return@itemsIndexed
-                }
-
+            ) { _, note ->
                 if (note.kind == 30023) {
                     social.mycelium.android.ui.components.note.ArticleCard(
                         note = note,
@@ -560,6 +528,10 @@ private fun DashboardFeedContent(
                     )
                     return@itemsIndexed
                 }
+                val isVisible by remember(note.id, isDashboardVisible) {
+                    derivedStateOf { isDashboardVisible && note.id in visibleKeys }
+                }
+                
                 val counts = countsByNoteId[note.originalNoteId ?: note.id] ?: countsByNoteId[note.id]
                 NoteCard(
                     note = note,
@@ -608,7 +580,7 @@ private fun DashboardFeedContent(
                     config = NoteCardConfig(
                         showHashtagsSection = false,
                         initialMediaPage = mediaPageForNote(note.id),
-                        isVisible = isDashboardVisible && note.id in visibleKeys,
+                        isVisible = isVisible,
                         compactMedia = compactMedia,
                         showSensitiveContent = showSensitiveContent,
                     ),

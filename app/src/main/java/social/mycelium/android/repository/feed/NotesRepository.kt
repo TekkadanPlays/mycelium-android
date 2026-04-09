@@ -392,7 +392,10 @@ class NotesRepository private constructor() {
 
                 if (isOutbox) {
                     outboxNoteIds.add(event.id)
-                    outboxReceivedNoteIds.add(event.id)
+                    // Cap to prevent unbounded memory growth during long sessions
+                    if (outboxReceivedNoteIds.size < MAX_OUTBOX_RECEIVED_IDS) {
+                        outboxReceivedNoteIds.add(event.id)
+                    }
                 }
 
                 // ── Pre-conversion dedup: all checks use event.id (no regex) ──
@@ -1334,6 +1337,7 @@ class NotesRepository private constructor() {
      *  the user's subscription relay set, so without this bypass outbox notes would
      *  be filtered out of the displayed feed despite being valid followed-user notes. */
     private val outboxReceivedNoteIds = Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<String, Boolean>())
+    private val MAX_OUTBOX_RECEIVED_IDS = 10_000
 
     /** Feed session state for UI and to avoid redundant load on tab return (Idle -> Loading -> Live; Refreshing during applyPendingNotes/refresh). */
     private val _feedSessionState = MutableStateFlow(FeedSessionState.Idle)
@@ -1592,18 +1596,29 @@ class NotesRepository private constructor() {
                 val notes = mutableListOf<Note>()
                 val absoluteFloorMs = System.currentTimeMillis() - 14L * 86_400_000L
                 var cacheDropped = 0
+                var repostCount = 0
                 for (entity in entities) {
                     if (entity.eventId in deletedEventIds) continue
                     try {
                         val event = Event.fromJson(entity.eventJson)
-                        // Skip kind-6 reposts: their content is raw JSON of the original
-                        // event. convertEventToNote would display it as-is (broken text).
-                        // Reposts are reconstructed from live relay data via handleKind6Repost.
-                        if (event.kind == 6) continue
                         // Hard age floor: reject events older than 14 days to prevent ancient
                         // notes from previous pagination sessions appearing on cold start.
                         val eventMs = event.createdAt * 1000L
                         if (eventMs < absoluteFloorMs) { cacheDropped++; continue }
+
+                        // ── Kind-6 repost reconstruction ──
+                        // Content-embedded reposts carry the original note JSON inline and
+                        // can be reconstructed without a relay round-trip. Tag-only reposts
+                        // (blank content) are skipped — they need handleKind6Repost at runtime.
+                        if (event.kind == 6) {
+                            val repostNote = reconstructKind6FromCache(event, entity)
+                            if (repostNote != null && !repostNote.isReply) {
+                                notes.add(repostNote)
+                                repostCount++
+                            }
+                            continue
+                        }
+
                         val note = convertEventToNote(event, entity.relayUrl ?: "")
                         // Restore merged relay URLs from the dedicated column (schema v3+)
                         val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
@@ -1629,7 +1644,13 @@ class NotesRepository private constructor() {
                     latestNoteTimestampAtOpen = notes.maxOfOrNull { it.timestamp } ?: now
                     _feedSessionState.value = FeedSessionState.Live
                     _hasEverLoadedFeed.value = true
-                    MLog.d(TAG, "Restored ${notes.size} notes from Room event store")
+                    // Initialize age floor so events arriving before ensureSubscriptionToNotes
+                    // cannot bypass the gate (Fix 3: age floor initialization race)
+                    if (mainSubscriptionFloorMs == 0L) {
+                        mainSubscriptionFloorMs = now - FEED_SINCE_DAYS.toLong() * 86_400_000L
+                        feedAgeFloorMs = mainSubscriptionFloorMs
+                    }
+                    MLog.d(TAG, "Restored ${notes.size} notes from Room ($repostCount reposts reconstructed)")
                     // Prefetch quoted notes for restored feed so cards render without spinners
                     QuotedNoteCache.prefetchForNotes(notes)
                     refreshAuthorsFromCache()
@@ -2061,8 +2082,15 @@ class NotesRepository private constructor() {
                     val isLocal = locallyPublishedIds.contains(note.id) ||
                         (note.originalNoteId != null && locallyPublishedIds.contains(note.originalNoteId))
                     if (!isLocal) {
-                        val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
-                        if (urls.isNotEmpty() && urls.none { it in connectedSet }) continue
+                        // Outbox bypass: notes received from outbox relays always pass the relay
+                        // filter. OutboxFeedManager.activeOutboxRelays may be empty during cold
+                        // start or phase transitions, but these notes are valid followed-user content.
+                        val isOutbox = outboxReceivedNoteIds.contains(note.id) ||
+                            (note.originalNoteId != null && outboxReceivedNoteIds.contains(note.originalNoteId))
+                        if (!isOutbox) {
+                            val urls = note.relayUrls.ifEmpty { listOfNotNull(note.relayUrl) }
+                            if (urls.isNotEmpty() && urls.none { it in connectedSet }) continue
+                        }
                     }
                 }
                 afterRelay++
@@ -2212,6 +2240,7 @@ class NotesRepository private constructor() {
         pendingKind1Events.clear()
         relayStateMachine.resumeSubscriptionProvider = null
         relayStateMachine.requestDisconnect()
+        outboxReceivedNoteIds.clear()
         connectedRelays = emptyList()
         subscriptionRelays = emptyList()
         paginationRelays = emptyList()
@@ -2640,17 +2669,37 @@ class NotesRepository private constructor() {
                     }
                 }
             }
-
             // ── Load from Room into roomPaginatedNotes ──
+            // Gate: load when ANY events were collected (category OR outbox), since
+            // both are persisted to Room and need to appear in the display tail.
+            // Previously only `received` (category count) was checked, causing outbox
+            // events to be silently persisted but never loaded into the display.
             val wm = feedWindowManager
             var roomAdded = 0
-            if (wm != null && received > 0) {
+            val totalCollected = allCollectedEvents.size
+            if (wm != null && totalCollected > 0) {
                 wm.followFilterEnabled = followFilterEnabled
                 wm.followPubkeys = authors ?: emptyList()
-                val roomCursorSec = if (roomPaginatedNotes.isNotEmpty()) {
+                // Compute cursor/floor that encompasses ALL collected events.
+                // The Room tail cursor may be at Nov 2025 (from the initial kind-6
+                // cursor jump), but outbox events have timestamps from March/Feb 2026.
+                // If we only use the Room tail cursor, loadPage(older than Nov 30)
+                // will never find the newer outbox events.
+                val baseCursorSec = if (roomPaginatedNotes.isNotEmpty()) {
                     roomPaginatedNotes.minOf { it.timestamp } / 1000
                 } else windowUntilSec
-                val roomNotes = wm.loadPage(roomCursorSec, floorSec = windowSinceSec)
+                val effectiveCursorSec: Long
+                val effectiveFloorSec: Long
+                if (allCollectedEvents.isNotEmpty()) {
+                    val newestFetched = allCollectedEvents.maxOf { it.first.createdAt }
+                    val oldestFetched = allCollectedEvents.minOf { it.first.createdAt }
+                    effectiveCursorSec = maxOf(baseCursorSec, newestFetched + 1)
+                    effectiveFloorSec = minOf(windowSinceSec, oldestFetched - 1)
+                } else {
+                    effectiveCursorSec = baseCursorSec
+                    effectiveFloorSec = windowSinceSec
+                }
+                val roomNotes = wm.loadPage(effectiveCursorSec, floorSec = effectiveFloorSec, limit = 200)
                 if (roomNotes.isNotEmpty()) {
                     val existingMemIds = feedIndex.byId.keys
                     val newNotes = roomNotes.filter { it.id !in existingMemIds && it.id !in roomPaginatedIds }
@@ -2676,23 +2725,25 @@ class NotesRepository private constructor() {
             // Step category cursor back by one week for the next page
             paginationCursorMs = windowSinceSec * 1000L
 
-            // Exhaustion tracking for category relays (outbox auto-paginates independently)
-            val categoryExhausted = categoryEventCount.get() == 0
-            if (categoryExhausted) {
+            // Exhaustion tracking: consider ALL sources (category + outbox), not just category.
+            // Previously, empty category relays would trigger exhaustion even when outbox
+            // was returning hundreds of events — causing premature "feed ended" state.
+            val totalExhausted = totalCollected == 0
+            if (totalExhausted) {
                 paginationEmptyStreak++
             } else if (roomAdded > 0) {
                 paginationEmptyStreak = 0
             }
             if (paginationEmptyStreak >= PAGINATION_EXHAUSTION_WEEKS) {
                 _paginationExhausted.value = true
-                MLog.w(TAG, "Category pagination exhausted: $paginationEmptyStreak empty weeks")
+                MLog.w(TAG, "Pagination exhausted: $paginationEmptyStreak empty weeks (category=${categoryEventCount.get()}, outbox=${outboxEvents.size})")
             }
 
             val catStats = categoryRelays.take(3).joinToString { r ->
                 val cnt = perRelayEventCount[r] ?: 0
                 "${r.removePrefix("wss://").removeSuffix("/").takeLast(18)}=$cnt"
             }
-            MLog.w(TAG, "Older notes: +$roomAdded displayed (category=${categoryEventCount.get()}), " +
+            MLog.w(TAG, "Older notes: +$roomAdded displayed (category=${categoryEventCount.get()}, outbox=${outboxEvents.size}, total=$totalCollected), " +
                 "roomTail=${roomPaginatedNotes.size} | $catStats")
 
             if (roomAdded > 0) updateDisplayedNotes()
@@ -3634,8 +3685,8 @@ class NotesRepository private constructor() {
      */
     private fun convertEntityToNote(entity: social.mycelium.android.db.CachedEventEntity): Note? {
         val event = Event.fromJson(entity.eventJson)
-        // Skip kind-6 reposts — they need handleKind6Repost for proper enrichment
-        if (event.kind == 6) return null
+        // Kind-6 reposts: reconstruct from cached content (same as loadFeedCacheFromRoom)
+        if (event.kind == 6) return reconstructKind6FromCache(event, entity)
         val note = convertEventToNote(event, entity.relayUrl ?: "")
         // Skip replies (belt-and-suspenders — Room query already filters, but entity might be stale)
         if (note.isReply) return null
@@ -3647,6 +3698,130 @@ class NotesRepository private constructor() {
             EventRelayTracker.addRelay(event.id, entity.relayUrl)
         }
         return if (allUrls.isNotEmpty()) note.copy(relayUrls = allUrls) else note
+    }
+
+    /**
+     * Reconstruct a kind-6 content-embedded repost from a cached Room entity.
+     * Extracts the original note JSON from event.content (same parsing as
+     * handleKind6Repost's content-embedded path) and constructs the composite
+     * `repost:{originalNoteId}` Note.
+     *
+     * Returns null for:
+     * - Tag-only reposts (blank content) — need relay fetch for original note
+     * - Malformed JSON content
+     * - Original note author not in follow filter
+     *
+     * This is a pure function: no relay calls, no mutex, no side effects beyond
+     * EventRelayTracker and RawEventCache seeding.
+     */
+    private fun reconstructKind6FromCache(event: Event, entity: CachedEventEntity): Note? {
+        val content = event.content
+        if (content.isBlank()) return null // Tag-only repost — cannot reconstruct without relay
+
+        val jsonObj = try {
+            kotlinx.serialization.json.Json.parseToJsonElement(content) as? kotlinx.serialization.json.JsonObject
+        } catch (_: Exception) { null } ?: return null
+
+        val originalNoteId = (jsonObj["id"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return null
+        val notePubkey = (jsonObj["pubkey"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: return null
+        val noteCreatedAt = (jsonObj["created_at"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+        val noteContent = (jsonObj["content"] as? kotlinx.serialization.json.JsonPrimitive)?.content ?: ""
+
+        // Cache the original signed event JSON for NIP-18 re-reposts
+        social.mycelium.android.utils.RawEventCache.put(originalNoteId, content)
+
+        // Follow filter: skip if original author isn't followed
+        val followSet = followFilter
+        if (followFilterEnabled && followSet != null && notePubkey.lowercase() !in followSet) return null
+
+        val reposterAuthor = profileCache.resolveAuthor(event.pubKey)
+        val noteAuthor = profileCache.resolveAuthor(notePubkey)
+        val repostTimestampMs = event.createdAt * 1000L
+
+        // Parse hashtags from original note's JSON tags
+        val jsonTags = jsonObj["tags"] as? kotlinx.serialization.json.JsonArray
+        val hashtags = jsonTags?.mapNotNull { tag ->
+            val arr = tag as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
+            if (arr.size >= 2 && (arr[0] as? kotlinx.serialization.json.JsonPrimitive)?.content == "t") {
+                (arr[1] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            } else null
+        } ?: emptyList()
+
+        // Extract media URLs
+        val mediaUrls = UrlDetector.findUrls(noteContent)
+            .filter { UrlDetector.isImageUrl(it) || UrlDetector.isVideoUrl(it) }.distinct()
+
+        // NIP-92 imeta from reposted note
+        val repostImetaTags = jsonTags?.mapNotNull { tag ->
+            val arr = tag as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
+            if (arr.size >= 2 && (arr[0] as? kotlinx.serialization.json.JsonPrimitive)?.content == "imeta") {
+                arr.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "" }.toTypedArray()
+            } else null
+        } ?: emptyList()
+        val repostMediaMeta = if (repostImetaTags.isNotEmpty()) {
+            social.mycelium.android.data.IMetaData.parseAll(repostImetaTags.toTypedArray())
+        } else emptyMap()
+        for ((mUrl, mMeta) in repostMediaMeta) {
+            if (mMeta.width != null && mMeta.height != null && mMeta.height > 0) {
+                social.mycelium.android.utils.MediaAspectRatioCache.add(mUrl, mMeta.width, mMeta.height)
+            }
+        }
+
+        // Quoted event refs
+        val quotedRefs = Nip19QuoteParser.extractQuotedEventRefs(noteContent)
+        val quotedEventIds = quotedRefs.map { it.eventId }
+        quotedRefs.forEach { ref ->
+            if (ref.relayHints.isNotEmpty()) QuotedNoteCache.putRelayHints(ref.eventId, ref.relayHints)
+        }
+
+        // NIP-10 reply detection from original note's tags
+        val eTags = jsonTags?.mapNotNull { tag ->
+            val arr = tag as? kotlinx.serialization.json.JsonArray ?: return@mapNotNull null
+            if (arr.size >= 2 && (arr[0] as? kotlinx.serialization.json.JsonPrimitive)?.content == "e") {
+                arr.map { (it as? kotlinx.serialization.json.JsonPrimitive)?.content ?: "" }.toTypedArray()
+            } else null
+        } ?: emptyList()
+        val repostRootId = eTags.firstOrNull { it.size >= 4 && (it.getOrNull(3) == "root" || it.getOrNull(4) == "root") }?.getOrNull(1)
+            ?: eTags.firstOrNull()?.getOrNull(1)
+        val repostReplyToId = eTags.lastOrNull { it.size >= 4 && (it.getOrNull(3) == "reply" || it.getOrNull(4) == "reply") }?.getOrNull(1)
+            ?: if (eTags.size >= 2) eTags.last().getOrNull(1) else eTags.firstOrNull()?.getOrNull(1)
+        val repostIsReply = eTags.isNotEmpty() && eTags.any { tag ->
+            when {
+                tag.size <= 3 -> true
+                tag.size >= 4 -> tag.getOrNull(3) == "reply" || tag.getOrNull(3) == "root" || tag.getOrNull(4) == "reply" || tag.getOrNull(4) == "root"
+                else -> false
+            }
+        }
+
+        // Restore relay URLs from entity
+        val relayUrl = entity.relayUrl ?: ""
+        val allUrls = entity.relayUrls?.split(",")?.filter { it.isNotBlank() } ?: emptyList()
+        val noteRelayUrls = allUrls.ifEmpty { listOfNotNull(relayUrl.ifBlank { null }) }
+
+        // Seed relay tracker
+        if (allUrls.isNotEmpty()) {
+            allUrls.forEach { url -> EventRelayTracker.addRelay(originalNoteId, url) }
+        } else if (relayUrl.isNotBlank()) {
+            EventRelayTracker.addRelay(originalNoteId, relayUrl)
+        }
+
+        return Note(
+            id = "repost:$originalNoteId",
+            author = noteAuthor,
+            content = noteContent,
+            timestamp = noteCreatedAt * 1000L,
+            likes = 0, shares = 0, comments = 0, isLiked = false,
+            hashtags = hashtags, mediaUrls = mediaUrls, mediaMeta = repostMediaMeta,
+            quotedEventIds = quotedEventIds,
+            relayUrl = relayUrl.ifBlank { null }?.let { social.mycelium.android.utils.normalizeRelayUrl(it) },
+            relayUrls = noteRelayUrls,
+            isReply = repostIsReply,
+            rootNoteId = if (repostIsReply) repostRootId else null,
+            replyToId = if (repostIsReply) repostReplyToId else null,
+            originalNoteId = originalNoteId,
+            repostedByAuthors = listOf(reposterAuthor),
+            repostTimestamp = repostTimestampMs
+        )
     }
 
     private fun convertEventToNote(event: Event, relayUrl: String): Note {

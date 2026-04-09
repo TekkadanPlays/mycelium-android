@@ -17,6 +17,115 @@ app.get('/api/status', (c) => {
   });
 });
 
+import { readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+
+// Get a list of the diagnostic logs available
+app.get('/api/logs', async (c) => {
+  const logDir = '../../device_logs';
+  try {
+    const files = await readdir(logDir);
+    return c.json({ files: files.filter(f => f.endsWith('.txt')) });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
+});
+
+// Get parsed diagnostic log data
+app.get('/api/logs/:filename', async (c) => {
+  const filename = c.req.param('filename');
+  if (!/^[a-zA-Z0-9_\-\.]+$/.test(filename) || filename.includes('..')) {
+    return c.json({ error: 'Invalid filename' }, 400);
+  }
+
+  const query = c.req.query();
+  const filepath = join('../../device_logs', filename); 
+  const logFile = Bun.file(filepath);
+  
+  if (!(await logFile.exists())) {
+    return c.json({ error: 'File not found' }, 404);
+  }
+  
+  const text = await logFile.text();
+  const lines = text.split(/\r?\n/);
+  
+  const results = [];
+  let currentSegment = 'General';
+  let segmentFile = '';
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim() || line.startsWith('===')) continue;
+    if (line.startsWith('--- ')) {
+      const match = line.match(/--- (.+?) \((.+?)\) ---/);
+      if (match) {
+        currentSegment = match[1];
+        segmentFile = match[2];
+      } else {
+        currentSegment = line.replace(/---/g, '').trim();
+        segmentFile = '';
+      }
+      continue;
+    }
+    
+    if (line.match(/^\d{2}:\d{2}:\d{2}\.\d{3}/)) {
+      const parts = line.split(' | ');
+      let time = parts[0]?.trim();
+      let level = 'INFO';
+      let category = '';
+      let tag = '';
+      let message = '';
+      
+      if (parts.length >= 5) {
+        level = parts[1].trim();
+        category = parts[2].trim();
+        tag = parts[3].trim();
+        message = parts.slice(4).join(' | ').trim();
+      } else if (parts.length === 4) {
+        category = parts[1].trim();
+        tag = parts[2].trim();
+        message = parts.slice(3).join(' | ').trim();
+      } else {
+        message = line;
+      }
+      
+      results.push({
+        lineNumber: i + 1,
+        segment: currentSegment,
+        segmentFile,
+        time,
+        level,
+        category,
+        tag,
+        message,
+        // Including raw might make payload too bloated, let's omit or only send if requested. Wait, `raw: line` is okay.
+        raw: line
+      });
+    } else {
+      if (results.length > 0 && !line.includes('═════════') && !line.includes('SESSION START')) {
+        results[results.length - 1].message += '\n' + line;
+        results[results.length - 1].raw += '\n' + line;
+      }
+    }
+  }
+
+  let filtered = results;
+  if (query.level) {
+    filtered = filtered.filter(r => r.level.toUpperCase() === query.level.toUpperCase());
+  }
+  if (query.category) {
+    filtered = filtered.filter(r => r.category.toUpperCase() === query.category.toUpperCase());
+  }
+  if (query.tag) {
+    filtered = filtered.filter(r => r.tag.toLowerCase().includes(query.tag.toLowerCase()));
+  }
+  if (query.q) {
+    filtered = filtered.filter(r => r.message.toLowerCase().includes(query.q.toLowerCase()));
+  }
+
+  return c.json({ total: filtered.length, data: filtered });
+});
+
 // ---------------------------------------------------------------------------
 // Benchmark endpoints — used by the live demo to measure real round-trip time
 // ---------------------------------------------------------------------------

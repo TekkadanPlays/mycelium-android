@@ -19,6 +19,30 @@
   "banner": "https://raw.githubusercontent.com/TekkadanPlays/mycelium-android/main/banner.png",
   "releases": [
     {
+      "version": "0.5.30",
+      "versionCode": 50,
+      "releaseDate": "2026-04-09",
+      "downloadUrl": "https://github.com/TekkadanPlays/mycelium-android/releases/download/v0.5.30-beta/Mycelium-v0.5.30-beta.apk",
+      "changelog": "Feed performance overhaul, media aspect ratio stability, notification pipeline fixes, and full notification history on cold start.",
+      "minSdk": 35,
+      "targetSdk": 36,
+      "packageId": "social.mycelium.android",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE"
+      ],
+      "features": [
+        "Perf: feed recomposition overhaul — structural equality on NoteCard models + per-item remember blocks prevent O(N) recomposition cascades",
+        "Perf: new-notes counter animation replaced with fade (eliminates layout-triggering expandVertically)",
+        "Fix: media default aspect ratio standardised to 4:3 across feed, quoted notes, notifications, and thread view — eliminates scroll teleporting",
+        "Fix: media ratio corrected once after image load via one-shot callback instead of continuous recomposition",
+        "Fix: scroll position no longer resets to 0 on configuration change (LazyListState key split from content key)",
+        "Fix: all notifications restored from Room on cold start — no artificial cap (supports years of history)",
+        "Fix: boost (repost) context survived across cold starts — cross-pollination pipeline preserved",
+        "Fix: NIP-18 repost detection and e-tag pipeline corrected for boost cross-pollination"
+      ]
+    },
+    {
       "version": "0.5.24",
       "versionCode": 49,
       "releaseDate": "2026-03-30",
